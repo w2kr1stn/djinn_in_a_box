@@ -1,0 +1,73 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__docker-gateway__mcp-find",
+      "mcp__docker-gateway__mcp-add",
+      "mcp__docker-gateway__mcp-exec",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs",
+      "Web Search(*)",
+      "Fetch(*)",
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(xargs:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(sed:*)",
+      "Bash(rg:*)",
+      "Bash(echo:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(timeout:*)",
+      "Bash(sleep:*)",
+      "Bash(mkdir:*)",
+      "Bash(wc:*)",
+      "Bash(python:*)",
+      "Bash(uv:*)",
+      "Bash(ruff:*)",
+      "Bash(pytest:*)",
+      "Bash(git add:*)",
+      "Bash(git log:*)",
+      "Bash(gh view:*)",
+      "Bash(gh list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker:*)",
+      "Bash(npx:*)",
+      "Bash(npm:*)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | xargs -I {} sh -c 'if echo {} | grep -E \"\\.py$\" > /dev/null; then ruff check --fix \"{}\" && pyright \"{}\"; elif echo {} | grep -E \"\\.(ts|tsx|js|jsx)$\" > /dev/null; then prettier --write \"{}\" && eslint --fix \"{}\"; fi'"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "backend-engineer|frontend-developer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '\\a'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,87 @@
+{
+    // ===========================================================================
+    // Project DevContainer - Uses ai-dev-base image
+    // ===========================================================================
+    // Copy this file to: your-project/.devcontainer/devcontainer.json
+    // ===========================================================================
+    "name": "Project Dev Environment",
+    // Use the pre-built base image
+    "image": "ai-dev-base:latest",
+    // -------------------------------------------------------------------------
+    // Workspace: Mount project directory into container
+    // -------------------------------------------------------------------------
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/dev/project,type=bind",
+    "workspaceFolder": "/home/dev/project",
+    // -------------------------------------------------------------------------
+    // Network: Connect to ai-dev-network (where MCP Gateway runs)
+    // -------------------------------------------------------------------------
+    "runArgs": [
+        "--network=ai-dev-network",
+        "--cap-add=NET_ADMIN"
+    ],
+    // -------------------------------------------------------------------------
+    // Environment: MCP Gateway URL
+    // -------------------------------------------------------------------------
+    "containerEnv": {
+        "MCP_GATEWAY_URL": "http://mcp-gateway:8811"
+    },
+    // -------------------------------------------------------------------------
+    // Persistent mounts (same as docker-compose, keeps credentials)
+    // -------------------------------------------------------------------------
+    "mounts": [
+        // Tool credentials & cache (Docker volumes)
+        "source=ai-dev-claude-config,target=/home/dev/.claude,type=volume",
+        "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
+        "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
+        "source=ai-dev-fnm-versions,target=/home/dev/.local/share/fnm/node-versions,type=volume",
+        // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
+        "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
+    ],
+    // -------------------------------------------------------------------------
+    // User settings
+    // -------------------------------------------------------------------------
+    "remoteUser": "dev",
+    "containerUser": "dev",
+    // -------------------------------------------------------------------------
+    // VS Code extensions (optional - add what you need)
+    // -------------------------------------------------------------------------
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                // Python
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "charliermarsh.ruff",
+                // Git
+                "eamodio.gitlens",
+                // Theme
+                "dcasella.monokai-plusplus",
+                "vscode-icons-team.vscode-icons",
+                "oderwat.indent-rainbow",
+                // General
+                "editorconfig.editorconfig",
+                "esbenp.prettier-vscode"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "zsh"
+            }
+        }
+    }
+    // -------------------------------------------------------------------------
+    // Project-specific setup (customize per project)
+    // -------------------------------------------------------------------------
+    // "postCreateCommand": "uv sync",
+    // -------------------------------------------------------------------------
+    // Add project-specific tools via features (examples below)
+    // -------------------------------------------------------------------------
+    // "features": {
+    //   // Add Python
+    //   "ghcr.io/devcontainers/features/go:1": {},
+    //   // Add Rust
+    //   "ghcr.io/devcontainers/features/rust:1": {},
+    // }
+    // -------------------------------------------------------------------------
+    // NOTE: For OAuth authentication, first use ./dev.sh auth from the
+    // ai-dev-base directory to authenticate with host network.
+    // -------------------------------------------------------------------------
+}

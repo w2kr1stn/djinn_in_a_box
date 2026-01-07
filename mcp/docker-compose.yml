@@ -1,0 +1,84 @@
+# =============================================================================
+# MCP Gateway - Docker Compose
+# =============================================================================
+# Runs the Docker MCP Gateway as a permanent service.
+# All AI coding agents (Claude Code, Codex, etc.) connect to this gateway
+# to access MCP servers from the Docker MCP Catalog.
+#
+# Usage:
+#   ./mcp.sh start              # Start gateway
+#   ./mcp.sh stop               # Stop gateway
+#   docker mcp server enable duckduckgo  # Enable server (via CLI plugin)
+# =============================================================================
+
+services:
+  gateway:
+    image: docker/mcp-gateway:latest
+    container_name: mcp-gateway
+    restart: unless-stopped
+    
+    # -------------------------------------------------------------------------
+    # Command: Gateway with security hardening
+    #   --transport=streaming : HTTP streaming (compatible with Claude & Codex)
+    #   --verify-signatures   : Only run cryptographically signed MCP images
+    #   --log-calls           : Log all tool invocations for audit
+    #   --block-secrets       : Prevent secrets from leaking in responses
+    # -------------------------------------------------------------------------
+    command:
+      - --transport=streaming
+      - --port=8811
+      - --verify-signatures
+      - --log-calls
+      - --block-secrets
+    
+    # -------------------------------------------------------------------------
+    # Volumes
+    # -------------------------------------------------------------------------
+    volumes:
+      # Docker socket - required for spawning MCP server containers
+      # NOTE: This grants significant privileges. Only use trusted MCP servers.
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+      # Persistent configuration (uses same location as docker mcp CLI)
+      - ~/.docker/mcp:/root/.docker/mcp
+    
+    # -------------------------------------------------------------------------
+    # Network: Dedicated network for AI tools communication
+    # -------------------------------------------------------------------------
+    networks:
+      - ai-dev-network
+    
+    # -------------------------------------------------------------------------
+    # Port mapping - Only expose locally (127.0.0.1)
+    # -------------------------------------------------------------------------
+    ports:
+      - "127.0.0.1:8811:8811"
+    
+    # -------------------------------------------------------------------------
+    # Resource limits - Prevent runaway resource consumption
+    # -------------------------------------------------------------------------
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # -------------------------------------------------------------------------
+    # Environment
+    # -------------------------------------------------------------------------
+    environment:
+      - TZ=Europe/Berlin
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  ai-dev-network:
+    external: true
+    name: ai-dev-network
+    driver: bridge
+
+
