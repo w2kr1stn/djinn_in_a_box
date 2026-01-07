@@ -1,0 +1,123 @@
+# =============================================================================
+# AI Dev Base - Docker Compose (Basis-Konfiguration)
+# =============================================================================
+# Usage:
+#   ./dev.sh start              # Ohne Docker Socket (sicher)
+#   ./dev.sh start --docker     # Mit Docker Socket + Proxy
+#   ./dev.sh start --firewall   # Mit Netzwerk-Firewall
+#   ./dev.sh start --docker --firewall  # Beides kombiniert
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Main development container
+  # ---------------------------------------------------------------------------
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-dev-base:latest
+    container_name: ai-dev
+    stdin_open: true
+    tty: true
+    
+    networks:
+      - ai-dev-network
+    
+    volumes:
+      # Claude Code config & credentials
+      - claude-config:/home/dev/.claude
+      # Gemini CLI config & credentials
+      - gemini-config:/home/dev/.gemini
+      # Codex CLI config & credentials
+      - codex-config:/home/dev/.codex
+      # uv cache
+      - uv-cache:/home/dev/.cache/uv
+      # fnm Node versions
+      - fnm-versions:/home/dev/.local/share/fnm/node-versions
+      # SSH Keys from host
+      - ~/.ssh:/home/dev/.ssh:ro
+      # Git config from host
+      - ~/.gitconfig:/home/dev/.gitconfig:ro
+      # ZSH configuration from host
+      - ~/.zshrc:/home/dev/.zshrc.local:ro
+      - ~/.oh-my-zsh/custom/themes/.zsh-theme-remote.omp.json:/home/dev/.zsh-theme.omp.json:ro
+      - ~/.oh-my-zsh/custom:/home/dev/.oh-my-zsh/custom:ro
+      # Mount der Host-Konfiguration als Read-Only Quelle
+      - ./config/claude:/home/dev/.claude_seed:ro
+      - ./config/gemini:/home/dev/.gemini_seed:ro
+      # Projects directory - ADJUST THIS PATH
+      - /mnt/spaceIn/Laboratorium/Code:/home/dev/projects
+
+    environment:
+      - TZ=Europe/Berlin
+      - MCP_GATEWAY_URL=http://mcp-gateway:8811/
+      - ENABLE_FIREWALL=${ENABLE_FIREWALL:-false}
+      - UV_LINK_MODE=copy
+      
+    cap_add:
+      - NET_ADMIN
+    
+    # -------------------------------------------------------------------------
+    # Resource Limits (Schutz vor Ressourcen-Erschöpfung)
+    # -------------------------------------------------------------------------
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 12G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    
+    working_dir: /home/dev/projects
+
+  # ---------------------------------------------------------------------------
+  # OAuth authentication container (uses host network)
+  # ---------------------------------------------------------------------------
+  dev-auth:
+    image: ai-dev-base:latest
+    container_name: ai-dev-auth
+    stdin_open: true
+    tty: true
+    profiles:
+      - auth
+    network_mode: "host"
+    volumes:
+      - claude-config:/home/dev/.claude
+      - gemini-config:/home/dev/.gemini
+      - codex-config:/home/dev/.codex
+      - uv-cache:/home/dev/.cache/uv
+      - fnm-versions:/home/dev/.local/share/fnm/node-versions
+      - ~/.gitconfig:/home/dev/.gitconfig:ro
+      - ~/.zshrc:/home/dev/.zshrc.local:ro
+      - ~/.oh-my-zsh/custom/themes/.zsh-theme-remote.omp.json:/home/dev/.zsh-theme.omp.json:ro
+      - ~/.oh-my-zsh/custom:/home/dev/.oh-my-zsh/custom:ro
+      - /media/willi/spaceIn/Laboratorium/Code:/home/dev/projects
+    environment:
+      - TZ=Europe/Berlin
+      - MCP_GATEWAY_URL=http://localhost:8811/
+      - UV_LINK_MODE=copy
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 12G
+    working_dir: /home/dev/projects
+
+networks:
+  ai-dev-network:
+    external: true
+    name: ai-dev-network
+
+volumes:
+  claude-config:
+    name: ai-dev-claude-config
+  gemini-config:
+    name: ai-dev-gemini-config
+  codex-config:
+    name: ai-dev-codex-config
+  uv-cache:
+    name: ai-dev-uv-cache
+  fnm-versions:
+    name: ai-dev-fnm-versions
