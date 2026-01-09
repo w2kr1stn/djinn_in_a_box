@@ -48,6 +48,8 @@ ${YELLOW}Commands:${NC}
 ${YELLOW}Options:${NC}
   --docker    Enable Docker access (via secure proxy)
   --firewall  Enable network firewall (restricts outbound to whitelist)
+  --here      Mount current directory additionally under ~/workspace/
+  --mount <path>  Mount specified path additionally under ~/workspace/
 
 ${YELLOW}Security Modes:${NC}
   ${GREEN}Default${NC}        Kein Docker-Zugriff, kein Firewall
@@ -55,14 +57,24 @@ ${YELLOW}Security Modes:${NC}
   ${GREEN}--firewall${NC}     Ausgehender Traffic auf Whitelist beschränkt
   ${GREEN}--docker --firewall${NC}  Maximale Sicherheit + Docker-Zugriff
 
+${YELLOW}Workspace Mount:${NC}
+  ${GREEN}--here${NC}         Mountet \$(pwd) zusätzlich unter ~/workspace/
+  ${GREEN}--mount /path${NC}  Mountet beliebigen Pfad unter ~/workspace/
+  
+  Im Container:
+    ~/projects/   → Dein festes Code-Verzeichnis (immer)
+    ~/workspace/  → Temporärer Mount (nur mit --here/--mount)
+
 ${YELLOW}Examples:${NC}
   ./dev.sh build                      # Build the image
   ./dev.sh start                      # Sicher: Kein Docker-Zugriff
   ./dev.sh start --docker             # Mit Docker-Zugriff via Proxy
   ./dev.sh start --firewall           # Mit Netzwerk-Firewall
   ./dev.sh start --docker --firewall  # Beides kombiniert
+  ./dev.sh start --here               # Mit aktuellem Verzeichnis als Workspace
+  ./dev.sh start --mount ~/.config    # Mit spezifischem Pfad als Workspace
+  ./dev.sh start --docker --here      # Docker + aktuelles Verzeichnis
   ./dev.sh auth                       # OAuth Authentifizierung
-  ./dev.sh auth --docker              # OAuth mit Docker-Zugriff
   ./dev.sh clean                      # Container entfernen
   ./dev.sh clean --all                # Alles entfernen (inkl. Credentials!)
 
@@ -80,6 +92,11 @@ ${YELLOW}Workflow:${NC}
   3. ./mcp.sh enable duckduckgo        # MCP Server aktivieren
   4. cd .. && ./dev.sh auth            # Einmalig: OAuth
   5. ./dev.sh start --docker           # Täglich: Mit Docker-Zugriff
+
+${YELLOW}Workspace Workflow:${NC}
+  # An lokaler Config schrauben:
+  cd ~/.config && /path/to/dev.sh start --here --docker
+  # Im Container: cd ~/workspace && claude
 EOF
 }
 
@@ -102,13 +119,45 @@ cmd_start() {
     # Parse arguments
     local docker_enabled="false"
     local firewall_enabled="false"
+    local mount_path=""
+    local skip_next="false"
     
-    for arg in "$@"; do
-        case "$arg" in
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next="false"
+            continue
+        fi
+        case "${args[$i]}" in
             --docker)   docker_enabled="true" ;;
             --firewall) firewall_enabled="true" ;;
+            --here)     mount_path="$(pwd)" ;;
+            --mount)
+                # Nächstes Argument ist der Pfad
+                mount_path="${args[$((i+1))]:-}"
+                skip_next="true"
+                if [[ -z "$mount_path" ]]; then
+                    echo -e "${RED}❌${NC} --mount requires a path argument"
+                    exit 1
+                fi
+                ;;
         esac
     done
+    
+    # Validiere Mount-Pfad falls angegeben
+    local extra_volume_args=""
+    if [[ -n "$mount_path" ]]; then
+        # Tilde expandieren
+        mount_path="${mount_path/#\~/$HOME}"
+        # Absoluten Pfad sicherstellen
+        if [[ -d "$mount_path" ]]; then
+            mount_path="$(cd "$mount_path" && pwd)"
+        else
+            echo -e "${RED}❌${NC} Mount path does not exist or is not a directory: $mount_path"
+            exit 1
+        fi
+        extra_volume_args="-v ${mount_path}:/home/dev/workspace"
+    fi
     
     # Compose files basierend auf Flags
     local compose_files
@@ -132,11 +181,17 @@ cmd_start() {
     else
         echo -e "   ${YELLOW}🔒 Firewall:${NC} Disabled (use --firewall to enable)"
     fi
+    
+    if [[ -n "$mount_path" ]]; then
+        echo -e "   ${GREEN}📂 Workspace:${NC} $mount_path"
+        echo -e "      └─ Available at: ~/workspace/"
+    fi
     echo ""
     
     # Container starten
+    # shellcheck disable=SC2086
     ENABLE_FIREWALL="$firewall_enabled" \
-        docker compose $compose_files run --rm dev
+        docker compose $compose_files run --rm $extra_volume_args dev
 }
 
 cmd_auth() {
@@ -161,14 +216,17 @@ cmd_auth() {
     if [[ "$docker_enabled" == "true" ]]; then
         echo -e "${YELLOW}⚠️  Docker-Proxy wird im Host-Network-Modus separat gestartet...${NC}"
         # Proxy manuell starten wenn im auth-modus mit docker
+        # shellcheck disable=SC2086
         docker compose $compose_files up -d docker-proxy 2>/dev/null || true
         sleep 2
     fi
     
+    # shellcheck disable=SC2086
     docker compose $compose_files --profile auth run --rm dev-auth
     
     # Proxy wieder stoppen
     if [[ "$docker_enabled" == "true" ]]; then
+        # shellcheck disable=SC2086
         docker compose $compose_files stop docker-proxy 2>/dev/null || true
     fi
 }

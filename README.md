@@ -72,9 +72,19 @@ Das `dev.sh` Script vereinfacht die Container-Verwaltung:
 | `./dev.sh start` | Startet Container (dediziertes Netzwerk) |
 | `./dev.sh auth` | Startet Container für OAuth (Host-Netzwerk) |
 | `./dev.sh status` | Zeigt Container, Volumes und MCP-Status |
+| `./dev.sh audit` | Zeigt Docker Proxy Audit-Log |
 | `./dev.sh clean` | Entfernt Container |
 | `./dev.sh clean --all` | Entfernt Container, Volumes **und** Netzwerk |
 | `./dev.sh help` | Zeigt Hilfe |
+
+### Optionen für `start`
+
+| Option | Beschreibung |
+|--------|--------------|
+| `--docker` | Docker-Zugriff via sicherem Proxy aktivieren |
+| `--firewall` | Netzwerk-Firewall aktivieren (Egress-Whitelist) |
+| `--here` | Aktuelles Verzeichnis zusätzlich unter `~/workspace/` mounten |
+| `--mount <path>` | Beliebigen Pfad zusätzlich unter `~/workspace/` mounten |
 
 **Beispiele:**
 
@@ -85,12 +95,93 @@ Das `dev.sh` Script vereinfacht die Container-Verwaltung:
 # Täglicher Workflow
 ./dev.sh start
 
+# Mit Docker-Zugriff
+./dev.sh start --docker
+
+# Mit maximaler Sicherheit
+./dev.sh start --docker --firewall
+
 # Nach Dockerfile-Änderungen
 ./dev.sh build
 
 # Kompletter Reset (löscht auch Auth-Credentials!)
 ./dev.sh clean --all
 ./dev.sh build
+```
+
+---
+
+## Workspace Mount (Temporäres Verzeichnis)
+
+Neben dem festen Projekt-Verzeichnis (`~/projects/`) kann ein zusätzliches Verzeichnis temporär gemountet werden – ideal um mit AI-Agents am lokalen System zu arbeiten.
+
+### Verzeichnisstruktur im Container
+
+| Pfad | Quelle | Persistenz |
+|------|--------|------------|
+| `~/projects/` | Festes Code-Verzeichnis (docker-compose.yml) | Immer |
+| `~/workspace/` | Via `--here` oder `--mount` | Nur diese Session |
+
+### Verwendung
+
+```bash
+# Aktuelles Verzeichnis mounten
+cd ~/.config
+./dev.sh start --here
+
+# Beliebigen Pfad mounten
+./dev.sh start --mount ~/dotfiles
+
+# Kombiniert mit anderen Optionen
+./dev.sh start --docker --firewall --here
+./dev.sh start --docker --mount /etc/nginx
+```
+
+### Im Container
+
+```bash
+# Festes Arbeitsverzeichnis (immer verfügbar)
+cd ~/projects/
+claude "Arbeite an meinem Projekt"
+
+# Temporärer Workspace (nur mit --here/--mount)
+cd ~/workspace/
+claude "Optimiere diese Config-Dateien"
+```
+
+### ⚠️ Wichtig: Bind-Mount Verhalten
+
+Der Workspace ist ein **Bind-Mount** – Änderungen sind **sofort** auf der lokalen Platte:
+
+```bash
+# Im Container:
+rm ~/workspace/wichtig.conf  # → Datei ist SOFORT weg auf dem Host!
+```
+
+**Empfehlung für kritische Verzeichnisse:**
+
+```bash
+# Vorher Backup machen
+cp -r ~/.config ~/.config.bak
+
+# Dann mounten
+./dev.sh start --mount ~/.config --docker
+```
+
+### Workflow-Beispiele
+
+```bash
+# Dotfiles mit AI bearbeiten
+cd ~/dotfiles
+./dev.sh start --here --docker
+# Im Container: claude "Refactore meine zsh config"
+
+# System-Configs analysieren (read-only empfohlen)
+./dev.sh start --mount /etc --docker
+# Im Container: claude "Erkläre mir die nginx config"
+
+# An anderem Projekt arbeiten ohne docker-compose zu ändern
+./dev.sh start --mount ~/anderes-projekt --docker
 ```
 
 ---
@@ -267,45 +358,38 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ---
 
-## Sicherheit (optional)
+## Sicherheit
 
-Für erhöhte Sicherheit mit `--dangerously-skip-permissions`:
+### Security Modi
 
-```bash
-# Container mit Firewall starten
-docker run --cap-add=NET_ADMIN -v $(pwd)/scripts:/scripts ai-dev-base:latest \
-    -c "sudo /scripts/init-firewall.sh && zsh"
-```
+| Modus | Command | Docker | Firewall | Empfohlen für |
+|-------|---------|--------|----------|---------------|
+| **Standard** | `./dev.sh start` | ❌ | ❌ | Normale Entwicklung |
+| **Docker** | `./dev.sh start --docker` | ✅ (Proxy) | ❌ | Container-Entwicklung |
+| **Firewall** | `./dev.sh start --firewall` | ❌ | ✅ | Sensitive Projekte |
+| **Maximum** | `./dev.sh start --docker --firewall` | ✅ | ✅ | **Allgemein empfohlen** |
 
-Das Firewall-Skript beschränkt ausgehende Verbindungen auf eine Whitelist.
+### Docker Socket Proxy
 
----
+Wenn `--docker` aktiviert ist, läuft ein sicherer Proxy der gefährliche Operationen blockiert:
 
-## Troubleshooting
+| Erlaubt | Blockiert |
+|---------|-----------|
+| `docker ps`, `images`, `networks` | `docker exec` |
+| `docker run`, `start`, `stop` | `docker build` |
+| `docker pull` | `docker commit`, `push` |
+| | `swarm`, `secrets`, `configs` |
 
-### "fnm: command not found"
+Details: [DOCKER-SOCKET-SECURITY.md](./DOCKER-SOCKET-SECURITY.md)
 
-```bash
-# Shell neu laden
-source ~/.zshrc
-```
+### Firewall
 
-### Python-Pakete mit native Extensions funktionieren nicht
+Mit `--firewall` werden ausgehende Verbindungen auf eine Whitelist beschränkt:
 
-Dieses Image verwendet Debian (glibc), nicht Alpine (musl). Die meisten Pakete sollten funktionieren. Falls nicht:
-
-```bash
-# Im Dockerfile zusätzliche Build-Dependencies
-apt-get install -y libffi-dev libssl-dev
-```
-
-### Credentials verloren nach Container-Neustart
-
-Sicherstellen, dass die Volumes gemountet sind:
-
-```bash
-docker volume ls | grep ai-dev
-```
+- Package Registries (npm, PyPI)
+- AI APIs (Anthropic, OpenAI)
+- Code Hosting (GitHub)
+- OAuth Endpoints
 
 ---
 
@@ -356,6 +440,44 @@ Vollständige Dokumentation: [mcp/README.md](./mcp/README.md)
 
 ---
 
+## Troubleshooting
+
+### "fnm: command not found"
+
+```bash
+# Shell neu laden
+source ~/.zshrc
+```
+
+### Python-Pakete mit native Extensions funktionieren nicht
+
+Dieses Image verwendet Debian (glibc), nicht Alpine (musl). Die meisten Pakete sollten funktionieren. Falls nicht:
+
+```bash
+# Im Dockerfile zusätzliche Build-Dependencies
+apt-get install -y libffi-dev libssl-dev
+```
+
+### Credentials verloren nach Container-Neustart
+
+Sicherstellen, dass die Volumes gemountet sind:
+
+```bash
+docker volume ls | grep ai-dev
+```
+
+### Workspace Mount funktioniert nicht
+
+```bash
+# Pfad existiert?
+ls -la /pfad/zum/verzeichnis
+
+# Berechtigungen prüfen
+# Der Container läuft als User 'dev' (UID 1000)
+```
+
+---
+
 ## Anpassungen
 
 ### Weitere globale Node-Pakete
@@ -378,4 +500,14 @@ RUN uv tool install ruff black mypy
 RUN apt-get install -y bash
 ENV SHELL=/bin/bash
 ENTRYPOINT ["/bin/bash"]
+```
+
+### Festes Projekt-Verzeichnis ändern
+
+In `docker-compose.yml` anpassen:
+
+```yaml
+volumes:
+  # Projects directory - ADJUST THIS PATH
+  - /dein/pfad:/home/dev/projects
 ```
