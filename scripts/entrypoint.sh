@@ -27,10 +27,11 @@ sync_tool_config() {
     local tool_name=$1
     local config_file=$2
     local seed_dir="/home/dev/.${tool_name}_seed"
-    
-    if [ -d "$seed_dir" ]; then
+
+    # Check if seed dir exists AND has files (avoids zsh "no matches found" error)
+    if [[ -d "$seed_dir" ]] && [[ -n "$(ls -A "$seed_dir" 2>/dev/null)" ]]; then
         cp -r "$seed_dir"/* "/home/dev/.${tool_name}/" 2>/dev/null || true
-        if [ -f "$seed_dir/settings.json" ] && [ -f "$config_file" ]; then
+        if [[ -f "$seed_dir/settings.json" ]] && [[ -f "$config_file" ]]; then
             jq -s '.[0] * .[1]' "$config_file" "$seed_dir/settings.json" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
         fi
     fi
