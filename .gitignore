@@ -1,0 +1,12 @@
+# Environment configuration (contains local paths)
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
