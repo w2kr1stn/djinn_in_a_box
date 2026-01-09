@@ -16,14 +16,26 @@ Minimales, wiederverwendbares Base-Image für AI-gestützte Entwicklung mit **Cl
 
 ## Schnellstart
 
-### 1. Base-Image bauen
+### 1. Konfiguration erstellen
 
 ```bash
 cd ai-dev-base
-./dev.sh build
+
+# Template kopieren und anpassen
+cp .env.example .env
+
+# Mindestens CODE_DIR setzen:
+# CODE_DIR=/pfad/zu/deinen/projekten
+nano .env
 ```
 
-### 2. MCP Gateway starten (optional, aber empfohlen)
+### 2. Base-Image bauen
+
+```bash
+./scripts/dev.sh build
+```
+
+### 3. MCP Gateway starten (optional, aber empfohlen)
 
 ```bash
 cd mcp
@@ -33,11 +45,11 @@ cd mcp
 cd ..
 ```
 
-### 3. Tools authentifizieren (einmalig)
+### 4. Tools authentifizieren (einmalig)
 
 ```bash
 # Startet Container mit Host-Netzwerk für OAuth
-./dev.sh auth
+./scripts/dev.sh auth
 
 # Im Container:
 claude   # Folge dem OAuth-Flow im Browser
@@ -46,10 +58,10 @@ gemini auth  # Authentifizierung für Google Generative AI
 exit
 ```
 
-### 4. Normal arbeiten (täglich)
+### 5. Normal arbeiten (täglich)
 
 ```bash
-./dev.sh start
+./scripts/dev.sh start
 
 # Im Container:
 claude   # Mit MCP Tools verfügbar
@@ -504,10 +516,27 @@ ENTRYPOINT ["/bin/bash"]
 
 ### Festes Projekt-Verzeichnis ändern
 
-In `docker-compose.yml` anpassen:
+In `.env` anpassen:
 
-```yaml
-volumes:
-  # Projects directory - ADJUST THIS PATH
-  - /dein/pfad:/home/dev/projects
+```bash
+CODE_DIR=/dein/pfad/zu/projekten
+```
+
+### Shell-Mounts deaktivieren
+
+Falls du keine oh-my-zsh oder oh-my-posh Installation auf dem Host hast:
+
+```bash
+# In .env setzen:
+SKIP_SHELL_MOUNTS=true
+```
+
+### Resource-Limits anpassen
+
+```bash
+# In .env setzen:
+CPU_LIMIT=4
+MEMORY_LIMIT=8G
+CPU_RESERVATION=1
+MEMORY_RESERVATION=2G
 ```
