@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# Speichere Original-PWD des Aufrufers BEVOR ins Script-Verzeichnis gewechselt wird
+CALLER_PWD="$(pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Wechsle ins Hauptverzeichnis (eine Ebene über scripts/)
 cd "$SCRIPT_DIR/.."
@@ -218,7 +221,7 @@ cmd_start() {
         case "${args[$i]}" in
             --docker)   docker_enabled="true" ;;
             --firewall) firewall_enabled="true" ;;
-            --here)     mount_path="$(pwd)" ;;
+            --here)     mount_path="$CALLER_PWD" ;;
             --mount)
                 # Nächstes Argument ist der Pfad
                 mount_path="${args[$((i+1))]:-}"
