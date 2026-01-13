@@ -6,6 +6,9 @@
 #   ./dev.sh start --docker     # Mit Docker Socket + Proxy
 #   ./dev.sh start --firewall   # Mit Netzwerk-Firewall
 #   ./dev.sh start --docker --firewall  # Beides kombiniert
+#
+# Configuration:
+#   Copy .env.example to .env and adjust paths for your system.
 # =============================================================================
 
 services:
@@ -20,10 +23,10 @@ services:
     container_name: ai-dev
     stdin_open: true
     tty: true
-    
+
     networks:
       - ai-dev-network
-    
+
     volumes:
       # Claude Code config & credentials
       - claude-config:/home/dev/.claude
@@ -35,41 +38,37 @@ services:
       - uv-cache:/home/dev/.cache/uv
       # fnm Node versions
       - fnm-versions:/home/dev/.local/share/fnm/node-versions
-      # SSH Keys from host
+      # SSH Keys from host (read-only)
       - ~/.ssh:/home/dev/.ssh:ro
-      # Git config from host
+      # Git config from host (read-only)
       - ~/.gitconfig:/home/dev/.gitconfig:ro
-      # ZSH configuration from host
-      - ~/.zshrc:/home/dev/.zshrc.local:ro
-      - ~/.oh-my-zsh/custom/themes/.zsh-theme-remote.omp.json:/home/dev/.zsh-theme.omp.json:ro
-      - ~/.oh-my-zsh/custom:/home/dev/.oh-my-zsh/custom:ro
       # Mount der Host-Konfiguration als Read-Only Quelle
       - ./config/claude:/home/dev/.claude_seed:ro
       - ./config/gemini:/home/dev/.gemini_seed:ro
-      # Projects directory - ADJUST THIS PATH
-      - /mnt/spaceIn/Laboratorium/Code:/home/dev/projects
+      # Projects directory - configured via .env or CODE_DIR environment variable
+      - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
 
     environment:
-      - TZ=Europe/Berlin
+      - TZ=${TZ:-Europe/Berlin}
       - MCP_GATEWAY_URL=http://mcp-gateway:8811/
       - ENABLE_FIREWALL=${ENABLE_FIREWALL:-false}
       - UV_LINK_MODE=copy
-      
+
     cap_add:
       - NET_ADMIN
-    
+
     # -------------------------------------------------------------------------
     # Resource Limits (Schutz vor Ressourcen-Erschöpfung)
     # -------------------------------------------------------------------------
     deploy:
       resources:
         limits:
-          cpus: '6'
-          memory: 12G
+          cpus: '${CPU_LIMIT:-6}'
+          memory: ${MEMORY_LIMIT:-12G}
         reservations:
-          cpus: '2'
-          memory: 4G
-    
+          cpus: '${CPU_RESERVATION:-2}'
+          memory: ${MEMORY_RESERVATION:-4G}
+
     working_dir: /home/dev/projects
 
   # ---------------------------------------------------------------------------
@@ -89,20 +88,21 @@ services:
       - codex-config:/home/dev/.codex
       - uv-cache:/home/dev/.cache/uv
       - fnm-versions:/home/dev/.local/share/fnm/node-versions
+      - ~/.ssh:/home/dev/.ssh:ro
       - ~/.gitconfig:/home/dev/.gitconfig:ro
-      - ~/.zshrc:/home/dev/.zshrc.local:ro
-      - ~/.oh-my-zsh/custom/themes/.zsh-theme-remote.omp.json:/home/dev/.zsh-theme.omp.json:ro
-      - ~/.oh-my-zsh/custom:/home/dev/.oh-my-zsh/custom:ro
-      - /media/willi/spaceIn/Laboratorium/Code:/home/dev/projects
+      - ./config/claude:/home/dev/.claude_seed:ro
+      - ./config/gemini:/home/dev/.gemini_seed:ro
+      # Same project directory as main container
+      - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
     environment:
-      - TZ=Europe/Berlin
+      - TZ=${TZ:-Europe/Berlin}
       - MCP_GATEWAY_URL=http://localhost:8811/
       - UV_LINK_MODE=copy
     deploy:
       resources:
         limits:
-          cpus: '6'
-          memory: 12G
+          cpus: '${CPU_LIMIT:-6}'
+          memory: ${MEMORY_LIMIT:-12G}
     working_dir: /home/dev/projects
 
 networks:
