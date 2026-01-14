@@ -292,6 +292,12 @@ cmd_start() {
     # shellcheck disable=SC2086
     ENABLE_FIREWALL="$firewall_enabled" \
         docker compose $compose_files run --rm $extra_volume_args $shell_mount_args dev
+
+    # Cleanup: Docker-Proxy stoppen falls gestartet
+    if [[ "$docker_enabled" == "true" ]]; then
+        docker compose $compose_files stop docker-proxy 2>/dev/null || true
+        docker compose $compose_files rm -f docker-proxy 2>/dev/null || true
+    fi
 }
 
 cmd_auth() {
@@ -335,6 +341,7 @@ cmd_auth() {
     if [[ "$docker_enabled" == "true" ]]; then
         # shellcheck disable=SC2086
         docker compose $compose_files stop docker-proxy 2>/dev/null || true
+        docker compose $compose_files rm -f docker-proxy 2>/dev/null || true
     fi
 }
 
