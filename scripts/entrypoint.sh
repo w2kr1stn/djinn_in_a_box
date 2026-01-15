@@ -19,6 +19,23 @@ for dir in ~/.cache/uv ~/.local/share/fnm; do
 done
 
 # =============================================================================
+# Git Configuration (container-specific paths)
+# =============================================================================
+# Generate ~/.gitconfig_local with container paths for includeIf directives
+SIGNING_KEY=$(ls ~/.ssh/*_github.pub 2>/dev/null | head -1)
+if [[ -n "$SIGNING_KEY" ]]; then
+    cat > ~/.gitconfig_local << EOF
+[user]
+    signingkey = $SIGNING_KEY
+EOF
+    # Add excludesfile if it exists
+    if [[ -f ~/.gitignore_global ]]; then
+        echo "[core]" >> ~/.gitconfig_local
+        echo "    excludesfile = $HOME/.gitignore_global" >> ~/.gitconfig_local
+    fi
+fi
+
+# =============================================================================
 # Tool Configuration & Seed Sync
 # =============================================================================
 mkdir -p ~/.claude/agents ~/.claude/skills ~/.gemini ~/.codex
