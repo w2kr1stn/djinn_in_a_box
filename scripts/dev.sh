@@ -184,7 +184,7 @@ ${YELLOW}Workflow:${NC}
 ${YELLOW}Workspace Workflow:${NC}
   # An lokaler Config schrauben:
   cd ~/.config && /path/to/dev.sh start --here --docker
-  # Im Container: cd ~/workspace && claude
+  # Im Container: Startet direkt in ~/workspace/
 EOF
 }
 
@@ -236,6 +236,7 @@ cmd_start() {
 
     # Validiere Mount-Pfad falls angegeben
     local extra_volume_args=""
+    local workdir_arg=""
     if [[ -n "$mount_path" ]]; then
         # Tilde expandieren
         mount_path="${mount_path/#\~/$HOME}"
@@ -247,6 +248,7 @@ cmd_start() {
             exit 1
         fi
         extra_volume_args="-v ${mount_path}:/home/dev/workspace"
+        workdir_arg="--workdir /home/dev/workspace"
     fi
 
     # Get optional shell mounts
@@ -291,7 +293,7 @@ cmd_start() {
     # Container starten
     # shellcheck disable=SC2086
     ENABLE_FIREWALL="$firewall_enabled" \
-        docker compose $compose_files run --rm $extra_volume_args $shell_mount_args dev
+        docker compose $compose_files run --rm $workdir_arg $extra_volume_args $shell_mount_args dev
 
     # Cleanup: Docker-Proxy stoppen falls gestartet
     if [[ "$docker_enabled" == "true" ]]; then
