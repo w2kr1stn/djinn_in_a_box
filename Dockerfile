@@ -60,6 +60,7 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 ARG CLAUDE_CODE_VERSION=2.1.7
 ARG GEMINI_CLI_VERSION=0.24.0
 ARG CODEX_VERSION=0.84.0
+ARG OPENCODE_VERSION=1.1.22
 
 RUN eval "$(fnm env --shell bash)" && npm install -g \
     typescript \
@@ -70,6 +71,7 @@ RUN eval "$(fnm env --shell bash)" && npm install -g \
     @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     @google/gemini-cli@${GEMINI_CLI_VERSION} \
     @openai/codex@${CODEX_VERSION} \
+    opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
 RUN uv tool install ruff
