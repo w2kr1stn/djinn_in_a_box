@@ -117,7 +117,7 @@ ${YELLOW}Usage:${NC} ./dev.sh <command> [options]
 ${YELLOW}Commands:${NC}
   build       Build/rebuild the base image
   start       Start interactive shell in container
-  auth        Start container with host network for OAuth (einmalig)
+  auth        Start with host network for OAuth (claude, gemini, codex, gh auth login)
   status      Show container, volume and MCP status
   clean       Remove containers and optionally volumes
   help        Show this help message

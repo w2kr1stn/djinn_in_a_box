@@ -29,6 +29,15 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
        -o /usr/local/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
+# -----------------------------------------------------------------------------
+# GitHub CLI Installation
+# -----------------------------------------------------------------------------
+ARG GH_VERSION=2.85.0
+
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+    | tar xz --strip-components=2 -C /usr/local/bin gh_${GH_VERSION}_linux_amd64/bin/gh \
+    && chmod +x /usr/local/bin/gh
+
 # Install uv (Python)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
@@ -98,7 +107,7 @@ fi
 EOF
 
 # Prepare persistent config directories
-RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/uv ~/.local/share/fnm/node-versions ~/.config \
+RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
     && ln -s ~/.claude ~/.config/claude \
     && ln -s ~/.claude/claude.json ~/.claude.json \
     && ln -s ~/.gemini/settings.json ~/.gemini-settings.json

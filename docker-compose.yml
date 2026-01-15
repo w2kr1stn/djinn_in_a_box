@@ -34,6 +34,8 @@ services:
       - gemini-config:/home/dev/.gemini
       # Codex CLI config & credentials
       - codex-config:/home/dev/.codex
+      # GitHub CLI config & credentials
+      - gh-config:/home/dev/.config/gh
       # uv cache
       - uv-cache:/home/dev/.cache/uv
       # SSH Keys from host (read-only)
@@ -84,8 +86,8 @@ services:
       - claude-config:/home/dev/.claude
       - gemini-config:/home/dev/.gemini
       - codex-config:/home/dev/.codex
+      - gh-config:/home/dev/.config/gh
       - uv-cache:/home/dev/.cache/uv
-      - fnm-versions:/home/dev/.local/share/fnm/node-versions
       - ~/.ssh:/home/dev/.ssh:ro
       - ~/.gitconfig:/home/dev/.gitconfig:ro
       - ./config/claude:/home/dev/.claude_seed:ro
@@ -115,5 +117,7 @@ volumes:
     name: ai-dev-gemini-config
   codex-config:
     name: ai-dev-codex-config
+  gh-config:
+    name: ai-dev-gh-config
   uv-cache:
     name: ai-dev-uv-cache
