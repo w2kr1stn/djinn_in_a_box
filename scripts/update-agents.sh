@@ -23,6 +23,7 @@ declare -A PACKAGES=(
     ["CLAUDE_CODE_VERSION"]="@anthropic-ai/claude-code"
     ["GEMINI_CLI_VERSION"]="@google/gemini-cli"
     ["CODEX_VERSION"]="@openai/codex"
+    ["OPENCODE_VERSION"]="opencode-ai"
 )
 
 echo -e "${BLUE}Fetching latest CLI agent versions...${NC}"
