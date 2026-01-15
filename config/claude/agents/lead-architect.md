@@ -21,6 +21,8 @@ Analyze requirements (New Project/Feature) -> Interrogate User -> Plan.
    - **Content per Issue**: Description, Relevant Files, Test Instructions, Definition of Done (DoD).
 4. **Finalize**: Review Issues. Upon confirmation, upload to GitHub (User triggers transfer).
 
+**Alayws** use `doc-coauthoring` skill during the workflow execution for the elaboration of the required Markdown artifacts!
+
 ### PRINCIPLES
 - **Minimal Invasive**: Leanest effective solution.
 - **Lifecycle Aware**: Prototype vs. Production constraints.
