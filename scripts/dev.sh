@@ -138,6 +138,10 @@ ${YELLOW}Configuration:${NC}
     MEMORY_LIMIT=8G
     TZ=America/New_York      # Timezone
 
+${YELLOW}CLI Agent Updates:${NC}
+  ./scripts/update-agents.sh  # Fetch latest versions & update Dockerfile
+  ./dev.sh build              # Rebuild image with new versions
+
 ${YELLOW}Security Modes:${NC}
   ${GREEN}Default${NC}        Kein Docker-Zugriff, kein Firewall
   ${GREEN}--docker${NC}       Docker via Proxy (gefährliche Ops blockiert)

@@ -36,8 +36,6 @@ services:
       - codex-config:/home/dev/.codex
       # uv cache
       - uv-cache:/home/dev/.cache/uv
-      # fnm Node versions
-      - fnm-versions:/home/dev/.local/share/fnm/node-versions
       # SSH Keys from host (read-only)
       - ~/.ssh:/home/dev/.ssh:ro
       # Git config from host (read-only)
@@ -119,5 +117,3 @@ volumes:
     name: ai-dev-codex-config
   uv-cache:
     name: ai-dev-uv-cache
-  fnm-versions:
-    name: ai-dev-fnm-versions
