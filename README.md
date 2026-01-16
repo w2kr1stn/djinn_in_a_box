@@ -252,6 +252,7 @@ Dann in VS Code: `Cmd+Shift+P` → "Reopen in Container"
     "source=ai-dev-gemini-config,target=/home/dev/.gemini,type=volume",
     "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
     "source=ai-dev-opencode-config,target=/home/dev/.config/opencode,type=volume",
+    "source=ai-dev-opencode-data,target=/home/dev/.local/share/opencode,type=volume",
     "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume"
   ],
   
@@ -328,7 +329,8 @@ Alle Tool-Credentials und Caches werden in Docker-Volumes gespeichert – nicht 
 | `ai-dev-claude-config` | Claude Code Credentials & Settings |
 | `ai-dev-gemini-config` | Gemini CLI Credentials & Settings |
 | `ai-dev-codex-config` | Codex CLI Credentials & Settings |
-| `ai-dev-opencode-config` | OpenCode Credentials & Settings |
+| `ai-dev-opencode-config` | OpenCode Config (settings, commands) |
+| `ai-dev-opencode-data` | OpenCode Data (OAuth tokens, sessions) |
 | `ai-dev-uv-cache` | Python Package Cache |
 | `ai-dev-fnm-versions` | Node.js Installationen |
 

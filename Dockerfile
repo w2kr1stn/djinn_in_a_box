@@ -107,7 +107,7 @@ fi
 EOF
 
 # Prepare persistent config directories
-RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config ~/.config/opencode/commands \
+RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config ~/.config/opencode/commands ~/.local/share/opencode \
     && ln -s ~/.claude ~/.config/claude \
     && ln -s ~/.claude/claude.json ~/.claude.json \
     && ln -s ~/.gemini/settings.json ~/.gemini-settings.json \
