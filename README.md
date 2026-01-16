@@ -1,6 +1,6 @@
 # AI Dev Base
 
-Minimales, wiederverwendbares Base-Image für AI-gestützte Entwicklung mit **Claude Code** und **OpenAI Codex CLI**.
+Minimales, wiederverwendbares Base-Image für AI-gestützte Entwicklung mit **Claude Code**, **Gemini CLI**, **Codex CLI** und **OpenCode**.
 
 ## Features
 
@@ -11,6 +11,7 @@ Minimales, wiederverwendbares Base-Image für AI-gestützte Entwicklung mit **Cl
 | **Claude Code** | Anthropic's AI Coding Agent |
 | **Gemini CLI** | Google's AI Coding Agent |
 | **Codex CLI** | OpenAI's AI Coding Agent |
+| **OpenCode** | Multi-Provider AI Coding Agent (lokal & Cloud) |
 | **Oh My Zsh** | ZSH Framework mit Custom-Plugins |
 | **Oh My Posh** | Prompt-Theming mit Custom-Theme |
 
@@ -52,9 +53,10 @@ cd ..
 ./scripts/dev.sh auth
 
 # Im Container:
-claude   # Folge dem OAuth-Flow im Browser
-codex    # Folge dem OAuth-Flow im Browser
+claude       # Folge dem OAuth-Flow im Browser
 gemini auth  # Authentifizierung für Google Generative AI
+codex        # Folge dem OAuth-Flow im Browser
+opencode     # API-Keys werden in ~/.config/opencode/.opencode.json gespeichert
 exit
 ```
 
@@ -64,8 +66,10 @@ exit
 ./scripts/dev.sh start
 
 # Im Container:
-claude   # Mit MCP Tools verfügbar
+claude     # Mit MCP Tools verfügbar
+gemini
 codex
+opencode   # Mit lokalem LLM Support (Ollama)
 ```
 
 Die Credentials werden in persistenten Docker-Volumes gespeichert und überleben Container-Neustarts.
@@ -245,9 +249,10 @@ Dann in VS Code: `Cmd+Shift+P` → "Reopen in Container"
   // Basis-Volumes (credentials)
   "mounts": [
     "source=ai-dev-claude-config,target=/home/dev/.claude,type=volume",
+    "source=ai-dev-gemini-config,target=/home/dev/.gemini,type=volume",
     "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
-    "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
-    "source=ai-dev-fnm-versions,target=/home/dev/.local/share/fnm/node-versions,type=volume"
+    "source=ai-dev-opencode-config,target=/home/dev/.config/opencode,type=volume",
+    "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume"
   ],
   
   // Projekt Konfiguration, Projekt braucht z.B. Python
@@ -302,8 +307,14 @@ fnm use 20
 # Claude Code starten
 claude
 
+# Gemini CLI starten
+gemini
+
 # Codex CLI starten  
 codex
+
+# OpenCode starten (mit lokalem LLM Support)
+opencode
 ```
 
 ---
@@ -317,6 +328,7 @@ Alle Tool-Credentials und Caches werden in Docker-Volumes gespeichert – nicht 
 | `ai-dev-claude-config` | Claude Code Credentials & Settings |
 | `ai-dev-gemini-config` | Gemini CLI Credentials & Settings |
 | `ai-dev-codex-config` | Codex CLI Credentials & Settings |
+| `ai-dev-opencode-config` | OpenCode Credentials & Settings |
 | `ai-dev-uv-cache` | Python Package Cache |
 | `ai-dev-fnm-versions` | Node.js Installationen |
 
