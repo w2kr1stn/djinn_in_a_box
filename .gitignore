@@ -10,3 +10,24 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Session/Task files (AI agent working files)
+SESSION*.md
+TASKS.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Logs
+logs/
+*.log
+
+# Docker
+.docker/
