@@ -38,9 +38,6 @@
 - **Frontend**: `npm run lint`, `npm run format`, `npm run test`
 - **Infra**: `docker compose up -d`
 
-## Slash Command Triggers
-If the user starts a message with one of these commands, strictly follow the associated protocol.
-
 ## Git Commits
-- **Exclude**: `TASKS.md`, `PROJECT.md` / `FEATURE.md`, `SESSION*.md` & this particular `CLAUDE.md` file
+- **Exclude**: `TASKS.md`, `PROJECT.md` / `FEATURE.md`, `SESSION*.md` & this particular `OPENCODE.md` file
 - **Avoid**: AI-generated footers in commit messages

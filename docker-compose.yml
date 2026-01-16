@@ -11,6 +11,43 @@
 #   Copy .env.example to .env and adjust paths for your system.
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Shared Configuration (YAML Anchors)
+# -----------------------------------------------------------------------------
+x-common-volumes: &common-volumes
+  # AI Agent configs & credentials
+  - claude-config:/home/dev/.claude
+  - gemini-config:/home/dev/.gemini
+  - codex-config:/home/dev/.codex
+  - opencode-config:/home/dev/.opencode
+  - opencode-data:/home/dev/.local/share/opencode
+  - gh-config:/home/dev/.config/gh
+  # Cache
+  - uv-cache:/home/dev/.cache/uv
+  # Host configs (read-only)
+  - ~/.ssh:/home/dev/.ssh:ro
+  - ~/.gitconfig:/home/dev/.gitconfig:ro
+  # Seed configs (read-only)
+  - ./config/claude:/home/dev/.claude_seed:ro
+  - ./config/gemini:/home/dev/.gemini_seed:ro
+  - ./config/opencode:/home/dev/.opencode/seed:ro
+  # Projects directory
+  - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
+
+x-common-environment: &common-environment
+  TZ: ${TZ:-Europe/Berlin}
+  UV_LINK_MODE: copy
+  LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://ai-station:11434/v1}
+  # Gemini CLI: Force file-based token storage instead of system keychain
+  # (keychain is not persistent in containers)
+  GEMINI_FORCE_FILE_STORAGE: "true"
+
+x-resource-limits: &resource-limits
+  resources:
+    limits:
+      cpus: '${CPU_LIMIT:-6}'
+      memory: ${MEMORY_LIMIT:-12G}
+
 services:
   # ---------------------------------------------------------------------------
   # Main development container
@@ -21,46 +58,20 @@ services:
       dockerfile: Dockerfile
     image: ai-dev-base:latest
     container_name: ai-dev
+    hostname: ai-dev
     stdin_open: true
     tty: true
-
     networks:
       - ai-dev-network
-
-    volumes:
-      # Claude Code config & credentials
-      - claude-config:/home/dev/.claude
-      # Gemini CLI config & credentials
-      - gemini-config:/home/dev/.gemini
-      # Codex CLI config & credentials
-      - codex-config:/home/dev/.codex
-      # uv cache
-      - uv-cache:/home/dev/.cache/uv
-      # fnm Node versions
-      - fnm-versions:/home/dev/.local/share/fnm/node-versions
-      # SSH Keys from host (read-only)
-      - ~/.ssh:/home/dev/.ssh:ro
-      # Git config from host (read-only)
-      - ~/.gitconfig:/home/dev/.gitconfig:ro
-      # Mount der Host-Konfiguration als Read-Only Quelle
-      - ./config/claude:/home/dev/.claude_seed:ro
-      - ./config/gemini:/home/dev/.gemini_seed:ro
-      # Projects directory - configured via .env or CODE_DIR environment variable
-      - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
-
+    volumes: *common-volumes
     environment:
-      - TZ=${TZ:-Europe/Berlin}
-      - MCP_GATEWAY_URL=http://mcp-gateway:8811/
-      - ENABLE_FIREWALL=${ENABLE_FIREWALL:-false}
-      - UV_LINK_MODE=copy
-
+      <<: *common-environment
+      MCP_GATEWAY_URL: http://mcp-gateway:8811/
+      ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
     cap_add:
       - NET_ADMIN
-
-    # -------------------------------------------------------------------------
-    # Resource Limits (Schutz vor Ressourcen-Erschöpfung)
-    # -------------------------------------------------------------------------
     deploy:
+      <<: *resource-limits
       resources:
         limits:
           cpus: '${CPU_LIMIT:-6}'
@@ -68,7 +79,6 @@ services:
         reservations:
           cpus: '${CPU_RESERVATION:-2}'
           memory: ${MEMORY_RESERVATION:-4G}
-
     working_dir: /home/dev/projects
 
   # ---------------------------------------------------------------------------
@@ -77,32 +87,17 @@ services:
   dev-auth:
     image: ai-dev-base:latest
     container_name: ai-dev-auth
+    hostname: ai-dev
     stdin_open: true
     tty: true
     profiles:
       - auth
     network_mode: "host"
-    volumes:
-      - claude-config:/home/dev/.claude
-      - gemini-config:/home/dev/.gemini
-      - codex-config:/home/dev/.codex
-      - uv-cache:/home/dev/.cache/uv
-      - fnm-versions:/home/dev/.local/share/fnm/node-versions
-      - ~/.ssh:/home/dev/.ssh:ro
-      - ~/.gitconfig:/home/dev/.gitconfig:ro
-      - ./config/claude:/home/dev/.claude_seed:ro
-      - ./config/gemini:/home/dev/.gemini_seed:ro
-      # Same project directory as main container
-      - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
+    volumes: *common-volumes
     environment:
-      - TZ=${TZ:-Europe/Berlin}
-      - MCP_GATEWAY_URL=http://localhost:8811/
-      - UV_LINK_MODE=copy
-    deploy:
-      resources:
-        limits:
-          cpus: '${CPU_LIMIT:-6}'
-          memory: ${MEMORY_LIMIT:-12G}
+      <<: *common-environment
+      MCP_GATEWAY_URL: http://localhost:8811/
+    deploy: *resource-limits
     working_dir: /home/dev/projects
 
 networks:
@@ -117,7 +112,11 @@ volumes:
     name: ai-dev-gemini-config
   codex-config:
     name: ai-dev-codex-config
+  opencode-config:
+    name: ai-dev-opencode-config
+  opencode-data:
+    name: ai-dev-opencode-data
+  gh-config:
+    name: ai-dev-gh-config
   uv-cache:
     name: ai-dev-uv-cache
-  fnm-versions:
-    name: ai-dev-fnm-versions

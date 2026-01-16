@@ -29,6 +29,15 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
        -o /usr/local/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
+# -----------------------------------------------------------------------------
+# GitHub CLI Installation
+# -----------------------------------------------------------------------------
+ARG GH_VERSION=2.85.0
+
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+    | tar xz --strip-components=2 -C /usr/local/bin gh_${GH_VERSION}_linux_amd64/bin/gh \
+    && chmod +x /usr/local/bin/gh
+
 # Install uv (Python)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
@@ -55,16 +64,23 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$HOME/
 ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
-# Global NPM Package
+# Global NPM Packages
+# CLI Agent versions - update with: ./scripts/update-agents.sh
+ARG CLAUDE_CODE_VERSION=2.1.7
+ARG GEMINI_CLI_VERSION=0.24.0
+ARG CODEX_VERSION=0.84.0
+ARG OPENCODE_VERSION=1.1.22
+
 RUN eval "$(fnm env --shell bash)" && npm install -g \
     typescript \
     typescript-language-server \
     pyright \
     prettier \
     eslint \
-    @anthropic-ai/claude-code \
-    @google/gemini-cli \
-    @openai/codex \
+    @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    @google/gemini-cli@${GEMINI_CLI_VERSION} \
+    @openai/codex@${CODEX_VERSION} \
+    opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
 
 RUN uv tool install ruff
@@ -91,7 +107,9 @@ fi
 EOF
 
 # Prepare persistent config directories
-RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/uv ~/.local/share/fnm/node-versions ~/.config \
+RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
+    ~/.opencode ~/.local/share/opencode \
+    && echo '{"name": "opencode-workspace", "private": true}' > ~/.opencode/package.json \
     && ln -s ~/.claude ~/.config/claude \
     && ln -s ~/.claude/claude.json ~/.claude.json \
     && ln -s ~/.gemini/settings.json ~/.gemini-settings.json

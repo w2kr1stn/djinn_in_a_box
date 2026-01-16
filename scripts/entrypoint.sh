@@ -19,9 +19,26 @@ for dir in ~/.cache/uv ~/.local/share/fnm; do
 done
 
 # =============================================================================
+# Git Configuration (container-specific paths)
+# =============================================================================
+# Generate ~/.gitconfig_local with container paths for includeIf directives
+SIGNING_KEY=$(ls ~/.ssh/*_github.pub 2>/dev/null | head -1)
+if [[ -n "$SIGNING_KEY" ]]; then
+    cat > ~/.gitconfig_local << EOF
+[user]
+    signingkey = $SIGNING_KEY
+EOF
+    # Add excludesfile if it exists
+    if [[ -f ~/.gitignore_global ]]; then
+        echo "[core]" >> ~/.gitconfig_local
+        echo "    excludesfile = $HOME/.gitignore_global" >> ~/.gitconfig_local
+    fi
+fi
+
+# =============================================================================
 # Tool Configuration & Seed Sync
 # =============================================================================
-mkdir -p ~/.claude/agents ~/.claude/skills ~/.gemini ~/.codex
+mkdir -p ~/.claude/agents ~/.claude/skills ~/.gemini ~/.codex ~/.config/opencode/commands
 
 sync_tool_config() {
     local tool_name=$1
@@ -39,6 +56,23 @@ sync_tool_config() {
 
 sync_tool_config "claude" "$HOME/.claude/claude.json"
 sync_tool_config "gemini" "$HOME/.gemini/settings.json"
+
+# OpenCode config sync (consistent structure like other tools)
+OPENCODE_SEED="$HOME/.opencode/seed"
+OPENCODE_CONFIG="$HOME/.opencode/config"
+mkdir -p "$OPENCODE_CONFIG/commands"
+if [[ -d "$OPENCODE_SEED" ]] && [[ -n "$(ls -A "$OPENCODE_SEED" 2>/dev/null)" ]]; then
+    # Copy commands directory if exists
+    [[ -d "$OPENCODE_SEED/commands" ]] && cp -r "$OPENCODE_SEED/commands"/* "$OPENCODE_CONFIG/commands/" 2>/dev/null || true
+    # Copy OPENCODE.md to home directory
+    [[ -f "$OPENCODE_SEED/OPENCODE.md" ]] && cp "$OPENCODE_SEED/OPENCODE.md" "$HOME/.opencode.md" 2>/dev/null || true
+    # Merge settings.json if exists
+    if [[ -f "$OPENCODE_SEED/settings.json" ]] && [[ -f "$OPENCODE_CONFIG/.opencode.json" ]]; then
+        jq -s '.[0] * .[1]' "$OPENCODE_CONFIG/.opencode.json" "$OPENCODE_SEED/settings.json" > "$OPENCODE_CONFIG/.opencode.json.tmp" && mv "$OPENCODE_CONFIG/.opencode.json.tmp" "$OPENCODE_CONFIG/.opencode.json"
+    elif [[ -f "$OPENCODE_SEED/settings.json" ]]; then
+        cp "$OPENCODE_SEED/settings.json" "$OPENCODE_CONFIG/.opencode.json"
+    fi
+fi
 
 # =============================================================================
 # MCP Gateway Configuration
@@ -73,6 +107,14 @@ TOML
     else
         sed -i "/\[mcp_servers\.docker-gateway\]/,/^\[/{s|url = .*|url = \"$MCP_BASE_URL\"|}" "$CODEX_CONFIG"
     fi
+
+    # OpenCode (JSON in ~/.opencode/config)
+    OPENCODE_MCP_CONFIG=~/.opencode/config/.opencode.json
+    [[ ! -f "$OPENCODE_MCP_CONFIG" ]] && echo '{}' > "$OPENCODE_MCP_CONFIG"
+    jq --arg url "$MCP_BASE_URL" \
+        '.mcpServers["docker-gateway"] = {"type": "sse", "url": $url}' \
+        "$OPENCODE_MCP_CONFIG" > "$OPENCODE_MCP_CONFIG.tmp" && mv "$OPENCODE_MCP_CONFIG.tmp" "$OPENCODE_MCP_CONFIG"
+
     echo "✓ MCP Gateway: Connected ($MCP_BASE_URL)"
 else
     echo "⚠ MCP Gateway: Not reachable at $MCP_HOST"

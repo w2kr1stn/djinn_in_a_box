@@ -15,11 +15,7 @@ cd "$SCRIPT_DIR/.."
 # -----------------------------------------------------------------------------
 # Farben für Output
 # -----------------------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+source "$SCRIPT_DIR/colors.sh"
 
 # -----------------------------------------------------------------------------
 # Load .env file if it exists
@@ -117,7 +113,7 @@ ${YELLOW}Usage:${NC} ./dev.sh <command> [options]
 ${YELLOW}Commands:${NC}
   build       Build/rebuild the base image
   start       Start interactive shell in container
-  auth        Start container with host network for OAuth (einmalig)
+  auth        Start with host network for OAuth (claude, gemini, codex, gh auth login)
   status      Show container, volume and MCP status
   clean       Remove containers and optionally volumes
   help        Show this help message
@@ -137,6 +133,10 @@ ${YELLOW}Configuration:${NC}
     CPU_LIMIT=4              # Adjust resource limits
     MEMORY_LIMIT=8G
     TZ=America/New_York      # Timezone
+
+${YELLOW}CLI Agent Updates:${NC}
+  ./scripts/update-agents.sh  # Fetch latest versions & update Dockerfile
+  ./dev.sh build              # Rebuild image with new versions
 
 ${YELLOW}Security Modes:${NC}
   ${GREEN}Default${NC}        Kein Docker-Zugriff, kein Firewall
