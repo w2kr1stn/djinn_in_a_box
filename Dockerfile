@@ -107,10 +107,11 @@ fi
 EOF
 
 # Prepare persistent config directories
-RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
+RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config ~/.config/opencode/commands \
     && ln -s ~/.claude ~/.config/claude \
     && ln -s ~/.claude/claude.json ~/.claude.json \
-    && ln -s ~/.gemini/settings.json ~/.gemini-settings.json
+    && ln -s ~/.gemini/settings.json ~/.gemini-settings.json \
+    && ln -s ~/.config/opencode/.opencode.json ~/.opencode.json
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
 RUN chmod +x ~/entrypoint.sh

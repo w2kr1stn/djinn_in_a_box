@@ -31,7 +31,9 @@
     "mounts": [
         // Tool credentials & cache (Docker volumes)
         "source=ai-dev-claude-config,target=/home/dev/.claude,type=volume",
+        "source=ai-dev-gemini-config,target=/home/dev/.gemini,type=volume",
         "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
+        "source=ai-dev-opencode-config,target=/home/dev/.config/opencode,type=volume",
         "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
         "source=ai-dev-fnm-versions,target=/home/dev/.local/share/fnm/node-versions,type=volume",
         // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
