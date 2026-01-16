@@ -19,8 +19,7 @@ x-common-volumes: &common-volumes
   - claude-config:/home/dev/.claude
   - gemini-config:/home/dev/.gemini
   - codex-config:/home/dev/.codex
-  - opencode-config:/home/dev/.config/opencode
-  - opencode-data:/home/dev/.local/share/opencode
+  - opencode-config:/home/dev/.opencode
   - gh-config:/home/dev/.config/gh
   # Cache
   - uv-cache:/home/dev/.cache/uv
@@ -30,7 +29,7 @@ x-common-volumes: &common-volumes
   # Seed configs (read-only)
   - ./config/claude:/home/dev/.claude_seed:ro
   - ./config/gemini:/home/dev/.gemini_seed:ro
-  - ./config/opencode:/home/dev/.opencode_seed:ro
+  - ./config/opencode:/home/dev/.opencode/seed:ro
   # Projects directory
   - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
 
@@ -109,8 +108,6 @@ volumes:
     name: ai-dev-codex-config
   opencode-config:
     name: ai-dev-opencode-config
-  opencode-data:
-    name: ai-dev-opencode-data
   gh-config:
     name: ai-dev-gh-config
   uv-cache:
