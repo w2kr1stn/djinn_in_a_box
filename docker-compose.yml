@@ -20,6 +20,7 @@ x-common-volumes: &common-volumes
   - gemini-config:/home/dev/.gemini
   - codex-config:/home/dev/.codex
   - opencode-config:/home/dev/.config/opencode
+  - opencode-data:/home/dev/.local/share/opencode
   - gh-config:/home/dev/.config/gh
   # Cache
   - uv-cache:/home/dev/.cache/uv
@@ -108,6 +109,8 @@ volumes:
     name: ai-dev-codex-config
   opencode-config:
     name: ai-dev-opencode-config
+  opencode-data:
+    name: ai-dev-opencode-data
   gh-config:
     name: ai-dev-gh-config
   uv-cache:

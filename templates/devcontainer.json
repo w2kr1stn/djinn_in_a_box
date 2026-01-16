@@ -34,8 +34,8 @@
         "source=ai-dev-gemini-config,target=/home/dev/.gemini,type=volume",
         "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
         "source=ai-dev-opencode-config,target=/home/dev/.config/opencode,type=volume",
+        "source=ai-dev-opencode-data,target=/home/dev/.local/share/opencode,type=volume",
         "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
-        "source=ai-dev-fnm-versions,target=/home/dev/.local/share/fnm/node-versions,type=volume",
         // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
         "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
     ],
