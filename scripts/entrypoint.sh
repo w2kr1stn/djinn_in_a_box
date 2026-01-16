@@ -38,7 +38,7 @@ fi
 # =============================================================================
 # Tool Configuration & Seed Sync
 # =============================================================================
-mkdir -p ~/.claude/agents ~/.claude/skills ~/.gemini ~/.codex
+mkdir -p ~/.claude/agents ~/.claude/skills ~/.gemini ~/.codex ~/.config/opencode/commands
 
 sync_tool_config() {
     local tool_name=$1
@@ -56,6 +56,22 @@ sync_tool_config() {
 
 sync_tool_config "claude" "$HOME/.claude/claude.json"
 sync_tool_config "gemini" "$HOME/.gemini/settings.json"
+
+# OpenCode config sync (uses XDG_CONFIG_HOME structure)
+OPENCODE_SEED="/home/dev/.opencode_seed"
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+if [[ -d "$OPENCODE_SEED" ]] && [[ -n "$(ls -A "$OPENCODE_SEED" 2>/dev/null)" ]]; then
+    # Copy commands directory if exists
+    [[ -d "$OPENCODE_SEED/commands" ]] && cp -r "$OPENCODE_SEED/commands"/* "$OPENCODE_CONFIG_DIR/commands/" 2>/dev/null || true
+    # Copy OPENCODE.md to home directory (will be symlinked to workspace)
+    [[ -f "$OPENCODE_SEED/OPENCODE.md" ]] && cp "$OPENCODE_SEED/OPENCODE.md" "$HOME/.opencode.md" 2>/dev/null || true
+    # Merge settings.json if exists
+    if [[ -f "$OPENCODE_SEED/settings.json" ]] && [[ -f "$OPENCODE_CONFIG_DIR/.opencode.json" ]]; then
+        jq -s '.[0] * .[1]' "$OPENCODE_CONFIG_DIR/.opencode.json" "$OPENCODE_SEED/settings.json" > "$OPENCODE_CONFIG_DIR/.opencode.json.tmp" && mv "$OPENCODE_CONFIG_DIR/.opencode.json.tmp" "$OPENCODE_CONFIG_DIR/.opencode.json"
+    elif [[ -f "$OPENCODE_SEED/settings.json" ]]; then
+        cp "$OPENCODE_SEED/settings.json" "$OPENCODE_CONFIG_DIR/.opencode.json"
+    fi
+fi
 
 # =============================================================================
 # MCP Gateway Configuration
@@ -90,6 +106,14 @@ TOML
     else
         sed -i "/\[mcp_servers\.docker-gateway\]/,/^\[/{s|url = .*|url = \"$MCP_BASE_URL\"|}" "$CODEX_CONFIG"
     fi
+
+    # OpenCode (JSON in XDG_CONFIG_HOME)
+    OPENCODE_CONFIG=~/.config/opencode/.opencode.json
+    [[ ! -f "$OPENCODE_CONFIG" ]] && echo '{}' > "$OPENCODE_CONFIG"
+    jq --arg url "$MCP_BASE_URL" \
+        '.mcpServers["docker-gateway"] = {"type": "sse", "url": $url}' \
+        "$OPENCODE_CONFIG" > "$OPENCODE_CONFIG.tmp" && mv "$OPENCODE_CONFIG.tmp" "$OPENCODE_CONFIG"
+
     echo "✓ MCP Gateway: Connected ($MCP_BASE_URL)"
 else
     echo "⚠ MCP Gateway: Not reachable at $MCP_HOST"
