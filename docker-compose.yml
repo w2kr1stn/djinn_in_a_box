@@ -20,6 +20,7 @@ x-common-volumes: &common-volumes
   - gemini-config:/home/dev/.gemini
   - codex-config:/home/dev/.codex
   - opencode-config:/home/dev/.opencode
+  - opencode-data:/home/dev/.local/share/opencode
   - gh-config:/home/dev/.config/gh
   # Cache
   - uv-cache:/home/dev/.cache/uv
@@ -37,6 +38,9 @@ x-common-environment: &common-environment
   TZ: ${TZ:-Europe/Berlin}
   UV_LINK_MODE: copy
   LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://ai-station:11434/v1}
+  # Gemini CLI: Force file-based token storage instead of system keychain
+  # (keychain is not persistent in containers)
+  GEMINI_FORCE_FILE_STORAGE: "true"
 
 x-resource-limits: &resource-limits
   resources:
@@ -54,6 +58,7 @@ services:
       dockerfile: Dockerfile
     image: ai-dev-base:latest
     container_name: ai-dev
+    hostname: ai-dev
     stdin_open: true
     tty: true
     networks:
@@ -82,6 +87,7 @@ services:
   dev-auth:
     image: ai-dev-base:latest
     container_name: ai-dev-auth
+    hostname: ai-dev
     stdin_open: true
     tty: true
     profiles:
@@ -108,6 +114,8 @@ volumes:
     name: ai-dev-codex-config
   opencode-config:
     name: ai-dev-opencode-config
+  opencode-data:
+    name: ai-dev-opencode-data
   gh-config:
     name: ai-dev-gh-config
   uv-cache:
