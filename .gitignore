@@ -1,5 +1,7 @@
 # Environment configuration (contains local paths)
 .env
+packages.txt
+tools/tools.txt
 
 # IDE
 .idea/

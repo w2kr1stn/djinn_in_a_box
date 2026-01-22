@@ -1,12 +1,12 @@
 # Project Memory: [PROJEKT_NAME]
 
 ## Context & Phase
-- **Current Phase**: MVP (Evolution: PoC -> **MVP** -> Production -> Scale)
+- **Current Phase**: PoC (**PoC** -> MVP* -> Production -> Scale)
 - **Tech-Debt Tolerance**: **Minimal** (High-quality code required for ISO 27001)
 - **Primary Mission**: [Kurze Beschreibung des Projektziels]
 
 ## Workflow Lifecycle (Strict)
-1. **Architect**: Analyze -> Specs (`PROJECT.md`/`FEATURE.md`) -> Plan (`DEV.json` with ~1h tasks).
+1. **Architect**: Analyze -> Specs (`PROJECT.md`/`FEATURE.md`) -> Plan (`TASK.md` with ~1h tasks).
 2. **Dev (Back/Front)**: Analyze -> Implement (SOTA/DRY/KISS) -> Test -> Report (`SESSION.md`) -> Update Issue.
 3. **QA**: Review (`SESSION.md` + Code) -> CI Check -> PR (Green) or Reject (Red).
 
