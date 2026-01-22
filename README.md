@@ -504,6 +504,52 @@ ls -la /pfad/zum/verzeichnis
 
 ## Anpassungen
 
+### Custom APT Packages
+
+Zusätzliche System-Pakete können über `packages.txt` installiert werden:
+
+```bash
+# Template kopieren
+cp packages.txt.example packages.txt
+
+# Pakete hinzufügen (ein Paket pro Zeile)
+echo "vim" >> packages.txt
+echo "htop" >> packages.txt
+
+# Image neu bauen
+./scripts/dev.sh build
+```
+
+Die `packages.txt` ist in `.gitignore` – jeder Entwickler kann eigene Pakete pflegen.
+
+### Optional CLI Tools (Runtime)
+
+Komplexere Tools (Azure CLI, Pulumi, etc.) werden bei Container-Start installiert:
+
+```bash
+# Template kopieren
+cp tools/tools.txt.example tools/tools.txt
+
+# Tools aktivieren (Zeilen auskommentieren)
+nano tools/tools.txt
+
+# Container starten - Tools werden automatisch installiert
+./scripts/dev.sh start
+```
+
+**Verfügbare Tools:**
+
+| Tool | Beschreibung |
+|------|--------------|
+| `azure-cli` | Microsoft Azure CLI (`az`) |
+| `pulumi` | Infrastructure as Code CLI |
+| `psql` | PostgreSQL Client (psql, pg_dump) |
+
+**Vorteile:**
+- Kein Rebuild nötig
+- Installation wird gecached (schneller Restart)
+- Projekt-spezifische Tool-Sets möglich
+
 ### Weitere globale Node-Pakete
 
 ```dockerfile

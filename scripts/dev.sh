@@ -115,7 +115,7 @@ ${YELLOW}Commands:${NC}
   start       Start interactive shell in container
   auth        Start with host network for OAuth (claude, gemini, codex, gh auth login)
   status      Show container, volume and MCP status
-  clean       Remove containers and optionally volumes
+  clean       Manage containers and volumes (see below)
   help        Show this help message
 
 ${YELLOW}Options:${NC}
@@ -152,6 +152,21 @@ ${YELLOW}Workspace Mount:${NC}
     ~/projects/   → Dein festes Code-Verzeichnis (immer)
     ~/workspace/  → Temporärer Mount (nur mit --here/--mount)
 
+${YELLOW}Clean & Volume Management:${NC}
+  ./dev.sh clean                      # Remove containers only
+  ./dev.sh clean volumes              # List all volumes by category
+  ./dev.sh clean volumes --credentials  # Delete auth tokens (claude, gemini, etc.)
+  ./dev.sh clean volumes --tools      # Delete tool configs (azure, pulumi)
+  ./dev.sh clean volumes --cache      # Delete caches (uv, tools)
+  ./dev.sh clean volumes <name>       # Delete specific volume
+  ./dev.sh clean --all                # Remove EVERYTHING (containers, volumes, network)
+
+${YELLOW}Volume Categories:${NC}
+  ${GREEN}credentials${NC}  AI agent auth tokens (claude, gemini, codex, opencode, gh)
+  ${GREEN}tools${NC}        Optional tool configs (azure-cli, pulumi)
+  ${GREEN}cache${NC}        Package & tool caches (uv, tools-cache)
+  ${GREEN}data${NC}         Application data (opencode-data)
+
 ${YELLOW}Examples:${NC}
   ./dev.sh build                      # Build the image
   ./dev.sh start                      # Sicher: Kein Docker-Zugriff
@@ -162,8 +177,6 @@ ${YELLOW}Examples:${NC}
   ./dev.sh start --mount ~/.config    # Mit spezifischem Pfad als Workspace
   ./dev.sh start --docker --here      # Docker + aktuelles Verzeichnis
   ./dev.sh auth                       # OAuth Authentifizierung
-  ./dev.sh clean                      # Container entfernen
-  ./dev.sh clean --all                # Alles entfernen (inkl. Credentials!)
 
 ${YELLOW}Docker-Proxy Sicherheit:${NC}
   Wenn --docker aktiviert ist, läuft ein Docker Socket Proxy der:
@@ -396,21 +409,187 @@ cmd_status() {
     fi
 }
 
-cmd_clean() {
-    echo -e "${BLUE}Cleaning up...${NC}"
+# -----------------------------------------------------------------------------
+# Volume Categories
+# -----------------------------------------------------------------------------
+declare -A VOLUME_CATEGORIES=(
+    # AI Agent credentials & settings
+    [ai-dev-claude-config]="credentials"
+    [ai-dev-gemini-config]="credentials"
+    [ai-dev-codex-config]="credentials"
+    [ai-dev-opencode-config]="credentials"
+    [ai-dev-gh-config]="credentials"
+    # Optional tool configs
+    [ai-dev-azure-config]="tools"
+    [ai-dev-pulumi-config]="tools"
+    # Cache & data
+    [ai-dev-uv-cache]="cache"
+    [ai-dev-tools-cache]="cache"
+    [ai-dev-opencode-data]="data"
+)
 
-    # Alle compose configs verwenden für vollständiges cleanup
-    docker compose -f docker-compose.yml -f docker-compose.docker.yml down 2>/dev/null || true
+get_volumes_by_category() {
+    local category="$1"
+    local volumes=""
+    for vol in "${!VOLUME_CATEGORIES[@]}"; do
+        if [[ "${VOLUME_CATEGORIES[$vol]}" == "$category" ]]; then
+            # Only include if volume exists
+            if docker volume inspect "$vol" &>/dev/null; then
+                volumes="$volumes $vol"
+            fi
+        fi
+    done
+    echo "$volumes" | xargs
+}
 
-    if [[ "${1:-}" == "--all" ]]; then
-        echo -e "${RED}Removing ALL volumes (including credentials)...${NC}"
-        docker volume rm $(docker volume ls -q | grep ai-dev) 2>/dev/null || true
-        echo -e "${RED}Removing network...${NC}"
-        docker network rm ai-dev-network 2>/dev/null || true
-        echo -e "${GREEN}All volumes and network removed.${NC}"
+get_all_ai_dev_volumes() {
+    docker volume ls -q --filter "name=ai-dev" 2>/dev/null | xargs
+}
+
+list_volumes() {
+    echo -e "${BLUE}AI Dev Volumes:${NC}"
+    echo ""
+    
+    local has_volumes=false
+    
+    for category in credentials tools cache data; do
+        local vols
+        vols=$(get_volumes_by_category "$category")
+        if [[ -n "$vols" ]]; then
+            has_volumes=true
+            case "$category" in
+                credentials) echo -e "  ${YELLOW}Credentials:${NC}" ;;
+                tools)       echo -e "  ${YELLOW}Tool Configs:${NC}" ;;
+                cache)       echo -e "  ${YELLOW}Cache:${NC}" ;;
+                data)        echo -e "  ${YELLOW}Data:${NC}" ;;
+            esac
+            for vol in $vols; do
+                local size
+                size=$(docker system df -v 2>/dev/null | grep "$vol" | awk '{print $4}' || echo "?")
+                printf "    %-30s %s\n" "${vol#ai-dev-}" "$size"
+            done
+            echo ""
+        fi
+    done
+    
+    if [[ "$has_volumes" == "false" ]]; then
+        echo "  No volumes found."
     fi
+}
 
-    echo -e "${GREEN}Cleanup complete.${NC}"
+delete_volumes() {
+    local volumes="$1"
+    local force="${2:-false}"
+    
+    if [[ -z "$volumes" ]]; then
+        echo -e "${YELLOW}No volumes to delete.${NC}"
+        return
+    fi
+    
+    echo -e "${RED}Volumes to delete:${NC}"
+    for vol in $volumes; do
+        echo "  - $vol"
+    done
+    echo ""
+    
+    if [[ "$force" != "true" ]]; then
+        read -p "Are you sure? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            return
+        fi
+    fi
+    
+    for vol in $volumes; do
+        if docker volume rm "$vol" 2>/dev/null; then
+            echo -e "  ${GREEN}Deleted:${NC} $vol"
+        else
+            echo -e "  ${RED}Failed:${NC} $vol (in use?)"
+        fi
+    done
+}
+
+cmd_clean() {
+    local subcommand="${1:-containers}"
+    shift 2>/dev/null || true
+    
+    case "$subcommand" in
+        containers|"")
+            echo -e "${BLUE}Stopping and removing containers...${NC}"
+            docker compose -f docker-compose.yml -f docker-compose.docker.yml down 2>/dev/null || true
+            echo -e "${GREEN}Containers removed.${NC}"
+            ;;
+        
+        --all)
+            echo -e "${BLUE}Stopping containers...${NC}"
+            docker compose -f docker-compose.yml -f docker-compose.docker.yml down 2>/dev/null || true
+            echo ""
+            echo -e "${RED}Removing ALL volumes (including credentials)...${NC}"
+            local all_vols
+            all_vols=$(get_all_ai_dev_volumes)
+            delete_volumes "$all_vols" "true"
+            echo ""
+            echo -e "${RED}Removing network...${NC}"
+            docker network rm ai-dev-network 2>/dev/null || true
+            echo -e "${GREEN}Complete cleanup done.${NC}"
+            ;;
+        
+        volumes)
+            local vol_arg="${1:-}"
+            
+            case "$vol_arg" in
+                ""|--list)
+                    list_volumes
+                    echo -e "${BLUE}Usage:${NC}"
+                    echo "  ./dev.sh clean volumes --credentials  # Delete auth tokens"
+                    echo "  ./dev.sh clean volumes --tools        # Delete tool configs (az, pulumi)"
+                    echo "  ./dev.sh clean volumes --cache        # Delete caches"
+                    echo "  ./dev.sh clean volumes <name>         # Delete specific volume"
+                    ;;
+                
+                --credentials)
+                    echo -e "${BLUE}Deleting credential volumes...${NC}"
+                    delete_volumes "$(get_volumes_by_category credentials)"
+                    ;;
+                
+                --tools)
+                    echo -e "${BLUE}Deleting tool config volumes...${NC}"
+                    delete_volumes "$(get_volumes_by_category tools)"
+                    ;;
+                
+                --cache)
+                    echo -e "${BLUE}Deleting cache volumes...${NC}"
+                    delete_volumes "$(get_volumes_by_category cache)"
+                    ;;
+                
+                --data)
+                    echo -e "${BLUE}Deleting data volumes...${NC}"
+                    delete_volumes "$(get_volumes_by_category data)"
+                    ;;
+                
+                *)
+                    # Specific volume name - try with and without prefix
+                    local vol_name="$vol_arg"
+                    if ! docker volume inspect "$vol_name" &>/dev/null; then
+                        vol_name="ai-dev-$vol_arg"
+                    fi
+                    if docker volume inspect "$vol_name" &>/dev/null; then
+                        delete_volumes "$vol_name"
+                    else
+                        echo -e "${RED}Volume not found: $vol_arg${NC}"
+                        echo ""
+                        list_volumes
+                    fi
+                    ;;
+            esac
+            ;;
+        
+        *)
+            echo -e "${RED}Unknown subcommand: $subcommand${NC}"
+            echo "Usage: ./dev.sh clean [containers|volumes|--all]"
+            ;;
+    esac
 }
 
 # -----------------------------------------------------------------------------
@@ -436,7 +615,7 @@ case "${1:-help}" in
     start)      shift; cmd_start "$@" ;;
     auth)       shift; cmd_auth "$@" ;;
     status)     cmd_status ;;
-    clean)      cmd_clean "${2:-}" ;;
+    clean)      shift; cmd_clean "$@" ;;
     audit)      cmd_audit ;;
     help|*)     usage ;;
 esac
