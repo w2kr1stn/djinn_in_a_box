@@ -35,6 +35,7 @@
         "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
         "source=ai-dev-opencode-config,target=/home/dev/.opencode,type=volume",
         "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
+        "source=ai-dev-sops-config,target=/home/dev/.config/sops,type=volume",
         // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
         "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
     ],

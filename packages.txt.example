@@ -1,0 +1,39 @@
+# =============================================================================
+# Custom APT Packages
+# =============================================================================
+# Add packages you want installed in your dev container.
+# One package per line. Comments (#) and empty lines are ignored.
+#
+# Usage:
+#   cp packages.txt.example packages.txt
+#   # Edit packages.txt
+#   ./scripts/dev.sh build
+#
+# Note: Base packages (git, curl, zsh, jq, etc.) are already included.
+# =============================================================================
+
+# --- Editors ---
+# vim
+# neovim
+
+# --- CLI Tools ---
+# htop
+# tree
+# ripgrep
+# fzf
+# tmux
+
+# --- Development ---
+# make
+# cmake
+# gdb
+
+# --- Networking ---
+# netcat-openbsd
+# dnsutils
+# iputils-ping
+
+# --- Archive Tools ---
+unzip
+# zip
+# p7zip-full

@@ -24,6 +24,11 @@ x-common-volumes: &common-volumes
   - gh-config:/home/dev/.config/gh
   # Cache
   - uv-cache:/home/dev/.cache/uv
+  - tools-cache:/home/dev/.cache/ai-dev-tools
+  # Optional tool configs (authentication & settings)
+  - azure-config:/home/dev/.azure
+  - pulumi-config:/home/dev/.pulumi
+  - sops-config:/home/dev/.config/sops
   # Host configs (read-only)
   - ~/.ssh:/home/dev/.ssh:ro
   - ~/.gitconfig:/home/dev/.gitconfig:ro
@@ -120,3 +125,11 @@ volumes:
     name: ai-dev-gh-config
   uv-cache:
     name: ai-dev-uv-cache
+  tools-cache:
+    name: ai-dev-tools-cache
+  azure-config:
+    name: ai-dev-azure-config
+  pulumi-config:
+    name: ai-dev-pulumi-config
+  sops-config:
+    name: ai-dev-sops-config

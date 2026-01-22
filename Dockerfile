@@ -7,10 +7,20 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies
+# System dependencies (base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl openssh-client git unzip zsh jq build-essential iptables sudo \
+    ca-certificates curl openssh-client git zsh jq build-essential iptables sudo unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Custom packages from packages.txt (optional)
+# Copy packages.txt if it exists (wildcard allows missing file)
+COPY packages.tx[t] /tmp/
+RUN if [ -f /tmp/packages.txt ]; then \
+        apt-get update && \
+        grep -v '^#' /tmp/packages.txt | grep -v '^[[:space:]]*$' | \
+        xargs -r apt-get install -y --no-install-recommends && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi && rm -f /tmp/packages.txt
 
 # -----------------------------------------------------------------------------
 # Docker CLI Installation (nur CLI, kein Daemon)
@@ -113,6 +123,10 @@ RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
     && ln -s ~/.claude ~/.config/claude \
     && ln -s ~/.claude/claude.json ~/.claude.json \
     && ln -s ~/.gemini/settings.json ~/.gemini-settings.json
+
+# Optional tools installer (runtime installation with caching)
+COPY --chown=dev:dev tools/ /home/dev/.tools/
+RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
 RUN chmod +x ~/entrypoint.sh
