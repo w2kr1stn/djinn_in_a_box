@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Single source of truth for CLI agent headless mode configuration. Used by dev.sh and agent_runner.py.",
+  "agents": {
+    "claude": {
+      "binary": "claude",
+      "description": "Anthropic Claude Code CLI",
+      "headless_flags": ["-p"],
+      "read_only_flags": ["--permission-mode", "plan"],
+      "write_flags": ["--dangerously-skip-permissions"],
+      "json_flags": ["--output-format", "json"],
+      "model_flag": "--model",
+      "prompt_via": "env",
+      "prompt_env_var": "AGENT_PROMPT",
+      "prompt_template": "\"$AGENT_PROMPT\""
+    },
+    "gemini": {
+      "binary": "gemini",
+      "description": "Google Gemini CLI",
+      "headless_flags": ["-p"],
+      "read_only_flags": [],
+      "write_flags": [],
+      "json_flags": ["--output-format", "json"],
+      "model_flag": "-m",
+      "prompt_via": "env",
+      "prompt_env_var": "AGENT_PROMPT",
+      "prompt_template": "\"$AGENT_PROMPT\""
+    },
+    "codex": {
+      "binary": "codex",
+      "description": "OpenAI Codex CLI",
+      "headless_flags": ["exec"],
+      "read_only_flags": [],
+      "write_flags": ["--full-auto"],
+      "json_flags": ["--json"],
+      "model_flag": "--model",
+      "prompt_via": "env",
+      "prompt_env_var": "AGENT_PROMPT",
+      "prompt_template": "\"$AGENT_PROMPT\""
+    },
+    "opencode": {
+      "binary": "opencode",
+      "description": "Anomaly OpenCode CLI",
+      "headless_flags": ["run"],
+      "read_only_flags": ["--agent", "plan"],
+      "write_flags": [],
+      "json_flags": ["--format", "json"],
+      "model_flag": "-m",
+      "prompt_via": "env",
+      "prompt_env_var": "AGENT_PROMPT",
+      "prompt_template": "\"$AGENT_PROMPT\""
+    }
+  }
+}

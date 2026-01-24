@@ -165,7 +165,7 @@ parse_container_args() {
 }
 
 # -----------------------------------------------------------------------------
-# Build agent headless command based on agent name and flags
+# Build agent headless command via agent_runner.py (reads config/agents.json)
 # The prompt is passed via $AGENT_PROMPT env var to avoid shell escaping issues
 # Args: <agent> <write_enabled> <json_enabled>
 # Returns: command string that references $AGENT_PROMPT
@@ -174,53 +174,16 @@ get_agent_command() {
     local agent="$1"
     local write_enabled="${2:-false}"
     local json_enabled="${3:-false}"
+    local model="${4:-}"
 
-    case "$agent" in
-        claude)
-            local cmd="claude -p"
-            if [[ "$write_enabled" == "true" ]]; then
-                cmd="$cmd --dangerously-skip-permissions"
-            else
-                cmd="$cmd --permission-mode plan"
-            fi
-            if [[ "$json_enabled" == "true" ]]; then
-                cmd="$cmd --output-format json"
-            fi
-            echo "$cmd \"\$AGENT_PROMPT\""
-            ;;
-        gemini)
-            local cmd="gemini -p"
-            if [[ "$json_enabled" == "true" ]]; then
-                cmd="$cmd --output-format json"
-            fi
-            echo "$cmd \"\$AGENT_PROMPT\""
-            ;;
-        codex)
-            local cmd="codex exec"
-            if [[ "$write_enabled" == "true" ]]; then
-                cmd="$cmd --full-auto"
-            fi
-            if [[ "$json_enabled" == "true" ]]; then
-                cmd="$cmd --json"
-            fi
-            echo "$cmd \"\$AGENT_PROMPT\""
-            ;;
-        opencode)
-            local cmd="opencode run"
-            if [[ "$write_enabled" != "true" ]]; then
-                cmd="$cmd --agent plan"
-            fi
-            if [[ "$json_enabled" == "true" ]]; then
-                cmd="$cmd --format json"
-            fi
-            echo "$cmd \"\$AGENT_PROMPT\""
-            ;;
-        *)
-            echo -e "${RED}Unknown agent: $agent${NC}" >&2
-            echo -e "Available agents: claude, gemini, codex, opencode" >&2
-            return 1
-            ;;
-    esac
+    local flags=""
+    [[ "$write_enabled" == "true" ]] && flags="$flags --write"
+    [[ "$json_enabled" == "true" ]] && flags="$flags --json"
+    [[ -n "$model" ]] && flags="$flags --model $model"
+
+    # Delegate to Python script which reads config/agents.json
+    # shellcheck disable=SC2086
+    python3 "$SCRIPT_DIR/agent_runner.py" build-cmd "$agent" $flags
 }
 
 usage() {
@@ -275,17 +238,19 @@ ${YELLOW}Headless Agent Mode:${NC}
   Mit --mount kann ein anderer Pfad gewählt werden.
 
   ${YELLOW}Run Options:${NC}
-    --write     Agent darf Dateien ändern (Standard: read-only/plan)
-    --json      Maschinenlesbarer JSON-Output
-    --docker    Docker-Zugriff via Proxy
-    --firewall  Netzwerk-Firewall
+    --write         Agent darf Dateien ändern (Standard: read-only/plan)
+    --json          Maschinenlesbarer JSON-Output
+    --model <name>  Spezifisches Modell wählen (z.B. sonnet, gemini-2.5-flash)
+    --docker        Docker-Zugriff via Proxy
+    --firewall      Netzwerk-Firewall
     --mount <path>  Alternativer Workspace-Pfad
 
   ${YELLOW}Run Examples:${NC}
     ./dev.sh run claude "Erkläre die Architektur dieses Projekts"
-    ./dev.sh run gemini "Refactore main.py" --write
+    ./dev.sh run claude "Fix the bug" --write --model sonnet
+    ./dev.sh run gemini "Refactore main.py" --write --model gemini-2.5-flash
     ./dev.sh run codex "Fix all type errors" --write --json
-    ./dev.sh run opencode "Analysiere Dependencies" --mount ~/other-project
+    ./dev.sh run opencode "Analysiere Dependencies" --model anthropic/claude-sonnet-4-5-20250929
 
 ${YELLOW}Workspace Mount:${NC}
   ${GREEN}--here${NC}         Mountet \$(pwd) zusätzlich unter ~/workspace/
@@ -488,11 +453,19 @@ cmd_run() {
     local run_args=()
     local write_enabled="false"
     local json_enabled="false"
+    local model=""
+    local expect_model="false"
 
     for arg in "$@"; do
+        if [[ "$expect_model" == "true" ]]; then
+            model="$arg"
+            expect_model="false"
+            continue
+        fi
         case "$arg" in
             --write)    write_enabled="true" ;;
             --json)     json_enabled="true" ;;
+            --model)    expect_model="true" ;;
             --docker|--firewall|--here|--mount)
                 run_args+=("$arg") ;;
             *)
@@ -533,7 +506,7 @@ cmd_run() {
 
     # Build agent command (prompt is passed via AGENT_PROMPT env var)
     local agent_cmd
-    agent_cmd=$(get_agent_command "$agent" "$write_enabled" "$json_enabled") || exit 1
+    agent_cmd=$(get_agent_command "$agent" "$write_enabled" "$json_enabled" "$model") || exit 1
 
     echo "" >&2
     echo -e "${BLUE}Running $agent (headless)...${NC}" >&2
@@ -541,6 +514,9 @@ cmd_run() {
     echo -e "   ${GREEN}Agent:${NC}     $agent" >&2
     echo -e "   ${GREEN}Workspace:${NC} ${PARSED_MOUNT_PATH:-$CALLER_PWD}" >&2
 
+    if [[ -n "$model" ]]; then
+        echo -e "   ${GREEN}Model:${NC}     $model" >&2
+    fi
     if [[ "$write_enabled" == "true" ]]; then
         echo -e "   ${YELLOW}Mode:${NC}      Read/Write (--write)" >&2
     else
