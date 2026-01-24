@@ -104,6 +104,125 @@ get_compose_files() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Parse common container arguments (--docker, --firewall, --here, --mount)
+# Sets: PARSED_DOCKER, PARSED_FIREWALL, PARSED_MOUNT_PATH,
+#        PARSED_EXTRA_VOLUME, PARSED_WORKDIR, PARSED_COMPOSE_FILES,
+#        PARSED_SHELL_MOUNTS
+# Remaining (non-parsed) args are stored in PARSED_REMAINING
+# -----------------------------------------------------------------------------
+parse_container_args() {
+    PARSED_DOCKER="false"
+    PARSED_FIREWALL="false"
+    PARSED_MOUNT_PATH=""
+    PARSED_EXTRA_VOLUME=""
+    PARSED_WORKDIR=""
+    PARSED_COMPOSE_FILES=""
+    PARSED_SHELL_MOUNTS=""
+    PARSED_REMAINING=()
+
+    local skip_next="false"
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next="false"
+            continue
+        fi
+        case "${args[$i]}" in
+            --docker)   PARSED_DOCKER="true" ;;
+            --firewall) PARSED_FIREWALL="true" ;;
+            --here)     PARSED_MOUNT_PATH="$CALLER_PWD" ;;
+            --mount)
+                PARSED_MOUNT_PATH="${args[$((i+1))]:-}"
+                skip_next="true"
+                if [[ -z "$PARSED_MOUNT_PATH" ]]; then
+                    echo -e "${RED}--mount requires a path argument${NC}"
+                    exit 1
+                fi
+                ;;
+            *)
+                PARSED_REMAINING+=("${args[$i]}")
+                ;;
+        esac
+    done
+
+    # Validate and resolve mount path
+    if [[ -n "$PARSED_MOUNT_PATH" ]]; then
+        PARSED_MOUNT_PATH="${PARSED_MOUNT_PATH/#\~/$HOME}"
+        if [[ -d "$PARSED_MOUNT_PATH" ]]; then
+            PARSED_MOUNT_PATH="$(cd "$PARSED_MOUNT_PATH" && pwd)"
+        else
+            echo -e "${RED}Mount path does not exist or is not a directory: $PARSED_MOUNT_PATH${NC}"
+            exit 1
+        fi
+        PARSED_EXTRA_VOLUME="-v ${PARSED_MOUNT_PATH}:/home/dev/workspace"
+        PARSED_WORKDIR="--workdir /home/dev/workspace"
+    fi
+
+    # Compose files and shell mounts
+    PARSED_COMPOSE_FILES=$(get_compose_files "$PARSED_DOCKER")
+    PARSED_SHELL_MOUNTS=$(get_shell_mount_args)
+}
+
+# -----------------------------------------------------------------------------
+# Build agent headless command based on agent name and flags
+# The prompt is passed via $AGENT_PROMPT env var to avoid shell escaping issues
+# Args: <agent> <write_enabled> <json_enabled>
+# Returns: command string that references $AGENT_PROMPT
+# -----------------------------------------------------------------------------
+get_agent_command() {
+    local agent="$1"
+    local write_enabled="${2:-false}"
+    local json_enabled="${3:-false}"
+
+    case "$agent" in
+        claude)
+            local cmd="claude -p"
+            if [[ "$write_enabled" == "true" ]]; then
+                cmd="$cmd --dangerously-skip-permissions"
+            else
+                cmd="$cmd --permission-mode plan"
+            fi
+            if [[ "$json_enabled" == "true" ]]; then
+                cmd="$cmd --output-format json"
+            fi
+            echo "$cmd \"\$AGENT_PROMPT\""
+            ;;
+        gemini)
+            local cmd="gemini -p"
+            if [[ "$json_enabled" == "true" ]]; then
+                cmd="$cmd --output-format json"
+            fi
+            echo "$cmd \"\$AGENT_PROMPT\""
+            ;;
+        codex)
+            local cmd="codex exec"
+            if [[ "$write_enabled" == "true" ]]; then
+                cmd="$cmd --full-auto"
+            fi
+            if [[ "$json_enabled" == "true" ]]; then
+                cmd="$cmd --json"
+            fi
+            echo "$cmd \"\$AGENT_PROMPT\""
+            ;;
+        opencode)
+            local cmd="opencode run"
+            if [[ "$write_enabled" != "true" ]]; then
+                cmd="$cmd --agent plan"
+            fi
+            if [[ "$json_enabled" == "true" ]]; then
+                cmd="$cmd --format json"
+            fi
+            echo "$cmd \"\$AGENT_PROMPT\""
+            ;;
+        *)
+            echo -e "${RED}Unknown agent: $agent${NC}" >&2
+            echo -e "Available agents: claude, gemini, codex, opencode" >&2
+            return 1
+            ;;
+    esac
+}
+
 usage() {
     cat << EOF
 ${BLUE}AI Dev Base${NC} - Entwicklungsumgebung für Claude Code, Gemini CLI & Codex CLI
@@ -113,6 +232,7 @@ ${YELLOW}Usage:${NC} ./dev.sh <command> [options]
 ${YELLOW}Commands:${NC}
   build       Build/rebuild the base image
   start       Start interactive shell in container
+  run         Run CLI agent headless (ephemeral, non-interactive)
   auth        Start with host network for OAuth (claude, gemini, codex, gh auth login)
   status      Show container, volume and MCP status
   clean       Manage containers and volumes (see below)
@@ -143,6 +263,29 @@ ${YELLOW}Security Modes:${NC}
   ${GREEN}--docker${NC}       Docker via Proxy (gefährliche Ops blockiert)
   ${GREEN}--firewall${NC}     Ausgehender Traffic auf Whitelist beschränkt
   ${GREEN}--docker --firewall${NC}  Maximale Sicherheit + Docker-Zugriff
+
+${YELLOW}Headless Agent Mode:${NC}
+  ${GREEN}./dev.sh run <agent> "<prompt>" [options]${NC}
+
+  Agents: claude, gemini, codex, opencode
+  Der Container startet ephemer, führt den Agent im headless mode aus,
+  gibt die Antwort auf stdout aus und beendet sich.
+
+  Automatisch wird \$(pwd) als ~/workspace/ gemountet (implizites --here).
+  Mit --mount kann ein anderer Pfad gewählt werden.
+
+  ${YELLOW}Run Options:${NC}
+    --write     Agent darf Dateien ändern (Standard: read-only/plan)
+    --json      Maschinenlesbarer JSON-Output
+    --docker    Docker-Zugriff via Proxy
+    --firewall  Netzwerk-Firewall
+    --mount <path>  Alternativer Workspace-Pfad
+
+  ${YELLOW}Run Examples:${NC}
+    ./dev.sh run claude "Erkläre die Architektur dieses Projekts"
+    ./dev.sh run gemini "Refactore main.py" --write
+    ./dev.sh run codex "Fix all type errors" --write --json
+    ./dev.sh run opencode "Analysiere Dependencies" --mount ~/other-project
 
 ${YELLOW}Workspace Mount:${NC}
   ${GREEN}--here${NC}         Mountet \$(pwd) zusätzlich unter ~/workspace/
@@ -313,6 +456,128 @@ cmd_start() {
         docker compose $compose_files stop docker-proxy 2>/dev/null || true
         docker compose $compose_files rm -f docker-proxy 2>/dev/null || true
     fi
+}
+
+cmd_run() {
+    # First argument must be the agent name (validate before expensive checks)
+    local agent="${1:-}"
+    if [[ -z "$agent" ]]; then
+        echo -e "${RED}Usage: ./dev.sh run <agent> \"<prompt>\" [options]${NC}"
+        echo ""
+        echo "Available agents: claude, gemini, codex, opencode"
+        exit 1
+    fi
+    shift
+
+    # Validate agent name early
+    case "$agent" in
+        claude|gemini|codex|opencode) ;;
+        *)
+            echo -e "${RED}Unknown agent: $agent${NC}"
+            echo "Available agents: claude, gemini, codex, opencode"
+            exit 1
+            ;;
+    esac
+
+    load_env
+    check_config
+    ensure_network
+
+    # Collect prompt (all non-flag arguments before options)
+    local prompt=""
+    local run_args=()
+    local write_enabled="false"
+    local json_enabled="false"
+
+    for arg in "$@"; do
+        case "$arg" in
+            --write)    write_enabled="true" ;;
+            --json)     json_enabled="true" ;;
+            --docker|--firewall|--here|--mount)
+                run_args+=("$arg") ;;
+            *)
+                # If it looks like a path after --mount, pass it through
+                if [[ ${#run_args[@]} -gt 0 && "${run_args[-1]}" == "--mount" ]]; then
+                    run_args+=("$arg")
+                elif [[ -z "$prompt" ]]; then
+                    prompt="$arg"
+                else
+                    # Append additional words to prompt
+                    prompt="$prompt $arg"
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z "$prompt" ]]; then
+        echo -e "${RED}Error: No prompt provided.${NC}"
+        echo ""
+        echo -e "Usage: ./dev.sh run $agent \"<prompt>\" [options]"
+        exit 1
+    fi
+
+    # Implicit --here: mount caller's pwd as workspace if no --mount was specified
+    local has_mount="false"
+    for arg in "${run_args[@]}"; do
+        if [[ "$arg" == "--here" || "$arg" == "--mount" ]]; then
+            has_mount="true"
+            break
+        fi
+    done
+    if [[ "$has_mount" == "false" ]]; then
+        run_args+=("--here")
+    fi
+
+    # Parse container arguments (--docker, --firewall, --here, --mount)
+    parse_container_args "${run_args[@]}"
+
+    # Build agent command (prompt is passed via AGENT_PROMPT env var)
+    local agent_cmd
+    agent_cmd=$(get_agent_command "$agent" "$write_enabled" "$json_enabled") || exit 1
+
+    echo "" >&2
+    echo -e "${BLUE}Running $agent (headless)...${NC}" >&2
+    echo "" >&2
+    echo -e "   ${GREEN}Agent:${NC}     $agent" >&2
+    echo -e "   ${GREEN}Workspace:${NC} ${PARSED_MOUNT_PATH:-$CALLER_PWD}" >&2
+
+    if [[ "$write_enabled" == "true" ]]; then
+        echo -e "   ${YELLOW}Mode:${NC}      Read/Write (--write)" >&2
+    else
+        echo -e "   ${GREEN}Mode:${NC}      Read-only (plan/analysis)" >&2
+    fi
+
+    if [[ "$PARSED_DOCKER" == "true" ]]; then
+        echo -e "   ${GREEN}Docker:${NC}    Enabled" >&2
+    fi
+    if [[ "$PARSED_FIREWALL" == "true" ]]; then
+        echo -e "   ${GREEN}Firewall:${NC}  Enabled" >&2
+    fi
+    if [[ "$json_enabled" == "true" ]]; then
+        echo -e "   ${GREEN}Output:${NC}    JSON" >&2
+    fi
+    echo "" >&2
+
+    # Run container ephemerally without TTY
+    # - AGENT_PROMPT is passed as env var to avoid shell escaping issues
+    # - entrypoint.sh ends with 'exec /bin/zsh "$@"'
+    #   so we pass '-c "cmd"' which becomes 'zsh -c "cmd"'
+    # shellcheck disable=SC2086
+    ENABLE_FIREWALL="$PARSED_FIREWALL" AGENT_PROMPT="$prompt" \
+        docker compose $PARSED_COMPOSE_FILES run --rm -T \
+        -e AGENT_PROMPT \
+        $PARSED_WORKDIR $PARSED_EXTRA_VOLUME $PARSED_SHELL_MOUNTS \
+        dev -c "$agent_cmd"
+
+    local exit_code=$?
+
+    # Cleanup: Docker-Proxy stoppen falls gestartet
+    if [[ "$PARSED_DOCKER" == "true" ]]; then
+        docker compose $PARSED_COMPOSE_FILES stop docker-proxy 2>/dev/null || true
+        docker compose $PARSED_COMPOSE_FILES rm -f docker-proxy 2>/dev/null || true
+    fi
+
+    return $exit_code
 }
 
 cmd_auth() {
@@ -613,6 +878,7 @@ cmd_audit() {
 case "${1:-help}" in
     build)      cmd_build ;;
     start)      shift; cmd_start "$@" ;;
+    run)        shift; cmd_run "$@" ;;
     auth)       shift; cmd_auth "$@" ;;
     status)     cmd_status ;;
     clean)      shift; cmd_clean "$@" ;;
