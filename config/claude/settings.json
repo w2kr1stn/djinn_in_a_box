@@ -47,6 +47,17 @@
     "deny": []
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/security_reminder_hook.py"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
