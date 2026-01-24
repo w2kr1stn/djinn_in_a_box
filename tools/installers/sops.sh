@@ -3,11 +3,13 @@
 set -e
 
 SOPS_VERSION="${SOPS_VERSION:-3.9.4}"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
 
-# Download and install SOPS binary
-curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" -o /tmp/sops
-chmod +x /tmp/sops
-sudo mv /tmp/sops "$INSTALL_DIR/sops"
+mkdir -p "$INSTALL_DIR"
 
-sops --version
+# Download SOPS binary directly to persistent volume
+curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" \
+    -o "$INSTALL_DIR/sops"
+chmod +x "$INSTALL_DIR/sops"
+
+"$INSTALL_DIR/sops" --version

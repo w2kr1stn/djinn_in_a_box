@@ -1,19 +1,14 @@
 #!/bin/bash
-# Microsoft Azure CLI
+# Microsoft Azure CLI (installed via uv for persistence)
 set -e
 
-# Install dependencies
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends gnupg lsb-release
-sudo rm -rf /var/lib/apt/lists/*
+INSTALL_BIN="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
+INSTALL_TOOLS="${TOOLS_DIR:-$HOME/.cache/ai-dev-tools}/uv-tools"
 
-# Add Microsoft signing key and repo
-curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-archive-keyring.gpg > /dev/null
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-archive-keyring.gpg] https://packages.microsoft.com/repos/azure-cli/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
+mkdir -p "$INSTALL_BIN" "$INSTALL_TOOLS"
 
-# Install Azure CLI
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends azure-cli
-sudo rm -rf /var/lib/apt/lists/*
+# Install Azure CLI via uv tool (persistent venv in volume)
+UV_TOOL_DIR="$INSTALL_TOOLS" UV_TOOL_BIN_DIR="$INSTALL_BIN" \
+    uv tool install azure-cli 2>&1 | tail -5
 
-az version --output tsv | head -1
+"$INSTALL_BIN/az" version --output tsv | head -1

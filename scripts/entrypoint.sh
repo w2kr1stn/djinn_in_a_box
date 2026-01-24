@@ -12,7 +12,7 @@ if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
     sudo /usr/local/bin/init-firewall.sh
 fi
 
-for dir in ~/.cache/uv ~/.local/share/fnm; do
+for dir in ~/.cache/uv ~/.cache/ai-dev-tools ~/.local/share/fnm; do
     if [[ -d "$dir" ]] && [[ ! -w "$dir" ]]; then
         sudo chown -R $(id -u):$(id -g) "$dir"
     fi
