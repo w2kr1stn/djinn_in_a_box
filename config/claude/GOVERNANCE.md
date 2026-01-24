@@ -1,28 +1,28 @@
 # Repository Governance: Modular Monolith
 
 ## 1. Architectural Mandate
-Dieses Projekt folgt strikt dem Muster eines **Modularen Monolithen** mit einer **Layered Architecture**. Jede Abweichung muss explizit vom Owner genehmigt werden.
+This project strictly follows the pattern of a **modular monolith** with a **layered architecture**. Any deviation must be explicitly approved by the owner.
 
+It is part of the wber-ai-toolkit project (toolkit-backend: FastAPI, toolkit-frontend: React, toolkit-infra Pulumi (Python))
 
-
-### Layer Definitions & Responsibilities
+### Layer Definitions & Responsibilities (FastAPI Backend)
 | Layer | Responsibility | Constraints |
 | :--- | :--- | :--- |
-| **API** | Request/Response Handling, Routing | Keine Business-Logik, keine DB-Aufrufe. |
-| **Service** | Core Business Logic, Orchestrierung | Ruft Repositories auf, kennt keine Web-Details. |
-| **Repository** | Data Access, CRUD Operations | Reine SQL/ORM Logik. Keine Business-Logik. |
-| **Models** | Schemas, Domain Entities, DB-Models | Reine Definitionen (Pydantic/SQLAlchemy). |
+| **API** | Request/Response Handling, Routing | No business logic, no DB calls. |
+| **Service** | Core Business Logic, Orchestration | Calls repositories, knows no web details. |
+| **Repository** | Data Access, CRUD Operations | Pure SQL/ORM logic. No business logic. |
+| **Models** | Schemas, Domain Entities, DB Models | Pure definitions (Pydantic/SQLAlchemy). |
 
 ### Communication Rules
-- **Intra-Module**: Kommunikation folgt dem Flow: `API -> Service -> Repository`.
-- **Inter-Module**: Module dürfen NUR über die Services anderer Module kommunizieren. Direkte Zugriffe auf fremde Repositories oder Datenbank-Tabellen sind verboten.
+- **Intra-Module**: Communication follows the flow: `API -> Service -> Repository`.
+- **Inter-Module**: Modules may ONLY communicate via the services of other modules. Direct access to external repositories or database tables is prohibited.
 
 ---
 
 ## 2. Development Workflow
 
 ### Planning & Execution
-- **Hierarchy**: All work originates from `DEV.json` (Epic -> Story -> Task).
+- **Hierarchy**: All work originates from `TASK.yml` (GitHub Issue -> TASK.yml, Sub-Issues).
 - **Task Size**: Sub-Issues must be scoped to ~1h execution time.
 - **Reporting**: Every dev session MUST conclude with a `SESSION.md` artifact detailing the implementation and test results.
 
@@ -37,8 +37,8 @@ Dieses Projekt folgt strikt dem Muster eines **Modularen Monolithen** mit einer 
 
 ---
 
-## 3. Quality Gates (The "Hard" Rules)
-Bevor eine Aufgabe als "Done" gilt, müssen folgende Kriterien erfüllt sein:
+## 3. Quality Gates (The “Hard” Rules)
+Before a task is considered “Done,” the following criteria must be met:
 
 | Tool | Requirement | Scope |
 | :--- | :--- | :--- |
@@ -51,6 +51,6 @@ Bevor eine Aufgabe als "Done" gilt, müssen folgende Kriterien erfüllt sein:
 ---
 
 ## 4. Compliance & Security
-- **Secrets Management**: Absolutes Verbot von Plaintext-Secrets. Nutzung von `[PLACEHOLDER_UPPER_SNAKE_CASE]` in Plänen.
-- **Documentation**: Google-Style Docstrings für alle öffentlichen Funktionen.
-- **ISO 27001 Baseline**: Code-Reviews durch den `qa-specialist` Agent sind obligatorisch für jeden PR.
+- **Secrets Management**: SOPS (age).
+- **Documentation**: Google-style docstrings for all public functions.
+- **ISO 27001 Baseline**: Code reviews by the `qa-specialist` agent are mandatory for every PR.

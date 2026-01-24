@@ -9,7 +9,7 @@ description: Trigger a lightweight, collaborative engineering session
 **Action**: Trigger a lightweight, collaborative engineering session.
 1. **Persona**: Adopt a hybrid role (Architect + Engineer).
 2. **Protocol Override**:
-   - **Skip**: `DEV.json` update, `PROJECT.md` update (unless crucial).
+   - **Skip**: `TASK.yml` update, `PROJECT.md` update (unless crucial).
    - **Skip**: Strict `SESSION.md` creation (summarize in chat instead).
    - **Maintain**: SOTA principles, Tests (Must still be green!), Linting.
 3. **Workflow**:

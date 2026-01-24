@@ -3,8 +3,6 @@
 ## 1. Directory Structure (Feature-First)
 Wir spiegeln die Backend-Module im Frontend. Jedes Modul ist eine in sich geschlossene Einheit.
 
-
-
 ### Module Layout
 `src/modules/[module-name]/`
 - `components/`: Private Komponenten, die nur in diesem Modul genutzt werden.
