@@ -97,7 +97,8 @@ RUN uv tool install ruff
 
 # Shell config (.zshrc)
 RUN cat > ~/.zshrc << 'EOF'
-export PATH="$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
+export PATH="$HOME/.cache/ai-dev-tools/bin:$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
+export LD_LIBRARY_PATH="$HOME/.cache/ai-dev-tools/lib:${LD_LIBRARY_PATH:-}"
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
 plugins=(git zsh-autosuggestions docker)
@@ -109,6 +110,37 @@ if command -v oh-my-posh &> /dev/null; then
     [[ -f ~/.zsh-theme.omp.json ]] && eval "$(oh-my-posh init zsh --config ~/.zsh-theme.omp.json)"
 fi
 [[ -f ~/.zshrc.local ]] && source ~/.zshrc.local
+export EDITOR=vim
+export VISUAL=vim
+# SOPS convenience functions
+_sops_filetype() {
+    local name="${1%.enc}"
+    case "$name" in
+        *.yaml|*.yml) echo "yaml" ;;
+        *.json) echo "json" ;;
+        *.ini) echo "ini" ;;
+        *) echo "dotenv" ;;
+    esac
+}
+sops-view() {
+    local file="${1:-.env.enc}" ft=$(_sops_filetype "${1:-.env.enc}")
+    sops decrypt --input-type "$ft" --output-type "$ft" "$file"
+}
+sops-edit() {
+    local file="${1:-.env.enc}" ft=$(_sops_filetype "${1:-.env.enc}")
+    sops edit --input-type "$ft" --output-type "$ft" "$file"
+}
+sops-dec() {
+    local src="${1:-.env.enc}" dst="${2:-${1:-.env.enc}}" ft
+    dst="${dst%.enc}"
+    ft=$(_sops_filetype "$src")
+    sops decrypt --input-type "$ft" --output-type "$ft" "$src" > "$dst" && echo "Decrypted: $src -> $dst"
+}
+sops-enc() {
+    local src="${1:-.env}" dst="${2:-${1:-.env}.enc}" ft
+    ft=$(_sops_filetype "$src")
+    sops encrypt --input-type "$ft" --output-type "$ft" "$src" > "$dst" && echo "Encrypted: $src -> $dst"
+}
 
 # Docker Status Hinweis beim Shell-Start
 if [[ -n "${DOCKER_HOST:-}" ]]; then
