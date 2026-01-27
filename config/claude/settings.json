@@ -49,13 +49,13 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Edit|Write",
         "hooks": [
           {
             "type": "command",
             "command": "python3 ~/.claude/security_reminder_hook.py"
           }
-        ],
-        "matcher": "Edit|Write|MultiEdit"
+        ]
       }
     ],
     "PostToolUse": [
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path' | xargs -I {} sh -c 'if echo {} | grep -E \"\\.py$\" > /dev/null; then ruff check --fix \"{}\" && pyright \"{}\"; elif echo {} | grep -E \"\\.(ts|tsx|js|jsx)$\" > /dev/null; then prettier --write \"{}\" && eslint --fix \"{}\"; fi'"
+            "command": "python3 ~/.claude/post_edit_lint_hook.py"
           }
         ]
       }
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '\\a'"
+            "command": "python3 ~/.claude/agent_complete_notify_hook.py"
           }
         ]
       }
