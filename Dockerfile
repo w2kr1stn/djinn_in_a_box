@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages.tx[t] /tmp/
 RUN if [ -f /tmp/packages.txt ]; then \
         apt-get update && \
-        grep -v '^#' /tmp/packages.txt | grep -v '^[[:space:]]*$' | \
+        sed 's/#.*//' /tmp/packages.txt | grep -v '^[[:space:]]*$' | \
         xargs -r apt-get install -y --no-install-recommends && \
         rm -rf /var/lib/apt/lists/*; \
     fi && rm -f /tmp/packages.txt
