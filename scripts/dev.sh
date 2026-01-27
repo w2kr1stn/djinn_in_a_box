@@ -265,15 +265,15 @@ ${YELLOW}Clean & Volume Management:${NC}
   ./dev.sh clean                      # Remove containers only
   ./dev.sh clean volumes              # List all volumes by category
   ./dev.sh clean volumes --credentials  # Delete auth tokens (claude, gemini, etc.)
-  ./dev.sh clean volumes --tools      # Delete tool configs (azure, pulumi)
-  ./dev.sh clean volumes --cache      # Delete caches (uv, tools)
+  ./dev.sh clean volumes --tools      # Delete tool installations & configs (az, pulumi, psql, sops)
+  ./dev.sh clean volumes --cache      # Delete caches (uv)
   ./dev.sh clean volumes <name>       # Delete specific volume
   ./dev.sh clean --all                # Remove EVERYTHING (containers, volumes, network)
 
 ${YELLOW}Volume Categories:${NC}
   ${GREEN}credentials${NC}  AI agent auth tokens (claude, gemini, codex, opencode, gh)
-  ${GREEN}tools${NC}        Optional tool configs (azure-cli, pulumi)
-  ${GREEN}cache${NC}        Package & tool caches (uv, tools-cache)
+  ${GREEN}tools${NC}        Tool installations & configs (az, pulumi, psql, sops)
+  ${GREEN}cache${NC}        Package caches (uv)
   ${GREEN}data${NC}         Application data (opencode-data)
 
 ${YELLOW}Examples:${NC}
@@ -661,12 +661,12 @@ declare -A VOLUME_CATEGORIES=(
     [ai-dev-codex-config]="credentials"
     [ai-dev-opencode-config]="credentials"
     [ai-dev-gh-config]="credentials"
-    # Optional tool configs
+    # Optional tool configs & installations
     [ai-dev-azure-config]="tools"
     [ai-dev-pulumi-config]="tools"
+    [ai-dev-tools-cache]="tools"
     # Cache & data
     [ai-dev-uv-cache]="cache"
-    [ai-dev-tools-cache]="cache"
     [ai-dev-opencode-data]="data"
 )
 
