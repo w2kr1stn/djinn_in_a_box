@@ -198,6 +198,7 @@ ${YELLOW}Commands:${NC}
   run         Run CLI agent headless (ephemeral, non-interactive)
   auth        Start with host network for OAuth (claude, gemini, codex, gh auth login)
   status      Show container, volume and MCP status
+  update      Fetch latest CLI agent versions and update Dockerfile
   clean       Manage containers and volumes (see below)
   help        Show this help message
 
@@ -218,7 +219,7 @@ ${YELLOW}Configuration:${NC}
     TZ=America/New_York      # Timezone
 
 ${YELLOW}CLI Agent Updates:${NC}
-  ./scripts/update-agents.sh  # Fetch latest versions & update Dockerfile
+  ./dev.sh update             # Fetch latest versions & update Dockerfile
   ./dev.sh build              # Rebuild image with new versions
 
 ${YELLOW}Security Modes:${NC}
@@ -834,6 +835,14 @@ cmd_clean() {
 }
 
 # -----------------------------------------------------------------------------
+# Update CLI Agent Versions
+# -----------------------------------------------------------------------------
+cmd_update() {
+    echo -e "${BLUE}Updating CLI agent versions...${NC}"
+    "$SCRIPT_DIR/update-agents.sh"
+}
+
+# -----------------------------------------------------------------------------
 # Audit-Log Funktion (für Debugging)
 # -----------------------------------------------------------------------------
 cmd_audit() {
@@ -857,6 +866,7 @@ case "${1:-help}" in
     run)        shift; cmd_run "$@" ;;
     auth)       shift; cmd_auth "$@" ;;
     status)     cmd_status ;;
+    update)     cmd_update ;;
     clean)      shift; cmd_clean "$@" ;;
     audit)      cmd_audit ;;
     help|*)     usage ;;
