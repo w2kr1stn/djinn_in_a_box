@@ -12,7 +12,8 @@ if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
     sudo /usr/local/bin/init-firewall.sh
 fi
 
-for dir in ~/.cache/uv ~/.cache/ai-dev-tools ~/.local/share/fnm; do
+# Fix ownership of volume-mounted directories (Docker creates them as root)
+for dir in ~/.cache/uv ~/.cache/ai-dev-tools ~/.local/share/fnm ~/.azure ~/.pulumi ~/.config/sops; do
     if [[ -d "$dir" ]] && [[ ! -w "$dir" ]]; then
         sudo chown -R $(id -u):$(id -g) "$dir"
     fi
