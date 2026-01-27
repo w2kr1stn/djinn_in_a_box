@@ -37,3 +37,6 @@
 unzip
 # zip
 # p7zip-full
+
+# --- Desktop Integration ---
+# libnotify-bin          # For desktop notifications (requires D-Bus socket mount)
