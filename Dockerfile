@@ -76,10 +76,10 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
 # Global NPM Packages
 # CLI Agent versions - update with: ./scripts/update-agents.sh
-ARG CLAUDE_CODE_VERSION=2.1.7
-ARG GEMINI_CLI_VERSION=0.24.0
-ARG CODEX_VERSION=0.84.0
-ARG OPENCODE_VERSION=1.1.22
+ARG CLAUDE_CODE_VERSION=2.1.20
+ARG GEMINI_CLI_VERSION=0.25.2
+ARG CODEX_VERSION=0.92.0
+ARG OPENCODE_VERSION=1.1.36
 
 RUN eval "$(fnm env --shell bash)" && npm install -g \
     typescript \
