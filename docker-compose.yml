@@ -38,6 +38,8 @@ x-common-volumes: &common-volumes
   - ./config/opencode:/home/dev/.opencode/seed:ro
   # Projects directory
   - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
+  # D-Bus for host desktop notifications (optional)
+  - ${XDG_RUNTIME_DIR:-/run/user/1000}/bus:/run/user/${HOST_UID:-1000}/bus:ro
 
 x-common-environment: &common-environment
   TZ: ${TZ:-Europe/Berlin}
@@ -46,6 +48,8 @@ x-common-environment: &common-environment
   # Gemini CLI: Force file-based token storage instead of system keychain
   # (keychain is not persistent in containers)
   GEMINI_FORCE_FILE_STORAGE: "true"
+  # D-Bus for host desktop notifications
+  DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/${HOST_UID:-1000}/bus"
 
 x-resource-limits: &resource-limits
   resources:

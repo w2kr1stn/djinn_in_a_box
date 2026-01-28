@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages.tx[t] /tmp/
 RUN if [ -f /tmp/packages.txt ]; then \
         apt-get update && \
-        grep -v '^#' /tmp/packages.txt | grep -v '^[[:space:]]*$' | \
+        sed 's/#.*//' /tmp/packages.txt | grep -v '^[[:space:]]*$' | \
         xargs -r apt-get install -y --no-install-recommends && \
         rm -rf /var/lib/apt/lists/*; \
     fi && rm -f /tmp/packages.txt
@@ -76,10 +76,10 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
 # Global NPM Packages
 # CLI Agent versions - update with: ./scripts/update-agents.sh
-ARG CLAUDE_CODE_VERSION=2.1.7
-ARG GEMINI_CLI_VERSION=0.24.0
-ARG CODEX_VERSION=0.84.0
-ARG OPENCODE_VERSION=1.1.22
+ARG CLAUDE_CODE_VERSION=2.1.20
+ARG GEMINI_CLI_VERSION=0.25.2
+ARG CODEX_VERSION=0.92.0
+ARG OPENCODE_VERSION=1.1.36
 
 RUN eval "$(fnm env --shell bash)" && npm install -g \
     typescript \

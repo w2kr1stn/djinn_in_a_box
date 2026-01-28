@@ -104,6 +104,88 @@ get_compose_files() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Parse common container arguments (--docker, --firewall, --here, --mount)
+# Sets: PARSED_DOCKER, PARSED_FIREWALL, PARSED_MOUNT_PATH,
+#        PARSED_EXTRA_VOLUME, PARSED_WORKDIR, PARSED_COMPOSE_FILES,
+#        PARSED_SHELL_MOUNTS
+# Remaining (non-parsed) args are stored in PARSED_REMAINING
+# -----------------------------------------------------------------------------
+parse_container_args() {
+    PARSED_DOCKER="false"
+    PARSED_FIREWALL="false"
+    PARSED_MOUNT_PATH=""
+    PARSED_EXTRA_VOLUME=""
+    PARSED_WORKDIR=""
+    PARSED_COMPOSE_FILES=""
+    PARSED_SHELL_MOUNTS=""
+    PARSED_REMAINING=()
+
+    local skip_next="false"
+    local args=("$@")
+    for i in "${!args[@]}"; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next="false"
+            continue
+        fi
+        case "${args[$i]}" in
+            --docker)   PARSED_DOCKER="true" ;;
+            --firewall) PARSED_FIREWALL="true" ;;
+            --here)     PARSED_MOUNT_PATH="$CALLER_PWD" ;;
+            --mount)
+                PARSED_MOUNT_PATH="${args[$((i+1))]:-}"
+                skip_next="true"
+                if [[ -z "$PARSED_MOUNT_PATH" ]]; then
+                    echo -e "${RED}--mount requires a path argument${NC}"
+                    exit 1
+                fi
+                ;;
+            *)
+                PARSED_REMAINING+=("${args[$i]}")
+                ;;
+        esac
+    done
+
+    # Validate and resolve mount path
+    if [[ -n "$PARSED_MOUNT_PATH" ]]; then
+        PARSED_MOUNT_PATH="${PARSED_MOUNT_PATH/#\~/$HOME}"
+        if [[ -d "$PARSED_MOUNT_PATH" ]]; then
+            PARSED_MOUNT_PATH="$(cd "$PARSED_MOUNT_PATH" && pwd)"
+        else
+            echo -e "${RED}Mount path does not exist or is not a directory: $PARSED_MOUNT_PATH${NC}"
+            exit 1
+        fi
+        PARSED_EXTRA_VOLUME="-v ${PARSED_MOUNT_PATH}:/home/dev/workspace"
+        PARSED_WORKDIR="--workdir /home/dev/workspace"
+    fi
+
+    # Compose files and shell mounts
+    PARSED_COMPOSE_FILES=$(get_compose_files "$PARSED_DOCKER")
+    PARSED_SHELL_MOUNTS=$(get_shell_mount_args)
+}
+
+# -----------------------------------------------------------------------------
+# Build agent headless command via agent_runner.py (reads config/agents.json)
+# The prompt is passed via $AGENT_PROMPT env var to avoid shell escaping issues
+# Args: <agent> <write_enabled> <json_enabled>
+# Returns: command string that references $AGENT_PROMPT
+# -----------------------------------------------------------------------------
+get_agent_command() {
+    local agent="$1"
+    local write_enabled="${2:-false}"
+    local json_enabled="${3:-false}"
+    local model="${4:-}"
+
+    local flags=""
+    [[ "$write_enabled" == "true" ]] && flags="$flags --write"
+    [[ "$json_enabled" == "true" ]] && flags="$flags --json"
+    [[ -n "$model" ]] && flags="$flags --model $model"
+
+    # Delegate to Python script which reads config/agents.json
+    # shellcheck disable=SC2086
+    python3 "$SCRIPT_DIR/agent_runner.py" build-cmd "$agent" $flags
+}
+
 usage() {
     cat << EOF
 ${BLUE}AI Dev Base${NC} - Entwicklungsumgebung für Claude Code, Gemini CLI & Codex CLI
@@ -113,8 +195,10 @@ ${YELLOW}Usage:${NC} ./dev.sh <command> [options]
 ${YELLOW}Commands:${NC}
   build       Build/rebuild the base image
   start       Start interactive shell in container
+  run         Run CLI agent headless (ephemeral, non-interactive)
   auth        Start with host network for OAuth (claude, gemini, codex, gh auth login)
   status      Show container, volume and MCP status
+  update      Fetch latest CLI agent versions and update Dockerfile
   clean       Manage containers and volumes (see below)
   help        Show this help message
 
@@ -135,7 +219,7 @@ ${YELLOW}Configuration:${NC}
     TZ=America/New_York      # Timezone
 
 ${YELLOW}CLI Agent Updates:${NC}
-  ./scripts/update-agents.sh  # Fetch latest versions & update Dockerfile
+  ./dev.sh update             # Fetch latest versions & update Dockerfile
   ./dev.sh build              # Rebuild image with new versions
 
 ${YELLOW}Security Modes:${NC}
@@ -143,6 +227,31 @@ ${YELLOW}Security Modes:${NC}
   ${GREEN}--docker${NC}       Docker via Proxy (gefährliche Ops blockiert)
   ${GREEN}--firewall${NC}     Ausgehender Traffic auf Whitelist beschränkt
   ${GREEN}--docker --firewall${NC}  Maximale Sicherheit + Docker-Zugriff
+
+${YELLOW}Headless Agent Mode:${NC}
+  ${GREEN}./dev.sh run <agent> "<prompt>" [options]${NC}
+
+  Agents: claude, gemini, codex, opencode
+  Der Container startet ephemer, führt den Agent im headless mode aus,
+  gibt die Antwort auf stdout aus und beendet sich.
+
+  Automatisch wird \$(pwd) als ~/workspace/ gemountet (implizites --here).
+  Mit --mount kann ein anderer Pfad gewählt werden.
+
+  ${YELLOW}Run Options:${NC}
+    --write         Agent darf Dateien ändern (Standard: read-only/plan)
+    --json          Maschinenlesbarer JSON-Output
+    --model <name>  Spezifisches Modell wählen (z.B. sonnet, gemini-2.5-flash)
+    --docker        Docker-Zugriff via Proxy
+    --firewall      Netzwerk-Firewall
+    --mount <path>  Alternativer Workspace-Pfad
+
+  ${YELLOW}Run Examples:${NC}
+    ./dev.sh run claude "Erkläre die Architektur dieses Projekts"
+    ./dev.sh run claude "Fix the bug" --write --model sonnet
+    ./dev.sh run gemini "Refactore main.py" --write --model gemini-2.5-flash
+    ./dev.sh run codex "Fix all type errors" --write --json
+    ./dev.sh run opencode "Analysiere Dependencies" --model anthropic/claude-sonnet-4-5-20250929
 
 ${YELLOW}Workspace Mount:${NC}
   ${GREEN}--here${NC}         Mountet \$(pwd) zusätzlich unter ~/workspace/
@@ -156,15 +265,15 @@ ${YELLOW}Clean & Volume Management:${NC}
   ./dev.sh clean                      # Remove containers only
   ./dev.sh clean volumes              # List all volumes by category
   ./dev.sh clean volumes --credentials  # Delete auth tokens (claude, gemini, etc.)
-  ./dev.sh clean volumes --tools      # Delete tool configs (azure, pulumi)
-  ./dev.sh clean volumes --cache      # Delete caches (uv, tools)
+  ./dev.sh clean volumes --tools      # Delete tool installations & configs (az, pulumi, psql, sops)
+  ./dev.sh clean volumes --cache      # Delete caches (uv)
   ./dev.sh clean volumes <name>       # Delete specific volume
   ./dev.sh clean --all                # Remove EVERYTHING (containers, volumes, network)
 
 ${YELLOW}Volume Categories:${NC}
   ${GREEN}credentials${NC}  AI agent auth tokens (claude, gemini, codex, opencode, gh)
-  ${GREEN}tools${NC}        Optional tool configs (azure-cli, pulumi)
-  ${GREEN}cache${NC}        Package & tool caches (uv, tools-cache)
+  ${GREEN}tools${NC}        Tool installations & configs (az, pulumi, psql, sops)
+  ${GREEN}cache${NC}        Package caches (uv)
   ${GREEN}data${NC}         Application data (opencode-data)
 
 ${YELLOW}Examples:${NC}
@@ -315,6 +424,139 @@ cmd_start() {
     fi
 }
 
+cmd_run() {
+    # First argument must be the agent name (validate before expensive checks)
+    local agent="${1:-}"
+    if [[ -z "$agent" ]]; then
+        echo -e "${RED}Usage: ./dev.sh run <agent> \"<prompt>\" [options]${NC}"
+        echo ""
+        echo "Available agents: claude, gemini, codex, opencode"
+        exit 1
+    fi
+    shift
+
+    # Validate agent name early
+    case "$agent" in
+        claude|gemini|codex|opencode) ;;
+        *)
+            echo -e "${RED}Unknown agent: $agent${NC}"
+            echo "Available agents: claude, gemini, codex, opencode"
+            exit 1
+            ;;
+    esac
+
+    load_env
+    check_config
+    ensure_network
+
+    # Collect prompt (all non-flag arguments before options)
+    local prompt=""
+    local run_args=()
+    local write_enabled="false"
+    local json_enabled="false"
+    local model=""
+    local expect_model="false"
+
+    for arg in "$@"; do
+        if [[ "$expect_model" == "true" ]]; then
+            model="$arg"
+            expect_model="false"
+            continue
+        fi
+        case "$arg" in
+            --write)    write_enabled="true" ;;
+            --json)     json_enabled="true" ;;
+            --model)    expect_model="true" ;;
+            --docker|--firewall|--here|--mount)
+                run_args+=("$arg") ;;
+            *)
+                # If it looks like a path after --mount, pass it through
+                if [[ ${#run_args[@]} -gt 0 && "${run_args[-1]}" == "--mount" ]]; then
+                    run_args+=("$arg")
+                elif [[ -z "$prompt" ]]; then
+                    prompt="$arg"
+                else
+                    # Append additional words to prompt
+                    prompt="$prompt $arg"
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z "$prompt" ]]; then
+        echo -e "${RED}Error: No prompt provided.${NC}"
+        echo ""
+        echo -e "Usage: ./dev.sh run $agent \"<prompt>\" [options]"
+        exit 1
+    fi
+
+    # Implicit --here: mount caller's pwd as workspace if no --mount was specified
+    local has_mount="false"
+    for arg in "${run_args[@]}"; do
+        if [[ "$arg" == "--here" || "$arg" == "--mount" ]]; then
+            has_mount="true"
+            break
+        fi
+    done
+    if [[ "$has_mount" == "false" ]]; then
+        run_args+=("--here")
+    fi
+
+    # Parse container arguments (--docker, --firewall, --here, --mount)
+    parse_container_args "${run_args[@]}"
+
+    # Build agent command (prompt is passed via AGENT_PROMPT env var)
+    local agent_cmd
+    agent_cmd=$(get_agent_command "$agent" "$write_enabled" "$json_enabled" "$model") || exit 1
+
+    echo "" >&2
+    echo -e "${BLUE}Running $agent (headless)...${NC}" >&2
+    echo "" >&2
+    echo -e "   ${GREEN}Agent:${NC}     $agent" >&2
+    echo -e "   ${GREEN}Workspace:${NC} ${PARSED_MOUNT_PATH:-$CALLER_PWD}" >&2
+
+    if [[ -n "$model" ]]; then
+        echo -e "   ${GREEN}Model:${NC}     $model" >&2
+    fi
+    if [[ "$write_enabled" == "true" ]]; then
+        echo -e "   ${YELLOW}Mode:${NC}      Read/Write (--write)" >&2
+    else
+        echo -e "   ${GREEN}Mode:${NC}      Read-only (plan/analysis)" >&2
+    fi
+
+    if [[ "$PARSED_DOCKER" == "true" ]]; then
+        echo -e "   ${GREEN}Docker:${NC}    Enabled" >&2
+    fi
+    if [[ "$PARSED_FIREWALL" == "true" ]]; then
+        echo -e "   ${GREEN}Firewall:${NC}  Enabled" >&2
+    fi
+    if [[ "$json_enabled" == "true" ]]; then
+        echo -e "   ${GREEN}Output:${NC}    JSON" >&2
+    fi
+    echo "" >&2
+
+    # Run container ephemerally without TTY
+    # - AGENT_PROMPT is passed as env var to avoid shell escaping issues
+    # - entrypoint.sh ends with 'exec /bin/zsh "$@"'
+    #   so we pass '-c "cmd"' which becomes 'zsh -c "cmd"'
+    # shellcheck disable=SC2086
+    ENABLE_FIREWALL="$PARSED_FIREWALL" AGENT_PROMPT="$prompt" \
+        docker compose $PARSED_COMPOSE_FILES run --rm -T \
+        -e AGENT_PROMPT \
+        $PARSED_WORKDIR $PARSED_EXTRA_VOLUME $PARSED_SHELL_MOUNTS \
+        dev -c "$agent_cmd"
+
+    local exit_code=$?
+
+    # Cleanup: Docker-Proxy stoppen falls gestartet
+    if [[ "$PARSED_DOCKER" == "true" ]]; then
+        docker compose $PARSED_COMPOSE_FILES stop docker-proxy 2>/dev/null || true
+        docker compose $PARSED_COMPOSE_FILES rm -f docker-proxy 2>/dev/null || true
+    fi
+
+    return $exit_code
+}
+
 cmd_auth() {
     load_env
     check_config
@@ -419,12 +661,12 @@ declare -A VOLUME_CATEGORIES=(
     [ai-dev-codex-config]="credentials"
     [ai-dev-opencode-config]="credentials"
     [ai-dev-gh-config]="credentials"
-    # Optional tool configs
+    # Optional tool configs & installations
     [ai-dev-azure-config]="tools"
     [ai-dev-pulumi-config]="tools"
+    [ai-dev-tools-cache]="tools"
     # Cache & data
     [ai-dev-uv-cache]="cache"
-    [ai-dev-tools-cache]="cache"
     [ai-dev-opencode-data]="data"
 )
 
@@ -593,6 +835,14 @@ cmd_clean() {
 }
 
 # -----------------------------------------------------------------------------
+# Update CLI Agent Versions
+# -----------------------------------------------------------------------------
+cmd_update() {
+    echo -e "${BLUE}Updating CLI agent versions...${NC}"
+    "$SCRIPT_DIR/update-agents.sh"
+}
+
+# -----------------------------------------------------------------------------
 # Audit-Log Funktion (für Debugging)
 # -----------------------------------------------------------------------------
 cmd_audit() {
@@ -613,8 +863,10 @@ cmd_audit() {
 case "${1:-help}" in
     build)      cmd_build ;;
     start)      shift; cmd_start "$@" ;;
+    run)        shift; cmd_run "$@" ;;
     auth)       shift; cmd_auth "$@" ;;
     status)     cmd_status ;;
+    update)     cmd_update ;;
     clean)      shift; cmd_clean "$@" ;;
     audit)      cmd_audit ;;
     help|*)     usage ;;
