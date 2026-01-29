@@ -249,44 +249,50 @@ class TestLogsCommand:
         with (
             patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
+            pytest.raises(typer.Exit) as exc_info,
         ):
             mock_run.return_value = MagicMock(returncode=0)
 
             mcp.logs()
 
-            first_call = mock_run.call_args_list[0]
-            cmd = first_call[0][0]
-            assert cmd[0:2] == ["docker", "logs"]
-            assert GATEWAY_CONTAINER in cmd
+        assert exc_info.value.exit_code == 0
+        first_call = mock_run.call_args_list[0]
+        cmd = first_call[0][0]
+        assert cmd[0:2] == ["docker", "logs"]
+        assert GATEWAY_CONTAINER in cmd
 
     def test_logs_with_follow_flag(self) -> None:
         """Test that logs with follow flag includes -f."""
         with (
             patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
+            pytest.raises(typer.Exit) as exc_info,
         ):
             mock_run.return_value = MagicMock(returncode=0)
 
             mcp.logs(follow=True)
 
-            first_call = mock_run.call_args_list[0]
-            cmd = first_call[0][0]
-            assert "-f" in cmd
+        assert exc_info.value.exit_code == 0
+        first_call = mock_run.call_args_list[0]
+        cmd = first_call[0][0]
+        assert "-f" in cmd
 
     def test_logs_with_tail_option(self) -> None:
         """Test that logs with tail option includes --tail."""
         with (
             patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
+            pytest.raises(typer.Exit) as exc_info,
         ):
             mock_run.return_value = MagicMock(returncode=0)
 
             mcp.logs(tail=50)
 
-            first_call = mock_run.call_args_list[0]
-            cmd = first_call[0][0]
-            assert "--tail" in cmd
-            assert "50" in cmd
+        assert exc_info.value.exit_code == 0
+        first_call = mock_run.call_args_list[0]
+        cmd = first_call[0][0]
+        assert "--tail" in cmd
+        assert "50" in cmd
 
 
 # =============================================================================

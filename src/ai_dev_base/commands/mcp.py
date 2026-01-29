@@ -323,8 +323,7 @@ def logs(
     cmd.extend(["--tail", str(tail), GATEWAY_CONTAINER])
 
     result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
+    raise typer.Exit(result.returncode)
 
 
 # =============================================================================
