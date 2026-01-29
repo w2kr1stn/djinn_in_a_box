@@ -289,6 +289,7 @@ def compose_run(
     interactive: bool = True,
     env: dict[str, str] | None = None,
     service: str = "dev",
+    timeout: int | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
 
@@ -312,11 +313,14 @@ def compose_run(
             Set to False for headless agent execution.
         env: Additional environment variables to pass to the container.
         service: Compose service name (default: dev).
+        timeout: Timeout in seconds for headless execution (default: None).
+            Only applies when interactive=False. On timeout, returns exit code 124.
 
     Returns:
         RunResult with returncode, stdout, stderr, and command.
         For interactive mode, stdout/stderr will be empty as output
         goes directly to the terminal.
+        On timeout (headless mode), returncode is 124 (matching GNU timeout).
 
     Example:
         >>> # Interactive shell
@@ -327,6 +331,14 @@ def compose_run(
         ...     config, options,
         ...     command='echo "Hello"',
         ...     interactive=False,
+        ... )
+
+        >>> # Headless with timeout
+        >>> result = compose_run(
+        ...     config, options,
+        ...     command='long_running_task',
+        ...     interactive=False,
+        ...     timeout=300,
         ... )
     """
     project_root = get_project_root()
@@ -385,21 +397,34 @@ def compose_run(
             command=cmd,
         )
     else:
-        # Headless mode: capture output
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=project_root,
-            env=subprocess_env,
-            check=False,
-        )
-        return RunResult(
-            returncode=result.returncode,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            command=cmd,
-        )
+        # Headless mode: capture output with optional timeout
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=project_root,
+                env=subprocess_env,
+                timeout=timeout,
+                check=False,
+            )
+            return RunResult(
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                command=cmd,
+            )
+        except subprocess.TimeoutExpired as e:
+            # Handle timeout: decode output if available
+            stdout = e.stdout.decode() if e.stdout is not None else ""
+            stderr = e.stderr.decode() if e.stderr is not None else f"Timeout after {timeout}s"
+            # Return code 124 is conventional for timeout (like GNU timeout command)
+            return RunResult(
+                returncode=124,
+                stdout=stdout,
+                stderr=stderr,
+                command=cmd,
+            )
 
 
 def compose_up(
