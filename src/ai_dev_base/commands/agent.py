@@ -31,7 +31,7 @@ from ai_dev_base.core.docker import (
 )
 
 if TYPE_CHECKING:
-    from ai_dev_base.config.models import AgentConfig, AppConfig
+    from ai_dev_base.config.models import AgentConfig
 
 # =============================================================================
 # Command Building
@@ -298,8 +298,6 @@ def agents(
         raise typer.Exit(1) from None
 
     if json_output:
-        import json
-
         data = {
             name: {
                 "binary": cfg.binary,

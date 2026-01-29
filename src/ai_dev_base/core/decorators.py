@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, ParamSpec, TypeVar
 import typer
 
 if TYPE_CHECKING:
-    from ai_dev_base.config import ConfigNotFoundError as ConfigNotFoundErrorType
+    pass
 
 P = ParamSpec("P")
 R = TypeVar("R")
