@@ -140,7 +140,9 @@ def start(
         raise typer.Exit(1) from None
 
     # Ensure Docker network exists
-    ensure_network()
+    if not network_exists() and not ensure_network():
+        error("Failed to create Docker network 'ai-dev-network'")
+        raise typer.Exit(1)
 
     # Resolve mount path
     mount_path: Path | None = None
@@ -252,7 +254,10 @@ def auth(
         err_console.print(
             "[yellow]Docker proxy starting separately for host network mode...[/yellow]"
         )
-        compose_up(services=["docker-proxy"], docker_enabled=True)
+        proxy_result = compose_up(services=["docker-proxy"], docker_enabled=True)
+        if not proxy_result.success:
+            error("Failed to start Docker proxy for host network mode")
+            raise typer.Exit(proxy_result.returncode)
         time.sleep(2)
 
     # Build the auth command with --profile auth and dev-auth service
@@ -309,7 +314,7 @@ def status() -> None:
         config = load_config()
         err_console.print(f"  CODE_DIR: {config.code_dir}")
     except ConfigNotFoundError:
-        warning("Configuration not found. Run 'codeagent init'")
+        warning("Configuration not found. Run 'codeagent init' to create one.")
 
     blank()
 
@@ -612,10 +617,12 @@ def audit(
     info(f"Docker Proxy Audit Log (last {tail} lines):")
     blank()
 
-    subprocess.run(
+    result = subprocess.run(
         ["docker", "logs", "--tail", str(tail), "ai-dev-docker-proxy"],
         check=False,
     )
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
 
 # =============================================================================
@@ -684,7 +691,8 @@ def enter() -> None:
     info(f"Opening new Zsh session in: {container}")
     blank()
 
-    subprocess.run(
+    result = subprocess.run(
         ["docker", "exec", "-it", container, "zsh"],
         check=False,
     )
+    raise typer.Exit(result.returncode)
