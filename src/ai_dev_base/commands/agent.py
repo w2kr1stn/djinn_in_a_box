@@ -54,7 +54,7 @@ def build_agent_command(
     The prompt is referenced via the $AGENT_PROMPT environment variable,
     which is expanded at runtime in the container shell.
 
-    Mirrors the build_shell_command() function from agent_runner.py (lines 88-136).
+    Mirrors the build_shell_command() function from the original agent_runner.py script.
 
     Args:
         agent_config: Agent configuration containing binary, flags, and template.

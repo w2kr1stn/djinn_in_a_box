@@ -59,7 +59,7 @@ class MCPCliNotFoundError(Exception):
 def check_mcp_cli() -> None:
     """Verify that the docker mcp CLI plugin is installed.
 
-    Mirrors check_mcp_cli() from mcp.sh (lines 17-30).
+    Mirrors the check_mcp_cli() function from the original mcp.sh script.
 
     Raises:
         MCPCliNotFoundError: If the docker mcp plugin is not installed.
@@ -85,7 +85,7 @@ def check_mcp_cli() -> None:
 def require_running() -> None:
     """Ensure the MCP Gateway container is running.
 
-    Mirrors require_running() from mcp.sh (lines 87-93).
+    Mirrors the require_running() function from the original mcp.sh script.
 
     Raises:
         typer.Exit: If the gateway is not running.
