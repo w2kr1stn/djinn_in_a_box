@@ -6,6 +6,11 @@ Commands:
     - build: Build/rebuild the Docker image
     - start: Start interactive development shell with optional Docker/firewall
     - auth: Start with host network for OAuth authentication
+    - status: Show container, volume, network, and service status
+    - clean: Manage containers and volumes (with subcommands)
+    - audit: Show Docker proxy audit log
+    - update: Update CLI agent versions in Dockerfile
+    - enter: Open a new shell in a running container
 
 These commands mirror the behavior of the original dev.sh Bash script,
 maintaining backwards compatibility with the existing workflow.
@@ -20,17 +25,42 @@ from typing import Annotated
 
 import typer
 
-from ai_dev_base.config import ConfigNotFoundError, load_config
-from ai_dev_base.core.console import blank, err_console, error, info, status_line, success
+from ai_dev_base.config import (
+    VOLUME_CATEGORIES,
+    ConfigNotFoundError,
+    get_all_volumes,
+    load_config,
+)
+from ai_dev_base.core.console import (
+    blank,
+    console,
+    err_console,
+    error,
+    header,
+    info,
+    print_volume_table,
+    status_line,
+    success,
+    warning,
+)
 from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
     compose_build,
+    compose_down,
     compose_run,
     compose_up,
+    delete_volume,
+    delete_volumes,
     ensure_network,
     get_compose_files,
+    get_existing_volumes_by_category,
+    get_running_containers,
     get_shell_mount_args,
+    is_container_running,
+    list_volumes,
+    network_exists,
+    volume_exists,
 )
 from ai_dev_base.core.paths import get_project_root, resolve_mount_path
 
@@ -254,3 +284,407 @@ def auth(
     cleanup_docker_proxy(docker)
 
     raise typer.Exit(result.returncode)
+
+
+# =============================================================================
+# Status Command
+# =============================================================================
+
+
+def status() -> None:
+    """Show container, volume, network, and service status.
+
+    Displays comprehensive status information about:
+    - Configuration (CODE_DIR)
+    - Running containers (ai-dev-*, mcp-*)
+    - Docker volumes by category
+    - Docker networks (ai-dev-network)
+    - Service status (Docker Proxy, MCP Gateway)
+
+    Equivalent to: ./dev.sh status
+    """
+    # Configuration
+    header("Configuration")
+    try:
+        config = load_config()
+        err_console.print(f"  CODE_DIR: {config.code_dir}")
+    except ConfigNotFoundError:
+        warning("Configuration not found. Run 'codeagent init'")
+
+    blank()
+
+    # Containers
+    header("Containers")
+    result = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "name=ai-dev",
+            "--filter",
+            "name=mcp-",
+            "--format",
+            "table {{.Names}}\t{{.Status}}\t{{.Image}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout.strip():
+        console.print(result.stdout.strip())
+    else:
+        err_console.print("  No containers found")
+
+    blank()
+
+    # Volumes
+    header("Volumes")
+    existing_volumes = list_volumes()
+    if existing_volumes:
+        # Group volumes by category for display
+        categorized: dict[str, list[str]] = {}
+        for category in VOLUME_CATEGORIES:
+            vols = get_existing_volumes_by_category(category)
+            if vols:
+                categorized[category] = vols
+
+        if categorized:
+            print_volume_table(categorized)
+        else:
+            err_console.print("  No categorized volumes found")
+    else:
+        err_console.print("  No volumes found")
+
+    blank()
+
+    # Networks
+    header("Networks")
+    result = subprocess.run(
+        [
+            "docker",
+            "network",
+            "ls",
+            "--filter",
+            "name=ai-dev",
+            "--format",
+            "table {{.Name}}\t{{.Driver}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout.strip():
+        console.print(result.stdout.strip())
+    else:
+        err_console.print("  No networks found")
+
+    blank()
+
+    # Service Status
+    header("Services")
+
+    # Docker Proxy Status
+    if is_container_running("ai-dev-docker-proxy"):
+        success("  Docker Proxy: Running")
+    else:
+        err_console.print("  [yellow]Docker Proxy: Not running[/yellow]")
+
+    # MCP Gateway Status
+    if is_container_running("mcp-gateway"):
+        success("  MCP Gateway: Running")
+    else:
+        err_console.print("  [yellow]MCP Gateway: Not running[/yellow]")
+
+
+# =============================================================================
+# Clean Commands (Subcommand Group)
+# =============================================================================
+
+clean_app = typer.Typer(
+    name="clean",
+    help="Manage containers and volumes",
+    no_args_is_help=False,
+)
+
+
+@clean_app.callback(invoke_without_command=True)
+def clean_default(ctx: typer.Context) -> None:
+    """Remove containers only (default action when no subcommand given).
+
+    Runs `docker compose down` to stop and remove containers.
+    Volumes and networks are preserved.
+
+    Equivalent to: ./dev.sh clean containers
+    """
+    if ctx.invoked_subcommand is None:
+        info("Stopping and removing containers...")
+        result = compose_down()
+        if result.success:
+            success("Containers removed.")
+        else:
+            error(f"Failed to remove containers (exit code: {result.returncode})")
+            if result.stderr:
+                err_console.print(result.stderr)
+            raise typer.Exit(result.returncode)
+
+
+@clean_app.command("volumes")
+def clean_volumes(
+    credentials: Annotated[
+        bool,
+        typer.Option("--credentials", help="Delete credential volumes (claude, gemini, etc.)"),
+    ] = False,
+    tools: Annotated[
+        bool,
+        typer.Option("--tools", help="Delete tool config volumes (azure, pulumi, etc.)"),
+    ] = False,
+    cache: Annotated[
+        bool,
+        typer.Option("--cache", help="Delete cache volumes (uv-cache)"),
+    ] = False,
+    data: Annotated[
+        bool,
+        typer.Option("--data", help="Delete data volumes (opencode-data)"),
+    ] = False,
+    name: Annotated[
+        str | None,
+        typer.Argument(help="Specific volume name to delete"),
+    ] = None,
+) -> None:
+    """Manage Docker volumes by category.
+
+    Without options, lists all volumes grouped by category.
+    With --credentials/--tools/--cache/--data, deletes volumes in that category.
+    With a volume name argument, deletes that specific volume.
+
+    Examples:
+        codeagent clean volumes                    # List all volumes
+        codeagent clean volumes --credentials      # Delete credential volumes
+        codeagent clean volumes ai-dev-uv-cache    # Delete specific volume
+    """
+    # If a specific volume name is provided, delete it
+    if name:
+        if volume_exists(name):
+            info(f"Deleting volume: {name}")
+            if delete_volume(name):
+                success(f"Volume '{name}' deleted.")
+            else:
+                error(f"Failed to delete volume '{name}' (may be in use)")
+                raise typer.Exit(1)
+        else:
+            error(f"Volume '{name}' does not exist")
+            raise typer.Exit(1)
+        return
+
+    # Check if any category flag is set
+    categories_to_delete: list[str] = []
+    if credentials:
+        categories_to_delete.append("credentials")
+    if tools:
+        categories_to_delete.append("tools")
+    if cache:
+        categories_to_delete.append("cache")
+    if data:
+        categories_to_delete.append("data")
+
+    # If no flags set, list volumes
+    if not categories_to_delete:
+        info("Volumes by category:")
+        blank()
+        categorized: dict[str, list[str]] = {}
+        for category in VOLUME_CATEGORIES:
+            vols = get_existing_volumes_by_category(category)
+            if vols:
+                categorized[category] = vols
+
+        if categorized:
+            print_volume_table(categorized)
+        else:
+            err_console.print("No volumes found.")
+
+        blank()
+        err_console.print("Use --credentials, --tools, --cache, or --data to delete.")
+        return
+
+    # Delete volumes in selected categories
+    for category in categories_to_delete:
+        volumes = get_existing_volumes_by_category(category)
+        if not volumes:
+            warning(f"No existing volumes in category '{category}'")
+            continue
+
+        info(f"Deleting {category} volumes...")
+        results = delete_volumes(volumes)
+
+        for vol, deleted in results.items():
+            if deleted:
+                success(f"  Deleted: {vol}")
+            else:
+                error(f"  Failed: {vol} (may be in use)")
+
+
+@clean_app.command("all")
+def clean_all(
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Skip confirmation prompt"),
+    ] = False,
+) -> None:
+    """Remove EVERYTHING: containers, volumes, and network.
+
+    This is a destructive operation that removes:
+    - All ai-dev containers
+    - All ai-dev volumes (credentials, tools, cache, data)
+    - The ai-dev-network
+
+    Equivalent to: ./dev.sh clean --all
+    """
+    if not force:
+        confirm = typer.confirm(
+            "This will delete ALL containers, volumes, and the network. Continue?",
+            default=False,
+        )
+        if not confirm:
+            info("Aborted.")
+            raise typer.Exit(0)
+
+    # Stop and remove containers
+    info("Stopping and removing containers...")
+    compose_down()
+
+    # Delete all volumes
+    info("Deleting all volumes...")
+    all_volumes = get_all_volumes()
+    for vol in all_volumes:
+        if volume_exists(vol):
+            if delete_volume(vol):
+                success(f"  Deleted: {vol}")
+            else:
+                warning(f"  Failed: {vol}")
+
+    # Remove network
+    info("Removing network...")
+    if network_exists("ai-dev-network"):
+        result = subprocess.run(
+            ["docker", "network", "rm", "ai-dev-network"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            success("  Deleted: ai-dev-network")
+        else:
+            warning("  Failed to remove ai-dev-network (may be in use)")
+    else:
+        err_console.print("  ai-dev-network does not exist")
+
+    blank()
+    success("Cleanup complete.")
+
+
+# =============================================================================
+# Audit Command
+# =============================================================================
+
+
+def audit(
+    tail: Annotated[
+        int,
+        typer.Option("--tail", "-n", help="Number of log lines to show"),
+    ] = 50,
+) -> None:
+    """Show Docker proxy audit log.
+
+    Displays the most recent log entries from the Docker proxy container.
+    The proxy logs all Docker socket operations for security auditing.
+
+    Equivalent to: ./dev.sh audit
+
+    Examples:
+        codeagent audit              # Show last 50 lines
+        codeagent audit -n 100       # Show last 100 lines
+    """
+    if not is_container_running("ai-dev-docker-proxy"):
+        error("Docker Proxy is not running.")
+        err_console.print("Start with: codeagent start --docker")
+        raise typer.Exit(1)
+
+    info(f"Docker Proxy Audit Log (last {tail} lines):")
+    blank()
+
+    subprocess.run(
+        ["docker", "logs", "--tail", str(tail), "ai-dev-docker-proxy"],
+        check=False,
+    )
+
+
+# =============================================================================
+# Update Command
+# =============================================================================
+
+
+def update() -> None:
+    """Update CLI agent versions in Dockerfile.
+
+    Runs the update-agents.sh script to check for and update
+    the versions of CLI agents (Claude Code, Gemini CLI, Codex)
+    in the Dockerfile.
+
+    Equivalent to: ./dev.sh update
+    """
+    info("Updating CLI agent versions...")
+    blank()
+
+    project_root = get_project_root()
+    script_path = project_root / "scripts" / "update-agents.sh"
+
+    if not script_path.exists():
+        error(f"Update script not found: {script_path}")
+        raise typer.Exit(1)
+
+    result = subprocess.run(
+        [str(script_path)],
+        cwd=project_root,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        error(f"Update failed with exit code {result.returncode}")
+        raise typer.Exit(result.returncode)
+
+
+# =============================================================================
+# Enter Command
+# =============================================================================
+
+
+def enter() -> None:
+    """Open a new shell in a running container.
+
+    Attaches to the first running ai-dev-base container and opens
+    an interactive Zsh shell. Useful for opening additional terminal
+    sessions in an already-running container.
+
+    Equivalent to: codeagent enter (from .zshrc.local wrapper)
+
+    Example:
+        # In terminal 1:
+        codeagent start --docker
+
+        # In terminal 2:
+        codeagent enter  # Opens new shell in same container
+    """
+    containers = get_running_containers("ai-dev-base-dev")
+    if not containers:
+        error("No running ai-dev-base container found.")
+        err_console.print("Start one with: codeagent start")
+        raise typer.Exit(1)
+
+    container = containers[0]
+    info(f"Opening new Zsh session in: {container}")
+    blank()
+
+    subprocess.run(
+        ["docker", "exec", "-it", container, "zsh"],
+        check=False,
+    )

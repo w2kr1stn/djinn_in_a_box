@@ -1,7 +1,7 @@
-"""CLI entry point for mcpgateway.
+"""MCP Gateway CLI entry point.
 
-This module provides the mcpgateway CLI for managing the Model Context
-Protocol Gateway that provides MCP servers to AI coding agents.
+Provides commands for managing the Model Context Protocol Gateway
+that enables MCP servers for AI coding agents.
 
 Usage:
     mcpgateway start          Start the MCP Gateway service
@@ -19,110 +19,82 @@ Usage:
     mcpgateway clean          Stop gateway and remove config (full reset)
 """
 
+from typing import Annotated
+
 import typer
 
+from ai_dev_base import __version__
 from ai_dev_base.commands import mcp
 
 app = typer.Typer(
     name="mcpgateway",
     help="MCP Gateway CLI - Manage Model Context Protocol servers",
     no_args_is_help=True,
+    rich_markup_mode="rich",
 )
 
 
+def _version_callback(value: bool) -> None:
+    """Show version and exit."""
+    if value:
+        typer.echo(f"mcpgateway {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
-def main() -> None:
-    """MCP Gateway CLI for managing Model Context Protocol servers."""
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """MCP Gateway CLI - Manage Model Context Protocol servers.
+
+    The MCP Gateway provides Model Context Protocol servers to AI coding
+    agents running in the development container.
+
+    [bold]Quick start:[/bold]
+
+        mcpgateway start          # Start the gateway
+
+        mcpgateway enable memory  # Enable a server
+
+        mcpgateway status         # Check status
+    """
 
 
 # =============================================================================
 # Gateway Lifecycle Commands
 # =============================================================================
 
-
-@app.command()
-def start() -> None:
-    """Start the MCP Gateway service."""
-    mcp.start()
-
-
-@app.command()
-def stop() -> None:
-    """Stop the MCP Gateway service."""
-    mcp.stop()
-
-
-@app.command()
-def restart() -> None:
-    """Restart the MCP Gateway service."""
-    mcp.restart()
-
-
-@app.command()
-def status() -> None:
-    """Show gateway status and enabled servers."""
-    mcp.status()
-
-
-@app.command()
-def logs(
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
-    tail: int = typer.Option(100, "--tail", "-n", help="Number of lines to show"),
-) -> None:
-    """Show gateway logs."""
-    mcp.logs(follow=follow, tail=tail)
-
+app.command("start")(mcp.start)
+app.command("stop")(mcp.stop)
+app.command("restart")(mcp.restart)
+app.command("status")(mcp.status)
+app.command("logs")(mcp.logs)
 
 # =============================================================================
 # Server Management Commands
 # =============================================================================
 
-
-@app.command()
-def enable(
-    server: str = typer.Argument(..., help="MCP server name to enable"),
-) -> None:
-    """Enable an MCP server.
-
-    Examples:
-        mcpgateway enable duckduckgo
-        mcpgateway enable memory
-    """
-    mcp.enable(server)
-
-
-@app.command()
-def disable(
-    server: str = typer.Argument(..., help="MCP server name to disable"),
-) -> None:
-    """Disable an MCP server."""
-    mcp.disable(server)
-
-
-@app.command()
-def servers() -> None:
-    """List enabled MCP servers."""
-    mcp.servers()
-
-
-@app.command()
-def catalog() -> None:
-    """Show available servers in the catalog."""
-    mcp.catalog()
-
+app.command("enable")(mcp.enable)
+app.command("disable")(mcp.disable)
+app.command("servers")(mcp.servers)
+app.command("catalog")(mcp.catalog)
 
 # =============================================================================
 # Diagnostic Commands
 # =============================================================================
 
-
-@app.command()
-def test() -> None:
-    """Test gateway connectivity."""
-    mcp.test()
+app.command("test")(mcp.test)
+app.command("clean")(mcp.clean)
 
 
-@app.command()
-def clean() -> None:
-    """Stop gateway and remove all configuration (full reset)."""
-    mcp.clean()
+if __name__ == "__main__":
+    app()
