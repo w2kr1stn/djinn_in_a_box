@@ -43,6 +43,7 @@ from ai_dev_base.core.console import (
     success,
     warning,
 )
+from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
@@ -100,6 +101,7 @@ def build(
 # =============================================================================
 
 
+@handle_config_errors
 def start(
     docker: Annotated[
         bool,
@@ -132,12 +134,8 @@ def start(
         codeagent start --here             # Mount cwd as workspace
         codeagent start -d -f --here       # Full options
     """
-    # Load configuration
-    try:
-        config = load_config()
-    except ConfigNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
+    # Load configuration (ConfigNotFoundError handled by decorator)
+    config = load_config()
 
     # Ensure Docker network exists
     if not network_exists() and not ensure_network():
@@ -209,6 +207,7 @@ def start(
 # =============================================================================
 
 
+@handle_config_errors
 def auth(
     docker: Annotated[
         bool,
@@ -229,12 +228,8 @@ def auth(
         codeagent auth              # Authenticate CLI tools
         codeagent auth --docker     # With Docker access
     """
-    # Load configuration
-    try:
-        config = load_config()
-    except ConfigNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
+    # Load configuration (ConfigNotFoundError handled by decorator)
+    config = load_config()
 
     info("Starting AI Dev with host network for OAuth authentication...")
     blank()

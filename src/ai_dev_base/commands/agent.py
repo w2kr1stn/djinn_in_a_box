@@ -22,8 +22,9 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from ai_dev_base.config import ConfigNotFoundError, load_agents, load_config
+from ai_dev_base.config import load_agents, load_config
 from ai_dev_base.core.console import console, err_console, error, info, status_line
+from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
@@ -98,6 +99,7 @@ def build_agent_command(
 # =============================================================================
 
 
+@handle_config_errors
 def run(
     agent: Annotated[
         str,
@@ -167,13 +169,9 @@ def run(
         # With Docker access and timeout
         codeagent run claude "Build the Docker image" --docker --timeout 300
     """
-    # Load configuration
-    try:
-        app_config = load_config()
-        agent_configs = load_agents()
-    except ConfigNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
+    # Load configuration (ConfigNotFoundError handled by decorator)
+    app_config = load_config()
+    agent_configs = load_agents()
 
     # Validate agent name
     if agent not in agent_configs:
