@@ -147,6 +147,12 @@ def ensure_network(name: str = "ai-dev-network") -> bool:
         capture_output=True,
         check=False,
     )
+    if result.returncode != 0:
+        from ai_dev_base.core.console import warning
+
+        stderr_msg = result.stderr.decode().strip() if result.stderr else ""
+        error_detail = stderr_msg or f"exit code {result.returncode}"
+        warning(f"Failed to create Docker network '{name}': {error_detail}")
     return result.returncode == 0
 
 
@@ -496,16 +502,10 @@ def compose_down(
     )
 
 
-def cleanup_docker_proxy(docker_enabled: bool) -> None:
+def cleanup_docker_proxy(docker_enabled: bool) -> bool:
     """Stop and remove docker-proxy if it was started.
 
-    Mirrors the cleanup logic from dev.sh (lines 421-424 and 552-555):
-    ```bash
-    if [[ "$docker_enabled" == "true" ]]; then
-        docker compose $compose_files stop docker-proxy 2>/dev/null || true
-        docker compose $compose_files rm -f docker-proxy 2>/dev/null || true
-    fi
-    ```
+    Mirrors the cleanup logic from the original dev.sh script.
 
     This cleanup is important to ensure the docker-proxy container
     doesn't keep running after the main dev container exits.
@@ -513,31 +513,49 @@ def cleanup_docker_proxy(docker_enabled: bool) -> None:
     Args:
         docker_enabled: Only cleanup if True (proxy was started).
 
+    Returns:
+        True if cleanup was successful (or skipped), False if any step failed.
+
     Example:
         >>> # After container run completes
         >>> cleanup_docker_proxy(docker_enabled=True)
     """
     if not docker_enabled:
-        return
+        return True
+
+    from ai_dev_base.core.console import warning
 
     project_root = get_project_root()
     compose_files = get_compose_files(docker_enabled=True)
+    success = True
 
     # Stop the proxy
-    subprocess.run(
+    stop_result = subprocess.run(
         ["docker", "compose", *compose_files, "stop", "docker-proxy"],
         capture_output=True,
         cwd=project_root,
         check=False,
     )
+    if stop_result.returncode != 0:
+        stderr_msg = stop_result.stderr.decode().strip() if stop_result.stderr else ""
+        if stderr_msg:
+            warning(f"Failed to stop docker-proxy: {stderr_msg}")
+        success = False
 
     # Remove the proxy container
-    subprocess.run(
+    rm_result = subprocess.run(
         ["docker", "compose", *compose_files, "rm", "-f", "docker-proxy"],
         capture_output=True,
         cwd=project_root,
         check=False,
     )
+    if rm_result.returncode != 0:
+        stderr_msg = rm_result.stderr.decode().strip() if rm_result.stderr else ""
+        if stderr_msg:
+            warning(f"Failed to remove docker-proxy: {stderr_msg}")
+        success = False
+
+    return success
 
 
 # =============================================================================
@@ -672,6 +690,12 @@ def delete_volume(name: str) -> bool:
         capture_output=True,
         check=False,
     )
+    if result.returncode != 0:
+        from ai_dev_base.core.console import warning
+
+        stderr_msg = result.stderr.decode().strip() if result.stderr else ""
+        error_detail = stderr_msg or f"exit code {result.returncode}"
+        warning(f"Failed to delete volume '{name}': {error_detail}")
     return result.returncode == 0
 
 
