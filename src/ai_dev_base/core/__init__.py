@@ -1,5 +1,6 @@
 """Core utilities for AI Dev Base CLI."""
 
+from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.console import (
     blank,
     console,
@@ -43,6 +44,8 @@ from ai_dev_base.core.paths import (
 )
 
 __all__ = [
+    # Decorators
+    "handle_config_errors",
     # Path utilities
     "CONFIG_DIR",
     "CONFIG_FILE",
