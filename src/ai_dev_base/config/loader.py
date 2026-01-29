@@ -200,6 +200,9 @@ def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
         pass
 
     # Priority 4: Built-in defaults
+    from ai_dev_base.core.console import warning
+
+    warning("No agents.toml found, using built-in defaults")
     return dict(DEFAULT_AGENTS)
 
 
@@ -501,11 +504,21 @@ def _build_config_from_env(env: dict[str, str]) -> dict[str, Any]:
     # Optional: resource limits
     resources_config: dict[str, Any] = {}
     if "CPU_LIMIT" in env:
-        resources_config["cpu_limit"] = int(env["CPU_LIMIT"])
+        try:
+            resources_config["cpu_limit"] = int(env["CPU_LIMIT"])
+        except ValueError as e:
+            raise ConfigValidationError(
+                f"Invalid CPU_LIMIT value '{env['CPU_LIMIT']}': must be an integer"
+            ) from e
     if "MEMORY_LIMIT" in env:
         resources_config["memory_limit"] = env["MEMORY_LIMIT"]
     if "CPU_RESERVATION" in env:
-        resources_config["cpu_reservation"] = int(env["CPU_RESERVATION"])
+        try:
+            resources_config["cpu_reservation"] = int(env["CPU_RESERVATION"])
+        except ValueError as e:
+            raise ConfigValidationError(
+                f"Invalid CPU_RESERVATION value '{env['CPU_RESERVATION']}': must be an integer"
+            ) from e
     if "MEMORY_RESERVATION" in env:
         resources_config["memory_reservation"] = env["MEMORY_RESERVATION"]
     if resources_config:
