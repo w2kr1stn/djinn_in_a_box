@@ -15,8 +15,10 @@ as the workspace (implicit --here behavior).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -375,7 +377,7 @@ def agents(
     """
     try:
         agent_configs = load_agents()
-    except Exception as e:
+    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError) as e:
         error(f"Failed to load agents: {e}")
         raise typer.Exit(1) from None
 
