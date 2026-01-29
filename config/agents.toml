@@ -1,0 +1,56 @@
+# =============================================================================
+# AI Dev Base - Default Agent Configurations
+# =============================================================================
+# This is the bundled default configuration for CLI coding agents.
+# Copy to ~/.config/ai-dev-base/agents.toml to customize.
+#
+# Each agent defines:
+#   binary          - Executable binary name
+#   description     - Human-readable description
+#   headless_flags  - Flags for non-interactive/headless mode
+#   read_only_flags - Flags for read-only/plan mode
+#   write_flags     - Flags to enable file modifications
+#   json_flags      - Flags for JSON output format
+#   model_flag      - Flag for model selection (--model or -m)
+#   prompt_template - Shell template for prompt injection
+# =============================================================================
+
+[agents.claude]
+binary = "claude"
+description = "Anthropic Claude Code CLI"
+headless_flags = ["-p"]
+read_only_flags = ["--permission-mode", "plan"]
+write_flags = ["--dangerously-skip-permissions"]
+json_flags = ["--output-format", "json"]
+model_flag = "--model"
+prompt_template = "\"$AGENT_PROMPT\""
+
+[agents.gemini]
+binary = "gemini"
+description = "Google Gemini CLI"
+headless_flags = ["-p"]
+read_only_flags = []
+write_flags = []
+json_flags = ["--output-format", "json"]
+model_flag = "-m"
+prompt_template = "\"$AGENT_PROMPT\""
+
+[agents.codex]
+binary = "codex"
+description = "OpenAI Codex CLI"
+headless_flags = ["exec"]
+read_only_flags = []
+write_flags = ["--full-auto"]
+json_flags = ["--json"]
+model_flag = "--model"
+prompt_template = "\"$AGENT_PROMPT\""
+
+[agents.opencode]
+binary = "opencode"
+description = "OpenCode CLI"
+headless_flags = ["run"]
+read_only_flags = ["--agent", "plan"]
+write_flags = []
+json_flags = ["--format", "json"]
+model_flag = "-m"
+prompt_template = "\"$AGENT_PROMPT\""

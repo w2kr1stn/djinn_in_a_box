@@ -11,6 +11,18 @@ from ai_dev_base.config.defaults import (
     get_all_volumes,
     get_volumes_by_category,
 )
+from ai_dev_base.config.loader import (
+    ConfigNotFoundError,
+    ConfigValidationError,
+    config_exists,
+    ensure_config_dir,
+    get_bundled_agents_path,
+    load_agents,
+    load_config,
+    migrate_from_env,
+    save_agents,
+    save_config,
+)
 from ai_dev_base.config.models import (
     AgentConfig,
     AgentsConfig,
@@ -32,4 +44,15 @@ __all__ = [
     "VOLUME_CATEGORIES",
     "get_all_volumes",
     "get_volumes_by_category",
+    # Loader
+    "ConfigNotFoundError",
+    "ConfigValidationError",
+    "config_exists",
+    "ensure_config_dir",
+    "get_bundled_agents_path",
+    "load_agents",
+    "load_config",
+    "migrate_from_env",
+    "save_agents",
+    "save_config",
 ]
