@@ -6,13 +6,20 @@ Tests for:
 - agents() - List available agents
 """
 
-from unittest.mock import patch
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
+import typer
 
 from ai_dev_base.commands.agent import build_agent_command
 from ai_dev_base.config.models import AgentConfig
 
+if TYPE_CHECKING:
+    from ai_dev_base.config.models import AppConfig
 
 # =============================================================================
 # Fixtures
@@ -185,7 +192,7 @@ class TestBuildAgentCommand:
         )
         parts = cmd.split()
 
-        # Order should be: binary, headless_flags, model_flag, model, write_flags, json_flags, prompt
+        # Order: binary, headless_flags, model_flag, model, write_flags, json_flags, prompt
         binary_idx = parts.index("claude")
         headless_idx = parts.index("-p")
         model_flag_idx = parts.index("--model")
@@ -289,9 +296,7 @@ class TestAgentCommandIntegration:
             ),
         }
 
-    def test_agent_command_matches_bash_behavior(
-        self, mock_agents: dict[str, AgentConfig]
-    ) -> None:
+    def test_agent_command_matches_bash_behavior(self, mock_agents: dict[str, AgentConfig]) -> None:
         """Verify command matches expected Bash script behavior."""
         # Test: codeagent run claude "test" should produce:
         # claude -p --permission-mode plan "$AGENT_PROMPT"
@@ -355,3 +360,393 @@ class TestAgentsListCommand:
         from ai_dev_base.commands.agent import run
 
         assert callable(run)
+
+    def test_agents_lists_available(self) -> None:
+        """Test agents command lists available agents."""
+        from ai_dev_base.commands.agent import agents
+
+        with patch("ai_dev_base.commands.agent.load_agents") as mock_load:
+            mock_load.return_value = {
+                "claude": AgentConfig(
+                    binary="claude",
+                    description="Anthropic Claude",
+                    prompt_template='"$AGENT_PROMPT"',
+                ),
+                "gemini": AgentConfig(
+                    binary="gemini",
+                    description="Google Gemini",
+                    prompt_template='"$AGENT_PROMPT"',
+                ),
+            }
+
+            # Should not raise
+            agents()
+
+            mock_load.assert_called_once()
+
+    def test_agents_json_output(self) -> None:
+        """Test agents --json outputs JSON format."""
+
+        from ai_dev_base.commands.agent import agents
+
+        with (
+            patch("ai_dev_base.commands.agent.load_agents") as mock_load,
+            patch("ai_dev_base.commands.agent.console") as mock_console,
+        ):
+            mock_load.return_value = {
+                "claude": AgentConfig(
+                    binary="claude",
+                    description="Anthropic Claude",
+                    prompt_template='"$AGENT_PROMPT"',
+                ),
+            }
+
+            agents(json_output=True)
+
+            # Should have printed JSON
+            mock_console.print.assert_called_once()
+            output = mock_console.print.call_args[0][0]
+            import json
+
+            data = json.loads(output)
+            assert "claude" in data
+
+    def test_agents_verbose_output(self) -> None:
+        """Test agents --verbose shows detailed info."""
+        from ai_dev_base.commands.agent import agents
+
+        with (
+            patch("ai_dev_base.commands.agent.load_agents") as mock_load,
+            patch("ai_dev_base.commands.agent.console") as mock_console,
+        ):
+            mock_load.return_value = {
+                "claude": AgentConfig(
+                    binary="claude",
+                    description="Anthropic Claude",
+                    headless_flags=["-p"],
+                    model_flag="--model",
+                    prompt_template='"$AGENT_PROMPT"',
+                ),
+            }
+
+            agents(verbose=True)
+
+            # Should have printed multiple lines with details
+            assert mock_console.print.call_count > 1
+
+
+# =============================================================================
+# run() Command Tests
+# =============================================================================
+
+
+class TestRunCommand:
+    """Tests for the run command."""
+
+    @pytest.fixture
+    def mock_agent_configs(self) -> dict[str, AgentConfig]:
+        """Provide mock agent configurations."""
+        return {
+            "claude": AgentConfig(
+                binary="claude",
+                description="Anthropic Claude Code CLI",
+                headless_flags=["-p"],
+                read_only_flags=["--permission-mode", "plan"],
+                write_flags=["--dangerously-skip-permissions"],
+                json_flags=["--output-format", "json"],
+                model_flag="--model",
+                prompt_template='"$AGENT_PROMPT"',
+            ),
+            "gemini": AgentConfig(
+                binary="gemini",
+                description="Google Gemini CLI",
+                headless_flags=["-p"],
+                model_flag="-m",
+                prompt_template='"$AGENT_PROMPT"',
+            ),
+        }
+
+    @pytest.fixture
+    def mock_app_config(self, tmp_path: Path) -> AppConfig:
+        """Provide mock app configuration."""
+        from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
+
+        # Create a valid projects dir
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        return AppConfig(
+            code_dir=projects_dir,
+            resources=ResourceLimits(),
+            shell=ShellConfig(),
+        )
+
+    def test_run_validates_agent_name(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run validates the agent name."""
+        from ai_dev_base.commands.agent import run
+
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="invalid", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+
+    def test_run_calls_compose_run_with_timeout(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run calls _compose_run_with_timeout."""
+        from ai_dev_base.commands.agent import run
+
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("ai_dev_base.commands.agent.ensure_network"),
+            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
+            pytest.raises(typer.Exit),
+        ):
+            mock_run.return_value = (0, "output", "")
+
+            run(agent="claude", prompt="test prompt")
+
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args[1]
+            assert "AGENT_PROMPT" in call_kwargs["env"]
+            assert call_kwargs["env"]["AGENT_PROMPT"] == "test prompt"
+
+    def test_run_with_write_flag(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run --write uses write_flags."""
+        from ai_dev_base.commands.agent import run
+
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("ai_dev_base.commands.agent.ensure_network"),
+            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
+            pytest.raises(typer.Exit),
+        ):
+            mock_run.return_value = (0, "output", "")
+
+            run(agent="claude", prompt="test", write=True)
+
+            call_kwargs = mock_run.call_args[1]
+            assert "--dangerously-skip-permissions" in call_kwargs["command"]
+
+    def test_run_with_timeout(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run --timeout passes timeout value."""
+        from ai_dev_base.commands.agent import run
+
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("ai_dev_base.commands.agent.ensure_network"),
+            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
+            pytest.raises(typer.Exit),
+        ):
+            mock_run.return_value = (0, "output", "")
+
+            run(agent="claude", prompt="test", timeout=300)
+
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs["timeout"] == 300
+
+    def test_run_with_docker_flag(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run --docker enables docker option."""
+        from ai_dev_base.commands.agent import run
+
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("ai_dev_base.commands.agent.ensure_network"),
+            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
+            pytest.raises(typer.Exit),
+        ):
+            mock_run.return_value = (0, "output", "")
+
+            run(agent="claude", prompt="test", docker=True)
+
+            # Check options
+            call_args = mock_run.call_args[0]
+            options = call_args[1]  # Second positional arg
+            assert options.docker_enabled is True
+
+            # Cleanup should be called with True
+            mock_cleanup.assert_called_once_with(True)
+
+
+# =============================================================================
+# _compose_run_with_timeout Tests
+# =============================================================================
+
+
+class TestComposeRunWithTimeout:
+    """Tests for _compose_run_with_timeout function."""
+
+    @pytest.fixture
+    def mock_app_config(self, tmp_path: Path) -> AppConfig:
+        """Provide mock app configuration."""
+        from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        return AppConfig(
+            code_dir=projects_dir,
+            resources=ResourceLimits(),
+            shell=ShellConfig(),
+        )
+
+    def test_returns_tuple_of_returncode_stdout_stderr(self, mock_app_config: AppConfig) -> None:
+        """Test function returns correct tuple structure."""
+        from ai_dev_base.commands.agent import _compose_run_with_timeout
+        from ai_dev_base.core.docker import ContainerOptions
+
+        options = ContainerOptions()
+
+        with (
+            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
+            patch(
+                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
+            ),
+            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = "output"
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            returncode, stdout, stderr = _compose_run_with_timeout(
+                mock_app_config,
+                options,
+                command="echo test",
+                env={"TEST": "value"},
+            )
+
+            assert returncode == 0
+            assert stdout == "output"
+            assert stderr == ""
+
+    def test_handles_timeout(self, mock_app_config: AppConfig) -> None:
+        """Test function handles subprocess timeout."""
+        import subprocess
+
+        from ai_dev_base.commands.agent import _compose_run_with_timeout
+        from ai_dev_base.core.docker import ContainerOptions
+
+        options = ContainerOptions()
+
+        with (
+            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
+            patch(
+                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
+            ),
+            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=10)
+
+            returncode, _stdout, stderr = _compose_run_with_timeout(
+                mock_app_config,
+                options,
+                command="echo test",
+                env={"TEST": "value"},
+                timeout=10,
+            )
+
+            # Return code 124 is conventional for timeout
+            assert returncode == 124
+            assert "Timeout" in stderr
+
+    def test_passes_environment_variables(self, mock_app_config: AppConfig) -> None:
+        """Test function passes environment variables to subprocess."""
+        from ai_dev_base.commands.agent import _compose_run_with_timeout
+        from ai_dev_base.core.docker import ContainerOptions
+
+        options = ContainerOptions()
+
+        with (
+            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
+            patch(
+                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
+            ),
+            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            _compose_run_with_timeout(
+                mock_app_config,
+                options,
+                command="echo test",
+                env={"AGENT_PROMPT": "test prompt"},
+            )
+
+            # Check subprocess was called with environment containing AGENT_PROMPT
+            call_kwargs = mock_run.call_args[1]
+            assert "AGENT_PROMPT" in call_kwargs["env"]
+
+    def test_includes_workspace_mount(self, mock_app_config: AppConfig, tmp_path: Path) -> None:
+        """Test function includes workspace mount when specified."""
+        from ai_dev_base.commands.agent import _compose_run_with_timeout
+        from ai_dev_base.core.docker import ContainerOptions
+
+        options = ContainerOptions(mount_path=tmp_path)
+
+        with (
+            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
+            patch(
+                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
+            ),
+            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            _compose_run_with_timeout(
+                mock_app_config,
+                options,
+                command="echo test",
+                env={},
+            )
+
+            # Check command includes volume mount
+            call_args = mock_run.call_args[0][0]
+            assert "-v" in call_args
+            mount_idx = call_args.index("-v")
+            mount_arg = call_args[mount_idx + 1]
+            assert str(tmp_path) in mount_arg
+            assert "/home/dev/workspace" in mount_arg
