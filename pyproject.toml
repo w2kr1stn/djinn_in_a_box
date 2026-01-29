@@ -81,7 +81,8 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
-    "B008", # FastAPI Depends() pattern in argument defaults
+    "B008",  # FastAPI Depends() pattern in argument defaults
+    "UP047", # Generic functions can use legacy TypeVar syntax (both are valid)
 ]
 
 [tool.ruff.format]

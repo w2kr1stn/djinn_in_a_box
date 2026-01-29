@@ -21,12 +21,12 @@ from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 
-P = ParamSpec("P")
-R = TypeVar("R")
-
 from ai_dev_base.core.console import console, error, info, success, warning
 from ai_dev_base.core.docker import ensure_network, is_container_running
 from ai_dev_base.core.paths import get_project_root
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 # =============================================================================
 # Constants

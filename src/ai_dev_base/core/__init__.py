@@ -1,6 +1,5 @@
 """Core utilities for AI Dev Base CLI."""
 
-from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.console import (
     blank,
     console,
@@ -14,6 +13,7 @@ from ai_dev_base.core.console import (
     success,
     warning,
 )
+from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
     ContainerOptions,
     RunResult,

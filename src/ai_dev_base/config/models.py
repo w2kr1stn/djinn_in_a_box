@@ -140,7 +140,7 @@ class ResourceLimits(BaseModel):
         return validate_memory_format(value)
 
     @model_validator(mode="after")
-    def validate_reservations(self) -> "ResourceLimits":
+    def validate_reservations(self) -> ResourceLimits:
         """Ensure cpu_reservation does not exceed cpu_limit."""
         if self.cpu_reservation > self.cpu_limit:
             msg = (
