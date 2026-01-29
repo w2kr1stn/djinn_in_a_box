@@ -12,6 +12,7 @@ from ai_dev_base.core.docker import (
     cleanup_docker_proxy,
     compose_build,
     compose_down,
+    compose_run,
     compose_up,
     delete_volume,
     delete_volumes,
@@ -423,6 +424,100 @@ class TestComposeBuild:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         result = compose_build(no_cache=True)
         assert "--no-cache" in result.command
+
+
+class TestComposeRun:
+    """Tests for compose_run function."""
+
+    @pytest.fixture
+    def mock_app_config(self, tmp_path: Path) -> AppConfig:
+        """Provide mock app configuration."""
+        from ai_dev_base.config.models import ResourceLimits
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        return AppConfig(
+            code_dir=projects_dir,
+            resources=ResourceLimits(),
+            shell=ShellConfig(),
+        )
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_run_headless_with_timeout(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test headless run passes timeout to subprocess."""
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="output", stderr="")
+
+        options = ContainerOptions()
+        result = compose_run(
+            mock_app_config,
+            options,
+            command="echo test",
+            interactive=False,
+            timeout=300,
+        )
+
+        assert result.success is True
+        assert result.stdout == "output"
+        # Verify timeout was passed
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["timeout"] == 300
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_run_handles_timeout_expiration(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test returns exit code 124 when timeout expires."""
+        import subprocess
+
+        mock_root.return_value = Path("/project")
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=10)
+
+        options = ContainerOptions()
+        result = compose_run(
+            mock_app_config,
+            options,
+            command="long_running_command",
+            interactive=False,
+            timeout=10,
+        )
+
+        # Return code 124 is conventional for timeout (like GNU timeout)
+        assert result.returncode == 124
+        assert "Timeout" in result.stderr
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_run_headless_mode(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test headless mode adds -T flag and captures output."""
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="captured", stderr="")
+
+        options = ContainerOptions()
+        result = compose_run(
+            mock_app_config,
+            options,
+            command="echo hello",
+            interactive=False,
+        )
+
+        assert "-T" in result.command
+        assert result.stdout == "captured"
 
 
 class TestComposeUp:

@@ -16,8 +16,6 @@ as the workspace (implicit --here behavior).
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -30,10 +28,7 @@ from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
     ensure_network,
-    get_compose_files,
-    get_shell_mount_args,
 )
-from ai_dev_base.core.paths import get_project_root
 
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AgentConfig, AppConfig
@@ -95,90 +90,6 @@ def build_agent_command(
     parts.append(agent_config.prompt_template)
 
     return " ".join(parts)
-
-
-# =============================================================================
-# Headless Execution with Timeout Support
-# =============================================================================
-
-
-def _compose_run_with_timeout(
-    config: AppConfig,
-    options: ContainerOptions,
-    *,
-    command: str,
-    env: dict[str, str],
-    timeout: int | None = None,
-) -> tuple[int, str, str]:
-    """Run container via compose with optional timeout.
-
-    This is a specialized version of compose_run that supports timeout
-    and proper signal handling for headless execution.
-
-    Args:
-        config: Application configuration.
-        options: Container options.
-        command: Shell command to execute.
-        env: Environment variables to pass.
-        timeout: Timeout in seconds (None = no timeout).
-
-    Returns:
-        Tuple of (returncode, stdout, stderr).
-    """
-    project_root = get_project_root()
-
-    # Build compose command
-    compose_files = get_compose_files(docker_enabled=options.docker_enabled)
-    cmd = ["docker", "compose", *compose_files, "run", "--rm", "-T"]
-
-    # Environment variables
-    env_vars: dict[str, str] = {
-        "ENABLE_FIREWALL": str(options.firewall_enabled).lower(),
-    }
-    env_vars.update(env)
-
-    for key, value in env_vars.items():
-        cmd.extend(["-e", f"{key}={value}"])
-
-    # Workspace mount
-    if options.mount_path is not None:
-        mount_str = f"{options.mount_path}:/home/dev/workspace"
-        cmd.extend(["-v", mount_str])
-        cmd.extend(["--workdir", "/home/dev/workspace"])
-
-    # Shell mounts
-    if options.shell_mounts:
-        shell_args = get_shell_mount_args(config)
-        cmd.extend(shell_args)
-
-    # Service and command
-    cmd.append("dev")
-    cmd.extend(["-c", command])
-
-    # Prepare environment for subprocess
-    subprocess_env = os.environ.copy()
-    subprocess_env.update(env_vars)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=project_root,
-            env=subprocess_env,
-            timeout=timeout,
-            check=False,
-        )
-        return result.returncode, result.stdout, result.stderr
-
-    except subprocess.TimeoutExpired as e:
-        # Handle timeout: decode output if available
-        # e.stdout/e.stderr are bytes | None when using capture_output=True
-        stdout = e.stdout.decode() if e.stdout is not None else ""
-        stderr = e.stderr.decode() if e.stderr is not None else f"Timeout after {timeout}s"
-
-        # Return code 124 is conventional for timeout (like GNU timeout command)
-        return 124, stdout, stderr
 
 
 # =============================================================================
@@ -322,21 +233,26 @@ def run(
     )
 
     # Execute in container
-    returncode, stdout, stderr = _compose_run_with_timeout(
+    from ai_dev_base.core.docker import compose_run
+
+    result = compose_run(
         app_config,
         options,
         command=agent_cmd,
+        interactive=False,
         env={"AGENT_PROMPT": prompt},
         timeout=timeout,
     )
 
     # Output to stdout (agent response)
-    if stdout:
-        console.print(stdout, end="")
+    if result.stdout:
+        console.print(result.stdout, end="")
 
     # Errors to stderr
-    if stderr:
-        err_console.print(stderr, end="")
+    if result.stderr:
+        err_console.print(result.stderr, end="")
+
+    returncode = result.returncode
 
     # Cleanup docker proxy if it was started
     cleanup_docker_proxy(docker)

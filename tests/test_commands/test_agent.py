@@ -498,23 +498,24 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
 
-    def test_run_calls_compose_run_with_timeout(
+    def test_run_calls_compose_run(
         self,
         mock_agent_configs: dict[str, AgentConfig],
         mock_app_config: AppConfig,
     ) -> None:
-        """Test run calls _compose_run_with_timeout."""
+        """Test run calls compose_run with correct parameters."""
         from ai_dev_base.commands.agent import run
+        from ai_dev_base.core.docker import RunResult
 
         with (
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.core.docker.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
             pytest.raises(typer.Exit),
         ):
-            mock_run.return_value = (0, "output", "")
+            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
 
             run(agent="claude", prompt="test prompt")
 
@@ -522,6 +523,7 @@ class TestRunCommand:
             call_kwargs = mock_run.call_args[1]
             assert "AGENT_PROMPT" in call_kwargs["env"]
             assert call_kwargs["env"]["AGENT_PROMPT"] == "test prompt"
+            assert call_kwargs["interactive"] is False
 
     def test_run_with_write_flag(
         self,
@@ -530,16 +532,17 @@ class TestRunCommand:
     ) -> None:
         """Test run --write uses write_flags."""
         from ai_dev_base.commands.agent import run
+        from ai_dev_base.core.docker import RunResult
 
         with (
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.core.docker.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
             pytest.raises(typer.Exit),
         ):
-            mock_run.return_value = (0, "output", "")
+            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
 
             run(agent="claude", prompt="test", write=True)
 
@@ -553,16 +556,17 @@ class TestRunCommand:
     ) -> None:
         """Test run --timeout passes timeout value."""
         from ai_dev_base.commands.agent import run
+        from ai_dev_base.core.docker import RunResult
 
         with (
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.core.docker.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
             pytest.raises(typer.Exit),
         ):
-            mock_run.return_value = (0, "output", "")
+            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
 
             run(agent="claude", prompt="test", timeout=300)
 
@@ -576,16 +580,17 @@ class TestRunCommand:
     ) -> None:
         """Test run --docker enables docker option."""
         from ai_dev_base.commands.agent import run
+        from ai_dev_base.core.docker import RunResult
 
         with (
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent._compose_run_with_timeout") as mock_run,
+            patch("ai_dev_base.core.docker.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
             pytest.raises(typer.Exit),
         ):
-            mock_run.return_value = (0, "output", "")
+            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
 
             run(agent="claude", prompt="test", docker=True)
 
@@ -598,155 +603,3 @@ class TestRunCommand:
             mock_cleanup.assert_called_once_with(True)
 
 
-# =============================================================================
-# _compose_run_with_timeout Tests
-# =============================================================================
-
-
-class TestComposeRunWithTimeout:
-    """Tests for _compose_run_with_timeout function."""
-
-    @pytest.fixture
-    def mock_app_config(self, tmp_path: Path) -> AppConfig:
-        """Provide mock app configuration."""
-        from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
-
-        projects_dir = tmp_path / "projects"
-        projects_dir.mkdir()
-
-        return AppConfig(
-            code_dir=projects_dir,
-            resources=ResourceLimits(),
-            shell=ShellConfig(),
-        )
-
-    def test_returns_tuple_of_returncode_stdout_stderr(self, mock_app_config: AppConfig) -> None:
-        """Test function returns correct tuple structure."""
-        from ai_dev_base.commands.agent import _compose_run_with_timeout
-        from ai_dev_base.core.docker import ContainerOptions
-
-        options = ContainerOptions()
-
-        with (
-            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
-            patch(
-                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
-            ),
-            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = "output"
-            mock_result.stderr = ""
-            mock_run.return_value = mock_result
-
-            returncode, stdout, stderr = _compose_run_with_timeout(
-                mock_app_config,
-                options,
-                command="echo test",
-                env={"TEST": "value"},
-            )
-
-            assert returncode == 0
-            assert stdout == "output"
-            assert stderr == ""
-
-    def test_handles_timeout(self, mock_app_config: AppConfig) -> None:
-        """Test function handles subprocess timeout."""
-        import subprocess
-
-        from ai_dev_base.commands.agent import _compose_run_with_timeout
-        from ai_dev_base.core.docker import ContainerOptions
-
-        options = ContainerOptions()
-
-        with (
-            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
-            patch(
-                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
-            ),
-            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=10)
-
-            returncode, _stdout, stderr = _compose_run_with_timeout(
-                mock_app_config,
-                options,
-                command="echo test",
-                env={"TEST": "value"},
-                timeout=10,
-            )
-
-            # Return code 124 is conventional for timeout
-            assert returncode == 124
-            assert "Timeout" in stderr
-
-    def test_passes_environment_variables(self, mock_app_config: AppConfig) -> None:
-        """Test function passes environment variables to subprocess."""
-        from ai_dev_base.commands.agent import _compose_run_with_timeout
-        from ai_dev_base.core.docker import ContainerOptions
-
-        options = ContainerOptions()
-
-        with (
-            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
-            patch(
-                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
-            ),
-            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = ""
-            mock_result.stderr = ""
-            mock_run.return_value = mock_result
-
-            _compose_run_with_timeout(
-                mock_app_config,
-                options,
-                command="echo test",
-                env={"AGENT_PROMPT": "test prompt"},
-            )
-
-            # Check subprocess was called with environment containing AGENT_PROMPT
-            call_kwargs = mock_run.call_args[1]
-            assert "AGENT_PROMPT" in call_kwargs["env"]
-
-    def test_includes_workspace_mount(self, mock_app_config: AppConfig, tmp_path: Path) -> None:
-        """Test function includes workspace mount when specified."""
-        from ai_dev_base.commands.agent import _compose_run_with_timeout
-        from ai_dev_base.core.docker import ContainerOptions
-
-        options = ContainerOptions(mount_path=tmp_path)
-
-        with (
-            patch("ai_dev_base.commands.agent.get_project_root", return_value=Path("/project")),
-            patch(
-                "ai_dev_base.commands.agent.get_compose_files", return_value=["-f", "compose.yml"]
-            ),
-            patch("ai_dev_base.commands.agent.get_shell_mount_args", return_value=[]),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = ""
-            mock_result.stderr = ""
-            mock_run.return_value = mock_result
-
-            _compose_run_with_timeout(
-                mock_app_config,
-                options,
-                command="echo test",
-                env={},
-            )
-
-            # Check command includes volume mount
-            call_args = mock_run.call_args[0][0]
-            assert "-v" in call_args
-            mount_idx = call_args.index("-v")
-            mount_arg = call_args[mount_idx + 1]
-            assert str(tmp_path) in mount_arg
-            assert "/home/dev/workspace" in mount_arg
