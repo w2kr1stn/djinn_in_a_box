@@ -14,10 +14,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ParamSpec, TypeVar
 
 import typer
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 from ai_dev_base.core.console import console, error, info, success, warning
 from ai_dev_base.core.docker import ensure_network, is_container_running
@@ -47,8 +52,6 @@ AI_DEV_NETWORK: str = "ai-dev-network"
 
 class MCPCliNotFoundError(Exception):
     """Raised when the docker mcp CLI plugin is not installed."""
-
-    pass
 
 
 # =============================================================================
@@ -103,6 +106,31 @@ def get_mcp_dir() -> Path:
         Path to the mcp/ directory containing docker-compose.yml.
     """
     return get_project_root() / "mcp"
+
+
+def require_mcp_cli(func: Callable[P, R]) -> Callable[P, R]:
+    """Decorator to check for MCP CLI before executing a command.
+
+    Wraps the function with a check for the docker mcp CLI plugin.
+    If the plugin is not installed, displays an error and exits.
+
+    Example:
+        >>> @require_mcp_cli
+        ... def my_command():
+        ...     # docker mcp commands here
+        ...     pass
+    """
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            check_mcp_cli()
+        except MCPCliNotFoundError as e:
+            error(str(e))
+            raise typer.Exit(1) from None
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 # =============================================================================
@@ -304,6 +332,7 @@ def logs(
 # =============================================================================
 
 
+@require_mcp_cli
 def enable(
     server: Annotated[str, typer.Argument(help="MCP server name to enable")],
 ) -> None:
@@ -318,12 +347,6 @@ def enable(
     Args:
         server: Name of the MCP server to enable.
     """
-    try:
-        check_mcp_cli()
-    except MCPCliNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
     require_running()
 
     info(f"Enabling MCP server: {server}")
@@ -339,6 +362,7 @@ def enable(
         raise typer.Exit(result.returncode)
 
 
+@require_mcp_cli
 def disable(
     server: Annotated[str, typer.Argument(help="MCP server name to disable")],
 ) -> None:
@@ -349,12 +373,6 @@ def disable(
     Args:
         server: Name of the MCP server to disable.
     """
-    try:
-        check_mcp_cli()
-    except MCPCliNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
     require_running()
 
     warning(f"Disabling MCP server: {server}")
@@ -370,17 +388,12 @@ def disable(
         raise typer.Exit(result.returncode)
 
 
+@require_mcp_cli
 def servers() -> None:
     """List enabled MCP servers.
 
     Equivalent to: ./mcp.sh servers
     """
-    try:
-        check_mcp_cli()
-    except MCPCliNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
     info("Enabled MCP Servers")
     console.print("=" * 40)
 
@@ -397,6 +410,7 @@ def servers() -> None:
         console.print("No servers enabled or gateway not running")
 
 
+@require_mcp_cli
 def catalog() -> None:
     """Show available servers in the catalog.
 
@@ -405,12 +419,6 @@ def catalog() -> None:
     Displays the docker-mcp catalog or provides instructions
     for initializing it.
     """
-    try:
-        check_mcp_cli()
-    except MCPCliNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
     info("MCP Server Catalog")
     console.print("=" * 40)
 
