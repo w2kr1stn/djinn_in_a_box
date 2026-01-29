@@ -14,8 +14,11 @@ tools/tools.txt
 Thumbs.db
 
 # Session/Task files (AI agent working files)
+.claude/
+FEATURE.md
 SESSION*.md
-TASKS.md
+TASKS.yml
+REVIEW.md
 
 # Python
 __pycache__/
@@ -23,6 +26,9 @@ __pycache__/
 *$py.class
 .venv/
 *.egg-info/
+
+# Test
+.coverage
 
 # Node
 node_modules/
