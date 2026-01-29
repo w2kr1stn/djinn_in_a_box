@@ -632,3 +632,87 @@ class TestGetExistingVolumesByCategory:
         mock_exists.return_value = True
         volumes = get_existing_volumes_by_category("unknown")
         assert volumes == []
+
+
+# =============================================================================
+# Subprocess Error Handling Tests
+# =============================================================================
+
+
+class TestComposeRunErrorHandling:
+    """Tests for subprocess error handling in compose_run."""
+
+    @pytest.fixture
+    def mock_app_config(self, tmp_path: Path) -> AppConfig:
+        """Provide mock app configuration."""
+        from ai_dev_base.config.models import ResourceLimits
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        return AppConfig(
+            code_dir=projects_dir,
+            resources=ResourceLimits(),
+            shell=ShellConfig(),
+        )
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_handles_docker_not_found(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test graceful handling when docker command is not found."""
+        mock_root.return_value = Path("/project")
+        mock_run.side_effect = FileNotFoundError(
+            "[Errno 2] No such file or directory: 'docker'"
+        )
+
+        options = ContainerOptions()
+        result = compose_run(mock_app_config, options, command="test", interactive=False)
+
+        # Should return error result, not crash
+        assert result.returncode == 127  # Command not found convention
+        assert "docker" in result.stderr.lower() or "not found" in result.stderr.lower()
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_handles_permission_error(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test graceful handling when docker socket is inaccessible."""
+        mock_root.return_value = Path("/project")
+        mock_run.side_effect = PermissionError(
+            "Permission denied: '/var/run/docker.sock'"
+        )
+
+        options = ContainerOptions()
+        result = compose_run(mock_app_config, options, command="test", interactive=False)
+
+        assert result.returncode == 126  # Permission denied convention
+        assert "permission" in result.stderr.lower()
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_handles_docker_not_found_interactive(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test graceful handling when docker command is not found in interactive mode."""
+        mock_root.return_value = Path("/project")
+        mock_run.side_effect = FileNotFoundError(
+            "[Errno 2] No such file or directory: 'docker'"
+        )
+
+        options = ContainerOptions()
+        result = compose_run(mock_app_config, options, interactive=True)
+
+        # Should return error result, not crash
+        assert result.returncode == 127
+        assert "docker" in result.stderr.lower() or "not found" in result.stderr.lower()
