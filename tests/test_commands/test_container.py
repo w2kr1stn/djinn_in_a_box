@@ -69,7 +69,7 @@ class TestStartCommand:
         """Test start loads configuration."""
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network"),
+            patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.compose_run") as mock_run,
             patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
             patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
@@ -89,6 +89,7 @@ class TestStartCommand:
         """Test start ensures Docker network exists."""
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
+            patch("ai_dev_base.commands.container.network_exists", return_value=False),
             patch("ai_dev_base.commands.container.ensure_network") as mock_network,
             patch("ai_dev_base.commands.container.compose_run") as mock_run,
             patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
@@ -99,6 +100,7 @@ class TestStartCommand:
             mock_config.shell.skip_mounts = False
             mock_load.return_value = mock_config
             mock_run.return_value = RunResult(returncode=0)
+            mock_network.return_value = True  # Network created successfully
 
             with pytest.raises(typer.Exit):
                 container.start()
@@ -109,7 +111,7 @@ class TestStartCommand:
         """Test start --docker sets docker_enabled option."""
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network"),
+            patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.compose_run") as mock_run,
             patch("ai_dev_base.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
@@ -135,7 +137,7 @@ class TestStartCommand:
         """Test start --firewall sets firewall_enabled option."""
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network"),
+            patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.compose_run") as mock_run,
             patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
             patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
@@ -159,7 +161,7 @@ class TestStartCommand:
 
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network"),
+            patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.compose_run") as mock_run,
             patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
             patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
@@ -181,7 +183,7 @@ class TestStartCommand:
         """Test start --mount mounts specified directory."""
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network"),
+            patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.compose_run") as mock_run,
             patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
             patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
@@ -263,6 +265,7 @@ class TestAuthCommand:
             mock_config = MagicMock()
             mock_load.return_value = mock_config
             mock_run.return_value = MagicMock(returncode=0)
+            mock_up.return_value = RunResult(returncode=0)  # Proxy start succeeds
 
             with pytest.raises(typer.Exit):
                 container.auth(docker=True)
@@ -435,6 +438,7 @@ class TestAuditCommand:
         ):
             mock_run.return_value = MagicMock(returncode=0)
 
+            # Successful audit returns normally (no exit)
             container.audit()
 
             # Should have called docker logs
@@ -450,11 +454,25 @@ class TestAuditCommand:
         ):
             mock_run.return_value = MagicMock(returncode=0)
 
+            # Successful audit returns normally (no exit)
             container.audit(tail=100)
 
             call_args = mock_run.call_args[0][0]
             assert "--tail" in call_args
             assert "100" in call_args
+
+    def test_audit_propagates_error_exit_code(self) -> None:
+        """Test audit propagates error exit code from docker logs."""
+        with (
+            patch("ai_dev_base.commands.container.is_container_running", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=1)
+
+            with pytest.raises(typer.Exit) as exc_info:
+                container.audit()
+
+            assert exc_info.value.exit_code == 1
 
 
 # =============================================================================
@@ -517,8 +535,10 @@ class TestEnterCommand:
             mock_get.return_value = ["ai-dev-base-dev-12345"]
             mock_run.return_value = MagicMock(returncode=0)
 
-            container.enter()
+            with pytest.raises(typer.Exit) as exc_info:
+                container.enter()
 
+            assert exc_info.value.exit_code == 0
             call_args = mock_run.call_args[0][0]
             assert "docker" in call_args
             assert "exec" in call_args
