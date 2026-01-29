@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # =============================================================================
 # Memory Format Validation
@@ -71,7 +71,7 @@ class AgentConfig(BaseModel):
         validate_assignment=True,
     )
 
-    binary: str
+    binary: Annotated[str, Field(min_length=1)]
     """Executable binary name (e.g., 'claude', 'gemini')."""
 
     description: str = ""
@@ -139,14 +139,16 @@ class ResourceLimits(BaseModel):
         """Validate memory format strings."""
         return validate_memory_format(value)
 
-    @field_validator("cpu_reservation", mode="after")
-    @classmethod
-    def validate_cpu_reservation(cls, value: int, info: object) -> int:
+    @model_validator(mode="after")
+    def validate_reservations(self) -> "ResourceLimits":
         """Ensure cpu_reservation does not exceed cpu_limit."""
-        # Access validated data from the info context
-        # Note: In Pydantic v2, we need to handle this differently
-        # The validation order ensures cpu_limit is validated first
-        return value
+        if self.cpu_reservation > self.cpu_limit:
+            msg = (
+                f"cpu_reservation ({self.cpu_reservation}) cannot exceed "
+                f"cpu_limit ({self.cpu_limit})"
+            )
+            raise ValueError(msg)
+        return self
 
 
 # =============================================================================
