@@ -7,7 +7,7 @@
 # Usage:
 #   cp packages.txt.example packages.txt
 #   # Edit packages.txt
-#   ./scripts/dev.sh build
+#   codeagent build
 #
 # Note: Base packages (git, curl, zsh, jq, etc.) are already included.
 # =============================================================================

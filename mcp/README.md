@@ -1,6 +1,6 @@
-# MCP Gateway für AI Dev Container
+# MCP Gateway fuer AI Dev Container
 
-Dieses Setup stellt einen Docker MCP Gateway bereit, der MCP Server aus dem [Docker MCP Catalog](https://hub.docker.com/search?q=mcp%2F) für alle CLI Coding Agents verfügbar macht.
+Dieses Setup stellt einen Docker MCP Gateway bereit, der MCP Server aus dem [Docker MCP Catalog](https://hub.docker.com/search?q=mcp%2F) fuer alle CLI Coding Agents verfuegbar macht.
 
 ## Voraussetzungen
 
@@ -17,27 +17,27 @@ docker run --rm -v ~/.docker/cli-plugins:/output golang:alpine sh -c "
     # 1. Setup
     apk add --no-cache git make
 
-    # 2. Ordner faken, damit das Makefile nicht abstürzt
+    # 2. Ordner faken, damit das Makefile nicht abstuerzt
     mkdir -p /root/.docker/cli-plugins
 
     # 3. Klonen
     git clone https://github.com/docker/mcp-gateway.git /build
     cd /build
 
-    # 4. Bauen (jetzt läuft es durch, weil der Zielordner existiert)
+    # 4. Bauen (jetzt laeuft es durch, weil der Zielordner existiert)
     make docker-mcp
 
     # 5. Das fertige Ergebnis auf deinen Host kopieren
     # (Das Makefile hat es bereits nach /root/.docker/cli-plugins gelegt)
     cp /root/.docker/cli-plugins/docker-mcp /output/
-    
-    # Rechte für den User anpassen (da Container root war)
+
+    # Rechte fuer den User anpassen (da Container root war)
     chown $(id -u):$(id -g) /output/docker-mcp
 "
 
 # Option 3: Binary von GitHub Releases
 # https://github.com/docker/mcp-gateway/releases
-# → Nach ~/.docker/cli-plugins/docker-mcp kopieren
+# -> Nach ~/.docker/cli-plugins/docker-mcp kopieren
 
 # Verifizieren
 docker mcp --help
@@ -84,31 +84,29 @@ docker mcp --help
 ### 1. MCP Gateway starten
 
 ```bash
-cd mcp
-./mcp.sh start
+mcpgateway start
 ```
 
 ### 2. MCP Server aktivieren
 
 ```bash
 # Web-Suche
-./mcp.sh enable duckduckgo
+mcpgateway enable duckduckgo
 
 # Persistenter Speicher
-./mcp.sh enable memory
+mcpgateway enable memory
 
 # HTTP Requests
-./mcp.sh enable fetch
+mcpgateway enable fetch
 
-# Status prüfen
-./mcp.sh servers
+# Status pruefen
+mcpgateway servers
 ```
 
 ### 3. AI Dev Container starten
 
 ```bash
-cd ..
-./dev.sh start
+codeagent start
 
 # Im Container: Claude Code nutzt automatisch den Gateway
 claude
@@ -118,16 +116,16 @@ claude
 
 | Befehl | Beschreibung |
 |--------|--------------|
-| `./mcp.sh start` | Gateway starten |
-| `./mcp.sh stop` | Gateway stoppen |
-| `./mcp.sh status` | Status und aktivierte Server anzeigen |
-| `./mcp.sh logs` | Gateway-Logs anzeigen |
-| `./mcp.sh enable <server>` | MCP Server aktivieren |
-| `./mcp.sh disable <server>` | MCP Server deaktivieren |
-| `./mcp.sh servers` | Aktivierte Server auflisten |
-| `./mcp.sh catalog` | Verfügbare Server anzeigen |
-| `./mcp.sh test` | Konnektivität testen |
-| `./mcp.sh clean` | Alles zurücksetzen |
+| `mcpgateway start` | Gateway starten |
+| `mcpgateway stop` | Gateway stoppen |
+| `mcpgateway status` | Status und aktivierte Server anzeigen |
+| `mcpgateway logs` | Gateway-Logs anzeigen |
+| `mcpgateway enable <server>` | MCP Server aktivieren |
+| `mcpgateway disable <server>` | MCP Server deaktivieren |
+| `mcpgateway servers` | Aktivierte Server auflisten |
+| `mcpgateway catalog` | Verfuegbare Server anzeigen |
+| `mcpgateway test` | Konnektivitaet testen |
+| `mcpgateway clean` | Alles zuruecksetzen |
 
 ## Verfügbare MCP Server
 
@@ -155,20 +153,18 @@ docker mcp catalog show docker-mcp
 
 ```bash
 # Einmalig: Setup
-cd ai-dev-base/mcp
-./mcp.sh start
-./mcp.sh enable duckduckgo
-./mcp.sh enable memory
+mcpgateway start
+mcpgateway enable duckduckgo
+mcpgateway enable memory
 
 # Einmalig: OAuth-Authentifizierung
-cd ..
-./dev.sh auth    # Host-Netzwerk für OAuth
-# → Claude Code und Codex authentifizieren
+codeagent auth    # Host-Netzwerk fuer OAuth
+# -> Claude Code und Codex authentifizieren
 exit
 
-# Täglich: Normal arbeiten
-./dev.sh start   # Dediziertes Netzwerk
-claude           # MCP Tools verfügbar
+# Taeglich: Normal arbeiten
+codeagent start   # Dediziertes Netzwerk
+claude            # MCP Tools verfuegbar
 ```
 
 ## Fehlerbehebung
@@ -176,16 +172,16 @@ claude           # MCP Tools verfügbar
 ### Agent findet MCP nicht
 
 ```bash
-# 1. Gateway läuft?
-./mcp.sh status
+# 1. Gateway laeuft?
+mcpgateway status
 
 # 2. Netzwerk existiert?
 docker network ls | grep ai-dev
 
 # 3. Verbindung testen
-./mcp.sh test
+mcpgateway test
 
-# 4. Im Container prüfen
+# 4. Im Container pruefen
 # a)
 cat ~/.claude/claude.json | jq .mcpServers
 # b)
@@ -245,14 +241,14 @@ ls -la /var/run/docker.sock
 
 ---
 
-## Systematische Überprüfung
+## Systematische Ueberpruefung
 
-### 1. Gateway-Status prüfen
+### 1. Gateway-Status pruefen
 
 ```bash
 # Vom Host aus
-./mcp.sh status
-./mcp.sh test
+mcpgateway status
+mcpgateway test
 
 # Zeigt aktivierte Server
 docker mcp server ls
@@ -315,11 +311,11 @@ codex
 # > Suche im Web nach aktuellen Docker News
 ```
 
-### 6. Gateway-Logs prüfen
+### 6. Gateway-Logs pruefen
 
 ```bash
 # Vom Host aus
-./mcp.sh logs
+mcpgateway logs
 
 # Zeigt Tool-Aufrufe (--log-calls ist aktiv)
 # Beispiel: "Tool called: duckduckgo.search query='Docker MCP'"
@@ -336,9 +332,9 @@ curl -s http://mcp-gateway:8811/ | head -20
 
 ### Checkliste
 
-| Prüfpunkt | Befehl | Erwartung |
-|-----------|--------|-----------|
-| Gateway läuft | `./mcp.sh status` | "Running" |
+| Pruefpunkt | Befehl | Erwartung |
+|------------|--------|-----------|
+| Gateway laeuft | `mcpgateway status` | "Running" |
 | Server aktiviert | `docker mcp server ls` | Liste mit Servern |
 | Claude Config | `cat ~/.claude/claude.json` | `mcpServers.docker-gateway` |
 | Codex Config | `cat ~/.codex/config.toml` | `[mcp_servers.docker-gateway]` |

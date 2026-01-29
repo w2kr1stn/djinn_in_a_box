@@ -1,6 +1,6 @@
 # Headless Mode Cheatsheet
 
-Quick reference for running CLI agents in headless mode via `dev.sh run` or `agent_runner.py`.
+Quick reference for running CLI agents in headless mode via `codeagent run`.
 
 ---
 
@@ -10,7 +10,7 @@ Quick reference for running CLI agents in headless mode via `dev.sh run` or `age
 
 | Alias | Full Model Name | Beschreibung |
 |-------|-----------------|--------------|
-| `opus` | `claude-opus-4-5-20250929` | Stärkstes Modell, tiefes Reasoning, langsamer |
+| `opus` | `claude-opus-4-5-20250929` | Staerkstes Modell, tiefes Reasoning, langsamer |
 | `sonnet` | `claude-sonnet-4-5-20250929` | Schnell, kosteneffizient, guter Default |
 
 ### Gemini CLI
@@ -20,104 +20,55 @@ Quick reference for running CLI agents in headless mode via `dev.sh run` or `age
 | `gemini-2.5-pro` | Pro-Modell, starkes Reasoning, 1M Token Context |
 | `gemini-2.5-flash` | Flash-Modell, schnell und kosteneffizient |
 
-> Verfugbare Modelle prüfen: `gemini --model-list` oder im Container `gemini -m <model>`
+> Verfuegbare Modelle pruefen: `gemini --model-list` oder im Container `gemini -m <model>`
 > Die Gemini CLI README referenziert "Gemini 3 models" - bei neueren Versionen
-> sind ggf. `gemini-3-pro` / `gemini-3-flash` verfügbar.
+> sind ggf. `gemini-3-pro` / `gemini-3-flash` verfuegbar.
 
 ---
 
-## Bash (dev.sh)
+## CLI Usage (codeagent run)
 
 ```bash
 # Claude mit Opus (read-only, Analyse)
-./dev.sh run claude "Erkläre die Architektur" --model opus
+codeagent run claude "Erklaere die Architektur" --model opus
 
 # Claude mit Sonnet (write, schneller)
-./dev.sh run claude "Fix den Bug in main.py" --write --model sonnet
+codeagent run claude "Fix den Bug in main.py" --write --model sonnet
 
 # Gemini Pro (tiefes Reasoning)
-./dev.sh run gemini "Refactore die Auth-Logik" --write --model gemini-2.5-pro
+codeagent run gemini "Refactore die Auth-Logik" --write --model gemini-2.5-pro
 
 # Gemini Flash (schnell)
-./dev.sh run gemini "Fasse die README zusammen" --model gemini-2.5-flash
+codeagent run gemini "Fasse die README zusammen" --model gemini-2.5-flash
 
-# JSON-Output für Scripting
-./dev.sh run claude "Liste alle TODOs" --model sonnet --json | jq '.result'
+# JSON-Output fuer Scripting
+codeagent run claude "Liste alle TODOs" --model sonnet --json | jq '.result'
 
 # Anderes Workspace-Verzeichnis
-./dev.sh run claude "Analysiere dieses Projekt" --model opus --mount ~/anderes-projekt
-```
+codeagent run claude "Analysiere dieses Projekt" --model opus --mount ~/anderes-projekt
 
----
+# Mit Docker-Zugriff
+codeagent run claude "Build und teste das Projekt" --docker
 
-## Python (agent_runner.py)
-
-### CLI
-
-```bash
-# Claude Opus
-python3 scripts/agent_runner.py run claude "Erkläre die Architektur" --model opus
-
-# Claude Sonnet + Write
-python3 scripts/agent_runner.py run claude "Fix den Bug" --write --model sonnet
-
-# Gemini Pro + JSON
-python3 scripts/agent_runner.py run gemini "Refactore main.py" --write --model gemini-2.5-pro --json
-
-# Liste verfügbarer Agents
-python3 scripts/agent_runner.py list
-```
-
-### Als Python-Modul
-
-```python
-from agent_runner import AgentRunner
-
-runner = AgentRunner(workspace="/path/to/project")
-
-# Claude Opus - tiefe Analyse
-result = runner.run(
-    "claude",
-    "Erkläre die Architektur und identifiziere potentielle Probleme",
-    model="opus",
-)
-print(result.stdout)
-
-# Claude Sonnet - schnelle Fixes
-result = runner.run(
-    "claude",
-    "Fix alle Type Errors",
-    write=True,
-    model="sonnet",
-)
-
-# Gemini Pro - mit JSON output
-result = runner.run(
-    "gemini",
-    "Analysiere die Dependencies auf Vulnerabilities",
-    model="gemini-2.5-pro",
-    json_output=True,
-)
-
-import json
-data = json.loads(result.stdout)
+# Verfuegbare Agents anzeigen
+codeagent agents
 ```
 
 ---
 
 ## Flags-Referenz
 
-| Flag | Bash (`dev.sh run`) | Python CLI | Python Modul |
-|------|---------------------|------------|--------------|
-| Agent | `<agent>` (positional) | `<agent>` (positional) | `agent=` |
-| Prompt | `"<prompt>"` | `"<prompt>"` | `prompt=` |
-| Model | `--model <name>` | `--model <name>` | `model=` |
-| Write | `--write` | `--write` | `write=True` |
-| JSON | `--json` | `--json` | `json_output=True` |
-| Workspace | `--mount <path>` | `--workspace <path>` | `workspace=` |
-| Docker | `--docker` | `--docker` | `docker_enabled=True` |
-| Firewall | `--firewall` | `--firewall` | `firewall_enabled=True` |
-| Timeout | - | `--timeout <sec>` | `timeout=` |
+| Flag | Description |
+|------|-------------|
+| `<agent>` | Agent name: `claude`, `gemini`, `codex`, `opencode` |
+| `<prompt>` | The prompt/task to execute |
+| `--model <name>` | Model to use (e.g., `opus`, `sonnet`, `gemini-2.5-pro`) |
+| `--write` | Enable write/edit mode |
+| `--json` | Output as JSON for scripting |
+| `--mount <path>` | Mount additional workspace directory |
+| `--docker` | Enable Docker socket access |
+| `--firewall` | Enable network firewall |
+| `--timeout <sec>` | Timeout in seconds |
 
 ---
 
@@ -125,9 +76,9 @@ data = json.loads(result.stdout)
 
 | Use Case | Empfehlung | Warum |
 |----------|-----------|-------|
-| Architektur-Analyse | `opus` / `gemini-2.5-pro` | Tiefes Reasoning, komplexe Zusammenhänge |
+| Architektur-Analyse | `opus` / `gemini-2.5-pro` | Tiefes Reasoning, komplexe Zusammenhaenge |
 | Quick Fixes | `sonnet` / `gemini-2.5-flash` | Schnell, kosteneffizient |
-| Code Review | `opus` / `gemini-2.5-pro` | Gründliche Analyse |
-| Refactoring | `sonnet` | Gute Balance Speed/Qualität |
+| Code Review | `opus` / `gemini-2.5-pro` | Gruendliche Analyse |
+| Refactoring | `sonnet` | Gute Balance Speed/Qualitaet |
 | Batch-Scripting | `sonnet` / `gemini-2.5-flash` | Kosten bei vielen Aufrufen |
-| Security Audit | `opus` | Maximale Gründlichkeit |
+| Security Audit | `opus` | Maximale Gruendlichkeit |

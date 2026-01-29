@@ -160,7 +160,7 @@ if [[ -n "${DOCKER_HOST:-}" ]]; then
 else
     echo ""
     echo "🐳 Docker Access: Disabled"
-    echo "   Enable with: ./dev.sh start --docker"
+    echo "   Enable with: codeagent start --docker"
     echo ""
 fi
 
