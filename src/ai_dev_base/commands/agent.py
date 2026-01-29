@@ -28,6 +28,7 @@ from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
     ensure_network,
+    network_exists,
 )
 
 if TYPE_CHECKING:
@@ -184,7 +185,9 @@ def run(
     agent_config = agent_configs[agent]
 
     # Ensure Docker network exists
-    ensure_network()
+    if not network_exists() and not ensure_network():
+        error("Failed to create Docker network 'ai-dev-network'")
+        raise typer.Exit(1)
 
     # Determine workspace path (implicit --here: default to cwd)
     workspace = mount if mount else Path.cwd()
