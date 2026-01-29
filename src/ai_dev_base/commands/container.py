@@ -659,6 +659,8 @@ def update() -> None:
         error(f"Update failed with exit code {result.returncode}")
         raise typer.Exit(result.returncode)
 
+    success("Update completed successfully")
+
 
 # =============================================================================
 # Enter Command
