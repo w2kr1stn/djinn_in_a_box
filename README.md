@@ -1,12 +1,12 @@
 # AI Dev Base
 
-Minimales, wiederverwendbares Base-Image für AI-gestützte Entwicklung mit **Claude Code**, **Gemini CLI**, **Codex CLI** und **OpenCode**.
+Minimales, wiederverwendbares Base-Image fuer AI-gestuetzte Entwicklung mit **Claude Code**, **Gemini CLI**, **Codex CLI** und **OpenCode**.
 
 ## Features
 
 | Tool | Zweck |
 |------|-------|
-| **fnm** | Fast Node Manager – Node.js Versionen pro Projekt |
+| **fnm** | Fast Node Manager - Node.js Versionen pro Projekt |
 | **uv** | Ultraschneller Python Package Manager |
 | **Claude Code** | Anthropic's AI Coding Agent |
 | **Gemini CLI** | Google's AI Coding Agent |
@@ -15,127 +15,180 @@ Minimales, wiederverwendbares Base-Image für AI-gestützte Entwicklung mit **Cl
 | **Oh My Zsh** | ZSH Framework mit Custom-Plugins |
 | **Oh My Posh** | Prompt-Theming mit Custom-Theme |
 
-## Schnellstart
-
-### 1. Konfiguration erstellen
+## Installation
 
 ```bash
+# Install CLI tools via uv
 cd ai-dev-base
+uv tool install .
 
-# Template kopieren und anpassen
-cp .env.example .env
-
-# Mindestens CODE_DIR setzen:
-# CODE_DIR=/pfad/zu/deinen/projekten
-nano .env
+# Or install in development mode
+uv sync
 ```
 
-### 2. Base-Image bauen
+After installation, `codeagent` and `mcpgateway` commands are available globally.
+
+## Quick Start
 
 ```bash
-./scripts/dev.sh build
+# 1. Initialize configuration (interactive)
+codeagent init
+
+# 2. Build the Docker image
+codeagent build
+
+# 3. Authenticate with AI services (once)
+codeagent auth
+# Im Container: claude, gemini auth, codex, opencode
+
+# 4. Start development shell (daily)
+codeagent start
+
+# Or start with Docker access
+codeagent start --docker
 ```
 
-### 3. MCP Gateway starten (optional, aber empfohlen)
+Die Credentials werden in persistenten Docker-Volumes gespeichert und ueberleben Container-Neustarts.
 
-```bash
-cd mcp
-./mcp.sh start
-./mcp.sh enable duckduckgo   # Web-Suche
-./mcp.sh enable memory       # Persistenter Speicher
-cd ..
-```
-
-### 4. Tools authentifizieren (einmalig)
-
-```bash
-# Startet Container mit Host-Netzwerk für OAuth
-./scripts/dev.sh auth
-
-# Im Container:
-claude       # Folge dem OAuth-Flow im Browser
-gemini auth  # Authentifizierung für Google Generative AI
-codex        # Folge dem OAuth-Flow im Browser
-opencode     # API-Keys werden in ~/.config/opencode/.opencode.json gespeichert
-exit
-```
-
-### 5. Normal arbeiten (täglich)
-
-```bash
-./scripts/dev.sh start
-
-# Im Container:
-claude     # Mit MCP Tools verfügbar
-gemini
-codex
-opencode   # Mit lokalem LLM Support (Ollama)
-```
-
-Die Credentials werden in persistenten Docker-Volumes gespeichert und überleben Container-Neustarts.
-
-> **Hinweis:** `./dev.sh auth` nutzt `network_mode: host` für OAuth-Callbacks. Nach der einmaligen Authentifizierung verwendet `./dev.sh start` ein dediziertes Docker-Netzwerk.
+> **Hinweis:** `codeagent auth` nutzt `network_mode: host` fuer OAuth-Callbacks. Nach der einmaligen Authentifizierung verwendet `codeagent start` ein dediziertes Docker-Netzwerk.
 
 ---
 
-## dev.sh Befehle
+## CLI Commands
 
-Das `dev.sh` Script vereinfacht die Container-Verwaltung:
+### codeagent
 
-| Befehl | Beschreibung |
-|--------|--------------|
-| `./dev.sh build` | Baut das Base-Image |
-| `./dev.sh start` | Startet Container (dediziertes Netzwerk) |
-| `./dev.sh auth` | Startet Container für OAuth (Host-Netzwerk) |
-| `./dev.sh status` | Zeigt Container, Volumes und MCP-Status |
-| `./dev.sh audit` | Zeigt Docker Proxy Audit-Log |
-| `./dev.sh clean` | Entfernt Container |
-| `./dev.sh clean --all` | Entfernt Container, Volumes **und** Netzwerk |
-| `./dev.sh help` | Zeigt Hilfe |
+Container lifecycle and agent execution:
 
-### Optionen für `start`
+```bash
+codeagent --help              # Show all commands
+codeagent --version           # Show version
+
+# Setup
+codeagent init                # Initialize config interactively
+codeagent config show         # Show current configuration
+codeagent config path         # Show config file path
+
+# Container lifecycle
+codeagent build               # Build Docker image
+codeagent start [options]     # Start interactive shell
+codeagent auth                # OAuth authentication
+codeagent status              # Show system status
+codeagent enter               # Attach to running container
+codeagent update              # Update CLI agent versions
+
+# Agent execution (headless)
+codeagent run claude "prompt" # Run agent non-interactively
+codeagent run gemini "prompt" --write --model gemini-2.5-pro
+codeagent agents              # List available agents
+
+# Cleanup
+codeagent clean               # Remove containers
+codeagent clean volumes       # List volumes by category
+codeagent clean volumes --credentials  # Delete auth tokens
+codeagent clean volumes --all # Remove ALL volumes
+```
+
+### Start Options
 
 | Option | Beschreibung |
 |--------|--------------|
 | `--docker` | Docker-Zugriff via sicherem Proxy aktivieren |
 | `--firewall` | Netzwerk-Firewall aktivieren (Egress-Whitelist) |
-| `--here` | Aktuelles Verzeichnis zusätzlich unter `~/workspace/` mounten |
-| `--mount <path>` | Beliebigen Pfad zusätzlich unter `~/workspace/` mounten |
+| `--here` | Aktuelles Verzeichnis zusaetzlich unter `~/workspace/` mounten |
+| `--mount <path>` | Beliebigen Pfad zusaetzlich unter `~/workspace/` mounten |
 
 **Beispiele:**
 
 ```bash
 # Einmalig: Authentifizierung
-./dev.sh auth
+codeagent auth
 
-# Täglicher Workflow
-./dev.sh start
+# Taeglicher Workflow
+codeagent start
 
 # Mit Docker-Zugriff
-./dev.sh start --docker
+codeagent start --docker
 
 # Mit maximaler Sicherheit
-./dev.sh start --docker --firewall
+codeagent start --docker --firewall
 
-# Nach Dockerfile-Änderungen
-./dev.sh build
+# Nach Dockerfile-Aenderungen
+codeagent build
 
-# Kompletter Reset (löscht auch Auth-Credentials!)
-./dev.sh clean --all
-./dev.sh build
+# Kompletter Reset (loescht auch Auth-Credentials!)
+codeagent clean volumes --all
+codeagent build
+```
+
+### mcpgateway
+
+MCP Gateway management for AI tool integration:
+
+```bash
+mcpgateway --help             # Show all commands
+
+# Lifecycle
+mcpgateway start              # Start MCP Gateway
+mcpgateway stop               # Stop MCP Gateway
+mcpgateway restart            # Restart MCP Gateway
+mcpgateway status             # Show status
+
+# Server management
+mcpgateway enable <server>    # Enable MCP server
+mcpgateway disable <server>   # Disable MCP server
+mcpgateway servers            # List enabled servers
+mcpgateway catalog            # Show available servers
+
+# Diagnostics
+mcpgateway test               # Test gateway connectivity
+mcpgateway logs               # Show gateway logs
+mcpgateway clean              # Full reset
 ```
 
 ---
 
-## Workspace Mount (Temporäres Verzeichnis)
+## Configuration
 
-Neben dem festen Projekt-Verzeichnis (`~/projects/`) kann ein zusätzliches Verzeichnis temporär gemountet werden – ideal um mit AI-Agents am lokalen System zu arbeiten.
+Configuration is stored in `~/.config/ai-dev-base/`:
+
+```
+~/.config/ai-dev-base/
+|-- config.toml      # Main configuration
+|-- agents.toml      # Agent definitions (optional)
+```
+
+### config.toml
+
+```toml
+[general]
+code_dir = "/path/to/your/projects"
+timezone = "Europe/Berlin"
+
+[resources]
+cpu_limit = 6
+memory_limit = "12G"
+cpu_reservation = 2
+memory_reservation = "4G"
+
+[shell]
+skip_mounts = false
+# omp_theme_path = "/path/to/custom/theme.omp.json"
+```
+
+Run `codeagent init` for interactive setup or `codeagent config show` to view current settings.
+
+---
+
+## Workspace Mount (Temporaeres Verzeichnis)
+
+Neben dem festen Projekt-Verzeichnis (`~/projects/`) kann ein zusaetzliches Verzeichnis temporaer gemountet werden - ideal um mit AI-Agents am lokalen System zu arbeiten.
 
 ### Verzeichnisstruktur im Container
 
 | Pfad | Quelle | Persistenz |
 |------|--------|------------|
-| `~/projects/` | Festes Code-Verzeichnis (docker-compose.yml) | Immer |
+| `~/projects/` | Festes Code-Verzeichnis (config.toml) | Immer |
 | `~/workspace/` | Via `--here` oder `--mount` | Nur diese Session |
 
 ### Verwendung
@@ -143,45 +196,45 @@ Neben dem festen Projekt-Verzeichnis (`~/projects/`) kann ein zusätzliches Verz
 ```bash
 # Aktuelles Verzeichnis mounten
 cd ~/.config
-./dev.sh start --here
+codeagent start --here
 
 # Beliebigen Pfad mounten
-./dev.sh start --mount ~/dotfiles
+codeagent start --mount ~/dotfiles
 
 # Kombiniert mit anderen Optionen
-./dev.sh start --docker --firewall --here
-./dev.sh start --docker --mount /etc/nginx
+codeagent start --docker --firewall --here
+codeagent start --docker --mount /etc/nginx
 ```
 
 ### Im Container
 
 ```bash
-# Festes Arbeitsverzeichnis (immer verfügbar)
+# Festes Arbeitsverzeichnis (immer verfuegbar)
 cd ~/projects/
 claude "Arbeite an meinem Projekt"
 
-# Temporärer Workspace (nur mit --here/--mount)
+# Temporaerer Workspace (nur mit --here/--mount)
 cd ~/workspace/
 claude "Optimiere diese Config-Dateien"
 ```
 
-### ⚠️ Wichtig: Bind-Mount Verhalten
+### Wichtig: Bind-Mount Verhalten
 
-Der Workspace ist ein **Bind-Mount** – Änderungen sind **sofort** auf der lokalen Platte:
+Der Workspace ist ein **Bind-Mount** - Aenderungen sind **sofort** auf der lokalen Platte:
 
 ```bash
 # Im Container:
-rm ~/workspace/wichtig.conf  # → Datei ist SOFORT weg auf dem Host!
+rm ~/workspace/wichtig.conf  # -> Datei ist SOFORT weg auf dem Host!
 ```
 
-**Empfehlung für kritische Verzeichnisse:**
+**Empfehlung fuer kritische Verzeichnisse:**
 
 ```bash
 # Vorher Backup machen
 cp -r ~/.config ~/.config.bak
 
 # Dann mounten
-./dev.sh start --mount ~/.config --docker
+codeagent start --mount ~/.config --docker
 ```
 
 ### Workflow-Beispiele
@@ -189,15 +242,15 @@ cp -r ~/.config ~/.config.bak
 ```bash
 # Dotfiles mit AI bearbeiten
 cd ~/dotfiles
-./dev.sh start --here --docker
+codeagent start --here --docker
 # Im Container: claude "Refactore meine zsh config"
 
 # System-Configs analysieren (read-only empfohlen)
-./dev.sh start --mount /etc --docker
-# Im Container: claude "Erkläre mir die nginx config"
+codeagent start --mount /etc --docker
+# Im Container: claude "Erklaere mir die nginx config"
 
-# An anderem Projekt arbeiten ohne docker-compose zu ändern
-./dev.sh start --mount ~/anderes-projekt --docker
+# An anderem Projekt arbeiten ohne config.toml zu aendern
+codeagent start --mount ~/anderes-projekt --docker
 ```
 
 ---
@@ -386,12 +439,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### Security Modi
 
-| Modus | Command | Docker | Firewall | Empfohlen für |
-|-------|---------|--------|----------|---------------|
-| **Standard** | `./dev.sh start` | ❌ | ❌ | Normale Entwicklung |
-| **Docker** | `./dev.sh start --docker` | ✅ (Proxy) | ❌ | Container-Entwicklung |
-| **Firewall** | `./dev.sh start --firewall` | ❌ | ✅ | Sensitive Projekte |
-| **Maximum** | `./dev.sh start --docker --firewall` | ✅ | ✅ | **Allgemein empfohlen** |
+| Modus | Command | Docker | Firewall | Empfohlen fuer |
+|-------|---------|--------|----------|----------------|
+| **Standard** | `codeagent start` | - | - | Normale Entwicklung |
+| **Docker** | `codeagent start --docker` | Proxy | - | Container-Entwicklung |
+| **Firewall** | `codeagent start --firewall` | - | Ja | Sensitive Projekte |
+| **Maximum** | `codeagent start --docker --firewall` | Proxy | Ja | **Allgemein empfohlen** |
 
 ### Docker Socket Proxy
 
@@ -419,7 +472,7 @@ Mit `--firewall` werden ausgehende Verbindungen auf eine Whitelist beschränkt:
 
 ## MCP Gateway Integration (Optional)
 
-Das Setup enthält einen optionalen [Docker MCP Gateway](./mcp/README.md), der MCP Server aus dem Docker MCP Catalog für alle AI Coding Agents bereitstellt.
+Das Setup enthaelt einen optionalen [Docker MCP Gateway](./mcp/README.md), der MCP Server aus dem Docker MCP Catalog fuer alle AI Coding Agents bereitstellt.
 
 ### Voraussetzung: docker mcp CLI Plugin
 
@@ -434,16 +487,14 @@ make docker-mcp
 
 ```bash
 # 1. Gateway starten
-cd mcp
-./mcp.sh start
+mcpgateway start
 
 # 2. MCP Server aktivieren (dynamisch!)
-./mcp.sh enable duckduckgo    # Web-Suche
-./mcp.sh enable memory        # Persistenter Speicher
+mcpgateway enable duckduckgo    # Web-Suche
+mcpgateway enable memory        # Persistenter Speicher
 
 # 3. AI Dev Container starten
-cd ..
-./dev.sh start
+codeagent start
 
 # 4. Claude Code nutzt jetzt automatisch den Gateway
 claude
@@ -457,10 +508,10 @@ claude
 | `--verify-signatures` | Nur signierte MCP Images erlaubt |
 | `--log-calls` | Audit-Log aller Tool-Aufrufe |
 | `--block-secrets` | Verhindert Secret-Leaks in Responses |
-| Isoliertes Netzwerk | Eigenes Bridge-Network für AI-Tools |
+| Isoliertes Netzwerk | Eigenes Bridge-Network fuer AI-Tools |
 | Lokale Bindung | Port nur auf 127.0.0.1 exponiert |
 
-Vollständige Dokumentation: [mcp/README.md](./mcp/README.md)
+Vollstaendige Dokumentation: [mcp/README.md](./mcp/README.md)
 
 ---
 
@@ -506,21 +557,21 @@ ls -la /pfad/zum/verzeichnis
 
 ### Custom APT Packages
 
-Zusätzliche System-Pakete können über `packages.txt` installiert werden:
+Zusaetzliche System-Pakete koennen ueber `packages.txt` installiert werden:
 
 ```bash
 # Template kopieren
 cp packages.txt.example packages.txt
 
-# Pakete hinzufügen (ein Paket pro Zeile)
+# Pakete hinzufuegen (ein Paket pro Zeile)
 echo "vim" >> packages.txt
 echo "htop" >> packages.txt
 
 # Image neu bauen
-./scripts/dev.sh build
+codeagent build
 ```
 
-Die `packages.txt` ist in `.gitignore` – jeder Entwickler kann eigene Pakete pflegen.
+Die `packages.txt` ist in `.gitignore` - jeder Entwickler kann eigene Pakete pflegen.
 
 ### Optional CLI Tools (Runtime)
 
@@ -534,7 +585,7 @@ cp tools/tools.txt.example tools/tools.txt
 nano tools/tools.txt
 
 # Container starten - Tools werden automatisch installiert
-./scripts/dev.sh start
+codeagent start
 ```
 
 **Verfügbare Tools:**
@@ -572,29 +623,74 @@ ENV SHELL=/bin/bash
 ENTRYPOINT ["/bin/bash"]
 ```
 
-### Festes Projekt-Verzeichnis ändern
+### Festes Projekt-Verzeichnis aendern
 
-In `.env` anpassen:
+In `~/.config/ai-dev-base/config.toml` anpassen:
 
-```bash
-CODE_DIR=/dein/pfad/zu/projekten
+```toml
+[general]
+code_dir = "/dein/pfad/zu/projekten"
 ```
+
+Oder interaktiv mit `codeagent init --force`.
 
 ### Shell-Mounts deaktivieren
 
 Falls du keine oh-my-zsh oder oh-my-posh Installation auf dem Host hast:
 
-```bash
-# In .env setzen:
-SKIP_SHELL_MOUNTS=true
+```toml
+# In config.toml setzen:
+[shell]
+skip_mounts = true
 ```
 
 ### Resource-Limits anpassen
 
+```toml
+# In config.toml setzen:
+[resources]
+cpu_limit = 4
+memory_limit = "8G"
+cpu_reservation = 1
+memory_reservation = "2G"
+```
+
+---
+
+## Migration from Bash Scripts
+
+If you previously used the Bash scripts (`dev.sh`, `mcp.sh`), here is the migration guide:
+
+| Old Command | New Command |
+|-------------|-------------|
+| `./scripts/dev.sh build` | `codeagent build` |
+| `./scripts/dev.sh start` | `codeagent start` |
+| `./scripts/dev.sh start --docker` | `codeagent start --docker` |
+| `./scripts/dev.sh auth` | `codeagent auth` |
+| `./scripts/dev.sh status` | `codeagent status` |
+| `./scripts/dev.sh clean` | `codeagent clean` |
+| `./scripts/dev.sh clean --all` | `codeagent clean volumes --all` |
+| `./scripts/dev.sh run claude "prompt"` | `codeagent run claude "prompt"` |
+| `./mcp/mcp.sh start` | `mcpgateway start` |
+| `./mcp/mcp.sh enable <server>` | `mcpgateway enable <server>` |
+| `./mcp/mcp.sh status` | `mcpgateway status` |
+
+### Shell Wrapper Migration
+
+Remove old shell wrappers from `~/.zshrc` or `~/.zshrc.local`:
+
 ```bash
-# In .env setzen:
-CPU_LIMIT=4
-MEMORY_LIMIT=8G
-CPU_RESERVATION=1
-MEMORY_RESERVATION=2G
+# OLD (can be removed):
+codeagent() {
+    local script_path="/path/to/ai-dev-base/scripts/dev.sh"
+    ...
+}
+
+mcpgateway() {
+    local script_path="/path/to/ai-dev-base/mcp/mcp.sh"
+    ...
+}
+
+# NEW: CLI is directly available after `uv tool install .`
+# No wrappers needed!
 ```

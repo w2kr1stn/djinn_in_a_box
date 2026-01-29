@@ -7,7 +7,7 @@
 # Usage:
 #   cp tools/tools.txt.example tools/tools.txt
 #   # Uncomment desired tools
-#   ./scripts/dev.sh start
+#   codeagent start
 #
 # Note: Tools are cached in a Docker volume - reinstall only on version change.
 # =============================================================================

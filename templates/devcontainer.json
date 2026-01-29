@@ -83,7 +83,7 @@
     //   "ghcr.io/devcontainers/features/rust:1": {},
     // }
     // -------------------------------------------------------------------------
-    // NOTE: For OAuth authentication, first use ./dev.sh auth from the
+    // NOTE: For OAuth authentication, first use `codeagent auth` from the
     // ai-dev-base directory to authenticate with host network.
     // -------------------------------------------------------------------------
 }

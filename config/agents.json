@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Single source of truth for CLI agent headless mode configuration. Used by dev.sh and agent_runner.py.",
+  "$comment": "Single source of truth for CLI agent headless mode configuration. Used by codeagent CLI.",
   "agents": {
     "claude": {
       "binary": "claude",

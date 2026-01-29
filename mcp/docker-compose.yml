@@ -6,8 +6,8 @@
 # to access MCP servers from the Docker MCP Catalog.
 #
 # Usage:
-#   ./mcp.sh start              # Start gateway
-#   ./mcp.sh stop               # Stop gateway
+#   mcpgateway start              # Start gateway
+#   mcpgateway stop               # Stop gateway
 #   docker mcp server enable duckduckgo  # Enable server (via CLI plugin)
 # =============================================================================
 

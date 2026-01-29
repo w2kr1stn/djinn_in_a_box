@@ -2,13 +2,13 @@
 # AI Dev Base - Docker Socket Override
 # =============================================================================
 # Aktiviert Docker-Zugriff via sicherem Socket Proxy.
-# Wird automatisch geladen wenn: ./dev.sh start --docker
+# Wird automatisch geladen wenn: codeagent start --docker
 #
 # Sicherheitsfeatures:
-#   - Docker Socket Proxy filtert gefährliche API-Aufrufe
-#   - Kein direkter Socket-Zugriff für den Dev-Container
+#   - Docker Socket Proxy filtert gefaehrliche API-Aufrufe
+#   - Kein direkter Socket-Zugriff fuer den Dev-Container
 #   - Audit-Logging aller Docker-Operationen
-#   - Resource Limits für gespawnte Container
+#   - Resource Limits fuer gespawnte Container
 # =============================================================================
 
 services:

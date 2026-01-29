@@ -53,21 +53,21 @@ Legende:
 
 ## Toggle-Mechanismus
 
-### Verfügbare Modi
+### Verfuegbare Modi
 
 | Modus | Command | Docker | Firewall | Sicherheit |
 |-------|---------|--------|----------|------------|
-| **Standard** | `./dev.sh start` | ❌ | ❌ | Hoch |
-| **Docker** | `./dev.sh start --docker` | ✅ (Proxy) | ❌ | Mittel |
-| **Firewall** | `./dev.sh start --firewall` | ❌ | ✅ | Hoch |
-| **Maximum** | `./dev.sh start --docker --firewall` | ✅ (Proxy) | ✅ | **Empfohlen** |
+| **Standard** | `codeagent start` | - | - | Hoch |
+| **Docker** | `codeagent start --docker` | Proxy | - | Mittel |
+| **Firewall** | `codeagent start --firewall` | - | Ja | Hoch |
+| **Maximum** | `codeagent start --docker --firewall` | Proxy | Ja | **Empfohlen** |
 
 ### Warum ein Toggle?
 
-1. **Principle of Least Privilege**: Docker-Zugriff nur wenn benötigt
+1. **Principle of Least Privilege**: Docker-Zugriff nur wenn benoetigt
 2. **Explizite Aktivierung**: Bewusste Entscheidung bei jedem Start
-3. **Audit Trail**: `./dev.sh status` zeigt aktuelle Konfiguration
-4. **Flexibilität**: Verschiedene Sicherheitslevel für verschiedene Tasks
+3. **Audit Trail**: `codeagent status` zeigt aktuelle Konfiguration
+4. **Flexibilitaet**: Verschiedene Sicherheitslevel fuer verschiedene Tasks
 
 ---
 
@@ -163,10 +163,10 @@ Auch mit Proxy bleiben einige Risiken:
 docker run --privileged -v /:/host alpine
 ```
 
-**Mitigation:** 
+**Mitigation:**
 - Resource Limits im Compose
-- Monitoring via `./dev.sh audit`
-- Firewall für Netzwerk-Exfiltration
+- Monitoring via `codeagent audit`
+- Firewall fuer Netzwerk-Exfiltration
 
 ### 2. Resource Exhaustion
 
@@ -193,16 +193,16 @@ deploy:
 
 ## Sicherheits-Checkliste
 
-### Täglicher Gebrauch
+### Taeglicher Gebrauch
 
 ```markdown
 ## Vor der Session
-- [ ] Brauche ich Docker-Zugriff? Wenn nein: `./dev.sh start`
-- [ ] Wenn ja: `./dev.sh start --docker --firewall`
+- [ ] Brauche ich Docker-Zugriff? Wenn nein: `codeagent start`
+- [ ] Wenn ja: `codeagent start --docker --firewall`
 
 ## Nach der Session
-- [ ] `./dev.sh status` - Unbekannte Container?
-- [ ] `./dev.sh audit` - Verdächtige Requests?
+- [ ] `codeagent status` - Unbekannte Container?
+- [ ] `codeagent audit` - Verdaechtige Requests?
 ```
 
 ### Wöchentlich
@@ -233,8 +233,8 @@ docker network inspect ai-dev-network
 ### Proxy-Logs anzeigen
 
 ```bash
-# Via dev.sh
-./dev.sh audit
+# Via CLI
+codeagent audit
 
 # Direkt
 docker logs -f ai-dev-docker-proxy
@@ -318,18 +318,18 @@ Besser: `docker run` mit dem gleichen Image verwenden.
 
 ## Empfehlung
 
-Für dein Szenario (Einzelbenutzer, lokale Entwicklung, AI-Agents):
+Fuer dein Szenario (Einzelbenutzer, lokale Entwicklung, AI-Agents):
 
 ```bash
 # Standard-Workflow
-./dev.sh start --docker --firewall
+codeagent start --docker --firewall
 ```
 
 Diese Kombination bietet:
-- ✅ Docker-Funktionalität für AI-Agents
-- ✅ Gefährliche Operationen blockiert
-- ✅ Netzwerk-Isolation
-- ✅ Audit-Logging
-- ✅ Resource Limits
+- Docker-Funktionalitaet fuer AI-Agents
+- Gefaehrliche Operationen blockiert
+- Netzwerk-Isolation
+- Audit-Logging
+- Resource Limits
 
-Der wichtigste Sicherheitsmechanismus bleibt **du selbst**: Code-Review, Awareness, regelmäßige Audits.
+Der wichtigste Sicherheitsmechanismus bleibt **du selbst**: Code-Review, Awareness, regelmaessige Audits.
