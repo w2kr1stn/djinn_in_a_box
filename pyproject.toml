@@ -1,0 +1,112 @@
+[project]
+name = "ai-dev-base"
+version = "1.0.0"
+description = "AI Development Base - CLI tools for managing AI development containers"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "AI Dev Base Team" }]
+keywords = ["cli", "docker", "ai", "development"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=13.9.0",
+    "pydantic>=2.10.0",
+    "tomli-w>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.0",
+    "pyright>=1.1.390",
+]
+
+[project.scripts]
+fmt = "devops:format_code"
+test = "devops:test"
+clean = "devops:clean"
+codeagent = "ai_dev_base.cli.codeagent:app"
+mcpgateway = "ai_dev_base.cli.mcpgateway:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_dev_base"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"devops.py" = "devops.py"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.8.3",
+    "mypy>=1.19.1",
+    "pyright>=1.1.408",
+    "pytest>=9.0.2",
+    "ruff>=0.14.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/w2kr1stn/ai-dev-base"
+Repository = "https://github.com/w2kr1stn/ai-dev-base"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "N",   # pep8-naming
+    "B",   # flake8-bugbear
+    "I",   # isort
+    "UP",  # pyupgrade
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "B008", # FastAPI Depends() pattern in argument defaults
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+extraPaths = ["pulumi"]
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnusedImport = true
+reportUnusedVariable = true
+reportUnusedFunction = "warning"
+reportPrivateUsage = "warning"
+reportConstantRedefinition = "error"
+reportIncompatibleMethodOverride = "error"
+reportIncompatibleVariableOverride = "error"
+reportGeneralTypeIssues = "error"
+
+[tool.bandit]
+exclude_dirs = [".venv", "venv", "tests"]
+skips = []
+# Fail on Medium and High severity (ISO 27001 compliance)
+# Run with: uv run bandit -c pyproject.toml -r .
