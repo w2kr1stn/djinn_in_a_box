@@ -155,7 +155,7 @@ def create_volume_table(volumes: dict[str, list[str]]) -> Table:
     Args:
         volumes: Dictionary mapping category names to lists of volume names.
             Categories should be: "credentials", "tools", "cache", "data".
-            Volume names should be the short names (without "ai-dev-" prefix).
+            Volume names should be the full names including the "ai-dev-" prefix.
 
     Returns:
         A configured Rich Table ready for printing to stdout.

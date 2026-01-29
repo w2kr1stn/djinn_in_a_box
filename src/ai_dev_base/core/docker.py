@@ -121,13 +121,7 @@ def network_exists(name: str = "ai-dev-network") -> bool:
 def ensure_network(name: str = "ai-dev-network") -> bool:
     """Create Docker network if it doesn't exist.
 
-    Mirrors the ensure_network() function from dev.sh (lines 313-318):
-    ```bash
-    if ! docker network inspect ai-dev-network &>/dev/null; then
-        echo -e "${BLUE}Creating ai-dev-network...${NC}"
-        docker network create ai-dev-network
-    fi
-    ```
+    Mirrors the ensure_network() function from the original dev.sh script.
 
     Args:
         name: Network name to create (default: ai-dev-network).
@@ -164,14 +158,7 @@ def ensure_network(name: str = "ai-dev-network") -> bool:
 def get_compose_files(docker_enabled: bool = False) -> list[str]:
     """Get compose file arguments based on options.
 
-    Mirrors the get_compose_files() function from dev.sh (lines 97-105):
-    ```bash
-    if [[ "$docker_enabled" == "true" ]]; then
-        echo "-f docker-compose.yml -f docker-compose.docker.yml"
-    else
-        echo "-f docker-compose.yml"
-    fi
-    ```
+    Mirrors the get_compose_files() function from the original dev.sh script.
 
     Args:
         docker_enabled: Include docker-compose.docker.yml for socket proxy.
@@ -202,7 +189,7 @@ def get_compose_files(docker_enabled: bool = False) -> list[str]:
 def get_shell_mount_args(config: AppConfig) -> list[str]:
     """Build shell configuration mount arguments.
 
-    Mirrors the get_shell_mount_args() function from dev.sh (lines 65-92).
+    Mirrors the get_shell_mount_args() function from the original dev.sh script.
 
     Mounts (if files exist and skip_mounts is False):
     - ~/.zshrc -> /home/dev/.zshrc.local:ro
@@ -726,8 +713,8 @@ def get_existing_volumes_by_category(category: str) -> list[str]:
     This function combines the volume category definitions from
     config/defaults.py with a check for actual existence on the system.
 
-    Mirrors the get_volumes_by_category() function from dev.sh (lines 673-685)
-    which only returns volumes that actually exist.
+    Mirrors the get_volumes_by_category() function from the original dev.sh
+    script, but only returns volumes that actually exist.
 
     Args:
         category: One of 'credentials', 'tools', 'cache', 'data'.
