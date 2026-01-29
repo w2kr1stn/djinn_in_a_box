@@ -384,21 +384,21 @@ def compose_run(
     subprocess_env.update(env_vars)
 
     # Execute
-    if interactive:
-        # Interactive mode: inherit stdin/stdout/stderr
-        result = subprocess.run(
-            cmd,
-            cwd=project_root,
-            env=subprocess_env,
-            check=False,
-        )
-        return RunResult(
-            returncode=result.returncode,
-            command=cmd,
-        )
-    else:
-        # Headless mode: capture output with optional timeout
-        try:
+    try:
+        if interactive:
+            # Interactive mode: inherit stdin/stdout/stderr
+            result = subprocess.run(
+                cmd,
+                cwd=project_root,
+                env=subprocess_env,
+                check=False,
+            )
+            return RunResult(
+                returncode=result.returncode,
+                command=cmd,
+            )
+        else:
+            # Headless mode: capture output with optional timeout
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -414,17 +414,33 @@ def compose_run(
                 stderr=result.stderr,
                 command=cmd,
             )
-        except subprocess.TimeoutExpired as e:
-            # Handle timeout: decode output if available
-            stdout = e.stdout.decode() if e.stdout is not None else ""
-            stderr = e.stderr.decode() if e.stderr is not None else f"Timeout after {timeout}s"
-            # Return code 124 is conventional for timeout (like GNU timeout command)
-            return RunResult(
-                returncode=124,
-                stdout=stdout,
-                stderr=stderr,
-                command=cmd,
-            )
+    except subprocess.TimeoutExpired as e:
+        # Handle timeout: decode output if available
+        stdout = e.stdout.decode() if e.stdout is not None else ""
+        stderr = e.stderr.decode() if e.stderr is not None else f"Timeout after {timeout}s"
+        # Return code 124 is conventional for timeout (like GNU timeout command)
+        return RunResult(
+            returncode=124,
+            stdout=stdout,
+            stderr=stderr,
+            command=cmd,
+        )
+    except FileNotFoundError as e:
+        # Docker command not found
+        return RunResult(
+            returncode=127,  # Command not found convention
+            stdout="",
+            stderr=f"Docker command not found: {e}",
+            command=cmd,
+        )
+    except PermissionError as e:
+        # Permission denied (e.g., Docker socket inaccessible)
+        return RunResult(
+            returncode=126,  # Permission denied convention
+            stdout="",
+            stderr=f"Permission denied: {e}",
+            command=cmd,
+        )
 
 
 def compose_up(
