@@ -169,11 +169,14 @@ def stop() -> None:
     Equivalent to: ./mcp.sh stop
     """
     warning("Stopping MCP Gateway...")
-    subprocess.run(
+    result = subprocess.run(
         ["docker", "compose", "down"],
         cwd=get_mcp_dir(),
         check=False,
     )
+    if result.returncode != 0:
+        error("Failed to stop MCP Gateway")
+        raise typer.Exit(result.returncode)
     success("MCP Gateway stopped")
 
 
@@ -183,11 +186,14 @@ def restart() -> None:
     Equivalent to: ./mcp.sh restart
     """
     warning("Restarting MCP Gateway...")
-    subprocess.run(
+    result = subprocess.run(
         ["docker", "compose", "restart"],
         cwd=get_mcp_dir(),
         check=False,
     )
+    if result.returncode != 0:
+        error("Failed to restart MCP Gateway")
+        raise typer.Exit(result.returncode)
     time.sleep(2)
     success("MCP Gateway restarted")
 
@@ -288,7 +294,9 @@ def logs(
         cmd.append("-f")
     cmd.extend(["--tail", str(tail), GATEWAY_CONTAINER])
 
-    subprocess.run(cmd, check=False)
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
 
 
 # =============================================================================
@@ -563,11 +571,13 @@ def clean() -> None:
     )
 
     # Remove network
-    subprocess.run(
+    result = subprocess.run(
         ["docker", "network", "rm", AI_DEV_NETWORK],
         capture_output=True,
         check=False,
     )
+    if result.returncode != 0:
+        warning(f"Failed to remove network '{AI_DEV_NETWORK}' (may not exist or be in use)")
 
     # Remove MCP config directory (~/.docker/mcp)
     mcp_config = Path.home() / ".docker" / "mcp"
