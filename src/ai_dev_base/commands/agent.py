@@ -202,9 +202,9 @@ def run(
         status_line("Model", model)
 
     if write:
-        status_line("Mode", "Read/Write (--write)", "yellow")
+        status_line("Mode", "Read/Write (--write)", "warning")
     else:
-        status_line("Mode", "Read-only (plan/analysis)", "green")
+        status_line("Mode", "Read-only (plan/analysis)", "success")
 
     if docker:
         status_line("Docker", "Enabled")
@@ -316,21 +316,21 @@ def agents(
 
     if verbose:
         for name, cfg in sorted(agent_configs.items()):
-            console.print(f"[bold cyan]{name}[/bold cyan]: {cfg.description or cfg.binary}")
-            console.print(f"  [dim]Binary:[/dim]      {cfg.binary}")
-            console.print(f"  [dim]Model flag:[/dim]  {cfg.model_flag}")
+            console.print(f"[primary.bold]{name}[/primary.bold]: {cfg.description or cfg.binary}")
+            console.print(f"  [muted]Binary:[/muted]      {cfg.binary}")
+            console.print(f"  [muted]Model flag:[/muted]  {cfg.model_flag}")
             if cfg.headless_flags:
-                console.print(f"  [dim]Headless:[/dim]    {' '.join(cfg.headless_flags)}")
+                console.print(f"  [muted]Headless:[/muted]    {' '.join(cfg.headless_flags)}")
             if cfg.write_flags:
-                console.print(f"  [dim]Write mode:[/dim]  {' '.join(cfg.write_flags)}")
+                console.print(f"  [muted]Write mode:[/muted]  {' '.join(cfg.write_flags)}")
             if cfg.read_only_flags:
-                console.print(f"  [dim]Read-only:[/dim]   {' '.join(cfg.read_only_flags)}")
+                console.print(f"  [muted]Read-only:[/muted]   {' '.join(cfg.read_only_flags)}")
             if cfg.json_flags:
-                console.print(f"  [dim]JSON flags:[/dim]  {' '.join(cfg.json_flags)}")
+                console.print(f"  [muted]JSON flags:[/muted]  {' '.join(cfg.json_flags)}")
             console.print()
     else:
-        console.print("[bold]Available Agents:[/bold]")
+        console.print("[header]Available Agents:[/header]")
         console.print()
         for name, cfg in sorted(agent_configs.items()):
             desc = cfg.description or cfg.binary
-            console.print(f"  [cyan]{name}[/cyan]: {desc}")
+            console.print(f"  [primary]{name}[/primary]: {desc}")
