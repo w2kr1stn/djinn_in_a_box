@@ -104,7 +104,7 @@ def main(
     The AI Dev Base provides a containerized development environment
     with pre-configured CLI coding agents (Claude, Gemini, Codex, OpenCode).
 
-    [bold]Quick start:[/bold]
+    [info.bold]Quick start:[/info.bold]
 
         codeagent init            # First-time setup
 
@@ -137,7 +137,7 @@ def init_config(
     Creates config.toml with user-provided settings through interactive prompts.
     Run this once before using other commands.
 
-    [bold]Example:[/bold]
+    [info.bold]Example:[/info.bold]
 
         codeagent init              # Interactive setup
 
@@ -197,10 +197,10 @@ def init_config(
             warning("Bundled agents.toml not found. Using built-in defaults.")
 
     console.print()
-    console.print("[bold]Next steps:[/bold]")
-    console.print("  [dim]1.[/dim] codeagent build    [dim]# Build the Docker image[/dim]")
-    console.print("  [dim]2.[/dim] codeagent auth     [dim]# Authenticate with AI services[/dim]")
-    console.print("  [dim]3.[/dim] codeagent start    [dim]# Start development shell[/dim]")
+    console.print("[primary.bold]Next steps:[/primary.bold]")
+    console.print("  [muted]1.[/muted] codeagent build    [muted]# Build the Docker image[/muted]")
+    console.print("  [muted]2.[/muted] codeagent auth     [muted]# Authenticate with AI[/muted]")
+    console.print("  [muted]3.[/muted] codeagent start    [muted]# Start development shell[/muted]")
 
 
 # =============================================================================
@@ -228,7 +228,7 @@ def config_show(
 
     Displays all settings from ~/.config/ai-dev-base/config.toml.
 
-    [bold]Example:[/bold]
+    [info.bold]Example:[/info.bold]
 
         codeagent config show           # Human-readable output
 
@@ -247,22 +247,22 @@ def config_show(
     else:
         # Human-readable output
         info("Current Configuration")
-        console.print(f"  [dim]Config file:[/dim] {CONFIG_FILE}")
+        console.print(f"  [muted]Config file:[/muted] {CONFIG_FILE}")
         console.print()
 
-        console.print("[bold]General[/bold]")
+        console.print("[primary.bold]General[/primary.bold]")
         console.print(f"  code_dir:  {config.code_dir}")
         console.print(f"  timezone:  {config.timezone}")
         console.print()
 
-        console.print("[bold]Resources[/bold]")
+        console.print("[primary.bold]Resources[/primary.bold]")
         console.print(f"  cpu_limit:          {config.resources.cpu_limit}")
         console.print(f"  memory_limit:       {config.resources.memory_limit}")
         console.print(f"  cpu_reservation:    {config.resources.cpu_reservation}")
         console.print(f"  memory_reservation: {config.resources.memory_reservation}")
         console.print()
 
-        console.print("[bold]Shell[/bold]")
+        console.print("[primary.bold]Shell[/primary.bold]")
         console.print(f"  skip_mounts: {config.shell.skip_mounts}")
         if config.shell.omp_theme_path:
             console.print(f"  omp_theme_path: {config.shell.omp_theme_path}")
@@ -275,7 +275,7 @@ def config_path() -> None:
     Outputs the path to the main configuration file.
     Useful for scripting and manual editing.
 
-    [bold]Example:[/bold]
+    [info.bold]Example:[/info.bold]
 
         codeagent config path           # Show path
 
