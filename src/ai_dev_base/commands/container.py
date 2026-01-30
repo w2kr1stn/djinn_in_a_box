@@ -164,26 +164,26 @@ def start(
     status_line("Projects", str(config.code_dir))
 
     if docker:
-        status_line("Docker", "Enabled (via secure proxy)", "green")
+        status_line("Docker", "Enabled (via secure proxy)", "status.enabled")
     else:
-        status_line("Docker", "Disabled (use --docker to enable)", "yellow")
+        status_line("Docker", "Disabled (use --docker to enable)", "status.disabled")
 
     if firewall:
-        status_line("Firewall", "Enabled (outbound restricted)", "green")
+        status_line("Firewall", "Enabled (outbound restricted)", "status.enabled")
     else:
-        status_line("Firewall", "Disabled (use --firewall to enable)", "yellow")
+        status_line("Firewall", "Disabled (use --firewall to enable)", "status.disabled")
 
     if mount_path:
-        status_line("Workspace", str(mount_path), "green")
+        status_line("Workspace", str(mount_path), "status.enabled")
 
     # Shell mount status
     shell_args = get_shell_mount_args(config)
     if config.shell.skip_mounts:
-        status_line("Shell", "Using container defaults (skip_mounts=true)", "yellow")
+        status_line("Shell", "Using container defaults (skip_mounts=true)", "status.disabled")
     elif shell_args:
-        status_line("Shell", "Host config mounted", "green")
+        status_line("Shell", "Host config mounted", "status.enabled")
     else:
-        status_line("Shell", "No host config found", "yellow")
+        status_line("Shell", "No host config found", "status.disabled")
 
     blank()
 
@@ -247,7 +247,7 @@ def auth(
     # In host network mode, the proxy needs to be started as a separate service
     if docker:
         err_console.print(
-            "[yellow]Docker proxy starting separately for host network mode...[/yellow]"
+            "[warning]Docker proxy starting separately for host network mode...[/warning]"
         )
         proxy_result = compose_up(services=["docker-proxy"], docker_enabled=True)
         if not proxy_result.success:
@@ -388,13 +388,13 @@ def status() -> None:
     if is_container_running("ai-dev-docker-proxy"):
         success("  Docker Proxy: Running")
     else:
-        err_console.print("  [yellow]Docker Proxy: Not running[/yellow]")
+        err_console.print("  [status.disabled]Docker Proxy: Not running[/status.disabled]")
 
     # MCP Gateway Status
     if is_container_running("mcp-gateway"):
         success("  MCP Gateway: Running")
     else:
-        err_console.print("  [yellow]MCP Gateway: Not running[/yellow]")
+        err_console.print("  [status.disabled]MCP Gateway: Not running[/status.disabled]")
 
 
 # =============================================================================
