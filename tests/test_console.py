@@ -20,6 +20,7 @@ from ai_dev_base.core.console import (
     success,
     warning,
 )
+from ai_dev_base.core.theme import TODAI_THEME
 
 
 class TestConsoleSingletons:
@@ -200,7 +201,9 @@ class TestVolumeTable:
     def test_print_volume_table(self) -> None:
         """print_volume_table should print table to stdout."""
         output = io.StringIO()
-        test_console = Console(file=output, force_terminal=True, no_color=True)
+        test_console = Console(
+            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
+        )
 
         volumes = {"credentials": ["test-vol"]}
 
@@ -219,8 +222,8 @@ class TestColorStyles:
         "style",
         ["green", "yellow", "red", "blue"],
     )
-    def test_status_line_accepts_all_styles(self, style: str) -> None:
-        """status_line should accept all documented style values."""
+    def test_status_line_accepts_legacy_styles(self, style: str) -> None:
+        """status_line should accept legacy color names for backward compatibility."""
         output = io.StringIO()
         test_console = Console(file=output, force_terminal=True, no_color=True)
 
@@ -229,3 +232,64 @@ class TestColorStyles:
             status_line("Test", "value", style)
 
         assert "Test:" in output.getvalue()
+
+    @pytest.mark.parametrize(
+        "style",
+        ["status.enabled", "status.disabled", "status.error", "info"],
+    )
+    def test_status_line_accepts_theme_styles(self, style: str) -> None:
+        """status_line should accept TodAI theme style names."""
+        output = io.StringIO()
+        test_console = Console(
+            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
+        )
+
+        with patch("ai_dev_base.core.console.err_console", test_console):
+            # Should not raise any exceptions
+            status_line("Test", "value", style)
+
+        assert "Test:" in output.getvalue()
+
+
+class TestThemeIntegration:
+    """Tests verifying TodAI theme integration."""
+
+    def test_console_recognizes_theme_styles(self) -> None:
+        """Console singletons should recognize TodAI theme styles."""
+        # Verify theme is applied by checking if theme styles are recognized
+        # get_style returns a Style object for valid theme styles
+        success_style = console.get_style("success")
+        error_style = err_console.get_style("error")
+
+        # These should be Style objects (not raise MissingStyle)
+        assert success_style is not None
+        assert error_style is not None
+
+    def test_message_functions_include_icons(self) -> None:
+        """Message functions should include status icons."""
+        output = io.StringIO()
+        test_console = Console(
+            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
+        )
+
+        with patch("ai_dev_base.core.console.err_console", test_console):
+            success("test")
+            error("test")
+            info("test")
+            warning("test")
+
+        result = output.getvalue()
+        # Check for Unicode icons (checkmark, x, info, warning)
+        assert "\u2713" in result  # success checkmark
+        assert "\u2717" in result  # error x
+        assert "\u2139" in result  # info i
+        assert "\u26a0" in result  # warning triangle
+
+    def test_create_volume_table_uses_theme_styles(self) -> None:
+        """create_volume_table should use TodAI theme style names."""
+        table = create_volume_table({"credentials": ["test"]})
+
+        # Verify table uses theme-based styles
+        assert table.title_style == "table.title"
+        assert table.columns[0].style == "table.category"
+        assert table.columns[1].style == "table.value"
