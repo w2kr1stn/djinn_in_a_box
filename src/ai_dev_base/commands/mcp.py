@@ -241,7 +241,7 @@ def status() -> None:
     console.print("=" * 40)
 
     if is_container_running(GATEWAY_CONTAINER):
-        console.print("Gateway: [green]Running[/green]")
+        console.print("Gateway: [status.enabled]Running[/status.enabled]")
         console.print()
 
         # Show container details
@@ -298,7 +298,7 @@ def status() -> None:
         else:
             console.print("  (none)")
     else:
-        console.print("Gateway: [red]Stopped[/red]")
+        console.print("Gateway: [status.error]Stopped[/status.error]")
         console.print()
         console.print("Start with: mcpgateway start")
 
@@ -465,9 +465,9 @@ def test() -> None:
     # Container status
     console.print("Container status: ", end="")
     if is_container_running(GATEWAY_CONTAINER):
-        console.print("[green]Running[/green]")
+        console.print("[status.enabled]Running[/status.enabled]")
     else:
-        console.print("[red]Not running[/red]")
+        console.print("[status.error]Not running[/status.error]")
         all_passed = False
 
     # Localhost endpoint
@@ -489,9 +489,9 @@ def test() -> None:
         check=False,
     )
     if result.returncode == 0 and result.stdout in ("200", "404"):
-        console.print("[green]OK[/green]")
+        console.print("[status.enabled]OK[/status.enabled]")
     else:
-        console.print("[yellow]Not responding[/yellow]")
+        console.print("[status.disabled]Not responding[/status.disabled]")
 
     # Container endpoint (via docker network)
     console.print("Container endpoint (network access): ", end="")
@@ -517,9 +517,11 @@ def test() -> None:
         check=False,
     )
     if result.returncode == 0 and result.stdout in ("200", "404"):
-        console.print("[green]OK[/green]")
+        console.print("[status.enabled]OK[/status.enabled]")
     else:
-        console.print("[yellow]Not responding (network may not exist yet)[/yellow]")
+        console.print(
+            "[status.disabled]Not responding (network may not exist yet)[/status.disabled]"
+        )
 
     # Docker socket access
     console.print("Docker socket access: ", end="")
@@ -529,18 +531,18 @@ def test() -> None:
         check=False,
     )
     if result.returncode == 0:
-        console.print("[green]OK[/green]")
+        console.print("[status.enabled]OK[/status.enabled]")
     else:
-        console.print("[red]Failed[/red]")
+        console.print("[status.error]Failed[/status.error]")
         all_passed = False
 
     # CLI plugin
     console.print("docker mcp CLI plugin: ", end="")
     try:
         check_mcp_cli()
-        console.print("[green]Installed[/green]")
+        console.print("[status.enabled]Installed[/status.enabled]")
     except MCPCliNotFoundError:
-        console.print("[yellow]Not installed[/yellow]")
+        console.print("[status.disabled]Not installed[/status.disabled]")
 
     # Show endpoint URLs
     console.print()
