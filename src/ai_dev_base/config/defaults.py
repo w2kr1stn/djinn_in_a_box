@@ -32,6 +32,7 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     ],
     "cache": [
         "ai-dev-uv-cache",
+        "ai-dev-vscode-server",
     ],
     "data": [
         "ai-dev-opencode-data",
@@ -42,7 +43,7 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
 Categories:
 - credentials: AI agent auth tokens (claude, gemini, codex, opencode, gh)
 - tools: Tool installations & configs (az, pulumi, tools-cache)
-- cache: Package caches (uv)
+- cache: Package caches and IDE state (uv, vscode-server)
 - data: Application data (opencode-data)
 """
 
@@ -56,7 +57,7 @@ def get_all_volumes() -> list[str]:
     Example:
         >>> volumes = get_all_volumes()
         >>> len(volumes)
-        10
+        11
         >>> "ai-dev-claude-config" in volumes
         True
     """

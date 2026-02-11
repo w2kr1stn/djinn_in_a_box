@@ -36,6 +36,8 @@
         "source=ai-dev-opencode-config,target=/home/dev/.opencode,type=volume",
         "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
         "source=ai-dev-sops-config,target=/home/dev/.config/sops,type=volume",
+        // VS Code Server (persistent extensions & settings)
+        "source=ai-dev-vscode-server,target=/home/dev/.vscode-server,type=volume",
         // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
         "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
     ],
@@ -50,17 +52,23 @@
     "customizations": {
         "vscode": {
             "extensions": [
+                // AI
+                "anthropic.claude-code",
                 // Python
                 "ms-python.python",
                 "ms-python.vscode-pylance",
                 "charliermarsh.ruff",
-                // Git
+                // Git & CI
                 "eamodio.gitlens",
-                // Theme
+                "github.vscode-github-actions",
+                // Docker
+                "ms-azuretools.vscode-docker",
+                // Theme & UI
                 "dcasella.monokai-plusplus",
                 "vscode-icons-team.vscode-icons",
                 "oderwat.indent-rainbow",
                 // General
+                "tamasfe.even-better-toml",
                 "editorconfig.editorconfig",
                 "esbenp.prettier-vscode"
             ],
