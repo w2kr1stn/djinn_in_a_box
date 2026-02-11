@@ -155,9 +155,9 @@ EOF
 RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
     ~/.opencode ~/.local/share/opencode \
     && echo '{"name": "opencode-workspace", "private": true}' > ~/.opencode/package.json \
-    && ln -s ~/.claude ~/.config/claude \
-    && ln -s ~/.claude/claude.json ~/.claude.json \
-    && ln -s ~/.gemini/settings.json ~/.gemini-settings.json
+    && ln -sfn ~/.claude ~/.config/claude \
+    && ln -sf ~/.claude/claude.json ~/.claude.json \
+    && ln -sf ~/.gemini/settings.json ~/.gemini-settings.json
 
 # Optional tools installer (runtime installation with caching)
 COPY --chown=dev:dev tools/ /home/dev/.tools/
