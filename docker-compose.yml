@@ -29,6 +29,8 @@ x-common-volumes: &common-volumes
   - azure-config:/home/dev/.azure
   - pulumi-config:/home/dev/.pulumi
   - sops-config:/home/dev/.config/sops
+  # VS Code Server (persistent extensions & settings for Attach to Container)
+  - vscode-server:/home/dev/.vscode-server
   # Host configs (read-only)
   - ~/.ssh:/home/dev/.ssh:ro
   - ~/.gitconfig:/home/dev/.gitconfig:ro
@@ -137,3 +139,5 @@ volumes:
     name: ai-dev-pulumi-config
   sops-config:
     name: ai-dev-sops-config
+  vscode-server:
+    name: ai-dev-vscode-server
