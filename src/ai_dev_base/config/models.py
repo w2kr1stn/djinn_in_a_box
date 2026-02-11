@@ -31,15 +31,21 @@ def validate_memory_format(value: str) -> str:
     Raises:
         ValueError: If format is invalid.
     """
-    pattern = r"^\d+[GMKgmk]$"
+    pattern = r"^[1-9]\d*[GMKgmk]$"
     if not re.match(pattern, value):
         msg = (
             f"Invalid memory format: '{value}'. "
-            "Expected format like '12G', '4096M', '512K' (number + G/M/K suffix)"
+            "Expected format like '12G', '4096M', '512K' (positive number + G/M/K suffix)"
         )
         raise ValueError(msg)
     # Normalize to uppercase suffix
     return value[:-1] + value[-1].upper()
+
+
+def _memory_to_bytes(value: str) -> int:
+    """Convert a memory string like '12G' to bytes for comparison."""
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3}
+    return int(value[:-1]) * units[value[-1].upper()]
 
 
 # =============================================================================
@@ -141,11 +147,19 @@ class ResourceLimits(BaseModel):
 
     @model_validator(mode="after")
     def validate_reservations(self) -> ResourceLimits:
-        """Ensure cpu_reservation does not exceed cpu_limit."""
+        """Ensure reservations do not exceed limits."""
         if self.cpu_reservation > self.cpu_limit:
             msg = (
                 f"cpu_reservation ({self.cpu_reservation}) cannot exceed "
                 f"cpu_limit ({self.cpu_limit})"
+            )
+            raise ValueError(msg)
+        mem_res = _memory_to_bytes(self.memory_reservation)
+        mem_lim = _memory_to_bytes(self.memory_limit)
+        if mem_res > mem_lim:
+            msg = (
+                f"memory_reservation ({self.memory_reservation}) cannot exceed "
+                f"memory_limit ({self.memory_limit})"
             )
             raise ValueError(msg)
         return self
