@@ -18,7 +18,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Packages to update
+# Packages to update (ARG name -> npm package for version lookup)
+# Note: Claude Code uses the native installer (not npm), but npm registry
+# versions are in sync and used here for version discovery only.
 declare -A PACKAGES=(
     ["CLAUDE_CODE_VERSION"]="@anthropic-ai/claude-code"
     ["GEMINI_CLI_VERSION"]="@google/gemini-cli"
