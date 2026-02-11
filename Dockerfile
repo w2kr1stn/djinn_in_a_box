@@ -74,20 +74,23 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$HOME/
 ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
-# Global NPM Packages
 # CLI Agent versions - update with: ./scripts/update-agents.sh
 ARG CLAUDE_CODE_VERSION=2.1.20
 ARG GEMINI_CLI_VERSION=0.25.2
 ARG CODEX_VERSION=0.92.0
 ARG OPENCODE_VERSION=1.1.36
 
+# Claude Code via native installer (no npm/Node.js dependency)
+# Installs to ~/.local/bin/claude (already in PATH via .zshrc)
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
+
+# Global NPM Packages (remaining agents + dev tools)
 RUN eval "$(fnm env --shell bash)" && npm install -g \
     typescript \
     typescript-language-server \
     pyright \
     prettier \
     eslint \
-    @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     @google/gemini-cli@${GEMINI_CLI_VERSION} \
     @openai/codex@${CODEX_VERSION} \
     opencode-ai@${OPENCODE_VERSION} \
