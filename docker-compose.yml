@@ -31,6 +31,8 @@ x-common-volumes: &common-volumes
   - sops-config:/home/dev/.config/sops
   # VS Code Server (persistent extensions & settings for Attach to Container)
   - vscode-server:/home/dev/.vscode-server
+  # VS Code Workspaces (persistent .code-workspace files)
+  - vscode-workspaces:/home/dev/workspaces
   # Host configs (read-only)
   - ~/.ssh:/home/dev/.ssh:ro
   - ~/.gitconfig:/home/dev/.gitconfig:ro
@@ -141,3 +143,5 @@ volumes:
     name: ai-dev-sops-config
   vscode-server:
     name: ai-dev-vscode-server
+  vscode-workspaces:
+    name: ai-dev-vscode-workspaces

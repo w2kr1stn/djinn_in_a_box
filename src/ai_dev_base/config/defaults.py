@@ -36,6 +36,7 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     ],
     "data": [
         "ai-dev-opencode-data",
+        "ai-dev-vscode-workspaces",
     ],
 }
 """Volume categories for selective cleanup.
@@ -44,7 +45,7 @@ Categories:
 - credentials: AI agent auth tokens (claude, gemini, codex, opencode, gh)
 - tools: Tool installations & configs (az, pulumi, tools-cache)
 - cache: Package caches and IDE state (uv, vscode-server)
-- data: Application data (opencode-data)
+- data: Application data (opencode-data, vscode-workspaces)
 """
 
 
@@ -57,7 +58,7 @@ def get_all_volumes() -> list[str]:
     Example:
         >>> volumes = get_all_volumes()
         >>> len(volumes)
-        11
+        12
         >>> "ai-dev-claude-config" in volumes
         True
     """
