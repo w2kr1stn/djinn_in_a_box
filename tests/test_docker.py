@@ -74,11 +74,10 @@ class TestRunResult:
         assert result.success is False
 
     def test_default_values(self) -> None:
-        """Test default values for stdout, stderr, command."""
+        """Test default values for stdout, stderr."""
         result = RunResult(returncode=0)
         assert result.stdout == ""
         assert result.stderr == ""
-        assert result.command == []
 
     def test_full_result(self) -> None:
         """Test result with all fields populated."""
@@ -86,12 +85,10 @@ class TestRunResult:
             returncode=0,
             stdout="output",
             stderr="error",
-            command=["docker", "compose", "up"],
         )
         assert result.returncode == 0
         assert result.stdout == "output"
         assert result.stderr == "error"
-        assert result.command == ["docker", "compose", "up"]
 
 
 # =============================================================================
@@ -410,9 +407,10 @@ class TestComposeBuild:
         )
         result = compose_build()
         assert result.success is True
-        assert "docker" in result.command
-        assert "compose" in result.command
-        assert "build" in result.command
+        cmd = mock_run.call_args[0][0]
+        assert "docker" in cmd
+        assert "compose" in cmd
+        assert "build" in cmd
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
@@ -422,8 +420,9 @@ class TestComposeBuild:
         """Test includes --no-cache flag when requested."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = compose_build(no_cache=True)
-        assert "--no-cache" in result.command
+        compose_build(no_cache=True)
+        cmd = mock_run.call_args[0][0]
+        assert "--no-cache" in cmd
 
 
 class TestComposeRun:
@@ -516,7 +515,8 @@ class TestComposeRun:
             interactive=False,
         )
 
-        assert "-T" in result.command
+        cmd = mock_run.call_args[0][0]
+        assert "-T" in cmd
         assert result.stdout == "captured"
 
 
@@ -531,8 +531,9 @@ class TestComposeUp:
         """Test runs with -d flag by default."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = compose_up()
-        assert "-d" in result.command
+        compose_up()
+        cmd = mock_run.call_args[0][0]
+        assert "-d" in cmd
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
@@ -542,8 +543,9 @@ class TestComposeUp:
         """Test includes service names when specified."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = compose_up(services=["docker-proxy"])
-        assert "docker-proxy" in result.command
+        compose_up(services=["docker-proxy"])
+        cmd = mock_run.call_args[0][0]
+        assert "docker-proxy" in cmd
 
 
 class TestComposeDown:
@@ -557,9 +559,10 @@ class TestComposeDown:
         """Test basic down command."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = compose_down()
-        assert "down" in result.command
-        assert "-v" not in result.command
+        compose_down()
+        cmd = mock_run.call_args[0][0]
+        assert "down" in cmd
+        assert "-v" not in cmd
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
@@ -569,8 +572,9 @@ class TestComposeDown:
         """Test includes -v flag when remove_volumes=True."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = compose_down(remove_volumes=True)
-        assert "-v" in result.command
+        compose_down(remove_volumes=True)
+        cmd = mock_run.call_args[0][0]
+        assert "-v" in cmd
 
 
 class TestCleanupDockerProxy:
