@@ -65,36 +65,6 @@ def get_project_root() -> Path:
 
 
 # =============================================================================
-# Configuration Directory Access
-# =============================================================================
-
-
-def get_config_dir(*, create: bool = True) -> Path:
-    """Get the XDG-compliant configuration directory.
-
-    Returns the configuration directory path (~/.config/ai-dev-base/).
-    By default, creates the directory if it does not exist.
-
-    Args:
-        create: If True (default), create the directory if it does not exist.
-
-    Returns:
-        Path to the configuration directory.
-
-    Example:
-        >>> config_dir = get_config_dir()
-        >>> config_dir.exists()
-        True
-        >>> str(config_dir).endswith('.config/ai-dev-base')
-        True
-    """
-    if create and not CONFIG_DIR.exists():
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    return CONFIG_DIR
-
-
-# =============================================================================
 # Mount Path Resolution
 # =============================================================================
 

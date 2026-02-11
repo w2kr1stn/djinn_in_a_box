@@ -752,7 +752,7 @@ def get_existing_volumes_by_category(category: str) -> list[str]:
         >>> for vol in volumes:
         ...     print(f"  - {vol}")
     """
-    from ai_dev_base.config.defaults import get_volumes_by_category
+    from ai_dev_base.config.defaults import VOLUME_CATEGORIES
 
-    defined_volumes = get_volumes_by_category(category)
+    defined_volumes = VOLUME_CATEGORIES.get(category, [])
     return [vol for vol in defined_volumes if volume_exists(vol)]

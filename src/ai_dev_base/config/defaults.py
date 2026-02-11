@@ -3,7 +3,6 @@
 This module provides:
 - VOLUME_CATEGORIES: Docker volume categorization for cleanup commands
 - DEFAULT_AGENTS: Pre-configured agent definitions
-- DEFAULT_RESOURCES: Standard resource limits
 
 All defaults can be imported without side effects.
 """
@@ -12,7 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from ai_dev_base.config.models import AgentConfig, ResourceLimits
+from ai_dev_base.config.models import AgentConfig
 
 # =============================================================================
 # Volume Categories (for clean command)
@@ -62,24 +61,6 @@ def get_all_volumes() -> list[str]:
         True
     """
     return [vol for vols in VOLUME_CATEGORIES.values() for vol in vols]
-
-
-def get_volumes_by_category(category: str) -> list[str]:
-    """Get volume names for a specific category.
-
-    Args:
-        category: One of 'credentials', 'tools', 'cache', 'data'.
-
-    Returns:
-        List of volume names, empty list if category unknown.
-
-    Example:
-        >>> get_volumes_by_category("credentials")
-        ['ai-dev-claude-config', 'ai-dev-gemini-config', ...]
-        >>> get_volumes_by_category("unknown")
-        []
-    """
-    return VOLUME_CATEGORIES.get(category, [])
 
 
 # =============================================================================
@@ -139,19 +120,4 @@ Each agent is configured with:
 - json_flags: Flags for JSON output format
 - model_flag: Flag for model selection (--model or -m)
 - prompt_template: Shell template for prompt injection
-"""
-
-
-# =============================================================================
-# Default Resource Limits
-# =============================================================================
-
-DEFAULT_RESOURCES: Final[ResourceLimits] = ResourceLimits()
-"""Default Docker resource limits.
-
-Defaults:
-- cpu_limit: 6 cores
-- memory_limit: 12G
-- cpu_reservation: 2 cores
-- memory_reservation: 4G
 """
