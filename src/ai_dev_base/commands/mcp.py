@@ -21,7 +21,7 @@ from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 
-from ai_dev_base.core.console import console, error, info, success, warning
+from ai_dev_base.core.console import console, err_console, error, info, success, warning
 from ai_dev_base.core.docker import ensure_network, is_container_running
 from ai_dev_base.core.paths import get_project_root
 
@@ -95,7 +95,7 @@ def require_running() -> None:
     """
     if not is_container_running(GATEWAY_CONTAINER):
         error("MCP Gateway is not running")
-        console.print("Start it with: mcpgateway start")
+        err_console.print("Start it with: mcpgateway start")
         raise typer.Exit(1)
 
 
@@ -138,6 +138,7 @@ def require_mcp_cli(func: Callable[P, R]) -> Callable[P, R]:
 # =============================================================================
 
 
+@require_mcp_cli
 def start() -> None:
     """Start the MCP Gateway service.
 
@@ -148,12 +149,6 @@ def start() -> None:
     - Starts the gateway via docker compose
     - Displays endpoint information on success
     """
-    try:
-        check_mcp_cli()
-    except MCPCliNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
     ensure_network(AI_DEV_NETWORK)
     info("Starting MCP Gateway...")
 
@@ -172,14 +167,14 @@ def start() -> None:
 
     if is_container_running(GATEWAY_CONTAINER):
         success("MCP Gateway is running")
-        console.print()
-        console.print(f"Endpoint: {GATEWAY_ENDPOINT_CONTAINER} (from containers)")
-        console.print(f"          {GATEWAY_ENDPOINT_HOST} (from host)")
-        console.print()
-        console.print("Next steps:")
-        console.print("  mcpgateway enable duckduckgo    # Enable web search")
-        console.print("  mcpgateway enable memory        # Enable persistent memory")
-        console.print("  mcpgateway servers              # List enabled servers")
+        err_console.print()
+        err_console.print(f"Endpoint: {GATEWAY_ENDPOINT_CONTAINER} (from containers)")
+        err_console.print(f"          {GATEWAY_ENDPOINT_HOST} (from host)")
+        err_console.print()
+        err_console.print("Next steps:")
+        err_console.print("  mcpgateway enable duckduckgo    # Enable web search")
+        err_console.print("  mcpgateway enable memory        # Enable persistent memory")
+        err_console.print("  mcpgateway servers              # List enabled servers")
     else:
         error("MCP Gateway failed to start")
         # Show logs for debugging
@@ -238,14 +233,14 @@ def status() -> None:
     - Running MCP containers
     """
     info("MCP Gateway Status")
-    console.print("=" * 40)
+    err_console.print("=" * 40)
 
     if is_container_running(GATEWAY_CONTAINER):
-        console.print("Gateway: [status.enabled]Running[/status.enabled]")
-        console.print()
+        err_console.print("Gateway: [status.enabled]Running[/status.enabled]")
+        err_console.print()
 
         # Show container details
-        subprocess.run(
+        result = subprocess.run(
             [
                 "docker",
                 "ps",
@@ -254,10 +249,14 @@ def status() -> None:
                 "--format",
                 "ID: {{.ID}}\nImage: {{.Image}}\nStatus: {{.Status}}\nPorts: {{.Ports}}",
             ],
+            capture_output=True,
+            text=True,
             check=False,
         )
+        if result.stdout.strip():
+            err_console.print(result.stdout.strip())
 
-        console.print()
+        err_console.print()
         info("Enabled Servers:")
         result = subprocess.run(
             ["docker", "mcp", "server", "ls"],
@@ -266,11 +265,11 @@ def status() -> None:
             check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
-            console.print(result.stdout.strip())
+            err_console.print(result.stdout.strip())
         else:
-            console.print("  (none)")
+            err_console.print("  (none)")
 
-        console.print()
+        err_console.print()
         info("Running MCP Containers:")
         result = subprocess.run(
             [
@@ -292,15 +291,15 @@ def status() -> None:
             ]
             if lines:
                 for line in lines:
-                    console.print(line)
+                    err_console.print(line)
             else:
-                console.print("  (none)")
+                err_console.print("  (none)")
         else:
-            console.print("  (none)")
+            err_console.print("  (none)")
     else:
-        console.print("Gateway: [status.error]Stopped[/status.error]")
-        console.print()
-        console.print("Start with: mcpgateway start")
+        err_console.print("Gateway: [status.error]Stopped[/status.error]")
+        err_console.print()
+        err_console.print("Start with: mcpgateway start")
 
 
 def logs(
@@ -394,7 +393,7 @@ def servers() -> None:
     Equivalent to: ./mcp.sh servers
     """
     info("Enabled MCP Servers")
-    console.print("=" * 40)
+    err_console.print("=" * 40)
 
     result = subprocess.run(
         ["docker", "mcp", "server", "ls"],
@@ -406,7 +405,7 @@ def servers() -> None:
     if result.returncode == 0 and result.stdout.strip():
         console.print(result.stdout.strip())
     else:
-        console.print("No servers enabled or gateway not running")
+        err_console.print("No servers enabled or gateway not running")
 
 
 @require_mcp_cli
@@ -419,7 +418,7 @@ def catalog() -> None:
     for initializing it.
     """
     info("MCP Server Catalog")
-    console.print("=" * 40)
+    err_console.print("=" * 40)
 
     result = subprocess.run(
         ["docker", "mcp", "catalog", "show", "docker-mcp"],
@@ -429,16 +428,12 @@ def catalog() -> None:
     )
 
     if result.returncode != 0:
-        console.print("Unable to fetch catalog.")
-        console.print()
-        console.print("Initialize catalog first: docker mcp catalog init")
-        console.print("Or browse online: https://hub.docker.com/search?q=mcp%2F")
+        err_console.print("Unable to fetch catalog.")
+        err_console.print()
+        err_console.print("Initialize catalog first: docker mcp catalog init")
+        err_console.print("Or browse online: https://hub.docker.com/search?q=mcp%2F")
     else:
-        # Run again without capture to display output
-        subprocess.run(
-            ["docker", "mcp", "catalog", "show", "docker-mcp"],
-            check=False,
-        )
+        console.print(result.stdout.strip())
 
 
 # =============================================================================
@@ -458,20 +453,20 @@ def test() -> None:
     - docker mcp CLI plugin installation
     """
     info("Testing MCP Gateway...")
-    console.print()
+    err_console.print()
 
     all_passed = True
 
     # Container status
-    console.print("Container status: ", end="")
+    err_console.print("Container status: ", end="")
     if is_container_running(GATEWAY_CONTAINER):
-        console.print("[status.enabled]Running[/status.enabled]")
+        err_console.print("[status.enabled]Running[/status.enabled]")
     else:
-        console.print("[status.error]Not running[/status.error]")
+        err_console.print("[status.error]Not running[/status.error]")
         all_passed = False
 
     # Localhost endpoint
-    console.print("Localhost endpoint (host access): ", end="")
+    err_console.print("Localhost endpoint (host access): ", end="")
     result = subprocess.run(
         [
             "curl",
@@ -489,12 +484,12 @@ def test() -> None:
         check=False,
     )
     if result.returncode == 0 and result.stdout in ("200", "404"):
-        console.print("[status.enabled]OK[/status.enabled]")
+        err_console.print("[status.enabled]OK[/status.enabled]")
     else:
-        console.print("[status.disabled]Not responding[/status.disabled]")
+        err_console.print("[status.disabled]Not responding[/status.disabled]")
 
     # Container endpoint (via docker network)
-    console.print("Container endpoint (network access): ", end="")
+    err_console.print("Container endpoint (network access): ", end="")
     result = subprocess.run(
         [
             "docker",
@@ -517,38 +512,38 @@ def test() -> None:
         check=False,
     )
     if result.returncode == 0 and result.stdout in ("200", "404"):
-        console.print("[status.enabled]OK[/status.enabled]")
+        err_console.print("[status.enabled]OK[/status.enabled]")
     else:
-        console.print(
+        err_console.print(
             "[status.disabled]Not responding (network may not exist yet)[/status.disabled]"
         )
 
     # Docker socket access
-    console.print("Docker socket access: ", end="")
+    err_console.print("Docker socket access: ", end="")
     result = subprocess.run(
         ["docker", "exec", GATEWAY_CONTAINER, "ls", "/var/run/docker.sock"],
         capture_output=True,
         check=False,
     )
     if result.returncode == 0:
-        console.print("[status.enabled]OK[/status.enabled]")
+        err_console.print("[status.enabled]OK[/status.enabled]")
     else:
-        console.print("[status.error]Failed[/status.error]")
+        err_console.print("[status.error]Failed[/status.error]")
         all_passed = False
 
     # CLI plugin
-    console.print("docker mcp CLI plugin: ", end="")
+    err_console.print("docker mcp CLI plugin: ", end="")
     try:
         check_mcp_cli()
-        console.print("[status.enabled]Installed[/status.enabled]")
+        err_console.print("[status.enabled]Installed[/status.enabled]")
     except MCPCliNotFoundError:
-        console.print("[status.disabled]Not installed[/status.disabled]")
+        err_console.print("[status.disabled]Not installed[/status.disabled]")
 
     # Show endpoint URLs
-    console.print()
-    console.print("MCP Gateway URLs:")
-    console.print("  Claude Code: http://mcp-gateway:8811/sse")
-    console.print("  Codex CLI:   http://mcp-gateway:8811")
+    err_console.print()
+    err_console.print("MCP Gateway URLs:")
+    err_console.print("  Claude Code: http://mcp-gateway:8811/sse")
+    err_console.print("  Codex CLI:   http://mcp-gateway:8811")
 
     if not all_passed:
         raise typer.Exit(1)
@@ -591,6 +586,9 @@ def clean() -> None:
     # Remove MCP config directory (~/.docker/mcp)
     mcp_config = Path.home() / ".docker" / "mcp"
     if mcp_config.exists():
-        shutil.rmtree(mcp_config)
+        try:
+            shutil.rmtree(mcp_config)
+        except OSError as e:
+            warning(f"Failed to remove {mcp_config}: {e}")
 
     success("MCP Gateway cleaned")
