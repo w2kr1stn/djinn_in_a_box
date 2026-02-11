@@ -9,6 +9,8 @@ Provides TOML-based configuration loading with:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -128,14 +130,28 @@ def _transform_toml_to_config(data: dict[str, Any]) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
 
+    known_sections = {"general", "shell", "resources"}
+    unknown_sections = set(data.keys()) - known_sections
+    if unknown_sections:
+        from ai_dev_base.core.console import warning
+
+        warning(f"Unknown config sections ignored: {', '.join(sorted(unknown_sections))}")
+
     # Extract [general] section to top-level
     general = data.get("general", {})
+    known_general_keys = {"code_dir", "timezone"}
+    unknown_general = set(general.keys()) - known_general_keys
+    if unknown_general:
+        from ai_dev_base.core.console import warning
+
+        warning(f"Unknown keys in [general] ignored: {', '.join(sorted(unknown_general))}")
+
     if "code_dir" in general:
         result["code_dir"] = general["code_dir"]
     if "timezone" in general:
         result["timezone"] = general["timezone"]
 
-    # Pass through nested sections
+    # Pass through nested sections (Pydantic extra="forbid" catches unknown keys)
     if "shell" in data:
         result["shell"] = data["shell"]
     if "resources" in data:
@@ -280,8 +296,15 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
     # Transform AppConfig to TOML structure
     toml_data = _transform_config_to_toml(config)
 
-    with open(config_path, "wb") as f:
-        tomli_w.dump(toml_data, f)
+    # Atomic write: write to temp file then rename to avoid corruption on interrupt
+    fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(toml_data, f)
+        os.replace(tmp_path, config_path)
+    except BaseException:
+        os.unlink(tmp_path)
+        raise
 
 
 def _transform_config_to_toml(config: AppConfig) -> dict[str, Any]:
