@@ -19,6 +19,7 @@ maintaining backwards compatibility with the existing workflow.
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Annotated
@@ -303,6 +304,16 @@ def status() -> None:
 
     Equivalent to: ./dev.sh status
     """
+    # Check Docker availability
+    docker_check = subprocess.run(
+        ["docker", "info"],
+        capture_output=True,
+        check=False,
+    )
+    if docker_check.returncode != 0:
+        error("Docker is not available. Is the Docker daemon running?")
+        raise typer.Exit(1)
+
     # Configuration
     header("Configuration")
     try:
@@ -465,6 +476,9 @@ def clean_volumes(
     """
     # If a specific volume name is provided, delete it
     if name:
+        if not name.startswith("ai-dev-"):
+            error(f"Refusing to delete volume '{name}': only ai-dev-* volumes are managed")
+            raise typer.Exit(1)
         if volume_exists(name):
             info(f"Deleting volume: {name}")
             if delete_volume(name):
@@ -678,6 +692,10 @@ def enter() -> None:
         # In terminal 2:
         codeagent enter  # Opens new shell in same container
     """
+    if not sys.stdin.isatty():
+        error("Cannot enter container: no TTY available (stdin is not a terminal)")
+        raise typer.Exit(1)
+
     containers = get_running_containers("ai-dev-base-dev")
     if not containers:
         error("No running ai-dev-base container found.")
