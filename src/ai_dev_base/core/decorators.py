@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import wraps
-from typing import TYPE_CHECKING, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 
 import typer
-
-if TYPE_CHECKING:
-    pass
 
 P = ParamSpec("P")
 R = TypeVar("R")
