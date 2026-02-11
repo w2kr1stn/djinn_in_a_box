@@ -38,6 +38,8 @@
         "source=ai-dev-sops-config,target=/home/dev/.config/sops,type=volume",
         // VS Code Server (persistent extensions & settings)
         "source=ai-dev-vscode-server,target=/home/dev/.vscode-server,type=volume",
+        // VS Code Workspaces (persistent .code-workspace files)
+        "source=ai-dev-vscode-workspaces,target=/home/dev/workspaces,type=volume",
         // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
         "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
     ],
