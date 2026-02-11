@@ -16,6 +16,7 @@ as the workspace (implicit --here behavior).
 from __future__ import annotations
 
 import json
+import shlex
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -74,19 +75,19 @@ def build_agent_command(
         >>> "--dangerously-skip-permissions" in cmd
         True
     """
-    parts: list[str] = [agent_config.binary]
-    parts.extend(agent_config.headless_flags)
+    parts: list[str] = [shlex.quote(agent_config.binary)]
+    parts.extend(shlex.quote(f) for f in agent_config.headless_flags)
 
     if model:
-        parts.extend([agent_config.model_flag, model])
+        parts.extend([shlex.quote(agent_config.model_flag), shlex.quote(model)])
 
     if write:
-        parts.extend(agent_config.write_flags)
+        parts.extend(shlex.quote(f) for f in agent_config.write_flags)
     else:
-        parts.extend(agent_config.read_only_flags)
+        parts.extend(shlex.quote(f) for f in agent_config.read_only_flags)
 
     if json_output:
-        parts.extend(agent_config.json_flags)
+        parts.extend(shlex.quote(f) for f in agent_config.json_flags)
 
     # Append prompt template (uses $AGENT_PROMPT env var expanded at runtime)
     parts.append(agent_config.prompt_template)
