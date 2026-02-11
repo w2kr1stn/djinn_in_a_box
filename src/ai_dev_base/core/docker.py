@@ -14,9 +14,8 @@ All functions mirror the behavior of the original dev.sh Bash script.
 
 from __future__ import annotations
 
-import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -64,8 +63,6 @@ class ContainerOptions:
 class RunResult:
     """Result of a container execution.
 
-    Captures the exit code, output streams, and the command that was executed.
-
     Example:
         >>> result = RunResult(returncode=0, stdout="output", stderr="")
         >>> result.success
@@ -73,16 +70,8 @@ class RunResult:
     """
 
     returncode: int
-    """Exit code from the container process."""
-
     stdout: str = ""
-    """Standard output from the container (if captured)."""
-
     stderr: str = ""
-    """Standard error from the container (if captured)."""
-
-    command: list[str] = field(default_factory=lambda: [])
-    """The command that was executed."""
 
     @property
     def success(self) -> bool:
@@ -139,12 +128,13 @@ def ensure_network(name: str = "ai-dev-network") -> bool:
     result = subprocess.run(
         ["docker", "network", "create", name],
         capture_output=True,
+        text=True,
         check=False,
     )
     if result.returncode != 0:
         from ai_dev_base.core.console import warning
 
-        stderr_msg = result.stderr.decode().strip() if result.stderr else ""
+        stderr_msg = result.stderr.strip() if result.stderr else ""
         error_detail = stderr_msg or f"exit code {result.returncode}"
         warning(f"Failed to create Docker network '{name}': {error_detail}")
     return result.returncode == 0
@@ -277,7 +267,6 @@ def compose_build(*, no_cache: bool = False) -> RunResult:
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
-        command=cmd,
     )
 
 
@@ -379,23 +368,18 @@ def compose_run(
     if command is not None:
         cmd.extend(["-c", command])
 
-    # Prepare environment for subprocess
-    subprocess_env = os.environ.copy()
-    subprocess_env.update(env_vars)
-
-    # Execute
+    # Execute (env vars are passed to the container via -e flags above,
+    # no need to set them in the host subprocess environment)
     try:
         if interactive:
             # Interactive mode: inherit stdin/stdout/stderr
             result = subprocess.run(
                 cmd,
                 cwd=project_root,
-                env=subprocess_env,
                 check=False,
             )
             return RunResult(
                 returncode=result.returncode,
-                command=cmd,
             )
         else:
             # Headless mode: capture output with optional timeout
@@ -404,7 +388,6 @@ def compose_run(
                 capture_output=True,
                 text=True,
                 cwd=project_root,
-                env=subprocess_env,
                 timeout=timeout,
                 check=False,
             )
@@ -412,34 +395,28 @@ def compose_run(
                 returncode=result.returncode,
                 stdout=result.stdout,
                 stderr=result.stderr,
-                command=cmd,
             )
     except subprocess.TimeoutExpired as e:
-        # Handle timeout: decode output if available
-        stdout = e.stdout.decode() if e.stdout is not None else ""
-        stderr = e.stderr.decode() if e.stderr is not None else f"Timeout after {timeout}s"
+        # text=True means stdout/stderr are already str (not bytes)
+        stdout = e.stdout if e.stdout is not None else ""
+        stderr = e.stderr if e.stderr is not None else f"Timeout after {timeout}s"
         # Return code 124 is conventional for timeout (like GNU timeout command)
         return RunResult(
             returncode=124,
             stdout=stdout,
             stderr=stderr,
-            command=cmd,
         )
     except FileNotFoundError as e:
-        # Docker command not found
         return RunResult(
-            returncode=127,  # Command not found convention
+            returncode=127,
             stdout="",
             stderr=f"Docker command not found: {e}",
-            command=cmd,
         )
     except PermissionError as e:
-        # Permission denied (e.g., Docker socket inaccessible)
         return RunResult(
-            returncode=126,  # Permission denied convention
+            returncode=126,
             stdout="",
             stderr=f"Permission denied: {e}",
-            command=cmd,
         )
 
 
@@ -485,7 +462,6 @@ def compose_up(
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
-        command=cmd,
     )
 
 
@@ -526,7 +502,6 @@ def compose_down(
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
-        command=cmd,
     )
 
 
@@ -561,11 +536,12 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
     stop_result = subprocess.run(
         ["docker", "compose", *compose_files, "stop", "docker-proxy"],
         capture_output=True,
+        text=True,
         cwd=project_root,
         check=False,
     )
     if stop_result.returncode != 0:
-        stderr_msg = stop_result.stderr.decode().strip() if stop_result.stderr else ""
+        stderr_msg = stop_result.stderr.strip() if stop_result.stderr else ""
         if stderr_msg:
             warning(f"Failed to stop docker-proxy: {stderr_msg}")
         success = False
@@ -574,11 +550,12 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
     rm_result = subprocess.run(
         ["docker", "compose", *compose_files, "rm", "-f", "docker-proxy"],
         capture_output=True,
+        text=True,
         cwd=project_root,
         check=False,
     )
     if rm_result.returncode != 0:
-        stderr_msg = rm_result.stderr.decode().strip() if rm_result.stderr else ""
+        stderr_msg = rm_result.stderr.strip() if rm_result.stderr else ""
         if stderr_msg:
             warning(f"Failed to remove docker-proxy: {stderr_msg}")
         success = False
@@ -613,9 +590,14 @@ def is_container_running(name: str) -> bool:
         check=False,
     )
 
-    # Check for exact match in output
-    running_containers = result.stdout.strip().split("\n")
-    return name in running_containers
+    if result.returncode != 0:
+        return False
+
+    # Check for exact match in output (split produces [""] for empty string)
+    output = result.stdout.strip()
+    if not output:
+        return False
+    return name in output.split("\n")
 
 
 def get_running_containers(prefix: str = "ai-dev") -> list[str]:
@@ -716,12 +698,13 @@ def delete_volume(name: str) -> bool:
     result = subprocess.run(
         ["docker", "volume", "rm", name],
         capture_output=True,
+        text=True,
         check=False,
     )
     if result.returncode != 0:
         from ai_dev_base.core.console import warning
 
-        stderr_msg = result.stderr.decode().strip() if result.stderr else ""
+        stderr_msg = result.stderr.strip() if result.stderr else ""
         error_detail = stderr_msg or f"exit code {result.returncode}"
         warning(f"Failed to delete volume '{name}': {error_detail}")
     return result.returncode == 0
