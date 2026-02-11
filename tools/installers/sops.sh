@@ -2,10 +2,15 @@
 # SOPS - Secrets OPerationS (encrypted secrets management)
 set -e
 
-SOPS_VERSION="${SOPS_VERSION:-3.9.4}"
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
 
 mkdir -p "$INSTALL_DIR"
+
+# Resolve version: use SOPS_VERSION env var, or fetch latest from GitHub
+if [[ -z "${SOPS_VERSION:-}" ]]; then
+    SOPS_VERSION=$(curl -fsSL "https://api.github.com/repos/getsops/sops/releases/latest" \
+        | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+fi
 
 # Download SOPS binary directly to persistent volume
 curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" \
