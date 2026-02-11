@@ -16,5 +16,8 @@
 # azure-cli          # Microsoft Azure CLI (az)
 # pulumi             # Pulumi Infrastructure as Code CLI
 
+# --- JavaScript ---
+# bun                # Bun JavaScript runtime & toolkit
+
 # --- Database Clients ---
 # psql               # PostgreSQL client (psql, pg_dump, etc.)
