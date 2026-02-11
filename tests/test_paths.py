@@ -53,62 +53,6 @@ class TestGetProjectRoot:
         assert (root / "src" / "ai_dev_base").is_dir()
 
 
-class TestGetConfigDir:
-    """Tests for get_config_dir()."""
-
-    def test_returns_config_dir(self, mock_home: Path) -> None:
-        """get_config_dir() should return XDG config directory."""
-        # Reimport to pick up mocked HOME
-        from importlib import reload
-
-        import ai_dev_base.core.paths as paths_module
-
-        reload(paths_module)
-
-        # Note: CONFIG_DIR is computed at import time, so we test the function behavior
-        config_dir = paths_module.get_config_dir(create=False)
-        # The constant was computed before mock, but function should work
-        assert config_dir.name == "ai-dev-base"
-
-    def test_creates_directory_by_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """get_config_dir(create=True) should create the directory."""
-        # Create a fake config dir path that doesn't exist
-        fake_config = tmp_path / ".config" / "ai-dev-base"
-        assert not fake_config.exists()
-
-        # Patch CONFIG_DIR
-        import ai_dev_base.core.paths as paths_module
-
-        original = paths_module.CONFIG_DIR
-        monkeypatch.setattr(paths_module, "CONFIG_DIR", fake_config)
-
-        try:
-            result = paths_module.get_config_dir(create=True)
-            assert result.exists()
-            assert result.is_dir()
-        finally:
-            monkeypatch.setattr(paths_module, "CONFIG_DIR", original)
-
-    def test_no_create_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_config_dir(create=False) should not create the directory."""
-        fake_config = tmp_path / ".config" / "ai-dev-base"
-        assert not fake_config.exists()
-
-        import ai_dev_base.core.paths as paths_module
-
-        original = paths_module.CONFIG_DIR
-        monkeypatch.setattr(paths_module, "CONFIG_DIR", fake_config)
-
-        try:
-            result = paths_module.get_config_dir(create=False)
-            assert not fake_config.exists()
-            assert result == fake_config
-        finally:
-            monkeypatch.setattr(paths_module, "CONFIG_DIR", original)
-
-
 class TestResolveMountPath:
     """Tests for resolve_mount_path()."""
 

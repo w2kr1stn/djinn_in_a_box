@@ -324,7 +324,6 @@ class TestAgentsConfig:
         """Test AgentsConfig with no agents."""
         config = AgentsConfig()
         assert config.agents == {}
-        assert config.list_agents() == []
 
     def test_single_agent(self) -> None:
         """Test AgentsConfig with one agent."""
@@ -342,35 +341,6 @@ class TestAgentsConfig:
             }
         )
         assert len(config.agents) == 3
-        assert config.list_agents() == ["claude", "codex", "gemini"]
-
-    def test_get_agent_success(self) -> None:
-        """Test get_agent returns correct agent."""
-        config = AgentsConfig(
-            agents={
-                "claude": AgentConfig(binary="claude", description="Claude CLI"),
-            }
-        )
-        agent = config.get_agent("claude")
-        assert agent.binary == "claude"
-        assert agent.description == "Claude CLI"
-
-    def test_get_agent_not_found(self) -> None:
-        """Test get_agent raises KeyError for unknown agent."""
-        config = AgentsConfig(agents={"claude": AgentConfig(binary="claude")})
-        with pytest.raises(KeyError, match="Unknown agent 'unknown'"):
-            config.get_agent("unknown")
-
-    def test_get_agent_error_message_lists_available(self) -> None:
-        """Test get_agent error message lists available agents."""
-        config = AgentsConfig(
-            agents={
-                "claude": AgentConfig(binary="claude"),
-                "gemini": AgentConfig(binary="gemini"),
-            }
-        )
-        with pytest.raises(KeyError, match="Available agents: claude, gemini"):
-            config.get_agent("unknown")
 
     def test_from_dict(self) -> None:
         """Test creating AgentsConfig from dictionary (TOML-like)."""

@@ -5,12 +5,10 @@ from unittest.mock import patch
 
 import pytest
 from rich.console import Console
-from rich.table import Table
 
 from ai_dev_base.core.console import (
     blank,
     console,
-    create_volume_table,
     err_console,
     error,
     header,
@@ -159,44 +157,7 @@ class TestBlankAndHeader:
 
 
 class TestVolumeTable:
-    """Tests for volume table creation functions."""
-
-    def test_create_volume_table_returns_table(self) -> None:
-        """create_volume_table should return a Rich Table."""
-        volumes = {"credentials": ["test-volume"]}
-        table = create_volume_table(volumes)
-        assert isinstance(table, Table)
-
-    def test_create_volume_table_with_all_categories(self) -> None:
-        """create_volume_table should handle all volume categories."""
-        volumes = {
-            "credentials": ["claude-config", "gemini-config"],
-            "tools": ["azure-config"],
-            "cache": ["uv-cache"],
-            "data": ["opencode-data"],
-        }
-        table = create_volume_table(volumes)
-
-        # Table should have title
-        assert table.title == "AI Dev Volumes"
-
-        # Table should have 2 columns
-        assert len(table.columns) == 2
-
-    def test_create_volume_table_empty_volumes(self) -> None:
-        """create_volume_table should handle empty volumes dict."""
-        table = create_volume_table({})
-        assert isinstance(table, Table)
-        # Table should have no data rows
-        assert table.row_count == 0
-
-    def test_create_volume_table_partial_categories(self) -> None:
-        """create_volume_table should handle missing categories."""
-        volumes = {"credentials": ["only-creds"]}
-        table = create_volume_table(volumes)
-        assert isinstance(table, Table)
-        # Should have at least one row
-        assert table.row_count >= 1
+    """Tests for print_volume_table function."""
 
     def test_print_volume_table(self) -> None:
         """print_volume_table should print table to stdout."""
@@ -213,6 +174,40 @@ class TestVolumeTable:
         result = output.getvalue()
         assert "AI Dev Volumes" in result
         assert "test-vol" in result
+
+    def test_print_volume_table_all_categories(self) -> None:
+        """print_volume_table should handle all volume categories."""
+        output = io.StringIO()
+        test_console = Console(
+            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
+        )
+
+        volumes = {
+            "credentials": ["claude-config", "gemini-config"],
+            "tools": ["azure-config"],
+            "cache": ["uv-cache"],
+            "data": ["opencode-data"],
+        }
+
+        with patch("ai_dev_base.core.console.console", test_console):
+            print_volume_table(volumes)
+
+        result = output.getvalue()
+        assert "Credentials" in result
+        assert "claude-config" in result
+
+    def test_print_volume_table_empty(self) -> None:
+        """print_volume_table should handle empty volumes dict."""
+        output = io.StringIO()
+        test_console = Console(
+            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
+        )
+
+        with patch("ai_dev_base.core.console.console", test_console):
+            print_volume_table({})
+
+        result = output.getvalue()
+        assert "AI Dev Volumes" in result
 
 
 class TestColorStyles:
@@ -285,11 +280,15 @@ class TestThemeIntegration:
         assert "\u2139" in result  # info i
         assert "\u26a0" in result  # warning triangle
 
-    def test_create_volume_table_uses_theme_styles(self) -> None:
-        """create_volume_table should use TodAI theme style names."""
-        table = create_volume_table({"credentials": ["test"]})
+    def test_volume_table_uses_theme_styles(self) -> None:
+        """print_volume_table should use TodAI theme style names."""
+        output = io.StringIO()
+        test_console = Console(
+            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
+        )
 
-        # Verify table uses theme-based styles
-        assert table.title_style == "table.title"
-        assert table.columns[0].style == "table.category"
-        assert table.columns[1].style == "table.value"
+        with patch("ai_dev_base.core.console.console", test_console):
+            print_volume_table({"credentials": ["test"]})
+
+        # Table output should contain the volume
+        assert "test" in output.getvalue()

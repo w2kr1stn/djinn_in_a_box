@@ -331,29 +331,3 @@ class AgentsConfig(BaseModel):
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     """Dictionary of agent configurations keyed by agent name."""
-
-    def get_agent(self, name: str) -> AgentConfig:
-        """Get an agent configuration by name.
-
-        Args:
-            name: Agent name (e.g., 'claude', 'gemini').
-
-        Returns:
-            The AgentConfig for the specified agent.
-
-        Raises:
-            KeyError: If the agent is not found.
-        """
-        if name not in self.agents:
-            available = ", ".join(sorted(self.agents.keys()))
-            msg = f"Unknown agent '{name}'. Available agents: {available}"
-            raise KeyError(msg)
-        return self.agents[name]
-
-    def list_agents(self) -> list[str]:
-        """List all available agent names.
-
-        Returns:
-            Sorted list of agent names.
-        """
-        return sorted(self.agents.keys())

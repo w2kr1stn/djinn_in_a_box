@@ -154,28 +154,11 @@ def blank() -> None:
 # =============================================================================
 
 
-def create_volume_table(volumes: dict[str, list[str]]) -> Table:
-    """Create a Rich table for volume listing.
-
-    Creates a formatted table showing Docker volumes organized by category.
-    Matches the output format from dev.sh list_volumes function.
+def print_volume_table(volumes: dict[str, list[str]]) -> None:
+    """Print a formatted volume table to stdout.
 
     Args:
         volumes: Dictionary mapping category names to lists of volume names.
-            Categories should be: "credentials", "tools", "cache", "data".
-            Volume names should be the full names including the "ai-dev-" prefix.
-
-    Returns:
-        A configured Rich Table ready for printing to stdout.
-
-    Example:
-        >>> volumes = {
-        ...     "credentials": ["claude-config", "gemini-config"],
-        ...     "tools": ["azure-config", "pulumi-config"],
-        ...     "cache": ["uv-cache"],
-        ... }
-        >>> table = create_volume_table(volumes)
-        >>> console.print(table)
     """
     table = Table(
         title="AI Dev Volumes",
@@ -187,7 +170,6 @@ def create_volume_table(volumes: dict[str, list[str]]) -> Table:
     table.add_column("Category", style="table.category", width=15)
     table.add_column("Volume", style="table.value")
 
-    # Category display names matching dev.sh
     category_names: dict[str, str] = {
         "credentials": "Credentials",
         "tools": "Tool Configs",
@@ -195,40 +177,18 @@ def create_volume_table(volumes: dict[str, list[str]]) -> Table:
         "data": "Data",
     }
 
-    # Process categories in consistent order
     for category in ["credentials", "tools", "cache", "data"]:
         if category in volumes and volumes[category]:
             display_name = category_names.get(category, category.title())
             volume_list = volumes[category]
 
-            # Add first row with category name
             table.add_row(display_name, volume_list[0])
-
-            # Add remaining volumes with empty category column
             for vol in volume_list[1:]:
                 table.add_row("", vol)
 
-            # Add separator between categories (except last)
             if category != "data":
                 table.add_row("", "")
 
-    return table
-
-
-def print_volume_table(volumes: dict[str, list[str]]) -> None:
-    """Print a volume table to stdout.
-
-    Convenience function that creates and prints a volume table.
-
-    Args:
-        volumes: Dictionary mapping category names to lists of volume names.
-            See create_volume_table() for details.
-
-    Example:
-        >>> volumes = {"credentials": ["claude-config"], "cache": ["uv-cache"]}
-        >>> print_volume_table(volumes)
-    """
-    table = create_volume_table(volumes)
     console.print(table)
 
 
