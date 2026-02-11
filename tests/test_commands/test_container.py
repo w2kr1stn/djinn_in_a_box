@@ -518,9 +518,22 @@ class TestUpdateCommand:
 class TestEnterCommand:
     """Tests for the enter command."""
 
+    def test_enter_requires_tty(self) -> None:
+        """Test enter requires a TTY."""
+        with patch("ai_dev_base.commands.container.sys") as mock_sys:
+            mock_sys.stdin.isatty.return_value = False
+            with pytest.raises(typer.Exit) as exc_info:
+                container.enter()
+
+            assert exc_info.value.exit_code == 1
+
     def test_enter_requires_running_container(self) -> None:
         """Test enter requires a running ai-dev container."""
-        with patch("ai_dev_base.commands.container.get_running_containers", return_value=[]):
+        with (
+            patch("ai_dev_base.commands.container.sys") as mock_sys,
+            patch("ai_dev_base.commands.container.get_running_containers", return_value=[]),
+        ):
+            mock_sys.stdin.isatty.return_value = True
             with pytest.raises(typer.Exit) as exc_info:
                 container.enter()
 
@@ -529,9 +542,11 @@ class TestEnterCommand:
     def test_enter_opens_shell(self) -> None:
         """Test enter opens zsh shell in running container."""
         with (
+            patch("ai_dev_base.commands.container.sys") as mock_sys,
             patch("ai_dev_base.commands.container.get_running_containers") as mock_get,
             patch("subprocess.run") as mock_run,
         ):
+            mock_sys.stdin.isatty.return_value = True
             mock_get.return_value = ["ai-dev-base-dev-12345"]
             mock_run.return_value = MagicMock(returncode=0)
 

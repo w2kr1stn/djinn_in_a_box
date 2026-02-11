@@ -52,7 +52,6 @@ from ai_dev_base.commands.container import (
     update,
 )
 from ai_dev_base.config import (
-    ConfigNotFoundError,
     ensure_config_dir,
     get_bundled_agents_path,
     load_config,
@@ -60,6 +59,7 @@ from ai_dev_base.config import (
 )
 from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
 from ai_dev_base.core.console import console, error, info, success, warning
+from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.paths import AGENTS_FILE, CONFIG_FILE
 
 # =============================================================================
@@ -214,6 +214,7 @@ config_app = typer.Typer(
 
 
 @config_app.command("show")
+@handle_config_errors
 def config_show(
     json_output: Annotated[
         bool,
@@ -234,11 +235,7 @@ def config_show(
 
         codeagent config show --json    # JSON output for scripting
     """
-    try:
-        config = load_config()
-    except ConfigNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
+    config = load_config()
 
     if json_output:
         # Output as JSON (mode="json" ensures Path objects are serialized as strings)
