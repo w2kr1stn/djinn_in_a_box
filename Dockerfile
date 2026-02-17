@@ -146,7 +146,9 @@ sops-enc() {
 }
 
 # Docker Status Hinweis beim Shell-Start
-if [[ -n "${DOCKER_HOST:-}" ]]; then
+if [[ "${DOCKER_DIRECT:-false}" == "true" ]]; then
+    echo "🐳 Docker: Direct socket (full access)"
+elif [[ -n "${DOCKER_HOST:-}" ]]; then
     echo "🐳 Docker: Connected via proxy (${DOCKER_HOST})"
 fi
 EOF
