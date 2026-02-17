@@ -37,7 +37,7 @@ def send_notification(title: str, message: str) -> bool:
             tty.write("\a")
             tty.flush()
         return True
-    except (OSError, IOError):
+    except OSError:
         pass
 
     # Method 4: Print bell to stderr (might work in some terminals)

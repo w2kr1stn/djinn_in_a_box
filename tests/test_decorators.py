@@ -15,6 +15,7 @@ class TestHandleConfigErrors:
 
     def test_passes_through_normal_execution(self) -> None:
         """Test decorator allows normal execution."""
+
         @handle_config_errors
         def normal_func() -> str:
             return "success"
@@ -23,6 +24,7 @@ class TestHandleConfigErrors:
 
     def test_catches_config_not_found_error(self) -> None:
         """Test decorator catches ConfigNotFoundError and exits with code 1."""
+
         @handle_config_errors
         def failing_func() -> None:
             raise ConfigNotFoundError(Path("/nonexistent/config.toml"))
@@ -34,6 +36,7 @@ class TestHandleConfigErrors:
 
     def test_does_not_suppress_other_exceptions(self) -> None:
         """Test decorator only handles ConfigNotFoundError."""
+
         @handle_config_errors
         def other_error_func() -> None:
             raise ValueError("Other error")
@@ -43,6 +46,7 @@ class TestHandleConfigErrors:
 
     def test_preserves_function_metadata(self) -> None:
         """Test decorator preserves function name and docstring."""
+
         @handle_config_errors
         def documented_func() -> None:
             """This is a docstring."""
@@ -53,6 +57,7 @@ class TestHandleConfigErrors:
 
     def test_passes_arguments_correctly(self) -> None:
         """Test decorator passes args and kwargs to wrapped function."""
+
         @handle_config_errors
         def func_with_args(a: int, b: str, c: bool = False) -> tuple[int, str, bool]:
             return (a, b, c)

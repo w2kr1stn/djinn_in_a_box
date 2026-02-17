@@ -20,7 +20,7 @@ def debug_log(message):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         with open(DEBUG_LOG_FILE, "a") as f:
             f.write(f"[{timestamp}] {message}\n")
-    except Exception as e:
+    except Exception:
         # Silently ignore logging errors to avoid disrupting the hook
         pass
 
@@ -142,15 +142,13 @@ def cleanup_old_state_files():
         thirty_days_ago = current_time - (30 * 24 * 60 * 60)
 
         for filename in os.listdir(state_dir):
-            if filename.startswith("security_warnings_state_") and filename.endswith(
-                ".json"
-            ):
+            if filename.startswith("security_warnings_state_") and filename.endswith(".json"):
                 file_path = os.path.join(state_dir, filename)
                 try:
                     file_mtime = os.path.getmtime(file_path)
                     if file_mtime < thirty_days_ago:
                         os.remove(file_path)
-                except (OSError, IOError):
+                except OSError:
                     pass  # Ignore errors for individual file cleanup
     except Exception:
         pass  # Silently ignore cleanup errors
@@ -161,9 +159,9 @@ def load_state(session_id):
     state_file = get_state_file(session_id)
     if os.path.exists(state_file):
         try:
-            with open(state_file, "r") as f:
+            with open(state_file) as f:
                 return set(json.load(f))
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             return set()
     return set()
 
@@ -175,7 +173,7 @@ def save_state(session_id, shown_warnings):
         os.makedirs(os.path.dirname(state_file), exist_ok=True)
         with open(state_file, "w") as f:
             json.dump(list(shown_warnings), f)
-    except IOError as e:
+    except OSError as e:
         debug_log(f"Failed to save state file: {e}")
         pass  # Fail silently if we can't save state
 

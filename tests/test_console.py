@@ -162,9 +162,7 @@ class TestVolumeTable:
     def test_print_volume_table(self) -> None:
         """print_volume_table should print table to stdout."""
         output = io.StringIO()
-        test_console = Console(
-            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
-        )
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
 
         volumes = {"credentials": ["test-vol"]}
 
@@ -178,9 +176,7 @@ class TestVolumeTable:
     def test_print_volume_table_all_categories(self) -> None:
         """print_volume_table should handle all volume categories."""
         output = io.StringIO()
-        test_console = Console(
-            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
-        )
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
 
         volumes = {
             "credentials": ["claude-config", "gemini-config"],
@@ -199,9 +195,7 @@ class TestVolumeTable:
     def test_print_volume_table_empty(self) -> None:
         """print_volume_table should handle empty volumes dict."""
         output = io.StringIO()
-        test_console = Console(
-            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
-        )
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
 
         with patch("ai_dev_base.core.console.console", test_console):
             print_volume_table({})
@@ -235,9 +229,7 @@ class TestColorStyles:
     def test_status_line_accepts_theme_styles(self, style: str) -> None:
         """status_line should accept TodAI theme style names."""
         output = io.StringIO()
-        test_console = Console(
-            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
-        )
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
 
         with patch("ai_dev_base.core.console.err_console", test_console):
             # Should not raise any exceptions
@@ -263,9 +255,7 @@ class TestThemeIntegration:
     def test_message_functions_include_icons(self) -> None:
         """Message functions should include status icons."""
         output = io.StringIO()
-        test_console = Console(
-            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
-        )
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
 
         with patch("ai_dev_base.core.console.err_console", test_console):
             success("test")
@@ -283,9 +273,7 @@ class TestThemeIntegration:
     def test_volume_table_uses_theme_styles(self) -> None:
         """print_volume_table should use TodAI theme style names."""
         output = io.StringIO()
-        test_console = Console(
-            file=output, force_terminal=True, no_color=True, theme=TODAI_THEME
-        )
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
 
         with patch("ai_dev_base.core.console.console", test_console):
             print_volume_table({"credentials": ["test"]})

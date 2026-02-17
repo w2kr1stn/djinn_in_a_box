@@ -463,10 +463,7 @@ class TestTestCommand:
             mcp.test()
 
             # Should have curl call for localhost
-            curl_calls = [
-                c for c in mock_run.call_args_list
-                if c[0][0][0] == "curl"
-            ]
+            curl_calls = [c for c in mock_run.call_args_list if c[0][0][0] == "curl"]
             assert len(curl_calls) >= 1
 
     def test_test_checks_docker_socket(self) -> None:
@@ -481,10 +478,7 @@ class TestTestCommand:
             mcp.test()
 
             # Should have docker exec call
-            exec_calls = [
-                c for c in mock_run.call_args_list
-                if "exec" in c[0][0]
-            ]
+            exec_calls = [c for c in mock_run.call_args_list if "exec" in c[0][0]]
             assert len(exec_calls) >= 1
 
 
