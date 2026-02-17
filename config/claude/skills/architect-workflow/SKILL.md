@@ -66,7 +66,7 @@ Initial request: $ARGUMENTS
 3. **Present all questions to the user in a clear, organized list**
 4. **Wait for answers before proceeding to architecture design**
 
-If the user says "whatever you think is best", provide your recommendation and get explicit confirmation.
+If the user asks "was empfiehlst du?", provide your recommendation and get explicit confirmation.
 
 ---
 
@@ -82,7 +82,7 @@ If the user says "whatever you think is best", provide your recommendation and g
 
 ---
 
-## Phase 5: Finalize concept
+## Phase 5: Finalize Concept
 
 **Goal**: Create the artifacts to build the feature
 
@@ -92,8 +92,36 @@ If the user says "whatever you think is best", provide your recommendation and g
 1. Wait for explicit user approval
 2. Read all relevant files identified in previous phases
 3. Finalize feature architecture and implementation strategy
-4. Write clean and comprehensive artifacts
-5. Update todos as you progress
+4. Write `PLAN.md` — comprehensive architecture plan, a copy of Claude Code's internal plan provided in the codebase directly
+5. Write `TASKS.yml` with wave-based structure:
+   - Group tasks into waves (tasks within a wave can run in parallel)
+   - Each wave depends on completion of the previous wave
+   - Minimize number of waves while keeping tasks atomic (~1h workload)
+   - Structure:
+   ```yaml
+   feature: "Feature name"
+   issue: "#123"
+   branch: "category/issue-NUMBER/kebab-case-description"
+   waves:
+     - name: "Wave 1: Foundation"
+       tasks:
+         - id: T1
+           title: "Task title"
+           description: "What to implement"
+           files: ["relevant/files"]
+           test: "How to verify"
+           dod: "Definition of Done"
+     - name: "Wave 2: Core Logic"
+       depends_on: ["Wave 1"]
+       tasks:
+         - id: T3
+           title: "..."
+           description: "..."
+           files: ["..."]
+           test: "..."
+           dod: "..."
+   ```
+6. Update todos as you progress
 
 ---
 

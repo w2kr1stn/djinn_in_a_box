@@ -24,12 +24,12 @@ You are a developer implementing a new feature. Follow a systematic approach: un
 Initial request: $ARGUMENTS
 
 **Actions**:
-1. Create todo list with all phases
-2. If feature unclear, ask user for:
+1. Consume PLAN.md and TASKS.yml
+2. Identify your task and create a specific TODO list for all phases
+3. If feature unclear, ask user for:
    - What problem are they solving?
    - What should the feature do?
    - Any constraints or requirements?
-3. Summarize understanding and confirm with user
 
 ---
 
@@ -42,6 +42,8 @@ Initial request: $ARGUMENTS
    - Trace through the code comprehensively and focus on getting a comprehensive understanding of abstractions, architecture and flow of control
    - Target a different aspect of the codebase (eg. similar features, high level understanding, architectural understanding, user experience, etc)
    - Include a list of 5-10 key files to read
+
+  (As a sub-agent explore on your own)
 
    **Example agent prompts**:
    - "Find features similar to [feature] and trace through their implementation comprehensively"
@@ -62,7 +64,7 @@ Initial request: $ARGUMENTS
 
 **Actions**:
 1. Review the codebase findings and original feature request
-2. Identify underspecified aspects: edge cases, error handling, integration points, scope boundaries, design preferences, backward compatibility, performance needs, etc., not adressed yet in `FEATURE.md`
+2. Identify underspecified aspects: edge cases, error handling, integration points, scope boundaries, design preferences, backward compatibility, performance needs, etc., not addressed yet in `PLAN.md`
 3. **Present all questions to the user in a clear, organized list**
 4. **Wait for answers before proceeding to implement**
 
@@ -74,15 +76,13 @@ If the user asks "was empfiehlst du?", provide your recommendation and get expli
 
 **Goal**: Build the feature
 
-**DO NOT START WITHOUT USER APPROVAL**
-
 **Actions**:
 1. Wait for explicit user approval
 2. Read all relevant files identified in previous phases
 3. Implement following chosen architecture
 4. Follow codebase conventions strictly
 5. Write clean, well-documented code
-6. Update todos as you progress
+6. Update todos as you progress & commit completed, coherent work steps according to `git standards`
 
 ---
 
@@ -96,11 +96,13 @@ If the user asks "was empfiehlst du?", provide your recommendation and get expli
 3. **Present findings to user and ask what they want to do** (fix now, fix later, or proceed as-is)
 4. Address issues based on user decision
 
+(As a sub-agent review on your own)
+
 ---
 
-## Phase 6: Summary
+## Phase 6: Summary & Documentation
 
-**Goal**: Document what was accomplished (`README.md`, etc.)
+**Goal**: Document what was accomplished and update project memory
 
 **Actions**:
 1. Mark all todos complete
@@ -109,5 +111,7 @@ If the user asks "was empfiehlst du?", provide your recommendation and get expli
    - Key decisions made
    - Files modified
    - Suggested next steps
+3. **Doc Sync**: Ensure all documentation (README, codebase docs) reflects current implementation. Post summary comment to GitHub Issue.
+4. **CLAUDE.md Update** (MANDATORY): Use `claude-md-management` skill to update CLAUDE.md with learnings, findings, and project-specific information from this implementation.
 
 ---
