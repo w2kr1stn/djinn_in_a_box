@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Agent Complete Notification Hook for Claude Code
-Notifies the user when a subagent completes its work.
+Ready Notification Hook for Claude Code
+Notifies the user when Claude Code is done and waiting for input.
 """
 
 import json
@@ -33,7 +33,6 @@ def send_notification(title: str, message: str) -> bool:
 
     # Method 3: Write bell character directly to terminal
     try:
-        # Try to write to the controlling terminal
         with open("/dev/tty", "w") as tty:
             tty.write("\a")
             tty.flush()
@@ -53,21 +52,17 @@ def send_notification(title: str, message: str) -> bool:
 
 def main():
     """Main hook function."""
-    # Read input from stdin
     try:
         raw_input = sys.stdin.read()
         input_data = json.loads(raw_input)
     except json.JSONDecodeError:
         sys.exit(0)
 
-    # Extract agent information
-    agent_type = input_data.get("agent_type", "unknown")
-    # session_id = input_data.get("session_id", "")
+    stop_reason = input_data.get("stop_reason", "done")
 
-    # Send notification
     send_notification(
-        "Claude Code Agent Complete",
-        f"The {agent_type} agent has finished its task.",
+        "Claude Code",
+        f"Ready for input ({stop_reason})",
     )
 
     sys.exit(0)

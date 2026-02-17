@@ -69,13 +69,13 @@
         ]
       }
     ],
-    "SubagentStop": [
+    "Stop": [
       {
-        "matcher": "backend-engineer|frontend-developer",
+        "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "python3 ~/.claude/agent_complete_notify_hook.py"
+          "type": "command",
+          "command": "python3 ~/.claude/ready_notify_hook.py"
           }
         ]
       }
