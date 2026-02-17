@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import typer
@@ -602,4 +602,49 @@ class TestRunCommand:
             # Cleanup should be called with True
             mock_cleanup.assert_called_once_with(True)
 
+    def test_run_with_docker_direct_flag(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run --docker-direct sets docker_direct option and skips proxy cleanup."""
+        from ai_dev_base.commands.agent import run
+        from ai_dev_base.core.docker import RunResult
 
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("ai_dev_base.commands.agent.ensure_network"),
+            patch("ai_dev_base.core.docker.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
+            pytest.raises(typer.Exit),
+        ):
+            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+
+            run(agent="claude", prompt="test", docker_direct=True)
+
+            # Check options
+            call_args = mock_run.call_args[0]
+            options = call_args[1]  # Second positional arg
+            assert options.docker_direct is True
+            assert options.docker_enabled is False
+
+            # Cleanup should be called with False (no proxy to clean up)
+            mock_cleanup.assert_called_once_with(False)
+
+    def test_run_docker_and_direct_mutually_exclusive(
+        self,
+        mock_agent_configs: dict[str, AgentConfig],
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Test run fails when both --docker and --docker-direct are used."""
+        from ai_dev_base.commands.agent import run
+
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="claude", prompt="test", docker=True, docker_direct=True)
+
+        assert exc_info.value.exit_code == 1

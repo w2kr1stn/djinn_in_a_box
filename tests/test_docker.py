@@ -27,7 +27,6 @@ from ai_dev_base.core.docker import (
     volume_exists,
 )
 
-
 # =============================================================================
 # Data Classes Tests
 # =============================================================================
@@ -40,6 +39,7 @@ class TestContainerOptions:
         """Test default values are correct."""
         options = ContainerOptions()
         assert options.docker_enabled is False
+        assert options.docker_direct is False
         assert options.firewall_enabled is False
         assert options.mount_path is None
         assert options.shell_mounts is True
@@ -56,6 +56,12 @@ class TestContainerOptions:
         assert options.firewall_enabled is True
         assert options.mount_path == Path("/workspace")
         assert options.shell_mounts is False
+
+    def test_docker_direct_enabled(self) -> None:
+        """Test docker_direct can be set to True."""
+        options = ContainerOptions(docker_direct=True)
+        assert options.docker_direct is True
+        assert options.docker_enabled is False
 
 
 class TestRunResult:
@@ -133,9 +139,7 @@ class TestEnsureNetwork:
 
     @patch("ai_dev_base.core.docker.subprocess.run")
     @patch("ai_dev_base.core.docker.network_exists")
-    def test_creates_network(
-        self, mock_exists: MagicMock, mock_run: MagicMock
-    ) -> None:
+    def test_creates_network(self, mock_exists: MagicMock, mock_run: MagicMock) -> None:
         """Test creates network and returns True."""
         mock_exists.return_value = False
         mock_run.return_value = MagicMock(returncode=0)
@@ -149,9 +153,7 @@ class TestEnsureNetwork:
 
     @patch("ai_dev_base.core.docker.subprocess.run")
     @patch("ai_dev_base.core.docker.network_exists")
-    def test_create_network_fails(
-        self, mock_exists: MagicMock, mock_run: MagicMock
-    ) -> None:
+    def test_create_network_fails(self, mock_exists: MagicMock, mock_run: MagicMock) -> None:
         """Test returns False when network creation fails."""
         mock_exists.return_value = False
         mock_run.return_value = MagicMock(returncode=1)
@@ -196,6 +198,33 @@ class TestGetComposeFiles:
         files = get_compose_files()
         assert len(files) == 2
 
+    @patch("ai_dev_base.core.docker.get_project_root")
+    def test_with_docker_direct(self, mock_root: MagicMock) -> None:
+        """Test returns docker-direct compose file when docker_direct=True."""
+        mock_root.return_value = Path("/project")
+        files = get_compose_files(docker_direct=True)
+        assert len(files) == 4
+        file_paths = [f for f in files if f != "-f"]
+        assert any("docker-compose.yml" in f for f in file_paths)
+        assert any("docker-compose.docker-direct.yml" in f for f in file_paths)
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    def test_docker_direct_excludes_proxy(self, mock_root: MagicMock) -> None:
+        """Test docker_direct does not include proxy compose file."""
+        mock_root.return_value = Path("/project")
+        files = get_compose_files(docker_direct=True)
+        file_paths = [f for f in files if f != "-f"]
+        assert not any("docker-compose.docker.yml" in f and "direct" not in f for f in file_paths)
+
+    @patch("ai_dev_base.core.docker.get_project_root")
+    def test_docker_enabled_takes_precedence(self, mock_root: MagicMock) -> None:
+        """Test docker_enabled=True uses proxy even if docker_direct=True."""
+        mock_root.return_value = Path("/project")
+        files = get_compose_files(docker_enabled=True, docker_direct=True)
+        file_paths = [f for f in files if f != "-f"]
+        assert any("docker-compose.docker.yml" in f and "direct" not in f for f in file_paths)
+        assert not any("docker-compose.docker-direct.yml" in f for f in file_paths)
+
 
 # =============================================================================
 # Shell Mount Configuration Tests
@@ -220,7 +249,7 @@ class TestGetShellMountArgs:
         fake_home = tmp_path / "empty_home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         config = AppConfig(code_dir=tmp_path)
         args = get_shell_mount_args(config)
         assert args == []
@@ -232,7 +261,7 @@ class TestGetShellMountArgs:
         zshrc = fake_home / ".zshrc"
         zshrc.write_text("# zshrc")
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         config = AppConfig(code_dir=tmp_path)
         args = get_shell_mount_args(config)
         assert "-v" in args
@@ -245,7 +274,7 @@ class TestGetShellMountArgs:
         theme_file = fake_home / "custom-theme.json"
         theme_file.write_text("{}")
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        
+
         config = AppConfig(
             code_dir=tmp_path,
             shell=ShellConfig(omp_theme_path=theme_file),
@@ -395,9 +424,7 @@ class TestComposeBuild:
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_build_success(
-        self, mock_run: MagicMock, mock_root: MagicMock
-    ) -> None:
+    def test_build_success(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test returns successful RunResult."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(
@@ -414,9 +441,7 @@ class TestComposeBuild:
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_build_no_cache(
-        self, mock_run: MagicMock, mock_root: MagicMock
-    ) -> None:
+    def test_build_no_cache(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test includes --no-cache flag when requested."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -525,9 +550,7 @@ class TestComposeUp:
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_up_detached(
-        self, mock_run: MagicMock, mock_root: MagicMock
-    ) -> None:
+    def test_up_detached(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test runs with -d flag by default."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -537,9 +560,7 @@ class TestComposeUp:
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_up_with_services(
-        self, mock_run: MagicMock, mock_root: MagicMock
-    ) -> None:
+    def test_up_with_services(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test includes service names when specified."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -553,9 +574,7 @@ class TestComposeDown:
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_down_basic(
-        self, mock_run: MagicMock, mock_root: MagicMock
-    ) -> None:
+    def test_down_basic(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test basic down command."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -566,9 +585,7 @@ class TestComposeDown:
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_down_with_volumes(
-        self, mock_run: MagicMock, mock_root: MagicMock
-    ) -> None:
+    def test_down_with_volumes(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test includes -v flag when remove_volumes=True."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -582,18 +599,14 @@ class TestCleanupDockerProxy:
 
     @patch("ai_dev_base.core.docker.subprocess.run")
     @patch("ai_dev_base.core.docker.get_project_root")
-    def test_skips_when_docker_disabled(
-        self, mock_root: MagicMock, mock_run: MagicMock
-    ) -> None:
+    def test_skips_when_docker_disabled(self, mock_root: MagicMock, mock_run: MagicMock) -> None:
         """Test does nothing when docker_enabled=False."""
         cleanup_docker_proxy(docker_enabled=False)
         mock_run.assert_not_called()
 
     @patch("ai_dev_base.core.docker.subprocess.run")
     @patch("ai_dev_base.core.docker.get_project_root")
-    def test_stops_and_removes_proxy(
-        self, mock_root: MagicMock, mock_run: MagicMock
-    ) -> None:
+    def test_stops_and_removes_proxy(self, mock_root: MagicMock, mock_run: MagicMock) -> None:
         """Test stops and removes docker-proxy when docker_enabled=True."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0)
@@ -620,12 +633,13 @@ class TestGetExistingVolumesByCategory:
     @patch("ai_dev_base.core.docker.volume_exists")
     def test_filters_existing_volumes(self, mock_exists: MagicMock) -> None:
         """Test returns only volumes that exist."""
+
         # Mock volume_exists to return True for some volumes
         def exists_side_effect(name: str) -> bool:
             return name in ["ai-dev-claude-config", "ai-dev-gemini-config"]
-        
+
         mock_exists.side_effect = exists_side_effect
-        
+
         volumes = get_existing_volumes_by_category("credentials")
         assert "ai-dev-claude-config" in volumes
         assert "ai-dev-gemini-config" in volumes
@@ -669,9 +683,7 @@ class TestComposeRunErrorHandling:
     ) -> None:
         """Test graceful handling when docker command is not found."""
         mock_root.return_value = Path("/project")
-        mock_run.side_effect = FileNotFoundError(
-            "[Errno 2] No such file or directory: 'docker'"
-        )
+        mock_run.side_effect = FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
 
         options = ContainerOptions()
         result = compose_run(mock_app_config, options, command="test", interactive=False)
@@ -690,9 +702,7 @@ class TestComposeRunErrorHandling:
     ) -> None:
         """Test graceful handling when docker socket is inaccessible."""
         mock_root.return_value = Path("/project")
-        mock_run.side_effect = PermissionError(
-            "Permission denied: '/var/run/docker.sock'"
-        )
+        mock_run.side_effect = PermissionError("Permission denied: '/var/run/docker.sock'")
 
         options = ContainerOptions()
         result = compose_run(mock_app_config, options, command="test", interactive=False)
@@ -710,9 +720,7 @@ class TestComposeRunErrorHandling:
     ) -> None:
         """Test graceful handling when docker command is not found in interactive mode."""
         mock_root.return_value = Path("/project")
-        mock_run.side_effect = FileNotFoundError(
-            "[Errno 2] No such file or directory: 'docker'"
-        )
+        mock_run.side_effect = FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
 
         options = ContainerOptions()
         result = compose_run(mock_app_config, options, interactive=True)
