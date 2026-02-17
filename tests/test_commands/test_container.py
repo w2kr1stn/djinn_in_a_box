@@ -216,6 +216,39 @@ class TestStartCommand:
 
             assert exc_info.value.exit_code == 1
 
+    def test_start_with_docker_direct_flag(self) -> None:
+        """Test start --docker-direct sets docker_direct option."""
+        with (
+            patch("ai_dev_base.commands.container.load_config") as mock_load,
+            patch("ai_dev_base.commands.container.network_exists", return_value=True),
+            patch("ai_dev_base.commands.container.compose_run") as mock_run,
+            patch("ai_dev_base.commands.container.cleanup_docker_proxy") as mock_cleanup,
+            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
+        ):
+            mock_config = MagicMock()
+            mock_config.code_dir = Path("/projects")
+            mock_config.shell.skip_mounts = False
+            mock_load.return_value = mock_config
+            mock_run.return_value = RunResult(returncode=0)
+
+            with pytest.raises(typer.Exit):
+                container.start(docker_direct=True)
+
+            call_args = mock_run.call_args
+            options = call_args[0][1]
+            assert options.docker_direct is True
+            assert options.docker_enabled is False
+
+            # No proxy cleanup in direct mode
+            mock_cleanup.assert_called_once_with(False)
+
+    def test_start_docker_and_direct_mutually_exclusive(self) -> None:
+        """Test start --docker --docker-direct raises error."""
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(docker=True, docker_direct=True)
+
+        assert exc_info.value.exit_code == 1
+
 
 # =============================================================================
 # Auth Command Tests
@@ -272,6 +305,39 @@ class TestAuthCommand:
 
             # Should have started docker-proxy
             mock_up.assert_called_once_with(services=["docker-proxy"], docker_enabled=True)
+
+    def test_auth_with_docker_direct_skips_proxy(self) -> None:
+        """Test auth --docker-direct does not start proxy."""
+        with (
+            patch("ai_dev_base.commands.container.load_config") as mock_load,
+            patch("ai_dev_base.commands.container.get_project_root", return_value=Path("/project")),
+            patch(
+                "ai_dev_base.commands.container.get_compose_files",
+                return_value=["-f", "compose.yml"],
+            ),
+            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
+            patch("subprocess.run") as mock_run,
+            patch("ai_dev_base.commands.container.cleanup_docker_proxy") as mock_cleanup,
+            patch("ai_dev_base.commands.container.compose_up") as mock_up,
+        ):
+            mock_config = MagicMock()
+            mock_load.return_value = mock_config
+            mock_run.return_value = MagicMock(returncode=0)
+
+            with pytest.raises(typer.Exit):
+                container.auth(docker_direct=True)
+
+            # Proxy should NOT be started
+            mock_up.assert_not_called()
+            # Cleanup called with False (no proxy to clean)
+            mock_cleanup.assert_called_once_with(False)
+
+    def test_auth_docker_and_direct_mutually_exclusive(self) -> None:
+        """Test auth --docker --docker-direct raises error."""
+        with pytest.raises(typer.Exit) as exc_info:
+            container.auth(docker=True, docker_direct=True)
+
+        assert exc_info.value.exit_code == 1
 
 
 # =============================================================================
