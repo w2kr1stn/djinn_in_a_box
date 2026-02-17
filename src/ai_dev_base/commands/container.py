@@ -108,6 +108,10 @@ def start(
         bool,
         typer.Option("--docker", "-d", help="Enable Docker access via secure proxy"),
     ] = False,
+    docker_direct: Annotated[
+        bool,
+        typer.Option("--docker-direct", help="Enable direct Docker socket access (no proxy)"),
+    ] = False,
     firewall: Annotated[
         bool,
         typer.Option("--firewall", "-f", help="Enable network firewall (restricts outbound)"),
@@ -130,11 +134,17 @@ def start(
     Equivalent to: ./dev.sh start [options]
 
     Examples:
-        codeagent start                    # Basic interactive shell
-        codeagent start --docker           # With Docker access
-        codeagent start --here             # Mount cwd as workspace
-        codeagent start -d -f --here       # Full options
+        codeagent start                         # Basic interactive shell
+        codeagent start --docker                # With Docker access (proxy)
+        codeagent start --docker-direct         # With Docker access (direct)
+        codeagent start --here                  # Mount cwd as workspace
+        codeagent start -d -f --here            # Full options
     """
+    # Validate mutual exclusivity
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
+
     # Load configuration (ConfigNotFoundError handled by decorator)
     config = load_config()
 
@@ -166,6 +176,8 @@ def start(
 
     if docker:
         status_line("Docker", "Enabled (via secure proxy)", "status.enabled")
+    elif docker_direct:
+        status_line("Docker", "Enabled (DIRECT — no proxy)", "warning")
     else:
         status_line("Docker", "Disabled (use --docker to enable)", "status.disabled")
 
@@ -186,18 +198,28 @@ def start(
     else:
         status_line("Shell", "No host config found", "status.disabled")
 
+    # Security warning for direct mode
+    if docker_direct:
+        blank()
+        warning(
+            "Direct Docker socket access grants full Docker control. "
+            "This is equivalent to root access on the host. "
+            "Use --docker (proxy) for safer operation."
+        )
+
     blank()
 
     # Run container
     options = ContainerOptions(
         docker_enabled=docker,
+        docker_direct=docker_direct,
         firewall_enabled=firewall,
         mount_path=mount_path,
     )
 
     result = compose_run(config, options, interactive=True)
 
-    # Cleanup docker proxy if it was started
+    # Cleanup docker proxy if it was started (not needed for direct mode)
     cleanup_docker_proxy(docker)
 
     raise typer.Exit(result.returncode)
@@ -214,6 +236,10 @@ def auth(
         bool,
         typer.Option("--docker", "-d", help="Enable Docker access via proxy"),
     ] = False,
+    docker_direct: Annotated[
+        bool,
+        typer.Option("--docker-direct", help="Enable direct Docker socket access (no proxy)"),
+    ] = False,
 ) -> None:
     """Start with host network for OAuth authentication.
 
@@ -226,9 +252,15 @@ def auth(
     Equivalent to: ./dev.sh auth [--docker]
 
     Example:
-        codeagent auth              # Authenticate CLI tools
-        codeagent auth --docker     # With Docker access
+        codeagent auth                   # Authenticate CLI tools
+        codeagent auth --docker          # With Docker access (proxy)
+        codeagent auth --docker-direct   # With Docker access (direct)
     """
+    # Validate mutual exclusivity
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
+
     # Load configuration (ConfigNotFoundError handled by decorator)
     config = load_config()
 
@@ -236,15 +268,14 @@ def auth(
     blank()
     err_console.print("This mode uses network_mode: host so OAuth callbacks work.")
     err_console.print(
-        "After authenticating Claude Code, Gemini CLI and Codex, "
-        "exit and use 'codeagent start'"
+        "After authenticating Claude Code, Gemini CLI and Codex, exit and use 'codeagent start'"
     )
     blank()
 
     project_root = get_project_root()
-    compose_files = get_compose_files(docker_enabled=docker)
+    compose_files = get_compose_files(docker_enabled=docker, docker_direct=docker_direct)
 
-    # Start docker proxy separately if docker is enabled
+    # Start docker proxy separately if docker proxy mode is enabled
     # In host network mode, the proxy needs to be started as a separate service
     if docker:
         err_console.print(
@@ -255,6 +286,12 @@ def auth(
             error("Failed to start Docker proxy for host network mode")
             raise typer.Exit(proxy_result.returncode)
         time.sleep(2)
+
+    if docker_direct:
+        warning(
+            "Direct Docker socket access grants full Docker control. "
+            "Use --docker (proxy) for safer operation."
+        )
 
     # Build the auth command with --profile auth and dev-auth service
     cmd = [
@@ -281,7 +318,7 @@ def auth(
         check=False,
     )
 
-    # Cleanup docker proxy if it was started
+    # Cleanup docker proxy if it was started (not needed for direct mode)
     cleanup_docker_proxy(docker)
 
     raise typer.Exit(result.returncode)

@@ -126,6 +126,10 @@ def run(
         bool,
         typer.Option("--docker", "-d", help="Enable Docker socket access via proxy"),
     ] = False,
+    docker_direct: Annotated[
+        bool,
+        typer.Option("--docker-direct", help="Enable direct Docker socket access (no proxy)"),
+    ] = False,
     firewall: Annotated[
         bool,
         typer.Option("--firewall", "-f", help="Enable network firewall"),
@@ -170,6 +174,11 @@ def run(
         # With Docker access and timeout
         codeagent run claude "Build the Docker image" --docker --timeout 300
     """
+    # Validate mutual exclusivity
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
+
     # Load configuration (ConfigNotFoundError handled by decorator)
     app_config = load_config()
     agent_configs = load_agents()
@@ -208,7 +217,9 @@ def run(
         status_line("Mode", "Read-only (plan/analysis)", "success")
 
     if docker:
-        status_line("Docker", "Enabled")
+        status_line("Docker", "Enabled (proxy)")
+    elif docker_direct:
+        status_line("Docker", "Enabled (DIRECT)", "warning")
     if firewall:
         status_line("Firewall", "Enabled")
     if json_output:
@@ -229,6 +240,7 @@ def run(
     # Configure container options
     options = ContainerOptions(
         docker_enabled=docker,
+        docker_direct=docker_direct,
         firewall_enabled=firewall,
         mount_path=workspace,
         shell_mounts=True,
@@ -256,7 +268,7 @@ def run(
 
     returncode = result.returncode
 
-    # Cleanup docker proxy if it was started
+    # Cleanup docker proxy if it was started (not needed for direct mode)
     cleanup_docker_proxy(docker)
 
     raise typer.Exit(returncode)
