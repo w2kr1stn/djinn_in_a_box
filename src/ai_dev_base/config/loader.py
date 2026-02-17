@@ -36,8 +36,7 @@ class ConfigNotFoundError(FileNotFoundError):
     def __init__(self, path: Path) -> None:
         self.path = path
         super().__init__(
-            f"Configuration not found: {path}\n"
-            "Run 'codeagent init' to create configuration."
+            f"Configuration not found: {path}\nRun 'codeagent init' to create configuration."
         )
 
 
@@ -81,9 +80,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         with open(config_path, "rb") as f:
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigValidationError(
-            f"Invalid TOML syntax in {config_path}: {e}"
-        ) from e
+        raise ConfigValidationError(f"Invalid TOML syntax in {config_path}: {e}") from e
 
     # Transform nested TOML structure to flat Pydantic model
     # [general] -> top-level, [shell] -> shell, [resources] -> resources
@@ -92,8 +89,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         return AppConfig(**config_dict)
     except ValidationError as e:
         raise ConfigValidationError(
-            f"Configuration validation failed for {config_path}:\n"
-            f"{_format_validation_errors(e)}"
+            f"Configuration validation failed for {config_path}:\n{_format_validation_errors(e)}"
         ) from e
 
 
@@ -235,27 +231,22 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
         with open(path, "rb") as f:
             data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigValidationError(
-            f"Invalid TOML syntax in {path}: {e}"
-        ) from e
+        raise ConfigValidationError(f"Invalid TOML syntax in {path}: {e}") from e
 
     agents_data = data.get("agents", {})
     if not agents_data:
         raise ConfigValidationError(
-            f"No agents defined in {path}. "
-            "Expected [agents.<name>] sections."
+            f"No agents defined in {path}. Expected [agents.<name>] sections."
         )
 
     try:
-        agents_config = AgentsConfig(agents={
-            name: AgentConfig(**agent_data)
-            for name, agent_data in agents_data.items()
-        })
+        agents_config = AgentsConfig(
+            agents={name: AgentConfig(**agent_data) for name, agent_data in agents_data.items()}
+        )
         return agents_config.agents
     except ValidationError as e:
         raise ConfigValidationError(
-            f"Invalid agent configuration in {path}:\n"
-            f"{_format_validation_errors(e)}"
+            f"Invalid agent configuration in {path}:\n{_format_validation_errors(e)}"
         ) from e
 
 

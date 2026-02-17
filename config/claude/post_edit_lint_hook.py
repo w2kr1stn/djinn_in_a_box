@@ -46,7 +46,7 @@ def lint_python_file(file_path: str) -> list[str]:
         output = stdout.strip() or stderr.strip()
         if output and "error" in output.lower():
             # Only report actual errors, not the summary line
-            error_lines = [l for l in output.split('\n') if 'error:' in l.lower()]
+            error_lines = [l for l in output.split("\n") if "error:" in l.lower()]
             if error_lines:
                 issues.append(f"pyright: {len(error_lines)} type error(s)")
 

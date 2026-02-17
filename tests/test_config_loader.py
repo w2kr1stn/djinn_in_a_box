@@ -240,9 +240,7 @@ class TestLoadConfig:
 
         assert exc_info.value.path == missing_path
 
-    def test_raises_config_validation_error_for_invalid_toml(
-        self, tmp_path: Path
-    ) -> None:
+    def test_raises_config_validation_error_for_invalid_toml(self, tmp_path: Path) -> None:
         """Should raise ConfigValidationError for invalid TOML syntax."""
         invalid_file = tmp_path / "invalid.toml"
         invalid_file.write_text("this is not valid TOML [[[")
@@ -339,9 +337,7 @@ description = "Broken agent"
 class TestSaveConfig:
     """Tests for save_config function."""
 
-    def test_saves_config_to_file(
-        self, tmp_path: Path, sample_code_dir: Path
-    ) -> None:
+    def test_saves_config_to_file(self, tmp_path: Path, sample_code_dir: Path) -> None:
         """Should save AppConfig to TOML file."""
         config = AppConfig(code_dir=sample_code_dir, timezone="UTC")
         output_path = tmp_path / "output.toml"
@@ -353,9 +349,7 @@ class TestSaveConfig:
         assert "[general]" in content
         assert "UTC" in content
 
-    def test_creates_parent_directories(
-        self, tmp_path: Path, sample_code_dir: Path
-    ) -> None:
+    def test_creates_parent_directories(self, tmp_path: Path, sample_code_dir: Path) -> None:
         """Should create parent directories if they don't exist."""
         config = AppConfig(code_dir=sample_code_dir)
         output_path = tmp_path / "nested" / "dir" / "config.toml"
@@ -378,9 +372,7 @@ class TestEnsureConfigDir:
     ) -> None:
         """Should create config directory if it doesn't exist."""
         fake_config_dir = tmp_path / ".config" / "ai-dev-base"
-        monkeypatch.setattr(
-            "ai_dev_base.config.loader.CONFIG_DIR", fake_config_dir
-        )
+        monkeypatch.setattr("ai_dev_base.config.loader.CONFIG_DIR", fake_config_dir)
 
         result = ensure_config_dir()
 

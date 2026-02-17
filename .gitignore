@@ -15,11 +15,9 @@ Thumbs.db
 
 # Session/Task files (AI agent working files)
 .claude/
+CLAUDE.md
 PLAN.md
-FEATURE.md
-SESSION*.md
 TASKS.yml
-REVIEW.md
 
 # Python
 __pycache__/
