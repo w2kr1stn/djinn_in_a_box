@@ -49,6 +49,9 @@ class ContainerOptions:
     docker_enabled: bool = False
     """Enable Docker socket access via proxy."""
 
+    docker_direct: bool = False
+    """Enable direct Docker socket access (no proxy)."""
+
     firewall_enabled: bool = False
     """Enable network firewall (restricts outbound traffic)."""
 
@@ -145,13 +148,18 @@ def ensure_network(name: str = "ai-dev-network") -> bool:
 # =============================================================================
 
 
-def get_compose_files(docker_enabled: bool = False) -> list[str]:
+def get_compose_files(
+    docker_enabled: bool = False,
+    docker_direct: bool = False,
+) -> list[str]:
     """Get compose file arguments based on options.
 
     Mirrors the get_compose_files() function from the original dev.sh script.
 
     Args:
         docker_enabled: Include docker-compose.docker.yml for socket proxy.
+        docker_direct: Include docker-compose.docker-direct.yml for direct socket.
+            Mutually exclusive with docker_enabled (docker_enabled takes precedence).
 
     Returns:
         List of compose file arguments ["-f", "file1.yml", "-f", "file2.yml"].
@@ -167,6 +175,8 @@ def get_compose_files(docker_enabled: bool = False) -> list[str]:
 
     if docker_enabled:
         files.extend(["-f", str(project_root / "docker-compose.docker.yml")])
+    elif docker_direct:
+        files.extend(["-f", str(project_root / "docker-compose.docker-direct.yml")])
 
     return files
 
@@ -333,7 +343,10 @@ def compose_run(
     project_root = get_project_root()
 
     # Build compose command
-    compose_files = get_compose_files(docker_enabled=options.docker_enabled)
+    compose_files = get_compose_files(
+        docker_enabled=options.docker_enabled,
+        docker_direct=options.docker_direct,
+    )
     cmd = ["docker", "compose", *compose_files, "run", "--rm"]
 
     # TTY handling
@@ -398,8 +411,8 @@ def compose_run(
             )
     except subprocess.TimeoutExpired as e:
         # text=True means stdout/stderr are already str (not bytes)
-        stdout = e.stdout if e.stdout is not None else ""
-        stderr = e.stderr if e.stderr is not None else f"Timeout after {timeout}s"
+        stdout = str(e.stdout) if e.stdout is not None else ""
+        stderr = str(e.stderr) if e.stderr is not None else f"Timeout after {timeout}s"
         # Return code 124 is conventional for timeout (like GNU timeout command)
         return RunResult(
             returncode=124,
