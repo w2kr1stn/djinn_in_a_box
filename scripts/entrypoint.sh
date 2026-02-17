@@ -172,16 +172,12 @@ fi
 # Docker Status & Verification
 # =============================================================================
 if [[ "${DOCKER_DIRECT:-false}" == "true" ]]; then
-    # Direct socket mode: fix permissions if needed
+    # Direct socket mode: fix permissions so dev user can access immediately
     if [[ -S /var/run/docker.sock ]]; then
         SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
         if ! id -G | grep -qw "$SOCK_GID"; then
-            DOCKER_GRP=$(getent group "$SOCK_GID" 2>/dev/null | cut -d: -f1)
-            if [[ -z "$DOCKER_GRP" ]]; then
-                DOCKER_GRP="docker-host"
-                sudo groupadd -g "$SOCK_GID" "$DOCKER_GRP" 2>/dev/null || true
-            fi
-            sudo usermod -aG "$DOCKER_GRP" "$(whoami)" 2>/dev/null || true
+            sudo chgrp "$(id -gn)" /var/run/docker.sock
+            sudo chmod g+rw /var/run/docker.sock
         fi
     fi
 
