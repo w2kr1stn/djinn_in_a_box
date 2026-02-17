@@ -171,15 +171,44 @@ fi
 # =============================================================================
 # Docker Status & Verification
 # =============================================================================
-if [[ -n "${DOCKER_HOST:-}" ]]; then
+if [[ "${DOCKER_DIRECT:-false}" == "true" ]]; then
+    # Direct socket mode: fix permissions if needed
+    if [[ -S /var/run/docker.sock ]]; then
+        SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+        if ! id -G | grep -qw "$SOCK_GID"; then
+            DOCKER_GRP=$(getent group "$SOCK_GID" 2>/dev/null | cut -d: -f1)
+            if [[ -z "$DOCKER_GRP" ]]; then
+                DOCKER_GRP="docker-host"
+                sudo groupadd -g "$SOCK_GID" "$DOCKER_GRP" 2>/dev/null || true
+            fi
+            sudo usermod -aG "$DOCKER_GRP" "$(whoami)" 2>/dev/null || true
+        fi
+    fi
+
+    echo ""
+    echo "🐳 Docker Access: Direct socket (NO PROXY)"
+    echo "   Socket: /var/run/docker.sock"
+    echo ""
+    echo "   ⚠  WARNING: Full Docker access — no API filtering!"
+    echo "   All operations allowed: build, exec, push, etc."
+    echo ""
+
+    if docker version &>/dev/null; then
+        echo "   Status: ✓ Connected"
+    else
+        echo "   Status: ✗ Connection failed"
+        echo "   Hint: Check socket permissions (host docker GID: ${SOCK_GID:-unknown})"
+    fi
+    echo ""
+elif [[ -n "${DOCKER_HOST:-}" ]]; then
     echo ""
     echo "🐳 Docker Access: Enabled via proxy"
     echo "   Host: $DOCKER_HOST"
-    
+
     # Verbindung testen
     if docker version &>/dev/null; then
         echo "   Status: ✓ Connected"
-        
+
         # Proxy-Einschränkungen dokumentieren
         echo ""
         echo "   Allowed operations:"
@@ -210,7 +239,13 @@ fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Security Status:"
 printf "  Firewall:     %s\n" "${ENABLE_FIREWALL:-false}" | sed 's/true/✓ Enabled/;s/false/✗ Disabled/'
-printf "  Docker:       %s\n" "${DOCKER_ENABLED:-false}" | sed 's/true/✓ Enabled (proxied)/;s/false/✗ Disabled/'
+if [[ "${DOCKER_DIRECT:-false}" == "true" ]]; then
+    printf "  Docker:       ✓ Enabled (DIRECT — no proxy)\n"
+elif [[ "${DOCKER_ENABLED:-false}" == "true" ]]; then
+    printf "  Docker:       ✓ Enabled (proxied)\n"
+else
+    printf "  Docker:       ✗ Disabled\n"
+fi
 printf "  MCP Gateway:  %s\n" "$(curl -s --connect-timeout 1 "http://${MCP_HOST}/" &>/dev/null && echo '✓ Connected' || echo '✗ Not connected')"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
