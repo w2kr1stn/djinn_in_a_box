@@ -39,41 +39,81 @@ fi
 # =============================================================================
 # Tool Configuration & Seed Sync
 # =============================================================================
-mkdir -p ~/.claude/agents ~/.claude/skills ~/.gemini ~/.codex ~/.config/opencode/commands
+mkdir -p ~/.claude/{agents,skills,commands} ~/.gemini ~/.codex ~/.config/opencode/commands
 
-sync_tool_config() {
-    local tool_name=$1
-    local config_file=$2
-    local seed_dir="/home/dev/.${tool_name}_seed"
+# -----------------------------------------------------------------------------
+# sync_seed: Clean-sync managed dirs/files from read-only seed to volume.
+# Subdirectories are fully replaced (rm + cp). Root files are overwritten.
+# A .seed-manifest tracks synced files to detect and remove stale entries.
+#   $1 = label       (for logging)
+#   $2 = seed_dir    (read-only bind mount from host)
+#   $3 = target_dir  (persistent Docker volume)
+#   $4 = config_file (path for settings.json deep-merge, optional)
+# -----------------------------------------------------------------------------
+sync_seed() {
+    local label=$1 seed_dir=$2 target_dir=$3 config_file=${4:-}
+    local manifest="${target_dir}/.seed-manifest"
+    local tmp_manifest="${manifest}.tmp"
 
-    # Check if seed dir exists AND has files (avoids zsh "no matches found" error)
-    if [[ -d "$seed_dir" ]] && [[ -n "$(ls -A "$seed_dir" 2>/dev/null)" ]]; then
-        cp -r "$seed_dir"/* "/home/dev/.${tool_name}/" 2>/dev/null || true
-        if [[ -f "$seed_dir/settings.json" ]] && [[ -f "$config_file" ]]; then
-            jq -s '.[0] * .[1]' "$config_file" "$seed_dir/settings.json" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+    if [[ ! -d "$seed_dir" ]] || [[ -z "$(ls -A "$seed_dir" 2>/dev/null)" ]]; then
+        return
+    fi
+
+    echo "  [seed-sync] ${label}:"
+    : > "$tmp_manifest"
+
+    # Phase 1: Clean-replace subdirectories (seed = source of truth)
+    for dir in "$seed_dir"/*(N/); do
+        local dirname=${dir:t}
+        echo "    ↻ ${dirname}/"
+        rm -rf "${target_dir}/${dirname}"
+        cp -r "$dir" "${target_dir}/${dirname}"
+        find "${target_dir}/${dirname}" -type f -printf "${dirname}/%P\n" >> "$tmp_manifest"
+    done
+
+    # Phase 2: Overwrite root-level files (skip settings.json — handled via merge)
+    for file in "$seed_dir"/*(N.); do
+        local filename=${file:t}
+        [[ "$filename" == "settings.json" ]] && continue
+        echo "    ↻ ${filename}"
+        cp "$file" "${target_dir}/${filename}"
+        echo "$filename" >> "$tmp_manifest"
+    done
+
+    # Phase 3: Remove stale files tracked by previous manifest
+    if [[ -f "$manifest" ]]; then
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            if ! grep -qxF "$entry" "$tmp_manifest"; then
+                if [[ -e "${target_dir}/${entry}" ]]; then
+                    echo "    ✕ ${entry} (stale)"
+                    rm -f "${target_dir}/${entry}"
+                fi
+            fi
+        done < "$manifest"
+        find "$target_dir" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    fi
+
+    # Phase 4: Persist new manifest
+    sort -o "$manifest" "$tmp_manifest"
+    rm -f "$tmp_manifest"
+
+    # Phase 5: Deep-merge settings.json (seed wins, volume-only keys preserved)
+    if [[ -n "$config_file" ]] && [[ -f "$seed_dir/settings.json" ]]; then
+        if [[ -f "$config_file" ]]; then
+            echo "    ⊕ settings.json (merged)"
+            jq -s '.[0] * .[1]' "$config_file" "$seed_dir/settings.json" \
+                > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+        else
+            echo "    + settings.json (init)"
+            cp "$seed_dir/settings.json" "$config_file"
         fi
     fi
 }
 
-sync_tool_config "claude" "$HOME/.claude/claude.json"
-sync_tool_config "gemini" "$HOME/.gemini/settings.json"
-
-# OpenCode config sync
-# OpenCode looks for config in: ~/.config/opencode/.opencode.json
-# OpenCode looks for commands in: ~/.config/opencode/commands/
-OPENCODE_SEED="$HOME/.opencode/seed"
-OPENCODE_CONFIG="$HOME/.config/opencode"
-mkdir -p "$OPENCODE_CONFIG/commands"
-if [[ -d "$OPENCODE_SEED" ]] && [[ -n "$(ls -A "$OPENCODE_SEED" 2>/dev/null)" ]]; then
-    # Copy commands directory if exists (user: prefix in OpenCode)
-    [[ -d "$OPENCODE_SEED/commands" ]] && cp -r "$OPENCODE_SEED/commands"/* "$OPENCODE_CONFIG/commands/" 2>/dev/null || true
-    # Merge settings.json if exists
-    if [[ -f "$OPENCODE_SEED/settings.json" ]] && [[ -f "$OPENCODE_CONFIG/.opencode.json" ]]; then
-        jq -s '.[0] * .[1]' "$OPENCODE_CONFIG/.opencode.json" "$OPENCODE_SEED/settings.json" > "$OPENCODE_CONFIG/.opencode.json.tmp" && mv "$OPENCODE_CONFIG/.opencode.json.tmp" "$OPENCODE_CONFIG/.opencode.json"
-    elif [[ -f "$OPENCODE_SEED/settings.json" ]]; then
-        cp "$OPENCODE_SEED/settings.json" "$OPENCODE_CONFIG/.opencode.json"
-    fi
-fi
+sync_seed "claude"   "$HOME/.claude_seed"   "$HOME/.claude"          "$HOME/.claude/claude.json"
+sync_seed "gemini"   "$HOME/.gemini_seed"   "$HOME/.gemini"          "$HOME/.gemini/settings.json"
+sync_seed "opencode" "$HOME/.opencode/seed" "$HOME/.config/opencode" "$HOME/.config/opencode/.opencode.json"
 
 # =============================================================================
 # MCP Gateway Configuration
