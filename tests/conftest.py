@@ -8,12 +8,6 @@ import pytest
 
 
 @pytest.fixture
-def temp_dir(tmp_path: Path) -> Path:
-    """Provide a temporary directory for test operations."""
-    return tmp_path
-
-
-@pytest.fixture
 def mock_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Mock the home directory for testing XDG paths."""
     fake_home = tmp_path / "home"

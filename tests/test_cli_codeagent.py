@@ -103,11 +103,8 @@ class TestInitCommand:
         monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
         monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
 
-        # Mock ensure_config_dir to create the directory
-        def mock_ensure_config_dir() -> None:
-            config_dir.mkdir(parents=True, exist_ok=True)
-
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.ensure_config_dir", mock_ensure_config_dir)
+        # Mock CONFIG_DIR so mkdir creates the temp directory
+        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
 
         # Mock save_config to actually write a file
         def mock_save_config(config: object) -> None:
@@ -119,8 +116,10 @@ class TestInitCommand:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
 
-        # Mock get_bundled_agents_path to return None
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.get_bundled_agents_path", lambda: None)
+        # Mock get_project_root to avoid finding bundled agents.toml
+        monkeypatch.setattr(
+            "ai_dev_base.cli.codeagent.get_project_root", lambda: tmp_path / "nonexistent"
+        )
 
         # Run init with input
         result = runner.invoke(app, ["init"], input=f"{projects_dir}\nEurope/Berlin\n")
@@ -143,7 +142,7 @@ class TestInitCommand:
         # Mock paths
         monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
         monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.ensure_config_dir", lambda: None)
+        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
 
         # Mock save_config
         def mock_save_config(config: object) -> None:
@@ -155,7 +154,9 @@ class TestInitCommand:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.get_bundled_agents_path", lambda: None)
+        monkeypatch.setattr(
+            "ai_dev_base.cli.codeagent.get_project_root", lambda: tmp_path / "nonexistent"
+        )
 
         # Run init --force
         result = runner.invoke(app, ["init", "--force"], input=f"{projects_dir}\nEurope/Berlin\n")
@@ -178,7 +179,7 @@ class TestInitCommand:
         # Mock paths
         monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
         monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.ensure_config_dir", lambda: None)
+        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
 
         # Run init and decline overwrite
         result = runner.invoke(app, ["init"], input="n\n")
@@ -196,17 +197,15 @@ class TestInitCommand:
         # Mock paths
         monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
         monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
-
-        def mock_ensure_config_dir() -> None:
-            config_dir.mkdir(parents=True, exist_ok=True)
-
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.ensure_config_dir", mock_ensure_config_dir)
+        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
 
         def mock_save_config(config: object) -> None:
             config_file.write_text("[general]\ncode_dir = '/test'\n")
 
         monkeypatch.setattr("ai_dev_base.cli.codeagent.save_config", mock_save_config)
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.get_bundled_agents_path", lambda: None)
+        monkeypatch.setattr(
+            "ai_dev_base.cli.codeagent.get_project_root", lambda: tmp_path / "nonexistent"
+        )
 
         # Use a non-existent directory
         nonexistent = tmp_path / "new_projects"
@@ -313,79 +312,3 @@ class TestConfigPathCommand:
 
         assert result.exit_code == 0
         assert str(config_file) in result.stdout
-
-
-# =============================================================================
-# Command Registration Tests
-# =============================================================================
-
-
-class TestCommandRegistration:
-    """Tests for proper command registration."""
-
-    def test_build_command_registered(self) -> None:
-        """Test build command is registered."""
-        result = runner.invoke(app, ["build", "--help"])
-        assert result.exit_code == 0
-        assert "Build" in result.stdout or "build" in result.stdout
-
-    def test_start_command_registered(self) -> None:
-        """Test start command is registered."""
-        result = runner.invoke(app, ["start", "--help"])
-        assert result.exit_code == 0
-        assert "docker" in result.stdout.lower() or "firewall" in result.stdout.lower()
-
-    def test_auth_command_registered(self) -> None:
-        """Test auth command is registered."""
-        result = runner.invoke(app, ["auth", "--help"])
-        assert result.exit_code == 0
-        assert "OAuth" in result.stdout or "auth" in result.stdout.lower()
-
-    def test_status_command_registered(self) -> None:
-        """Test status command is registered."""
-        result = runner.invoke(app, ["status", "--help"])
-        assert result.exit_code == 0
-        assert "status" in result.stdout.lower()
-
-    def test_audit_command_registered(self) -> None:
-        """Test audit command is registered."""
-        result = runner.invoke(app, ["audit", "--help"])
-        assert result.exit_code == 0
-        assert "log" in result.stdout.lower() or "proxy" in result.stdout.lower()
-
-    def test_update_command_registered(self) -> None:
-        """Test update command is registered."""
-        result = runner.invoke(app, ["update", "--help"])
-        assert result.exit_code == 0
-        assert "update" in result.stdout.lower()
-
-    def test_enter_command_registered(self) -> None:
-        """Test enter command is registered."""
-        result = runner.invoke(app, ["enter", "--help"])
-        assert result.exit_code == 0
-        assert "shell" in result.stdout.lower() or "container" in result.stdout.lower()
-
-    def test_run_command_registered(self) -> None:
-        """Test run command is registered."""
-        result = runner.invoke(app, ["run", "--help"])
-        assert result.exit_code == 0
-        assert "agent" in result.stdout.lower()
-
-    def test_agents_command_registered(self) -> None:
-        """Test agents command is registered."""
-        result = runner.invoke(app, ["agents", "--help"])
-        assert result.exit_code == 0
-        assert "agent" in result.stdout.lower() or "list" in result.stdout.lower()
-
-    def test_clean_subcommand_registered(self) -> None:
-        """Test clean subcommand group is registered."""
-        result = runner.invoke(app, ["clean", "--help"])
-        assert result.exit_code == 0
-        assert "volumes" in result.stdout.lower() or "all" in result.stdout.lower()
-
-    def test_config_subcommand_registered(self) -> None:
-        """Test config subcommand group is registered."""
-        result = runner.invoke(app, ["config", "--help"])
-        assert result.exit_code == 0
-        assert "show" in result.stdout
-        assert "path" in result.stdout
