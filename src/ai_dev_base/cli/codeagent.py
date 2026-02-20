@@ -52,15 +52,13 @@ from ai_dev_base.commands.container import (
     update,
 )
 from ai_dev_base.config import (
-    ensure_config_dir,
-    get_bundled_agents_path,
     load_config,
     save_config,
 )
 from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
 from ai_dev_base.core.console import console, error, info, success, warning
 from ai_dev_base.core.decorators import handle_config_errors
-from ai_dev_base.core.paths import AGENTS_FILE, CONFIG_FILE
+from ai_dev_base.core.paths import AGENTS_FILE, CONFIG_DIR, CONFIG_FILE, get_project_root
 
 # =============================================================================
 # Main Application
@@ -143,7 +141,7 @@ def init_config(
 
         codeagent init --force      # Overwrite existing config
     """
-    ensure_config_dir()
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Check for existing config
     if CONFIG_FILE.exists() and not force:
@@ -189,11 +187,14 @@ def init_config(
 
     # Copy bundled agents.toml if user config does not exist
     if not AGENTS_FILE.exists():
-        bundled_path = get_bundled_agents_path()
-        if bundled_path is not None and bundled_path.exists():
-            shutil.copy(bundled_path, AGENTS_FILE)
-            success(f"Agent definitions copied to {AGENTS_FILE}")
-        else:
+        try:
+            bundled_path = get_project_root() / "config" / "agents.toml"
+            if bundled_path.exists():
+                shutil.copy(bundled_path, AGENTS_FILE)
+                success(f"Agent definitions copied to {AGENTS_FILE}")
+            else:
+                warning("Bundled agents.toml not found. Using built-in defaults.")
+        except FileNotFoundError:
             warning("Bundled agents.toml not found. Using built-in defaults.")
 
     console.print()

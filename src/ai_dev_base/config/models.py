@@ -71,11 +71,7 @@ class AgentConfig(BaseModel):
         'claude'
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=False,
-        validate_assignment=True,
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     binary: Annotated[str, Field(min_length=1)]
     """Executable binary name (e.g., 'claude', 'gemini')."""
@@ -121,11 +117,7 @@ class ResourceLimits(BaseModel):
         '8G'
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=False,
-        validate_assignment=True,
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     cpu_limit: Annotated[int, Field(ge=1, le=128)] = 6
     """Maximum CPU cores allocated to the container."""
@@ -182,11 +174,7 @@ class ShellConfig(BaseModel):
         True
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=False,
-        validate_assignment=True,
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     skip_mounts: bool = False
     """Skip mounting host shell configs (zshrc, oh-my-zsh, oh-my-posh)."""
@@ -231,11 +219,7 @@ class AppConfig(BaseModel):
         6
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=False,
-        validate_assignment=True,
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     code_dir: Path
     """Projects directory to mount as ~/projects in the container. Required."""
@@ -269,65 +253,3 @@ class AppConfig(BaseModel):
             msg = f"code_dir is not a directory: {value}"
             raise ValueError(msg)
         return value
-
-    @field_validator("timezone", mode="after")
-    @classmethod
-    def validate_timezone(cls, value: str) -> str:
-        """Basic timezone format validation.
-
-        Validates that timezone looks like a valid IANA timezone identifier
-        (e.g., 'Europe/Berlin', 'America/New_York', 'UTC').
-
-        Full validation against the timezone database is not performed here
-        to avoid adding extra dependencies.
-        """
-        # Basic format check: should be "Region/City" or simple like "UTC"
-        if not value:
-            msg = "Timezone cannot be empty"
-            raise ValueError(msg)
-
-        # Common simple timezones
-        simple_zones = {"UTC", "GMT", "EST", "PST", "CST", "MST"}
-        if value in simple_zones:
-            return value
-
-        # IANA format: "Continent/City" or "Continent/Region/City"
-        parts = value.split("/")
-        if len(parts) < 2:
-            msg = (
-                f"Invalid timezone format: '{value}'. "
-                "Expected IANA format like 'Europe/Berlin' or 'America/New_York'"
-            )
-            raise ValueError(msg)
-
-        return value
-
-
-# =============================================================================
-# Agents Container
-# =============================================================================
-
-
-class AgentsConfig(BaseModel):
-    """Container for all agent configurations.
-
-    Holds a dictionary of agent configurations keyed by agent name.
-    This model is used for loading agents.toml files.
-
-    Example:
-        >>> agents_config = AgentsConfig(agents={
-        ...     "claude": AgentConfig(binary="claude"),
-        ...     "gemini": AgentConfig(binary="gemini"),
-        ... })
-        >>> "claude" in agents_config.agents
-        True
-    """
-
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=False,
-        validate_assignment=True,
-    )
-
-    agents: dict[str, AgentConfig] = Field(default_factory=dict)
-    """Dictionary of agent configurations keyed by agent name."""

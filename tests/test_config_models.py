@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from ai_dev_base.config.models import (
     AgentConfig,
-    AgentsConfig,
     AppConfig,
     ResourceLimits,
     ShellConfig,
@@ -264,21 +263,6 @@ class TestAppConfig:
         config = AppConfig(code_dir=tmp_path, timezone="America/New_York")
         assert config.timezone == "America/New_York"
 
-    def test_timezone_validation_empty(self, tmp_path: Path) -> None:
-        """Test that empty timezone raises validation error."""
-        with pytest.raises(ValidationError, match="Timezone cannot be empty"):
-            AppConfig(code_dir=tmp_path, timezone="")
-
-    def test_timezone_validation_invalid_format(self, tmp_path: Path) -> None:
-        """Test that invalid timezone format raises validation error."""
-        with pytest.raises(ValidationError, match="Invalid timezone format"):
-            AppConfig(code_dir=tmp_path, timezone="InvalidTimezone")
-
-    def test_timezone_utc_accepted(self, tmp_path: Path) -> None:
-        """Test that UTC and other simple timezones are accepted."""
-        config = AppConfig(code_dir=tmp_path, timezone="UTC")
-        assert config.timezone == "UTC"
-
     def test_full_config(self, tmp_path: Path) -> None:
         """Test AppConfig with all options specified."""
         config = AppConfig(
@@ -309,50 +293,3 @@ class TestAppConfig:
         config = AppConfig.model_validate(data)
         assert config.resources.cpu_limit == 4
         assert config.shell.skip_mounts is True
-
-
-# =============================================================================
-# AgentsConfig Tests
-# =============================================================================
-
-
-class TestAgentsConfig:
-    """Tests for AgentsConfig container model."""
-
-    def test_empty_agents(self) -> None:
-        """Test AgentsConfig with no agents."""
-        config = AgentsConfig()
-        assert config.agents == {}
-
-    def test_single_agent(self) -> None:
-        """Test AgentsConfig with one agent."""
-        config = AgentsConfig(agents={"claude": AgentConfig(binary="claude")})
-        assert "claude" in config.agents
-        assert config.agents["claude"].binary == "claude"
-
-    def test_multiple_agents(self) -> None:
-        """Test AgentsConfig with multiple agents."""
-        config = AgentsConfig(
-            agents={
-                "claude": AgentConfig(binary="claude"),
-                "gemini": AgentConfig(binary="gemini"),
-                "codex": AgentConfig(binary="codex"),
-            }
-        )
-        assert len(config.agents) == 3
-
-    def test_from_dict(self) -> None:
-        """Test creating AgentsConfig from dictionary (TOML-like)."""
-        data = {
-            "agents": {
-                "claude": {
-                    "binary": "claude",
-                    "description": "Anthropic Claude Code CLI",
-                    "headless_flags": ["-p"],
-                    "write_flags": ["--dangerously-skip-permissions"],
-                },
-            }
-        }
-        config = AgentsConfig.model_validate(data)
-        assert config.agents["claude"].binary == "claude"
-        assert config.agents["claude"].headless_flags == ["-p"]

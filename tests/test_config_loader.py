@@ -14,7 +14,6 @@ from ai_dev_base.config.loader import (
     ConfigValidationError,
     _transform_config_to_toml,
     _transform_toml_to_config,
-    ensure_config_dir,
     load_agents,
     load_config,
     save_config,
@@ -362,19 +361,3 @@ class TestSaveConfig:
 # =============================================================================
 # Utility Function Tests
 # =============================================================================
-
-
-class TestEnsureConfigDir:
-    """Tests for ensure_config_dir function."""
-
-    def test_creates_config_directory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Should create config directory if it doesn't exist."""
-        fake_config_dir = tmp_path / ".config" / "ai-dev-base"
-        monkeypatch.setattr("ai_dev_base.config.loader.CONFIG_DIR", fake_config_dir)
-
-        result = ensure_config_dir()
-
-        assert fake_config_dir.exists()
-        assert result == fake_config_dir

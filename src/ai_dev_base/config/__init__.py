@@ -8,15 +8,12 @@ from ai_dev_base.config.defaults import (
 from ai_dev_base.config.loader import (
     ConfigNotFoundError,
     ConfigValidationError,
-    ensure_config_dir,
-    get_bundled_agents_path,
     load_agents,
     load_config,
     save_config,
 )
 from ai_dev_base.config.models import (
     AgentConfig,
-    AgentsConfig,
     AppConfig,
     ResourceLimits,
     ShellConfig,
@@ -25,7 +22,6 @@ from ai_dev_base.config.models import (
 __all__ = [
     # Models
     "AgentConfig",
-    "AgentsConfig",
     "AppConfig",
     "ResourceLimits",
     "ShellConfig",
@@ -36,8 +32,6 @@ __all__ = [
     # Loader
     "ConfigNotFoundError",
     "ConfigValidationError",
-    "ensure_config_dir",
-    "get_bundled_agents_path",
     "load_agents",
     "load_config",
     "save_config",

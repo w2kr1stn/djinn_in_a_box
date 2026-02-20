@@ -17,10 +17,9 @@ import tomli_w
 from pydantic import ValidationError
 
 from ai_dev_base.config.defaults import DEFAULT_AGENTS
-from ai_dev_base.config.models import AgentConfig, AgentsConfig, AppConfig
+from ai_dev_base.config.models import AgentConfig, AppConfig
 from ai_dev_base.core.paths import (
     AGENTS_FILE,
-    CONFIG_DIR,
     CONFIG_FILE,
     get_project_root,
 )
@@ -88,73 +87,36 @@ def load_config(path: Path | None = None) -> AppConfig:
         config_dict = _transform_toml_to_config(data)
         return AppConfig(**config_dict)
     except ValidationError as e:
+        details = "\n".join(
+            f"  - {'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
+        )
         raise ConfigValidationError(
-            f"Configuration validation failed for {config_path}:\n{_format_validation_errors(e)}"
+            f"Configuration validation failed for {config_path}:\n{details}"
         ) from e
 
 
 def _transform_toml_to_config(data: dict[str, Any]) -> dict[str, Any]:
     """Transform TOML structure to AppConfig-compatible dict.
 
-    TOML structure:
-        [general]
-        code_dir = "/path"
-        timezone = "Europe/Berlin"
-
-        [shell]
-        skip_mounts = false
-
-        [resources]
-        cpu_limit = 6
-
-    Transformed to:
-        {
-            "code_dir": "/path",
-            "timezone": "Europe/Berlin",
-            "shell": {"skip_mounts": false},
-            "resources": {"cpu_limit": 6}
-        }
+    Flattens [general] section to top-level fields. Unknown sections/keys
+    are caught by Pydantic's extra="forbid" with proper error messages.
     """
     result: dict[str, Any] = {}
 
-    known_sections = {"general", "shell", "resources"}
-    unknown_sections = set(data.keys()) - known_sections
-    if unknown_sections:
-        from ai_dev_base.core.console import warning
-
-        warning(f"Unknown config sections ignored: {', '.join(sorted(unknown_sections))}")
-
-    # Extract [general] section to top-level
+    # Flatten [general] section to top-level
     general = data.get("general", {})
-    known_general_keys = {"code_dir", "timezone"}
-    unknown_general = set(general.keys()) - known_general_keys
-    if unknown_general:
-        from ai_dev_base.core.console import warning
-
-        warning(f"Unknown keys in [general] ignored: {', '.join(sorted(unknown_general))}")
-
     if "code_dir" in general:
         result["code_dir"] = general["code_dir"]
     if "timezone" in general:
         result["timezone"] = general["timezone"]
 
-    # Pass through nested sections (Pydantic extra="forbid" catches unknown keys)
+    # Pass through nested sections (Pydantic extra="forbid" validates)
     if "shell" in data:
         result["shell"] = data["shell"]
     if "resources" in data:
         result["resources"] = data["resources"]
 
     return result
-
-
-def _format_validation_errors(error: ValidationError) -> str:
-    """Format Pydantic validation errors for user display."""
-    lines: list[str] = []
-    for err in error.errors():
-        loc = ".".join(str(item) for item in err["loc"])
-        msg = err["msg"]
-        lines.append(f"  - {loc}: {msg}")
-    return "\n".join(lines)
 
 
 # =============================================================================
@@ -240,14 +202,12 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
         )
 
     try:
-        agents_config = AgentsConfig(
-            agents={name: AgentConfig(**agent_data) for name, agent_data in agents_data.items()}
-        )
-        return agents_config.agents
+        return {name: AgentConfig(**agent_data) for name, agent_data in agents_data.items()}
     except ValidationError as e:
-        raise ConfigValidationError(
-            f"Invalid agent configuration in {path}:\n{_format_validation_errors(e)}"
-        ) from e
+        details = "\n".join(
+            f"  - {'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
+        )
+        raise ConfigValidationError(f"Invalid agent configuration in {path}:\n{details}") from e
 
 
 # =============================================================================
@@ -289,72 +249,13 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
 
 
 def _transform_config_to_toml(config: AppConfig) -> dict[str, Any]:
-    """Transform AppConfig to TOML-compatible nested structure.
-
-    Transforms:
-        AppConfig(code_dir="/path", timezone="UTC", shell=ShellConfig(...))
-
-    To TOML structure:
-        [general]
-        code_dir = "/path"
-        timezone = "UTC"
-
-        [shell]
-        skip_mounts = false
-    """
-    result: dict[str, Any] = {
+    """Transform AppConfig to TOML-compatible nested structure."""
+    data = config.model_dump(mode="json", exclude_none=True)
+    # Wrap top-level fields into [general] section (TOML layout convention)
+    return {
         "general": {
-            "code_dir": str(config.code_dir),
-            "timezone": config.timezone,
+            "code_dir": data.pop("code_dir"),
+            "timezone": data.pop("timezone"),
         },
-        "shell": {
-            "skip_mounts": config.shell.skip_mounts,
-        },
-        "resources": {
-            "cpu_limit": config.resources.cpu_limit,
-            "memory_limit": config.resources.memory_limit,
-            "cpu_reservation": config.resources.cpu_reservation,
-            "memory_reservation": config.resources.memory_reservation,
-        },
+        **data,
     }
-
-    # Include optional shell fields only if set
-    if config.shell.omp_theme_path is not None:
-        result["shell"]["omp_theme_path"] = str(config.shell.omp_theme_path)
-
-    return result
-
-
-# =============================================================================
-# Directory Utilities
-# =============================================================================
-
-
-def ensure_config_dir() -> Path:
-    """Ensure config directory exists, return path.
-
-    Creates ~/.config/ai-dev-base/ if it does not exist.
-
-    Returns:
-        Path to the config directory.
-
-    Example:
-        >>> config_dir = ensure_config_dir()
-        >>> config_dir.exists()
-        True
-    """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return CONFIG_DIR
-
-
-def get_bundled_agents_path() -> Path | None:
-    """Get path to bundled agents.toml if it exists.
-
-    Returns:
-        Path to config/agents.toml in project root, or None if not found.
-    """
-    try:
-        bundled_path = get_project_root() / "config" / "agents.toml"
-        return bundled_path if bundled_path.exists() else None
-    except FileNotFoundError:
-        return None
