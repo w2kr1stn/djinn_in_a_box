@@ -1,17 +1,4 @@
-"""Agent execution commands for AI Dev Base CLI.
-
-This module provides commands for executing AI coding agents in headless mode
-within Docker containers. The agents (Claude, Gemini, Codex, OpenCode) run
-in ephemeral containers, process a prompt, and return the result.
-
-Commands:
-    run: Execute an agent in headless mode with a prompt
-    agents: List available agents and their configurations
-
-The prompt is passed via the AGENT_PROMPT environment variable to avoid
-shell escaping issues. By default, the current working directory is mounted
-as the workspace (implicit --here behavior).
-"""
+"""Agent execution commands — run agents in headless mode within Docker containers."""
 
 from __future__ import annotations
 
@@ -30,7 +17,6 @@ from ai_dev_base.core.docker import (
     cleanup_docker_proxy,
     compose_run,
     ensure_network,
-    validate_docker_flags,
 )
 
 if TYPE_CHECKING:
@@ -50,30 +36,7 @@ def build_agent_command(
 ) -> str:
     """Build shell command string for agent execution.
 
-    Constructs the command that will be executed inside the container.
-    The prompt is referenced via the $AGENT_PROMPT environment variable,
-    which is expanded at runtime in the container shell.
-
-    Mirrors the build_shell_command() function from the original agent_runner.py script.
-
-    Args:
-        agent_config: Agent configuration containing binary, flags, and template.
-        write: Enable file modifications (uses write_flags instead of read_only_flags).
-        json_output: Enable JSON output format (adds json_flags).
-        model: Model override (e.g., 'sonnet', 'gemini-2.5-flash').
-
-    Returns:
-        Shell command string suitable for execution as 'zsh -c "<command>"'.
-        The prompt is referenced via $AGENT_PROMPT, not embedded directly.
-
-    Example:
-        >>> from ai_dev_base.config import load_agents
-        >>> agents = load_agents()
-        >>> cmd = build_agent_command(agents["claude"], write=True, model="sonnet")
-        >>> "claude" in cmd
-        True
-        >>> "--dangerously-skip-permissions" in cmd
-        True
+    The prompt is referenced via $AGENT_PROMPT env var, expanded at container runtime.
     """
     parts: list[str] = [shlex.quote(agent_config.binary)]
     parts.extend(shlex.quote(f) for f in agent_config.headless_flags)
@@ -174,9 +137,10 @@ def run(
         # With Docker access and timeout
         codeagent run claude "Build the Docker image" --docker --timeout 300
     """
-    validate_docker_flags(docker, docker_direct)
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
-    # Load configuration (ConfigNotFoundError handled by decorator)
     app_config = load_config()
     agent_configs = load_agents()
 
@@ -240,7 +204,6 @@ def run(
         docker_direct=docker_direct,
         firewall_enabled=firewall,
         mount_path=workspace,
-        shell_mounts=True,
     )
 
     # Execute in container
@@ -305,15 +268,7 @@ def agents(
 
     if json_output:
         data = {
-            name: {
-                "binary": cfg.binary,
-                "description": cfg.description,
-                "headless_flags": cfg.headless_flags,
-                "read_only_flags": cfg.read_only_flags,
-                "write_flags": cfg.write_flags,
-                "json_flags": cfg.json_flags,
-                "model_flag": cfg.model_flag,
-            }
+            name: cfg.model_dump(exclude={"prompt_template"})
             for name, cfg in sorted(agent_configs.items())
         }
         console.print(json.dumps(data, indent=2))

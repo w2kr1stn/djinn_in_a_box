@@ -1,13 +1,4 @@
-"""MCP Gateway commands for AI Dev Base CLI.
-
-Commands for managing the Model Context Protocol Gateway
-that provides MCP servers to AI coding agents.
-
-This module implements the functionality from mcp/mcp.sh:
-- Gateway lifecycle: start, stop, restart, status, logs
-- Server management: enable, disable, servers, catalog
-- Diagnostics: test, clean
-"""
+"""MCP Gateway commands — lifecycle, server management, and diagnostics."""
 
 from __future__ import annotations
 
@@ -20,12 +11,8 @@ from typing import Annotated
 import typer
 
 from ai_dev_base.core.console import console, err_console, error, info, success, warning
-from ai_dev_base.core.docker import ensure_network, is_container_running
+from ai_dev_base.core.docker import delete_network, ensure_network, is_container_running
 from ai_dev_base.core.paths import get_project_root
-
-# =============================================================================
-# Constants
-# =============================================================================
 
 GATEWAY_CONTAINER: str = "mcp-gateway"
 """Name of the MCP Gateway container."""
@@ -40,85 +27,36 @@ AI_DEV_NETWORK: str = "ai-dev-network"
 """Docker network name for AI Dev containers."""
 
 
-# =============================================================================
-# Exceptions
-# =============================================================================
+MCP_DIR: Path = get_project_root() / "mcp"
+"""Path to the mcp/ directory containing docker-compose.yml."""
 
 
-class MCPCliNotFoundError(Exception):
-    """Raised when the docker mcp CLI plugin is not installed."""
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-
-def check_mcp_cli() -> None:
-    """Verify that the docker mcp CLI plugin is installed.
-
-    Mirrors the check_mcp_cli() function from the original mcp.sh script.
-
-    Raises:
-        MCPCliNotFoundError: If the docker mcp plugin is not installed.
-    """
-    result = subprocess.run(
-        ["docker", "mcp", "--help"],
-        capture_output=True,
-        check=False,
-    )
+def _require_mcp_cli() -> None:
+    """Check for MCP CLI plugin and exit with error if not installed."""
+    result = subprocess.run(["docker", "mcp", "--help"], capture_output=True, check=False)
     if result.returncode != 0:
-        msg = (
+        error(
             "'docker mcp' CLI plugin not installed.\n\n"
             "Install it with:\n"
             "  git clone https://github.com/docker/mcp-gateway.git\n"
-            "  cd mcp-gateway\n"
-            "  make docker-mcp\n\n"
+            "  cd mcp-gateway && make docker-mcp\n\n"
             "Or download a binary from:\n"
             "  https://github.com/docker/mcp-gateway/releases"
         )
-        raise MCPCliNotFoundError(msg)
+        raise typer.Exit(1)
 
 
-def require_running() -> None:
-    """Ensure the MCP Gateway container is running.
-
-    Mirrors the require_running() function from the original mcp.sh script.
-
-    Raises:
-        typer.Exit: If the gateway is not running.
-    """
+def _require_running() -> None:
+    """Exit with error if MCP Gateway container is not running."""
     if not is_container_running(GATEWAY_CONTAINER):
         error("MCP Gateway is not running")
         err_console.print("Start it with: mcpgateway start")
         raise typer.Exit(1)
 
 
-def get_mcp_dir() -> Path:
-    """Get the path to the mcp/ directory in the project.
-
-    Returns:
-        Path to the mcp/ directory containing docker-compose.yml.
-    """
-    return get_project_root() / "mcp"
-
-
-def _ensure_mcp_cli() -> None:
-    """Check for MCP CLI and exit with error if not installed."""
-    try:
-        check_mcp_cli()
-    except MCPCliNotFoundError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
-
 def _run_mcp_compose(args: list[str], error_msg: str) -> None:
     """Run a docker compose command in the MCP directory. Raises typer.Exit on failure."""
-    result = subprocess.run(
-        ["docker", "compose", *args],
-        cwd=get_mcp_dir(),
-        check=False,
-    )
+    result = subprocess.run(["docker", "compose", *args], cwd=MCP_DIR, check=False)
     if result.returncode != 0:
         error(error_msg)
         raise typer.Exit(result.returncode)
@@ -130,16 +68,8 @@ def _run_mcp_compose(args: list[str], error_msg: str) -> None:
 
 
 def start() -> None:
-    """Start the MCP Gateway service.
-
-    Equivalent to: ./mcp.sh start
-
-    - Checks for docker mcp CLI plugin
-    - Ensures ai-dev-network exists
-    - Starts the gateway via docker compose
-    - Displays endpoint information on success
-    """
-    _ensure_mcp_cli()
+    """Start the MCP Gateway service."""
+    _require_mcp_cli()
     ensure_network(AI_DEV_NETWORK)
     info("Starting MCP Gateway...")
 
@@ -163,27 +93,21 @@ def start() -> None:
         # Show logs for debugging
         subprocess.run(
             ["docker", "compose", "logs"],
-            cwd=get_mcp_dir(),
+            cwd=MCP_DIR,
             check=False,
         )
         raise typer.Exit(1)
 
 
 def stop() -> None:
-    """Stop the MCP Gateway service.
-
-    Equivalent to: ./mcp.sh stop
-    """
+    """Stop the MCP Gateway service."""
     warning("Stopping MCP Gateway...")
     _run_mcp_compose(["down"], "Failed to stop MCP Gateway")
     success("MCP Gateway stopped")
 
 
 def restart() -> None:
-    """Restart the MCP Gateway service.
-
-    Equivalent to: ./mcp.sh restart
-    """
+    """Restart the MCP Gateway service."""
     warning("Restarting MCP Gateway...")
     _run_mcp_compose(["restart"], "Failed to restart MCP Gateway")
     time.sleep(2)
@@ -191,16 +115,7 @@ def restart() -> None:
 
 
 def status() -> None:
-    """Show gateway status and enabled servers.
-
-    Equivalent to: ./mcp.sh status
-
-    Displays:
-    - Gateway running status
-    - Container details (ID, Image, Status, Ports)
-    - Enabled MCP servers
-    - Running MCP containers
-    """
+    """Show gateway status and enabled servers."""
     info("MCP Gateway Status")
     err_console.print("=" * 40)
 
@@ -275,15 +190,8 @@ def logs(
     follow: Annotated[bool, typer.Option("--follow", "-f", help="Follow log output")] = False,
     tail: Annotated[int, typer.Option("--tail", "-n", help="Number of lines to show")] = 100,
 ) -> None:
-    """Show gateway logs.
-
-    Equivalent to: ./mcp.sh logs [-f]
-
-    Args:
-        follow: Follow log output in real-time.
-        tail: Number of lines to show (default: 100).
-    """
-    require_running()
+    """Show gateway logs."""
+    _require_running()
 
     cmd = ["docker", "logs"]
     if follow:
@@ -302,19 +210,9 @@ def logs(
 def enable(
     server: Annotated[str, typer.Argument(help="MCP server name to enable")],
 ) -> None:
-    """Enable an MCP server.
-
-    Equivalent to: ./mcp.sh enable <server>
-
-    Examples:
-        mcpgateway enable duckduckgo
-        mcpgateway enable memory
-
-    Args:
-        server: Name of the MCP server to enable.
-    """
-    _ensure_mcp_cli()
-    require_running()
+    """Enable an MCP server."""
+    _require_mcp_cli()
+    _require_running()
 
     info(f"Enabling MCP server: {server}")
     result = subprocess.run(
@@ -332,15 +230,9 @@ def enable(
 def disable(
     server: Annotated[str, typer.Argument(help="MCP server name to disable")],
 ) -> None:
-    """Disable an MCP server.
-
-    Equivalent to: ./mcp.sh disable <server>
-
-    Args:
-        server: Name of the MCP server to disable.
-    """
-    _ensure_mcp_cli()
-    require_running()
+    """Disable an MCP server."""
+    _require_mcp_cli()
+    _require_running()
 
     warning(f"Disabling MCP server: {server}")
     result = subprocess.run(
@@ -356,11 +248,8 @@ def disable(
 
 
 def servers() -> None:
-    """List enabled MCP servers.
-
-    Equivalent to: ./mcp.sh servers
-    """
-    _ensure_mcp_cli()
+    """List enabled MCP servers."""
+    _require_mcp_cli()
     info("Enabled MCP Servers")
     err_console.print("=" * 40)
 
@@ -378,14 +267,8 @@ def servers() -> None:
 
 
 def catalog() -> None:
-    """Show available servers in the catalog.
-
-    Equivalent to: ./mcp.sh catalog
-
-    Displays the docker-mcp catalog or provides instructions
-    for initializing it.
-    """
-    _ensure_mcp_cli()
+    """Show available servers in the catalog."""
+    _require_mcp_cli()
     info("MCP Server Catalog")
     err_console.print("=" * 40)
 
@@ -411,16 +294,7 @@ def catalog() -> None:
 
 
 def test() -> None:
-    """Test gateway connectivity.
-
-    Equivalent to: ./mcp.sh test
-
-    Checks:
-    - Container status
-    - Localhost endpoint accessibility
-    - Docker socket access from within the container
-    - docker mcp CLI plugin installation
-    """
+    """Test gateway connectivity (container, endpoints, socket, CLI plugin)."""
     info("Testing MCP Gateway...")
     err_console.print()
 
@@ -502,10 +376,10 @@ def test() -> None:
 
     # CLI plugin
     err_console.print("docker mcp CLI plugin: ", end="")
-    try:
-        check_mcp_cli()
+    cli_check = subprocess.run(["docker", "mcp", "--help"], capture_output=True, check=False)
+    if cli_check.returncode == 0:
         err_console.print("[status.enabled]Installed[/status.enabled]")
-    except MCPCliNotFoundError:
+    else:
         err_console.print("[status.disabled]Not installed[/status.disabled]")
 
     # Show endpoint URLs
@@ -519,17 +393,7 @@ def test() -> None:
 
 
 def clean() -> None:
-    """Stop gateway and remove all configuration (full reset).
-
-    Equivalent to: ./mcp.sh clean
-
-    This will:
-    - Stop the MCP Gateway container
-    - Remove the ai-dev-network
-    - Remove ~/.docker/mcp configuration directory
-
-    Requires user confirmation before proceeding.
-    """
+    """Stop gateway and remove all configuration (full reset)."""
     warning("This will stop the gateway and remove all configuration!")
 
     if not typer.confirm("Are you sure?"):
@@ -538,19 +402,13 @@ def clean() -> None:
     # Stop gateway (ignore errors — may not be running)
     subprocess.run(
         ["docker", "compose", "down"],
-        cwd=get_mcp_dir(),
+        cwd=MCP_DIR,
         capture_output=True,
         check=False,
     )
 
     # Remove network
-    result = subprocess.run(
-        ["docker", "network", "rm", AI_DEV_NETWORK],
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        warning(f"Failed to remove network '{AI_DEV_NETWORK}' (may not exist or be in use)")
+    delete_network(AI_DEV_NETWORK)
 
     # Remove MCP config directory (~/.docker/mcp)
     mcp_config = Path.home() / ".docker" / "mcp"

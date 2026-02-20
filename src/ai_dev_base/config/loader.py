@@ -43,6 +43,13 @@ class ConfigValidationError(ValueError):
     """Raised when config validation fails."""
 
 
+def _format_validation_errors(e: ValidationError) -> str:
+    """Format Pydantic validation errors as indented bullet list."""
+    return "\n".join(
+        f"  - {'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
+    )
+
+
 # =============================================================================
 # Configuration Loading
 # =============================================================================
@@ -87,11 +94,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         config_dict = _transform_toml_to_config(data)
         return AppConfig(**config_dict)
     except ValidationError as e:
-        details = "\n".join(
-            f"  - {'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
-        )
         raise ConfigValidationError(
-            f"Configuration validation failed for {config_path}:\n{details}"
+            f"Configuration validation failed for {config_path}:\n{_format_validation_errors(e)}"
         ) from e
 
 
@@ -204,10 +208,9 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
     try:
         return {name: AgentConfig(**agent_data) for name, agent_data in agents_data.items()}
     except ValidationError as e:
-        details = "\n".join(
-            f"  - {'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
-        )
-        raise ConfigValidationError(f"Invalid agent configuration in {path}:\n{details}") from e
+        raise ConfigValidationError(
+            f"Invalid agent configuration in {path}:\n{_format_validation_errors(e)}"
+        ) from e
 
 
 # =============================================================================

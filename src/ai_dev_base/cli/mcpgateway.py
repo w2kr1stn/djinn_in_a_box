@@ -1,23 +1,4 @@
-"""MCP Gateway CLI entry point.
-
-Provides commands for managing the Model Context Protocol Gateway
-that enables MCP servers for AI coding agents.
-
-Usage:
-    mcpgateway start          Start the MCP Gateway service
-    mcpgateway stop           Stop the MCP Gateway service
-    mcpgateway restart        Restart the MCP Gateway service
-    mcpgateway status         Show gateway status and enabled servers
-    mcpgateway logs [-f]      Show gateway logs
-
-    mcpgateway enable <srv>   Enable an MCP server
-    mcpgateway disable <srv>  Disable an MCP server
-    mcpgateway servers        List enabled servers
-    mcpgateway catalog        Show available servers in catalog
-
-    mcpgateway test           Test gateway connectivity
-    mcpgateway clean          Stop gateway and remove config (full reset)
-"""
+"""MCP Gateway CLI — MCP server management for AI Dev Base."""
 
 from typing import Annotated
 
@@ -69,32 +50,19 @@ def main(
     """
 
 
-# =============================================================================
-# Gateway Lifecycle Commands
-# =============================================================================
-
 app.command("start")(mcp.start)
 app.command("stop")(mcp.stop)
 app.command("restart")(mcp.restart)
 app.command("status")(mcp.status)
 app.command("logs")(mcp.logs)
 
-# =============================================================================
-# Server Management Commands
-# =============================================================================
-
 app.command("enable")(mcp.enable)
 app.command("disable")(mcp.disable)
 app.command("servers")(mcp.servers)
 app.command("catalog")(mcp.catalog)
 
-# =============================================================================
-# Diagnostic Commands
-# =============================================================================
-
 app.command("test")(mcp.test)
 app.command("clean")(mcp.clean)
-
 
 if __name__ == "__main__":
     app()

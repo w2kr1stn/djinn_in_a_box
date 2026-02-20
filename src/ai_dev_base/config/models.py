@@ -42,12 +42,6 @@ def validate_memory_format(value: str) -> str:
     return value[:-1] + value[-1].upper()
 
 
-def _memory_to_bytes(value: str) -> int:
-    """Convert a memory string like '12G' to bytes for comparison."""
-    units = {"K": 1024, "M": 1024**2, "G": 1024**3}
-    return int(value[:-1]) * units[value[-1].upper()]
-
-
 # =============================================================================
 # Agent Configuration
 # =============================================================================
@@ -146,8 +140,9 @@ class ResourceLimits(BaseModel):
                 f"cpu_limit ({self.cpu_limit})"
             )
             raise ValueError(msg)
-        mem_res = _memory_to_bytes(self.memory_reservation)
-        mem_lim = _memory_to_bytes(self.memory_limit)
+        units = {"K": 1024, "M": 1024**2, "G": 1024**3}
+        mem_res = int(self.memory_reservation[:-1]) * units[self.memory_reservation[-1]]
+        mem_lim = int(self.memory_limit[:-1]) * units[self.memory_limit[-1]]
         if mem_res > mem_lim:
             msg = (
                 f"memory_reservation ({self.memory_reservation}) cannot exceed "

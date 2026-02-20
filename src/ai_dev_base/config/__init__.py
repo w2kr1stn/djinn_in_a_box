@@ -1,9 +1,9 @@
 """Configuration models and utilities for AI Dev Base CLI."""
 
 from ai_dev_base.config.defaults import (
+    ALL_VOLUMES,
     DEFAULT_AGENTS,
     VOLUME_CATEGORIES,
-    get_all_volumes,
 )
 from ai_dev_base.config.loader import (
     ConfigNotFoundError,
@@ -28,7 +28,7 @@ __all__ = [
     # Defaults
     "DEFAULT_AGENTS",
     "VOLUME_CATEGORIES",
-    "get_all_volumes",
+    "ALL_VOLUMES",
     # Loader
     "ConfigNotFoundError",
     "ConfigValidationError",

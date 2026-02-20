@@ -1,20 +1,4 @@
-"""Container lifecycle commands for AI Dev Base CLI.
-
-Provides commands for building, starting, and managing the AI development container:
-
-Commands:
-    - build: Build/rebuild the Docker image
-    - start: Start interactive development shell with optional Docker/firewall
-    - auth: Start with host network for OAuth authentication
-    - status: Show container, volume, network, and service status
-    - clean: Manage containers and volumes (with subcommands)
-    - audit: Show Docker proxy audit log
-    - update: Update CLI agent versions in Dockerfile
-    - enter: Open a new shell in a running container
-
-These commands mirror the behavior of the original dev.sh Bash script,
-maintaining backwards compatibility with the existing workflow.
-"""
+"""Container lifecycle commands — build, start, auth, status, clean, and more."""
 
 from __future__ import annotations
 
@@ -27,9 +11,9 @@ from typing import Annotated
 import typer
 
 from ai_dev_base.config import (
+    ALL_VOLUMES,
     VOLUME_CATEGORIES,
     ConfigNotFoundError,
-    get_all_volumes,
     load_config,
 )
 from ai_dev_base.core.console import (
@@ -52,6 +36,7 @@ from ai_dev_base.core.docker import (
     compose_down,
     compose_run,
     compose_up,
+    delete_network,
     delete_volume,
     delete_volumes,
     ensure_network,
@@ -59,9 +44,7 @@ from ai_dev_base.core.docker import (
     get_running_containers,
     get_shell_mount_args,
     is_container_running,
-    list_volumes,
     network_exists,
-    validate_docker_flags,
     volume_exists,
 )
 from ai_dev_base.core.paths import get_project_root, resolve_mount_path
@@ -79,10 +62,7 @@ def build(
 ) -> None:
     """Build/rebuild the Docker image.
 
-    Runs `docker compose build` to build the ai-dev-base image.
-    This must be done before the first use and after Dockerfile changes.
-
-    Equivalent to: ./dev.sh build
+    Must be done before first use and after Dockerfile changes.
     """
     info("Building ai-dev-base image...")
 
@@ -140,12 +120,12 @@ def start(
         codeagent start --here                  # Mount cwd as workspace
         codeagent start -d -f --here            # Full options
     """
-    validate_docker_flags(docker, docker_direct)
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
-    # Load configuration (ConfigNotFoundError handled by decorator)
     config = load_config()
 
-    # Ensure Docker network exists
     if not ensure_network():
         error("Failed to create Docker network 'ai-dev-network'")
         raise typer.Exit(1)
@@ -157,10 +137,7 @@ def start(
     elif mount:
         try:
             mount_path = resolve_mount_path(mount)
-        except FileNotFoundError as e:
-            error(str(e))
-            raise typer.Exit(1) from None
-        except NotADirectoryError as e:
+        except (FileNotFoundError, NotADirectoryError) as e:
             error(str(e))
             raise typer.Exit(1) from None
 
@@ -253,9 +230,10 @@ def auth(
         codeagent auth --docker          # With Docker access (proxy)
         codeagent auth --docker-direct   # With Docker access (direct)
     """
-    validate_docker_flags(docker, docker_direct)
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
-    # Load configuration (ConfigNotFoundError handled by decorator)
     config = load_config()
 
     info("Starting AI Dev with host network for OAuth authentication...")
@@ -304,17 +282,7 @@ def auth(
 
 
 def status() -> None:
-    """Show container, volume, network, and service status.
-
-    Displays comprehensive status information about:
-    - Configuration (CODE_DIR)
-    - Running containers (ai-dev-*, mcp-*)
-    - Docker volumes by category
-    - Docker networks (ai-dev-network)
-    - Service status (Docker Proxy, MCP Gateway)
-
-    Equivalent to: ./dev.sh status
-    """
+    """Show container, volume, network, and service status."""
     # Check Docker availability
     docker_check = subprocess.run(
         ["docker", "info"],
@@ -362,19 +330,11 @@ def status() -> None:
 
     # Volumes
     header("Volumes")
-    existing_volumes = list_volumes()
-    if existing_volumes:
-        # Group volumes by category for display
-        categorized: dict[str, list[str]] = {}
-        for category in VOLUME_CATEGORIES:
-            vols = get_existing_volumes_by_category(category)
-            if vols:
-                categorized[category] = vols
-
-        if categorized:
-            print_volume_table(categorized)
-        else:
-            err_console.print("  No categorized volumes found")
+    categorized = {
+        cat: vols for cat in VOLUME_CATEGORIES if (vols := get_existing_volumes_by_category(cat))
+    }
+    if categorized:
+        print_volume_table(categorized)
     else:
         err_console.print("  No volumes found")
 
@@ -517,17 +477,15 @@ def clean_volumes(
     if not categories_to_delete:
         info("Volumes by category:")
         blank()
-        categorized: dict[str, list[str]] = {}
-        for category in VOLUME_CATEGORIES:
-            vols = get_existing_volumes_by_category(category)
-            if vols:
-                categorized[category] = vols
-
+        categorized = {
+            cat: vols
+            for cat in VOLUME_CATEGORIES
+            if (vols := get_existing_volumes_by_category(cat))
+        }
         if categorized:
             print_volume_table(categorized)
         else:
             err_console.print("No volumes found.")
-
         blank()
         err_console.print("Use --credentials, --tools, --cache, or --data to delete.")
         return
@@ -580,26 +538,18 @@ def clean_all(
 
     # Delete all volumes
     info("Deleting all volumes...")
-    all_volumes = get_all_volumes()
-    for vol in all_volumes:
-        if volume_exists(vol):
-            if delete_volume(vol):
-                success(f"  Deleted: {vol}")
-            else:
-                warning(f"  Failed: {vol}")
+    results = delete_volumes(ALL_VOLUMES)
+    for vol, deleted in results.items():
+        if deleted:
+            success(f"  Deleted: {vol}")
+        else:
+            warning(f"  Failed: {vol}")
 
     # Remove network
     info("Removing network...")
     if network_exists("ai-dev-network"):
-        result = subprocess.run(
-            ["docker", "network", "rm", "ai-dev-network"],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0:
+        if delete_network("ai-dev-network"):
             success("  Deleted: ai-dev-network")
-        else:
-            warning("  Failed to remove ai-dev-network (may be in use)")
     else:
         err_console.print("  ai-dev-network does not exist")
 
@@ -618,17 +568,7 @@ def audit(
         typer.Option("--tail", "-n", help="Number of log lines to show"),
     ] = 50,
 ) -> None:
-    """Show Docker proxy audit log.
-
-    Displays the most recent log entries from the Docker proxy container.
-    The proxy logs all Docker socket operations for security auditing.
-
-    Equivalent to: ./dev.sh audit
-
-    Examples:
-        codeagent audit              # Show last 50 lines
-        codeagent audit -n 100       # Show last 100 lines
-    """
+    """Show Docker proxy audit log."""
     if not is_container_running("ai-dev-docker-proxy"):
         error("Docker Proxy is not running.")
         err_console.print("Start with: codeagent start --docker")
@@ -651,14 +591,7 @@ def audit(
 
 
 def update() -> None:
-    """Update CLI agent versions in Dockerfile.
-
-    Runs the update-agents.sh script to check for and update
-    the versions of CLI agents (Claude Code, Gemini CLI, Codex)
-    in the Dockerfile.
-
-    Equivalent to: ./dev.sh update
-    """
+    """Update CLI agent versions in Dockerfile."""
     info("Updating CLI agent versions...")
     blank()
 
@@ -688,21 +621,7 @@ def update() -> None:
 
 
 def enter() -> None:
-    """Open a new shell in a running container.
-
-    Attaches to the first running ai-dev-base container and opens
-    an interactive Zsh shell. Useful for opening additional terminal
-    sessions in an already-running container.
-
-    Equivalent to: codeagent enter (from .zshrc.local wrapper)
-
-    Example:
-        # In terminal 1:
-        codeagent start --docker
-
-        # In terminal 2:
-        codeagent enter  # Opens new shell in same container
-    """
+    """Open a new shell in a running container."""
     if not sys.stdin.isatty():
         error("Cannot enter container: no TTY available (stdin is not a terminal)")
         raise typer.Exit(1)

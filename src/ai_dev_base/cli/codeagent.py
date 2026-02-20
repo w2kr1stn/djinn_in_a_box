@@ -1,34 +1,4 @@
-"""Main CLI entry point for codeagent.
-
-Provides commands for managing AI development containers and running
-CLI coding agents (Claude, Gemini, Codex, OpenCode).
-
-Usage:
-    codeagent --version         Show version and exit
-    codeagent --help            Show help message
-    codeagent --install-completion  Install shell completion
-
-    # First-time setup
-    codeagent init              Initialize configuration interactively
-    codeagent config show       Show current configuration
-    codeagent config path       Show configuration file path
-
-    # Container lifecycle
-    codeagent build             Build the Docker image
-    codeagent start             Start the development container
-    codeagent auth              Authenticate with AI services
-    codeagent status            Show container status
-    codeagent audit             Show container logs
-    codeagent update            Update the Docker image
-    codeagent enter             Enter the container shell
-
-    # Agent execution
-    codeagent run <agent> <prompt>  Run an agent with a prompt
-    codeagent agents            List available agents
-
-    # Cleanup
-    codeagent clean volumes     Remove Docker volumes
-"""
+"""CodeAgent CLI — container lifecycle management for AI Dev Base."""
 
 from __future__ import annotations
 
@@ -60,21 +30,12 @@ from ai_dev_base.core.console import console, error, info, success, warning
 from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.paths import AGENTS_FILE, CONFIG_DIR, CONFIG_FILE, get_project_root
 
-# =============================================================================
-# Main Application
-# =============================================================================
-
 app = typer.Typer(
     name="codeagent",
     help="AI Dev Base CLI - Manage AI development containers",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-
-
-# =============================================================================
-# Version Callback
-# =============================================================================
 
 
 def _version_callback(value: bool) -> None:
@@ -112,11 +73,6 @@ def main(
 
         codeagent run claude "Hello world"  # Run an agent
     """
-
-
-# =============================================================================
-# Init Command
-# =============================================================================
 
 
 @app.command("init")
@@ -188,13 +144,14 @@ def init_config(
     # Copy bundled agents.toml if user config does not exist
     if not AGENTS_FILE.exists():
         try:
-            bundled_path = get_project_root() / "config" / "agents.toml"
-            if bundled_path.exists():
-                shutil.copy(bundled_path, AGENTS_FILE)
-                success(f"Agent definitions copied to {AGENTS_FILE}")
-            else:
-                warning("Bundled agents.toml not found. Using built-in defaults.")
+            bundled_path: Path | None = get_project_root() / "config" / "agents.toml"
         except FileNotFoundError:
+            bundled_path = None
+
+        if bundled_path and bundled_path.exists():
+            shutil.copy(bundled_path, AGENTS_FILE)
+            success(f"Agent definitions copied to {AGENTS_FILE}")
+        else:
             warning("Bundled agents.toml not found. Using built-in defaults.")
 
     console.print()
@@ -203,10 +160,6 @@ def init_config(
     console.print("  [muted]2.[/muted] codeagent auth     [muted]# Authenticate with AI[/muted]")
     console.print("  [muted]3.[/muted] codeagent start    [muted]# Start development shell[/muted]")
 
-
-# =============================================================================
-# Config Subcommand Group
-# =============================================================================
 
 config_app = typer.Typer(
     help="Manage configuration files.",
@@ -282,12 +235,7 @@ def config_path() -> None:
     console.print(str(CONFIG_FILE))
 
 
-# Register config subcommand group
 app.add_typer(config_app, name="config")
-
-# =============================================================================
-# Container Lifecycle Commands
-# =============================================================================
 
 app.command()(build)
 app.command()(start)
@@ -297,23 +245,10 @@ app.command()(audit)
 app.command()(update)
 app.command()(enter)
 
-# =============================================================================
-# Clean Subcommand Group
-# =============================================================================
-
 app.add_typer(clean_app, name="clean")
-
-# =============================================================================
-# Agent Execution Commands
-# =============================================================================
 
 app.command()(run)
 app.command()(agents)
-
-
-# =============================================================================
-# Main Entry Point
-# =============================================================================
 
 if __name__ == "__main__":
     app()
