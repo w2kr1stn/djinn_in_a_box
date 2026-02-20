@@ -3,7 +3,7 @@
 # Optional Tools Installer
 # =============================================================================
 # Reads tools.txt and installs missing tools with caching.
-# Cache markers are stored in ~/.cache/ai-dev-tools/
+# Cache is invalidated on image rebuild (via ~/.build-timestamp).
 # =============================================================================
 
 set -e
@@ -12,7 +12,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_FILE="${TOOLS_FILE:-$SCRIPT_DIR/tools.txt}"
 CACHE_DIR="$HOME/.cache/ai-dev-tools"
 INSTALLERS_DIR="$SCRIPT_DIR/installers"
-CACHE_TTL_DAYS="${TOOLS_CACHE_TTL:-7}"
 
 # Persistent tool directories (available to all installers)
 export TOOLS_DIR="$CACHE_DIR"
@@ -23,34 +22,19 @@ export TOOLS_LIB="$CACHE_DIR/lib"
 export PATH="$TOOLS_BIN:$HOME/.local/bin:$PATH"
 export LD_LIBRARY_PATH="$TOOLS_LIB:${LD_LIBRARY_PATH:-}"
 
-# Map tool name to binary name for verification
-get_tool_binary() {
-    case "$1" in
-        azure-cli) echo "az" ;;
-        *) echo "$1" ;;
-    esac
-}
-
-# Colors (if terminal supports it)
-if [[ -t 1 ]]; then
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m'
-else
-    GREEN='' YELLOW='' BLUE='' NC=''
-fi
-
-log_info()  { echo -e "${BLUE}[tools]${NC} $1"; }
-log_ok()    { echo -e "${GREEN}[tools]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[tools]${NC} $1"; }
-
-# Check if tools.txt exists
 if [[ ! -f "$TOOLS_FILE" ]]; then
     exit 0
 fi
 
 mkdir -p "$CACHE_DIR" "$TOOLS_BIN" "$TOOLS_LIB"
+
+# Invalidate cache when image was rebuilt
+BUILD_TS=$(cat ~/.build-timestamp 2>/dev/null || echo "0")
+CACHE_TS="$CACHE_DIR/.build-timestamp"
+if [[ ! -f "$CACHE_TS" ]] || [[ "$(cat "$CACHE_TS")" != "$BUILD_TS" ]]; then
+    rm -f "$CACHE_DIR"/*.installed
+    echo "$BUILD_TS" > "$CACHE_TS"
+fi
 
 # Read tools from file (ignore comments and empty lines)
 tools=$(grep -v '^#' "$TOOLS_FILE" | grep -v '^[[:space:]]*$' | awk '{print $1}')
@@ -59,7 +43,7 @@ if [[ -z "$tools" ]]; then
     exit 0
 fi
 
-log_info "Checking optional tools..."
+echo "[tools] Checking optional tools..."
 
 installed=0
 skipped=0
@@ -67,50 +51,35 @@ skipped=0
 for tool in $tools; do
     installer="$INSTALLERS_DIR/${tool}.sh"
     cache_marker="$CACHE_DIR/${tool}.installed"
-    
-    # Check if installer exists
+
     if [[ ! -f "$installer" ]]; then
-        log_warn "Unknown tool: $tool (no installer found)"
+        echo "[tools] Unknown tool: $tool (no installer found)"
         continue
     fi
-    
-    # Check cache - skip only if marker exists, binary present, AND marker is fresh
-    updating=false
+
+    # Check cache: marker exists AND binary is in PATH
     if [[ -f "$cache_marker" ]]; then
-        binary=$(get_tool_binary "$tool")
-        marker_age=$(( ($(date +%s) - $(stat -c %Y "$cache_marker")) / 86400 ))
-        if command -v "$binary" &>/dev/null && [[ $marker_age -lt $CACHE_TTL_DAYS ]]; then
+        binary="$tool"; [[ "$tool" == "azure-cli" ]] && binary="az"
+        if command -v "$binary" &>/dev/null; then
             skipped=$((skipped + 1))
             continue
         fi
-        # Stale or missing binary: remove marker AND old binary/shim to prevent shadowing
         rm -f "$cache_marker"
-        rm -f "$TOOLS_BIN/${binary:-$tool}"
-        updating=true
     fi
 
-    if [[ "$updating" == "true" ]]; then
-        log_info "Updating $tool..."
-    else
-        log_info "Installing $tool..."
-    fi
+    echo "[tools] Installing $tool..."
 
-    # Run installer and capture version output
     if version=$("$installer" 2>&1 | tail -1); then
         echo "$version" > "$cache_marker"
-        if [[ "$updating" == "true" ]]; then
-            log_ok "$tool updated ($version)"
-        else
-            log_ok "$tool installed ($version)"
-        fi
+        echo "[tools] ✓ $tool installed ($version)"
         installed=$((installed + 1))
     else
-        log_warn "Failed to install $tool"
+        echo "[tools] ✗ Failed to install $tool"
     fi
 done
 
 if [[ $installed -gt 0 ]]; then
-    log_ok "$installed tool(s) installed/updated, $skipped up to date"
+    echo "[tools] $installed tool(s) installed, $skipped already installed"
 elif [[ $skipped -gt 0 ]]; then
-    log_info "$skipped tool(s) up to date (TTL: ${CACHE_TTL_DAYS}d)"
+    echo "[tools] $skipped tool(s) already installed (cached)"
 fi

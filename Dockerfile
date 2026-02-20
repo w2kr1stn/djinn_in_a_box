@@ -162,8 +162,10 @@ RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
     && ln -sf ~/.gemini/settings.json ~/.gemini-settings.json
 
 # Optional tools installer (runtime installation with caching)
+# Build timestamp used by install.sh to invalidate cache on image rebuild
 COPY --chown=dev:dev tools/ /home/dev/.tools/
-RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true
+RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true \
+    && date +%s > ~/.build-timestamp
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
 RUN chmod +x ~/entrypoint.sh
