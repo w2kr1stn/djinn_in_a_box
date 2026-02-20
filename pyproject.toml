@@ -26,14 +26,6 @@ dependencies = [
     "tomli-w>=1.0.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.3.0",
-    "pytest-cov>=6.0.0",
-    "ruff>=0.9.0",
-    "pyright>=1.1.390",
-]
-
 [project.scripts]
 fmt = "devops:format_code"
 test = "devops:test"
@@ -54,9 +46,9 @@ packages = ["src/ai_dev_base"]
 [dependency-groups]
 dev = [
     "bandit>=1.8.3",
-    "mypy>=1.19.1",
-    "pyright>=1.1.408",
     "pytest>=9.0.2",
+    "pytest-cov>=6.0.0",
+    "pyright>=1.1.408",
     "ruff>=0.14.13",
 ]
 

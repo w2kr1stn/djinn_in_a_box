@@ -60,6 +60,9 @@ x-resource-limits: &resource-limits
     limits:
       cpus: '${CPU_LIMIT:-6}'
       memory: ${MEMORY_LIMIT:-12G}
+    reservations:
+      cpus: '${CPU_RESERVATION:-2}'
+      memory: ${MEMORY_RESERVATION:-4G}
 
 services:
   # ---------------------------------------------------------------------------
@@ -83,15 +86,7 @@ services:
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
     cap_add:
       - NET_ADMIN
-    deploy:
-      <<: *resource-limits
-      resources:
-        limits:
-          cpus: '${CPU_LIMIT:-6}'
-          memory: ${MEMORY_LIMIT:-12G}
-        reservations:
-          cpus: '${CPU_RESERVATION:-2}'
-          memory: ${MEMORY_RESERVATION:-4G}
+    deploy: *resource-limits
     working_dir: /home/dev/projects
 
   # ---------------------------------------------------------------------------
