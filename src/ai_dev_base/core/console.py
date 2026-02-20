@@ -170,24 +170,13 @@ def print_volume_table(volumes: dict[str, list[str]]) -> None:
     table.add_column("Category", style="table.category", width=15)
     table.add_column("Volume", style="table.value")
 
-    category_names: dict[str, str] = {
-        "credentials": "Credentials",
-        "tools": "Tool Configs",
-        "cache": "Cache",
-        "data": "Data",
-    }
-
-    for category in ["credentials", "tools", "cache", "data"]:
-        if category in volumes and volumes[category]:
-            display_name = category_names.get(category, category.title())
-            volume_list = volumes[category]
-
-            table.add_row(display_name, volume_list[0])
-            for vol in volume_list[1:]:
-                table.add_row("", vol)
-
-            if category != "data":
-                table.add_row("", "")
+    entries = [(cat, vols) for cat, vols in volumes.items() if vols]
+    for i, (category, volume_list) in enumerate(entries):
+        table.add_row(category.title(), volume_list[0])
+        for vol in volume_list[1:]:
+            table.add_row("", vol)
+        if i < len(entries) - 1:
+            table.add_row("", "")
 
     console.print(table)
 
