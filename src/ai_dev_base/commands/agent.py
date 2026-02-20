@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import shlex
-import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -29,8 +28,9 @@ from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
+    compose_run,
     ensure_network,
-    network_exists,
+    validate_docker_flags,
 )
 
 if TYPE_CHECKING:
@@ -174,10 +174,7 @@ def run(
         # With Docker access and timeout
         codeagent run claude "Build the Docker image" --docker --timeout 300
     """
-    # Validate mutual exclusivity
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
+    validate_docker_flags(docker, docker_direct)
 
     # Load configuration (ConfigNotFoundError handled by decorator)
     app_config = load_config()
@@ -193,7 +190,7 @@ def run(
     agent_config = agent_configs[agent]
 
     # Ensure Docker network exists
-    if not network_exists() and not ensure_network():
+    if not ensure_network():
         error("Failed to create Docker network 'ai-dev-network'")
         raise typer.Exit(1)
 
@@ -247,8 +244,6 @@ def run(
     )
 
     # Execute in container
-    from ai_dev_base.core.docker import compose_run
-
     result = compose_run(
         app_config,
         options,
@@ -279,6 +274,7 @@ def run(
 # =============================================================================
 
 
+@handle_config_errors
 def agents(
     verbose: Annotated[
         bool,
@@ -305,11 +301,7 @@ def agents(
         # JSON output for scripting
         codeagent agents --json
     """
-    try:
-        agent_configs = load_agents()
-    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError) as e:
-        error(f"Failed to load agents: {e}")
-        raise typer.Exit(1) from None
+    agent_configs = load_agents()
 
     if json_output:
         data = {

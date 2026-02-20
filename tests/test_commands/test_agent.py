@@ -266,100 +266,12 @@ class TestBuildAgentCommandEdgeCases:
 
 
 # =============================================================================
-# Integration Tests (Mocked)
-# =============================================================================
-
-
-class TestAgentCommandIntegration:
-    """Integration tests with mocked subprocess calls."""
-
-    @pytest.fixture
-    def mock_agents(self) -> dict[str, AgentConfig]:
-        """Provide mock agent configurations."""
-        return {
-            "claude": AgentConfig(
-                binary="claude",
-                description="Anthropic Claude Code CLI",
-                headless_flags=["-p"],
-                read_only_flags=["--permission-mode", "plan"],
-                write_flags=["--dangerously-skip-permissions"],
-                json_flags=["--output-format", "json"],
-                model_flag="--model",
-                prompt_template='"$AGENT_PROMPT"',
-            ),
-            "gemini": AgentConfig(
-                binary="gemini",
-                description="Google Gemini CLI",
-                headless_flags=["-p"],
-                model_flag="-m",
-                prompt_template='"$AGENT_PROMPT"',
-            ),
-        }
-
-    def test_agent_command_matches_bash_behavior(self, mock_agents: dict[str, AgentConfig]) -> None:
-        """Verify command matches expected Bash script behavior."""
-        # Test: codeagent run claude "test" should produce:
-        # claude -p --permission-mode plan "$AGENT_PROMPT"
-        cmd = build_agent_command(mock_agents["claude"])
-        expected = 'claude -p --permission-mode plan "$AGENT_PROMPT"'
-        assert cmd == expected
-
-    def test_agent_command_with_write_matches_bash(
-        self, mock_agents: dict[str, AgentConfig]
-    ) -> None:
-        """Verify write mode command matches expected Bash behavior."""
-        # Test: codeagent run claude "test" --write should produce:
-        # claude -p --dangerously-skip-permissions "$AGENT_PROMPT"
-        cmd = build_agent_command(mock_agents["claude"], write=True)
-        expected = 'claude -p --dangerously-skip-permissions "$AGENT_PROMPT"'
-        assert cmd == expected
-
-    def test_agent_command_with_model_matches_bash(
-        self, mock_agents: dict[str, AgentConfig]
-    ) -> None:
-        """Verify model override command matches expected Bash behavior."""
-        # Test: codeagent run claude "test" --write --model sonnet should produce:
-        # claude -p --model sonnet --dangerously-skip-permissions "$AGENT_PROMPT"
-        cmd = build_agent_command(mock_agents["claude"], write=True, model="sonnet")
-        expected = 'claude -p --model sonnet --dangerously-skip-permissions "$AGENT_PROMPT"'
-        assert cmd == expected
-
-    def test_agent_command_with_json_matches_bash(
-        self, mock_agents: dict[str, AgentConfig]
-    ) -> None:
-        """Verify JSON output command matches expected Bash behavior."""
-        # Test: codeagent run claude "test" --json should produce:
-        # claude -p --permission-mode plan --output-format json "$AGENT_PROMPT"
-        cmd = build_agent_command(mock_agents["claude"], json_output=True)
-        expected = 'claude -p --permission-mode plan --output-format json "$AGENT_PROMPT"'
-        assert cmd == expected
-
-
-# =============================================================================
 # agents() Command Tests
 # =============================================================================
 
 
 class TestAgentsListCommand:
     """Tests for the agents list command."""
-
-    def test_agents_function_exists(self) -> None:
-        """Verify agents function can be imported."""
-        from ai_dev_base.commands.agent import agents
-
-        assert callable(agents)
-
-    def test_build_agent_command_exists(self) -> None:
-        """Verify build_agent_command function can be imported."""
-        from ai_dev_base.commands.agent import build_agent_command
-
-        assert callable(build_agent_command)
-
-    def test_run_function_exists(self) -> None:
-        """Verify run function can be imported."""
-        from ai_dev_base.commands.agent import run
-
-        assert callable(run)
 
     def test_agents_lists_available(self) -> None:
         """Test agents command lists available agents."""
@@ -444,27 +356,11 @@ class TestRunCommand:
     """Tests for the run command."""
 
     @pytest.fixture
-    def mock_agent_configs(self) -> dict[str, AgentConfig]:
-        """Provide mock agent configurations."""
-        return {
-            "claude": AgentConfig(
-                binary="claude",
-                description="Anthropic Claude Code CLI",
-                headless_flags=["-p"],
-                read_only_flags=["--permission-mode", "plan"],
-                write_flags=["--dangerously-skip-permissions"],
-                json_flags=["--output-format", "json"],
-                model_flag="--model",
-                prompt_template='"$AGENT_PROMPT"',
-            ),
-            "gemini": AgentConfig(
-                binary="gemini",
-                description="Google Gemini CLI",
-                headless_flags=["-p"],
-                model_flag="-m",
-                prompt_template='"$AGENT_PROMPT"',
-            ),
-        }
+    def mock_agent_configs(
+        self, claude_config: AgentConfig, gemini_config: AgentConfig
+    ) -> dict[str, AgentConfig]:
+        """Provide mock agent configurations from top-level fixtures."""
+        return {"claude": claude_config, "gemini": gemini_config}
 
     @pytest.fixture
     def mock_app_config(self, tmp_path: Path) -> AppConfig:

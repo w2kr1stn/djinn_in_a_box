@@ -55,13 +55,13 @@ from ai_dev_base.core.docker import (
     delete_volume,
     delete_volumes,
     ensure_network,
-    get_compose_files,
     get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
     is_container_running,
     list_volumes,
     network_exists,
+    validate_docker_flags,
     volume_exists,
 )
 from ai_dev_base.core.paths import get_project_root, resolve_mount_path
@@ -140,16 +140,13 @@ def start(
         codeagent start --here                  # Mount cwd as workspace
         codeagent start -d -f --here            # Full options
     """
-    # Validate mutual exclusivity
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
+    validate_docker_flags(docker, docker_direct)
 
     # Load configuration (ConfigNotFoundError handled by decorator)
     config = load_config()
 
     # Ensure Docker network exists
-    if not network_exists() and not ensure_network():
+    if not ensure_network():
         error("Failed to create Docker network 'ai-dev-network'")
         raise typer.Exit(1)
 
@@ -256,10 +253,7 @@ def auth(
         codeagent auth --docker          # With Docker access (proxy)
         codeagent auth --docker-direct   # With Docker access (direct)
     """
-    # Validate mutual exclusivity
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
+    validate_docker_flags(docker, docker_direct)
 
     # Load configuration (ConfigNotFoundError handled by decorator)
     config = load_config()
@@ -271,9 +265,6 @@ def auth(
         "After authenticating Claude Code, Gemini CLI and Codex, exit and use 'codeagent start'"
     )
     blank()
-
-    project_root = get_project_root()
-    compose_files = get_compose_files(docker_enabled=docker, docker_direct=docker_direct)
 
     # Start docker proxy separately if docker proxy mode is enabled
     # In host network mode, the proxy needs to be started as a separate service
@@ -293,30 +284,13 @@ def auth(
             "Use --docker (proxy) for safer operation."
         )
 
-    # Build the auth command with --profile auth and dev-auth service
-    cmd = [
-        "docker",
-        "compose",
-        *compose_files,
-        "--profile",
-        "auth",
-        "run",
-        "--rm",
-    ]
-
-    # Add shell mounts
-    shell_args = get_shell_mount_args(config)
-    cmd.extend(shell_args)
-
-    # Service name
-    cmd.append("dev-auth")
-
-    # Execute interactively
-    result = subprocess.run(
-        cmd,
-        cwd=project_root,
-        check=False,
+    # Run auth container via compose_run
+    options = ContainerOptions(
+        docker_enabled=docker,
+        docker_direct=docker_direct,
+        shell_mounts=True,
     )
+    result = compose_run(config, options, service="dev-auth", profile="auth", interactive=True)
 
     # Cleanup docker proxy if it was started (not needed for direct mode)
     cleanup_docker_proxy(docker)

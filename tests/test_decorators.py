@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 import typer
 
-from ai_dev_base.config import ConfigNotFoundError
+from ai_dev_base.config import ConfigNotFoundError, ConfigValidationError
 from ai_dev_base.core.decorators import handle_config_errors
 
 
@@ -34,8 +34,20 @@ class TestHandleConfigErrors:
 
         assert exc_info.value.exit_code == 1
 
+    def test_catches_config_validation_error(self) -> None:
+        """Test decorator catches ConfigValidationError and exits with code 1."""
+
+        @handle_config_errors
+        def invalid_config_func() -> None:
+            raise ConfigValidationError("Invalid config: bad timezone format")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            invalid_config_func()
+
+        assert exc_info.value.exit_code == 1
+
     def test_does_not_suppress_other_exceptions(self) -> None:
-        """Test decorator only handles ConfigNotFoundError."""
+        """Test decorator does not catch non-config exceptions."""
 
         @handle_config_errors
         def other_error_func() -> None:
@@ -66,45 +78,25 @@ class TestHandleConfigErrors:
         assert result == (1, "test", True)
 
 
-class TestRequireMcpCli:
-    """Tests for @require_mcp_cli decorator."""
+class TestEnsureMcpCli:
+    """Tests for _ensure_mcp_cli helper."""
 
     def test_passes_when_mcp_cli_installed(self) -> None:
-        """Test decorator allows execution when MCP CLI is installed."""
-        from ai_dev_base.commands.mcp import require_mcp_cli
-
-        @require_mcp_cli
-        def mcp_func() -> str:
-            return "mcp success"
+        """Test helper passes when MCP CLI is installed."""
+        from ai_dev_base.commands.mcp import _ensure_mcp_cli
 
         with patch("ai_dev_base.commands.mcp.check_mcp_cli"):
-            assert mcp_func() == "mcp success"
+            _ensure_mcp_cli()  # Should not raise
 
     def test_exits_when_mcp_cli_not_installed(self) -> None:
-        """Test decorator exits with code 1 when MCP CLI is missing."""
-        from ai_dev_base.commands.mcp import MCPCliNotFoundError, require_mcp_cli
-
-        @require_mcp_cli
-        def mcp_func() -> str:
-            return "should not reach"
+        """Test helper exits with code 1 when MCP CLI is missing."""
+        from ai_dev_base.commands.mcp import MCPCliNotFoundError, _ensure_mcp_cli
 
         with (
             patch("ai_dev_base.commands.mcp.check_mcp_cli") as mock_check,
             pytest.raises(typer.Exit) as exc_info,
         ):
             mock_check.side_effect = MCPCliNotFoundError("MCP CLI not installed")
-            mcp_func()
+            _ensure_mcp_cli()
 
         assert exc_info.value.exit_code == 1
-
-    def test_preserves_function_metadata(self) -> None:
-        """Test decorator preserves function name and docstring."""
-        from ai_dev_base.commands.mcp import require_mcp_cli
-
-        @require_mcp_cli
-        def documented_mcp_func() -> None:
-            """MCP docstring."""
-            pass
-
-        assert documented_mcp_func.__name__ == "documented_mcp_func"
-        assert documented_mcp_func.__doc__ == "MCP docstring."
