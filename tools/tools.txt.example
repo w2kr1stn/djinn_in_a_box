@@ -19,5 +19,8 @@
 # --- JavaScript ---
 # bun                # Bun JavaScript runtime & toolkit
 
+# --- Security ---
+# sops               # SOPS encrypted secrets management
+
 # --- Database Clients ---
 # psql               # PostgreSQL client (psql, pg_dump, etc.)

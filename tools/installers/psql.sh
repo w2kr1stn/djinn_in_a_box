@@ -1,5 +1,6 @@
 #!/bin/bash
 # PostgreSQL Client (psql, pg_dump, pg_restore, etc.)
+# Uses official PostgreSQL apt repo for latest version (not Debian's older packages)
 set -e
 
 INSTALL_BIN="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
@@ -7,18 +8,24 @@ INSTALL_LIB="${TOOLS_LIB:-$HOME/.cache/ai-dev-tools/lib}"
 
 mkdir -p "$INSTALL_BIN" "$INSTALL_LIB"
 
-# Install via APT to resolve dependencies
+# Add PostgreSQL official apt repo (latest stable packages)
+if [[ ! -f /etc/apt/sources.list.d/pgdg.list ]]; then
+    echo "deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+fi
+
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends postgresql-client
 sudo rm -rf /var/lib/apt/lists/*
 
-# Find the actual PostgreSQL version installed and get real binaries
-# /usr/bin/psql is a Perl wrapper that needs PgCommon - use the real binary instead
+# Find the latest PostgreSQL version installed and get real binaries
+# /usr/bin/psql is a Perl wrapper that needs PgCommon — use the real binary instead
 PG_VERSION=$(ls /usr/lib/postgresql/ | sort -V | tail -1)
 PG_BIN_DIR="/usr/lib/postgresql/${PG_VERSION}/bin"
 
 if [[ -d "$PG_BIN_DIR" ]]; then
-    # Copy actual binaries (not the Perl wrappers)
     for bin in psql pg_dump pg_restore pg_dumpall; do
         [[ -f "$PG_BIN_DIR/$bin" ]] && cp "$PG_BIN_DIR/$bin" "$INSTALL_BIN/"
     done
