@@ -1,64 +1,34 @@
-"""TodAI Design Theme for Rich console output.
-
-Defines the central theme for the AI Dev Base CLI with consistent
-colors, styles, and icons.
-
-Usage:
-    from ai_dev_base.core.theme import TODAI_THEME, ICONS
-    from rich.console import Console
-
-    console = Console(theme=TODAI_THEME)
-    console.print(f"[success]{ICONS['success']} Build complete[/success]")
-"""
+"""TodAI Design Theme — colors, styles, and icons for Rich console output."""
 
 from rich.style import Style
 from rich.theme import Theme
 
-# =============================================================================
-# Color Tokens
-# =============================================================================
-
-PRIMARY = "#69B9A1"
-TEXT_MUTED = "#b2bec3"
-SUCCESS = "#03b971"
-INFO = "#0e8ac8"
-WARNING = "#f5b332"
-ERROR = "#9c0136"
-
-# =============================================================================
-# TodAI Rich Theme
-# =============================================================================
-
 TODAI_THEME: Theme = Theme(
     {
         # Semantic Message Styles
-        "success": Style(color=SUCCESS),
-        "error": Style(color=ERROR, bold=True),
-        "warning": Style(color=WARNING),
-        "info": Style(color=INFO),
-        "info.bold": Style(color=INFO, bold=True),
+        "success": Style(color="#03b971"),
+        "error": Style(color="#9c0136", bold=True),
+        "warning": Style(color="#f5b332"),
+        "info": Style(color="#0e8ac8"),
+        "info.bold": Style(color="#0e8ac8", bold=True),
         # Primary/Accent Styles
-        "primary": Style(color=PRIMARY),
-        "primary.bold": Style(color=PRIMARY, bold=True),
+        "primary": Style(color="#69B9A1"),
+        "primary.bold": Style(color="#69B9A1", bold=True),
         # Text Styles
-        "muted": Style(color=TEXT_MUTED),
+        "muted": Style(color="#b2bec3"),
         # Header Styles
-        "header": Style(color=INFO, bold=True),
+        "header": Style(color="#0e8ac8", bold=True),
         # Status Indicator Styles
-        "status.enabled": Style(color=SUCCESS),
-        "status.disabled": Style(color=WARNING),
-        "status.error": Style(color=ERROR),
+        "status.enabled": Style(color="#03b971"),
+        "status.disabled": Style(color="#f5b332"),
+        "status.error": Style(color="#9c0136"),
         # Table Styles
-        "table.title": Style(color=INFO, bold=True),
+        "table.title": Style(color="#0e8ac8", bold=True),
         "table.header": Style(bold=True),
-        "table.category": Style(color=WARNING),
-        "table.value": Style(color=TEXT_MUTED),
+        "table.category": Style(color="#f5b332"),
+        "table.value": Style(color="#b2bec3"),
     }
 )
-
-# =============================================================================
-# Icon Constants
-# =============================================================================
 
 ICONS: dict[str, str] = {
     "success": "\u2713",  # ✓

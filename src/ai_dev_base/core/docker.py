@@ -1,16 +1,4 @@
-"""Docker and Docker Compose operations for AI Dev Base.
-
-Provides wrapper functions for:
-- Network management (ensure_network, network_exists)
-- Compose file selection (get_compose_files)
-- Shell mount configuration (get_shell_mount_args)
-- Container execution (compose_run, compose_build, compose_up, compose_down)
-- Container status (is_container_running, get_running_containers)
-- Volume management (list_volumes, delete_volume, delete_volumes)
-- Cleanup (cleanup_docker_proxy)
-
-All functions mirror the behavior of the original dev.sh Bash script.
-"""
+"""Docker and Docker Compose operations for AI Dev Base."""
 
 from __future__ import annotations
 
@@ -31,20 +19,7 @@ from ai_dev_base.core.paths import get_project_root
 
 @dataclass
 class ContainerOptions:
-    """Options for container execution.
-
-    Configures how the container should be started, including
-    Docker socket access, firewall settings, and volume mounts.
-
-    Example:
-        >>> options = ContainerOptions(
-        ...     docker_enabled=True,
-        ...     firewall_enabled=True,
-        ...     mount_path=Path("/path/to/workspace"),
-        ... )
-        >>> options.docker_enabled
-        True
-    """
+    """Options for container execution (Docker access, firewall, mounts)."""
 
     docker_enabled: bool = False
     """Enable Docker socket access via proxy."""
@@ -62,26 +37,9 @@ class ContainerOptions:
     """Include shell configuration mounts (zshrc, oh-my-zsh, oh-my-posh)."""
 
 
-def validate_docker_flags(docker: bool, docker_direct: bool) -> None:
-    """Raise typer.Exit if both --docker and --docker-direct are set."""
-    if docker and docker_direct:
-        import typer
-
-        from ai_dev_base.core.console import error
-
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
-
-
 @dataclass
 class RunResult:
-    """Result of a container execution.
-
-    Example:
-        >>> result = RunResult(returncode=0, stdout="output", stderr="")
-        >>> result.success
-        True
-    """
+    """Result of a container execution."""
 
     returncode: int
     stdout: str = ""
@@ -122,19 +80,25 @@ def network_exists(name: str = "ai-dev-network") -> bool:
     return _docker_inspect("network", name)
 
 
+def delete_network(name: str) -> bool:
+    """Delete a Docker network by name. Returns True on success."""
+    result = subprocess.run(
+        ["docker", "network", "rm", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        from ai_dev_base.core.console import warning
+
+        stderr_msg = result.stderr.strip() if result.stderr else ""
+        error_detail = stderr_msg or f"exit code {result.returncode}"
+        warning(f"Failed to delete network '{name}': {error_detail}")
+    return result.returncode == 0
+
+
 def ensure_network(name: str = "ai-dev-network") -> bool:
-    """Ensure Docker network exists, creating it if needed.
-
-    Args:
-        name: Network name (default: ai-dev-network).
-
-    Returns:
-        True on success (network exists or was created), False on failure.
-
-    Example:
-        >>> if not ensure_network():
-        ...     print("Failed to create network")
-    """
+    """Ensure Docker network exists, creating it if needed. Returns True on success."""
     if _docker_inspect("network", name):
         return True
 
@@ -162,24 +126,7 @@ def get_compose_files(
     docker_enabled: bool = False,
     docker_direct: bool = False,
 ) -> list[str]:
-    """Get compose file arguments based on options.
-
-    Mirrors the get_compose_files() function from the original dev.sh script.
-
-    Args:
-        docker_enabled: Include docker-compose.docker.yml for socket proxy.
-        docker_direct: Include docker-compose.docker-direct.yml for direct socket.
-            Mutually exclusive with docker_enabled (docker_enabled takes precedence).
-
-    Returns:
-        List of compose file arguments ["-f", "file1.yml", "-f", "file2.yml"].
-        Always uses absolute paths based on project root.
-
-    Example:
-        >>> args = get_compose_files(docker_enabled=True)
-        >>> len([a for a in args if a.endswith(".yml")])
-        2
-    """
+    """Get compose file arguments ["-f", "file.yml", ...] based on Docker options."""
     project_root = get_project_root()
     files = ["-f", str(project_root / "docker-compose.yml")]
 
@@ -197,28 +144,9 @@ def get_compose_files(
 
 
 def get_shell_mount_args(config: AppConfig) -> list[str]:
-    """Build shell configuration mount arguments.
+    """Build shell config mount arguments (zshrc, OMP theme, oh-my-zsh custom).
 
-    Mirrors the get_shell_mount_args() function from the original dev.sh script.
-
-    Mounts (if files exist and skip_mounts is False):
-    - ~/.zshrc -> /home/dev/.zshrc.local:ro
-    - OMP theme -> /home/dev/.zsh-theme.omp.json:ro
-    - ~/.oh-my-zsh/custom -> /home/dev/.oh-my-zsh/custom:ro
-
-    Args:
-        config: Application configuration with shell settings.
-
-    Returns:
-        List of volume mount arguments for docker compose run.
-        Empty list if config.shell.skip_mounts is True.
-
-    Example:
-        >>> from ai_dev_base.config.models import AppConfig
-        >>> config = AppConfig(code_dir=Path.home() / "projects")
-        >>> args = get_shell_mount_args(config)
-        >>> "-v" in args if args else True  # May be empty if no files exist
-        True
+    Returns empty list if config.shell.skip_mounts is True or no host files exist.
     """
     if config.shell.skip_mounts:
         return []
@@ -254,21 +182,7 @@ def get_shell_mount_args(config: AppConfig) -> list[str]:
 
 
 def compose_build(*, no_cache: bool = False) -> RunResult:
-    """Build the Docker image via compose.
-
-    Runs `docker compose build` in the project root directory.
-
-    Args:
-        no_cache: If True, build without using cache.
-
-    Returns:
-        RunResult with returncode, stdout, stderr, and command.
-
-    Example:
-        >>> result = compose_build()
-        >>> if result.success:
-        ...     print("Build complete")
-    """
+    """Build the Docker image via `docker compose build`."""
     project_root = get_project_root()
     cmd = ["docker", "compose", "build"]
 
@@ -306,25 +220,12 @@ def compose_run(
     Args:
         config: Application configuration.
         options: Container options (docker, firewall, mounts).
-        command: Shell command to execute (passed as -c "command").
-            If None, starts an interactive shell.
+        command: Shell command to execute. If None, starts an interactive shell.
         interactive: Enable TTY and stdin (default: True).
-            Set to False for headless agent execution.
         env: Additional environment variables to pass to the container.
         service: Compose service name (default: dev).
         profile: Compose profile to activate (e.g., "auth").
-        timeout: Timeout in seconds for headless execution (default: None).
-            Only applies when interactive=False. On timeout, returns exit code 124.
-
-    Returns:
-        RunResult with returncode, stdout, stderr.
-        For interactive mode, stdout/stderr will be empty as output
-        goes directly to the terminal.
-
-    Example:
-        >>> result = compose_run(config, options)
-        >>> result = compose_run(config, options, command='echo "Hello"', interactive=False)
-        >>> result = compose_run(config, options, service="dev-auth", profile="auth")
+        timeout: Timeout in seconds (headless only). Returns exit code 124 on timeout.
     """
     project_root = get_project_root()
 
@@ -429,20 +330,7 @@ def compose_up(
     docker_enabled: bool = False,
     docker_direct: bool = False,
 ) -> RunResult:
-    """Start compose services.
-
-    Args:
-        services: List of service names to start. If None, starts all services.
-        detach: Run in detached mode (default: True).
-        docker_enabled: Include docker-compose.docker.yml.
-        docker_direct: Include docker-compose.docker-direct.yml.
-
-    Returns:
-        RunResult with returncode, stdout, stderr.
-
-    Example:
-        >>> result = compose_up(services=["docker-proxy"], docker_enabled=True)
-    """
+    """Start compose services (detached by default)."""
     project_root = get_project_root()
     compose_files = get_compose_files(docker_enabled=docker_enabled, docker_direct=docker_direct)
 
@@ -469,27 +357,10 @@ def compose_up(
     )
 
 
-def compose_down(
-    *,
-    remove_volumes: bool = False,
-    docker_enabled: bool = False,
-    docker_direct: bool = False,
-) -> RunResult:
-    """Stop and remove compose services.
-
-    Args:
-        remove_volumes: Also remove named volumes (default: False).
-        docker_enabled: Include docker-compose.docker.yml.
-        docker_direct: Include docker-compose.docker-direct.yml.
-
-    Returns:
-        RunResult with returncode, stdout, stderr.
-
-    Example:
-        >>> result = compose_down(remove_volumes=True)
-    """
+def compose_down(*, remove_volumes: bool = False) -> RunResult:
+    """Stop and remove compose services."""
     project_root = get_project_root()
-    compose_files = get_compose_files(docker_enabled=docker_enabled, docker_direct=docker_direct)
+    compose_files = get_compose_files()
 
     cmd = ["docker", "compose", *compose_files, "down"]
 
@@ -512,23 +383,7 @@ def compose_down(
 
 
 def cleanup_docker_proxy(docker_enabled: bool) -> bool:
-    """Stop and remove docker-proxy if it was started.
-
-    Mirrors the cleanup logic from the original dev.sh script.
-
-    This cleanup is important to ensure the docker-proxy container
-    doesn't keep running after the main dev container exits.
-
-    Args:
-        docker_enabled: Only cleanup if True (proxy was started).
-
-    Returns:
-        True if cleanup was successful (or skipped), False if any step failed.
-
-    Example:
-        >>> # After container run completes
-        >>> cleanup_docker_proxy(docker_enabled=True)
-    """
+    """Stop and remove docker-proxy if it was started. No-op if docker_enabled is False."""
     if not docker_enabled:
         return True
 
@@ -601,20 +456,7 @@ def volume_exists(name: str) -> bool:
 
 
 def delete_volume(name: str) -> bool:
-    """Delete a Docker volume by name.
-
-    Args:
-        name: Volume name to delete.
-
-    Returns:
-        True if deleted successfully, False if failed (e.g., volume in use).
-
-    Example:
-        >>> if delete_volume("ai-dev-uv-cache"):
-        ...     print("Cache volume deleted")
-        ... else:
-        ...     print("Failed to delete (in use?)")
-    """
+    """Delete a Docker volume by name. Returns True on success."""
     result = subprocess.run(
         ["docker", "volume", "rm", name],
         capture_output=True,
@@ -631,47 +473,12 @@ def delete_volume(name: str) -> bool:
 
 
 def delete_volumes(names: list[str]) -> dict[str, bool]:
-    """Delete multiple volumes.
-
-    Attempts to delete each volume in the list, tracking success/failure
-    for each one individually.
-
-    Args:
-        names: List of volume names to delete.
-
-    Returns:
-        Dict mapping volume name to success status (True=deleted, False=failed).
-
-    Example:
-        >>> results = delete_volumes(["ai-dev-uv-cache", "ai-dev-gh-config"])
-        >>> for name, success in results.items():
-        ...     status = "deleted" if success else "failed"
-        ...     print(f"{name}: {status}")
-    """
+    """Delete multiple volumes. Returns dict mapping name to success status."""
     return {name: delete_volume(name) for name in names}
 
 
 def get_existing_volumes_by_category(category: str) -> list[str]:
-    """Get existing volume names for a specific category.
-
-    This function combines the volume category definitions from
-    config/defaults.py with a check for actual existence on the system.
-
-    Mirrors the get_volumes_by_category() function from the original dev.sh
-    script, but only returns volumes that actually exist.
-
-    Args:
-        category: One of 'credentials', 'tools', 'cache', 'data'.
-
-    Returns:
-        List of existing volume names for the category.
-        Empty list if category is unknown or no volumes exist.
-
-    Example:
-        >>> volumes = get_existing_volumes_by_category("credentials")
-        >>> for vol in volumes:
-        ...     print(f"  - {vol}")
-    """
+    """Get existing volume names for a category (credentials/tools/cache/data)."""
     from ai_dev_base.config.defaults import VOLUME_CATEGORIES
 
     defined_volumes = VOLUME_CATEGORIES.get(category, [])
