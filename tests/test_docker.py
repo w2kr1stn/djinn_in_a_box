@@ -130,18 +130,18 @@ class TestNetworkExists:
 class TestEnsureNetwork:
     """Tests for ensure_network function."""
 
-    @patch("ai_dev_base.core.docker.network_exists")
-    def test_network_already_exists(self, mock_exists: MagicMock) -> None:
-        """Test returns False when network already exists."""
-        mock_exists.return_value = True
+    @patch("ai_dev_base.core.docker._docker_inspect")
+    def test_network_already_exists(self, mock_inspect: MagicMock) -> None:
+        """Test returns True when network already exists."""
+        mock_inspect.return_value = True
         result = ensure_network()
-        assert result is False
+        assert result is True
 
     @patch("ai_dev_base.core.docker.subprocess.run")
-    @patch("ai_dev_base.core.docker.network_exists")
-    def test_creates_network(self, mock_exists: MagicMock, mock_run: MagicMock) -> None:
+    @patch("ai_dev_base.core.docker._docker_inspect")
+    def test_creates_network(self, mock_inspect: MagicMock, mock_run: MagicMock) -> None:
         """Test creates network and returns True."""
-        mock_exists.return_value = False
+        mock_inspect.return_value = False
         mock_run.return_value = MagicMock(returncode=0)
         result = ensure_network()
         assert result is True
@@ -152,10 +152,10 @@ class TestEnsureNetwork:
         assert "create" in call_args
 
     @patch("ai_dev_base.core.docker.subprocess.run")
-    @patch("ai_dev_base.core.docker.network_exists")
-    def test_create_network_fails(self, mock_exists: MagicMock, mock_run: MagicMock) -> None:
+    @patch("ai_dev_base.core.docker._docker_inspect")
+    def test_create_network_fails(self, mock_inspect: MagicMock, mock_run: MagicMock) -> None:
         """Test returns False when network creation fails."""
-        mock_exists.return_value = False
+        mock_inspect.return_value = False
         mock_run.return_value = MagicMock(returncode=1)
         result = ensure_network()
         assert result is False

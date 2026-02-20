@@ -62,6 +62,17 @@ class ContainerOptions:
     """Include shell configuration mounts (zshrc, oh-my-zsh, oh-my-posh)."""
 
 
+def validate_docker_flags(docker: bool, docker_direct: bool) -> None:
+    """Raise typer.Exit if both --docker and --docker-direct are set."""
+    if docker and docker_direct:
+        import typer
+
+        from ai_dev_base.core.console import error
+
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
+
+
 @dataclass
 class RunResult:
     """Result of a container execution.
@@ -83,50 +94,49 @@ class RunResult:
 
 
 # =============================================================================
+# Docker Query Helpers
+# =============================================================================
+
+
+def _docker_inspect(resource: str, name: str) -> bool:
+    """Check if a Docker resource exists via inspect. Returns True if found."""
+    result = subprocess.run(["docker", resource, "inspect", name], capture_output=True, check=False)
+    return result.returncode == 0
+
+
+def _docker_list(cmd: list[str]) -> list[str]:
+    """Run a Docker command and return stdout lines, or empty list on failure."""
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    return [line for line in result.stdout.strip().split("\n") if line]
+
+
+# =============================================================================
 # Network Management
 # =============================================================================
 
 
 def network_exists(name: str = "ai-dev-network") -> bool:
-    """Check if a Docker network exists.
-
-    Uses `docker network inspect` to check for network existence.
-
-    Args:
-        name: Network name to check (default: ai-dev-network).
-
-    Returns:
-        True if the network exists, False otherwise.
-
-    Example:
-        >>> if not network_exists():
-        ...     ensure_network()
-    """
-    result = subprocess.run(
-        ["docker", "network", "inspect", name],
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    """Check if a Docker network exists."""
+    return _docker_inspect("network", name)
 
 
 def ensure_network(name: str = "ai-dev-network") -> bool:
-    """Create Docker network if it doesn't exist.
-
-    Mirrors the ensure_network() function from the original dev.sh script.
+    """Ensure Docker network exists, creating it if needed.
 
     Args:
-        name: Network name to create (default: ai-dev-network).
+        name: Network name (default: ai-dev-network).
 
     Returns:
-        True if network was created, False if it already existed.
+        True on success (network exists or was created), False on failure.
 
     Example:
-        >>> created = ensure_network()
-        >>> print("Network created" if created else "Network already exists")
+        >>> if not ensure_network():
+        ...     print("Failed to create network")
     """
-    if network_exists(name):
-        return False
+    if _docker_inspect("network", name):
+        return True
 
     result = subprocess.run(
         ["docker", "network", "create", name],
@@ -288,20 +298,10 @@ def compose_run(
     interactive: bool = True,
     env: dict[str, str] | None = None,
     service: str = "dev",
+    profile: str | None = None,
     timeout: int | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
-
-    Mirrors the container run logic from dev.sh cmd_start() and cmd_run().
-
-    The container is started with:
-    - Compose files based on docker_enabled flag
-    - Shell mounts based on config.shell.skip_mounts
-    - Additional workspace mount if options.mount_path is set
-    - Environment variables for firewall and custom env
-
-    For headless mode (interactive=False), the container runs without TTY
-    and executes the command directly.
 
     Args:
         config: Application configuration.
@@ -312,33 +312,19 @@ def compose_run(
             Set to False for headless agent execution.
         env: Additional environment variables to pass to the container.
         service: Compose service name (default: dev).
+        profile: Compose profile to activate (e.g., "auth").
         timeout: Timeout in seconds for headless execution (default: None).
             Only applies when interactive=False. On timeout, returns exit code 124.
 
     Returns:
-        RunResult with returncode, stdout, stderr, and command.
+        RunResult with returncode, stdout, stderr.
         For interactive mode, stdout/stderr will be empty as output
         goes directly to the terminal.
-        On timeout (headless mode), returncode is 124 (matching GNU timeout).
 
     Example:
-        >>> # Interactive shell
         >>> result = compose_run(config, options)
-
-        >>> # Headless agent execution
-        >>> result = compose_run(
-        ...     config, options,
-        ...     command='echo "Hello"',
-        ...     interactive=False,
-        ... )
-
-        >>> # Headless with timeout
-        >>> result = compose_run(
-        ...     config, options,
-        ...     command='long_running_task',
-        ...     interactive=False,
-        ...     timeout=300,
-        ... )
+        >>> result = compose_run(config, options, command='echo "Hello"', interactive=False)
+        >>> result = compose_run(config, options, service="dev-auth", profile="auth")
     """
     project_root = get_project_root()
 
@@ -347,7 +333,10 @@ def compose_run(
         docker_enabled=options.docker_enabled,
         docker_direct=options.docker_direct,
     )
-    cmd = ["docker", "compose", *compose_files, "run", "--rm"]
+    if profile:
+        cmd = ["docker", "compose", *compose_files, "--profile", profile, "run", "--rm"]
+    else:
+        cmd = ["docker", "compose", *compose_files, "run", "--rm"]
 
     # TTY handling
     if not interactive:
@@ -438,6 +427,7 @@ def compose_up(
     *,
     detach: bool = True,
     docker_enabled: bool = False,
+    docker_direct: bool = False,
 ) -> RunResult:
     """Start compose services.
 
@@ -445,15 +435,16 @@ def compose_up(
         services: List of service names to start. If None, starts all services.
         detach: Run in detached mode (default: True).
         docker_enabled: Include docker-compose.docker.yml.
+        docker_direct: Include docker-compose.docker-direct.yml.
 
     Returns:
-        RunResult with returncode, stdout, stderr, and command.
+        RunResult with returncode, stdout, stderr.
 
     Example:
         >>> result = compose_up(services=["docker-proxy"], docker_enabled=True)
     """
     project_root = get_project_root()
-    compose_files = get_compose_files(docker_enabled=docker_enabled)
+    compose_files = get_compose_files(docker_enabled=docker_enabled, docker_direct=docker_direct)
 
     cmd = ["docker", "compose", *compose_files, "up"]
 
@@ -482,21 +473,23 @@ def compose_down(
     *,
     remove_volumes: bool = False,
     docker_enabled: bool = False,
+    docker_direct: bool = False,
 ) -> RunResult:
     """Stop and remove compose services.
 
     Args:
         remove_volumes: Also remove named volumes (default: False).
         docker_enabled: Include docker-compose.docker.yml.
+        docker_direct: Include docker-compose.docker-direct.yml.
 
     Returns:
-        RunResult with returncode, stdout, stderr, and command.
+        RunResult with returncode, stdout, stderr.
 
     Example:
         >>> result = compose_down(remove_volumes=True)
     """
     project_root = get_project_root()
-    compose_files = get_compose_files(docker_enabled=docker_enabled)
+    compose_files = get_compose_files(docker_enabled=docker_enabled, docker_direct=docker_direct)
 
     cmd = ["docker", "compose", *compose_files, "down"]
 
@@ -582,62 +575,14 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
 
 
 def is_container_running(name: str) -> bool:
-    """Check if a container is running by name.
-
-    Uses `docker ps` with name filter to check container status.
-
-    Args:
-        name: Container name to check (exact match).
-
-    Returns:
-        True if the container is running, False otherwise.
-
-    Example:
-        >>> if is_container_running("ai-dev-docker-proxy"):
-        ...     print("Docker proxy is running")
-    """
-    result = subprocess.run(
-        ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode != 0:
-        return False
-
-    # Check for exact match in output (split produces [""] for empty string)
-    output = result.stdout.strip()
-    if not output:
-        return False
-    return name in output.split("\n")
+    """Check if a container is running by name (exact match)."""
+    names = _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"])
+    return name in names
 
 
 def get_running_containers(prefix: str = "ai-dev") -> list[str]:
-    """Get list of running containers with prefix.
-
-    Args:
-        prefix: Container name prefix to filter by (default: ai-dev).
-
-    Returns:
-        List of running container names matching the prefix.
-
-    Example:
-        >>> containers = get_running_containers()
-        >>> for name in containers:
-        ...     print(f"Running: {name}")
-    """
-    result = subprocess.run(
-        ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
-    return [c for c in result.stdout.strip().split("\n") if c]
+    """Get list of running containers matching a name prefix."""
+    return _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"])
 
 
 # =============================================================================
@@ -646,51 +591,13 @@ def get_running_containers(prefix: str = "ai-dev") -> list[str]:
 
 
 def list_volumes(prefix: str = "ai-dev") -> list[str]:
-    """List Docker volumes with prefix.
-
-    Args:
-        prefix: Volume name prefix to filter by (default: ai-dev).
-
-    Returns:
-        List of volume names matching the prefix.
-
-    Example:
-        >>> volumes = list_volumes()
-        >>> "ai-dev-claude-config" in volumes
-        True
-    """
-    result = subprocess.run(
-        ["docker", "volume", "ls", "-q", "--filter", f"name={prefix}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
-    return [v for v in result.stdout.strip().split("\n") if v]
+    """List Docker volumes matching a name prefix."""
+    return _docker_list(["docker", "volume", "ls", "-q", "--filter", f"name={prefix}"])
 
 
 def volume_exists(name: str) -> bool:
-    """Check if a Docker volume exists.
-
-    Args:
-        name: Volume name to check.
-
-    Returns:
-        True if the volume exists, False otherwise.
-
-    Example:
-        >>> if volume_exists("ai-dev-claude-config"):
-        ...     print("Claude config volume exists")
-    """
-    result = subprocess.run(
-        ["docker", "volume", "inspect", name],
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    """Check if a Docker volume exists."""
+    return _docker_inspect("volume", name)
 
 
 def delete_volume(name: str) -> bool:
