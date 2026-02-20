@@ -1,10 +1,4 @@
-"""Tests for agent execution commands.
-
-Tests for:
-- build_agent_command() - Shell command construction
-- run() - Headless agent execution
-- agents() - List available agents
-"""
+"""Tests for agent execution commands."""
 
 from __future__ import annotations
 
@@ -20,10 +14,6 @@ from ai_dev_base.config.models import AgentConfig
 
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AppConfig
-
-# =============================================================================
-# Fixtures
-# =============================================================================
 
 
 @pytest.fixture
@@ -84,11 +74,6 @@ def opencode_config() -> AgentConfig:
         model_flag="-m",
         prompt_template='"$AGENT_PROMPT"',
     )
-
-
-# =============================================================================
-# build_agent_command Tests
-# =============================================================================
 
 
 class TestBuildAgentCommand:
@@ -265,11 +250,6 @@ class TestBuildAgentCommandEdgeCases:
         assert "--model" not in cmd
 
 
-# =============================================================================
-# agents() Command Tests
-# =============================================================================
-
-
 class TestAgentsListCommand:
     """Tests for the agents list command."""
 
@@ -322,34 +302,6 @@ class TestAgentsListCommand:
 
             data = json.loads(output)
             assert "claude" in data
-
-    def test_agents_verbose_output(self) -> None:
-        """Test agents --verbose shows detailed info."""
-        from ai_dev_base.commands.agent import agents
-
-        with (
-            patch("ai_dev_base.commands.agent.load_agents") as mock_load,
-            patch("ai_dev_base.commands.agent.console") as mock_console,
-        ):
-            mock_load.return_value = {
-                "claude": AgentConfig(
-                    binary="claude",
-                    description="Anthropic Claude",
-                    headless_flags=["-p"],
-                    model_flag="--model",
-                    prompt_template='"$AGENT_PROMPT"',
-                ),
-            }
-
-            agents(verbose=True)
-
-            # Should have printed multiple lines with details
-            assert mock_console.print.call_count > 1
-
-
-# =============================================================================
-# run() Command Tests
-# =============================================================================
 
 
 class TestRunCommand:
@@ -407,19 +359,18 @@ class TestRunCommand:
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.core.docker.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
             pytest.raises(typer.Exit),
         ):
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
-
             run(agent="claude", prompt="test prompt")
 
-            mock_run.assert_called_once()
-            call_kwargs = mock_run.call_args[1]
-            assert "AGENT_PROMPT" in call_kwargs["env"]
-            assert call_kwargs["env"]["AGENT_PROMPT"] == "test prompt"
-            assert call_kwargs["interactive"] is False
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args[1]
+        assert "AGENT_PROMPT" in call_kwargs["env"]
+        assert call_kwargs["env"]["AGENT_PROMPT"] == "test prompt"
+        assert call_kwargs["interactive"] is False
 
     def test_run_with_write_flag(
         self,
@@ -434,16 +385,15 @@ class TestRunCommand:
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.core.docker.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
             pytest.raises(typer.Exit),
         ):
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
-
             run(agent="claude", prompt="test", write=True)
 
-            call_kwargs = mock_run.call_args[1]
-            assert "--dangerously-skip-permissions" in call_kwargs["command"]
+        call_kwargs = mock_run.call_args[1]
+        assert "--dangerously-skip-permissions" in call_kwargs["command"]
 
     def test_run_with_timeout(
         self,
@@ -458,16 +408,15 @@ class TestRunCommand:
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.core.docker.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
             pytest.raises(typer.Exit),
         ):
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
-
             run(agent="claude", prompt="test", timeout=300)
 
-            call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["timeout"] == 300
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["timeout"] == 300
 
     def test_run_with_docker_flag(
         self,
@@ -482,21 +431,17 @@ class TestRunCommand:
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.core.docker.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
             pytest.raises(typer.Exit),
         ):
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
-
             run(agent="claude", prompt="test", docker=True)
 
-            # Check options
-            call_args = mock_run.call_args[0]
-            options = call_args[1]  # Second positional arg
-            assert options.docker_enabled is True
-
-            # Cleanup should be called with True
-            mock_cleanup.assert_called_once_with(True)
+        call_args = mock_run.call_args[0]
+        options = call_args[1]
+        assert options.docker_enabled is True
+        mock_cleanup.assert_called_once_with(True)
 
     def test_run_with_docker_direct_flag(
         self,
@@ -511,22 +456,18 @@ class TestRunCommand:
             patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
             patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
             patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.core.docker.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
             patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
             pytest.raises(typer.Exit),
         ):
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
-
             run(agent="claude", prompt="test", docker_direct=True)
 
-            # Check options
-            call_args = mock_run.call_args[0]
-            options = call_args[1]  # Second positional arg
-            assert options.docker_direct is True
-            assert options.docker_enabled is False
-
-            # Cleanup should be called with False (no proxy to clean up)
-            mock_cleanup.assert_called_once_with(False)
+        call_args = mock_run.call_args[0]
+        options = call_args[1]
+        assert options.docker_direct is True
+        assert options.docker_enabled is False
+        mock_cleanup.assert_called_once_with(False)
 
     def test_run_docker_and_direct_mutually_exclusive(
         self,

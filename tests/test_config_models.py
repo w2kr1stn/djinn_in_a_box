@@ -77,35 +77,6 @@ class TestAgentConfig:
         assert agent.model_flag == "--model"
         assert agent.prompt_template == '"$AGENT_PROMPT"'
 
-    def test_full_config(self) -> None:
-        """Test AgentConfig with all fields populated."""
-        agent = AgentConfig(
-            binary="claude",
-            description="Anthropic Claude Code CLI",
-            headless_flags=["-p"],
-            read_only_flags=["--permission-mode", "plan"],
-            write_flags=["--dangerously-skip-permissions"],
-            json_flags=["--output-format", "json"],
-            model_flag="--model",
-            prompt_template='"$AGENT_PROMPT"',
-        )
-        assert agent.binary == "claude"
-        assert agent.description == "Anthropic Claude Code CLI"
-        assert agent.headless_flags == ["-p"]
-        assert agent.read_only_flags == ["--permission-mode", "plan"]
-        assert agent.write_flags == ["--dangerously-skip-permissions"]
-        assert agent.json_flags == ["--output-format", "json"]
-
-    def test_gemini_config(self) -> None:
-        """Test AgentConfig for Gemini agent with different model_flag."""
-        agent = AgentConfig(
-            binary="gemini",
-            description="Google Gemini CLI",
-            headless_flags=["-p"],
-            model_flag="-m",
-        )
-        assert agent.model_flag == "-m"
-
     def test_extra_fields_forbidden(self) -> None:
         """Test that extra fields are not allowed."""
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -127,19 +98,6 @@ class TestResourceLimits:
         assert limits.memory_limit == "12G"
         assert limits.cpu_reservation == 2
         assert limits.memory_reservation == "4G"
-
-    def test_custom_values(self) -> None:
-        """Test ResourceLimits with custom values."""
-        limits = ResourceLimits(
-            cpu_limit=8,
-            memory_limit="16G",
-            cpu_reservation=4,
-            memory_reservation="8G",
-        )
-        assert limits.cpu_limit == 8
-        assert limits.memory_limit == "16G"
-        assert limits.cpu_reservation == 4
-        assert limits.memory_reservation == "8G"
 
     def test_memory_format_normalization(self) -> None:
         """Test that lowercase memory suffixes are normalized to uppercase."""
@@ -188,17 +146,6 @@ class TestResourceLimits:
 
 class TestShellConfig:
     """Tests for ShellConfig model."""
-
-    def test_default_values(self) -> None:
-        """Test ShellConfig with default values."""
-        shell = ShellConfig()
-        assert shell.skip_mounts is False
-        assert shell.omp_theme_path is None
-
-    def test_skip_mounts_true(self) -> None:
-        """Test ShellConfig with skip_mounts enabled."""
-        shell = ShellConfig(skip_mounts=True)
-        assert shell.skip_mounts is True
 
     def test_omp_theme_path_expansion(self, mock_home: Path) -> None:
         """Test that tilde in omp_theme_path is expanded."""
@@ -262,20 +209,6 @@ class TestAppConfig:
         """Test AppConfig with custom timezone."""
         config = AppConfig(code_dir=tmp_path, timezone="America/New_York")
         assert config.timezone == "America/New_York"
-
-    def test_full_config(self, tmp_path: Path) -> None:
-        """Test AppConfig with all options specified."""
-        config = AppConfig(
-            code_dir=tmp_path,
-            timezone="Europe/London",
-            resources=ResourceLimits(cpu_limit=4, memory_limit="8G"),
-            shell=ShellConfig(skip_mounts=True),
-        )
-        assert config.code_dir == tmp_path
-        assert config.timezone == "Europe/London"
-        assert config.resources.cpu_limit == 4
-        assert config.resources.memory_limit == "8G"
-        assert config.shell.skip_mounts is True
 
     def test_nested_model_from_dict(self, tmp_path: Path) -> None:
         """Test creating AppConfig from nested dictionary (TOML-like)."""

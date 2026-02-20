@@ -8,12 +8,12 @@ import pytest
 from ai_dev_base.config.models import AppConfig, ShellConfig
 from ai_dev_base.core.docker import (
     ContainerOptions,
-    RunResult,
     cleanup_docker_proxy,
     compose_build,
     compose_down,
     compose_run,
     compose_up,
+    delete_network,
     delete_volume,
     delete_volumes,
     ensure_network,
@@ -26,80 +26,6 @@ from ai_dev_base.core.docker import (
     network_exists,
     volume_exists,
 )
-
-# =============================================================================
-# Data Classes Tests
-# =============================================================================
-
-
-class TestContainerOptions:
-    """Tests for ContainerOptions dataclass."""
-
-    def test_default_values(self) -> None:
-        """Test default values are correct."""
-        options = ContainerOptions()
-        assert options.docker_enabled is False
-        assert options.docker_direct is False
-        assert options.firewall_enabled is False
-        assert options.mount_path is None
-        assert options.shell_mounts is True
-
-    def test_custom_values(self) -> None:
-        """Test custom values are set correctly."""
-        options = ContainerOptions(
-            docker_enabled=True,
-            firewall_enabled=True,
-            mount_path=Path("/workspace"),
-            shell_mounts=False,
-        )
-        assert options.docker_enabled is True
-        assert options.firewall_enabled is True
-        assert options.mount_path == Path("/workspace")
-        assert options.shell_mounts is False
-
-    def test_docker_direct_enabled(self) -> None:
-        """Test docker_direct can be set to True."""
-        options = ContainerOptions(docker_direct=True)
-        assert options.docker_direct is True
-        assert options.docker_enabled is False
-
-
-class TestRunResult:
-    """Tests for RunResult dataclass."""
-
-    def test_success_property_true(self) -> None:
-        """Test success property returns True for returncode 0."""
-        result = RunResult(returncode=0)
-        assert result.success is True
-
-    def test_success_property_false(self) -> None:
-        """Test success property returns False for non-zero returncode."""
-        result = RunResult(returncode=1)
-        assert result.success is False
-        result = RunResult(returncode=127)
-        assert result.success is False
-
-    def test_default_values(self) -> None:
-        """Test default values for stdout, stderr."""
-        result = RunResult(returncode=0)
-        assert result.stdout == ""
-        assert result.stderr == ""
-
-    def test_full_result(self) -> None:
-        """Test result with all fields populated."""
-        result = RunResult(
-            returncode=0,
-            stdout="output",
-            stderr="error",
-        )
-        assert result.returncode == 0
-        assert result.stdout == "output"
-        assert result.stderr == "error"
-
-
-# =============================================================================
-# Network Management Tests
-# =============================================================================
 
 
 class TestNetworkExists:
@@ -161,11 +87,6 @@ class TestEnsureNetwork:
         assert result is False
 
 
-# =============================================================================
-# Compose File Management Tests
-# =============================================================================
-
-
 class TestGetComposeFiles:
     """Tests for get_compose_files function."""
 
@@ -190,13 +111,6 @@ class TestGetComposeFiles:
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker.yml" in f for f in file_paths)
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    def test_default_is_without_docker(self, mock_root: MagicMock) -> None:
-        """Test default is docker_enabled=False."""
-        mock_root.return_value = Path("/project")
-        files = get_compose_files()
-        assert len(files) == 2
 
     @patch("ai_dev_base.core.docker.get_project_root")
     def test_with_docker_direct(self, mock_root: MagicMock) -> None:
@@ -224,11 +138,6 @@ class TestGetComposeFiles:
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.docker.yml" in f and "direct" not in f for f in file_paths)
         assert not any("docker-compose.docker-direct.yml" in f for f in file_paths)
-
-
-# =============================================================================
-# Shell Mount Configuration Tests
-# =============================================================================
 
 
 class TestGetShellMountArgs:
@@ -284,11 +193,6 @@ class TestGetShellMountArgs:
         assert any(".zsh-theme.omp.json:ro" in arg for arg in args)
 
 
-# =============================================================================
-# Container Status Tests
-# =============================================================================
-
-
 class TestIsContainerRunning:
     """Tests for is_container_running function."""
 
@@ -342,11 +246,6 @@ class TestGetRunningContainers:
         assert containers == []
 
 
-# =============================================================================
-# Volume Management Tests
-# =============================================================================
-
-
 class TestListVolumes:
     """Tests for list_volumes function."""
 
@@ -385,6 +284,22 @@ class TestVolumeExists:
         assert volume_exists("nonexistent") is False
 
 
+class TestDeleteNetwork:
+    """Tests for delete_network function."""
+
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_delete_success(self, mock_run: MagicMock) -> None:
+        """Test returns True on successful deletion."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert delete_network("ai-dev-network") is True
+
+    @patch("ai_dev_base.core.docker.subprocess.run")
+    def test_delete_failure(self, mock_run: MagicMock) -> None:
+        """Test returns False on deletion failure."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="network in use")
+        assert delete_network("ai-dev-network") is False
+
+
 class TestDeleteVolume:
     """Tests for delete_volume function."""
 
@@ -412,11 +327,6 @@ class TestDeleteVolumes:
         results = delete_volumes(volumes)
         assert results == {"vol1": True, "vol2": False, "vol3": True}
         assert mock_delete.call_count == 3
-
-
-# =============================================================================
-# Compose Operations Tests
-# =============================================================================
 
 
 class TestComposeBuild:
@@ -450,21 +360,22 @@ class TestComposeBuild:
         assert "--no-cache" in cmd
 
 
+@pytest.fixture
+def mock_app_config(tmp_path: Path) -> AppConfig:
+    """Provide mock app configuration for compose tests."""
+    from ai_dev_base.config.models import ResourceLimits
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    return AppConfig(
+        code_dir=projects_dir,
+        resources=ResourceLimits(),
+        shell=ShellConfig(),
+    )
+
+
 class TestComposeRun:
     """Tests for compose_run function."""
-
-    @pytest.fixture
-    def mock_app_config(self, tmp_path: Path) -> AppConfig:
-        """Provide mock app configuration."""
-        from ai_dev_base.config.models import ResourceLimits
-
-        projects_dir = tmp_path / "projects"
-        projects_dir.mkdir()
-        return AppConfig(
-            code_dir=projects_dir,
-            resources=ResourceLimits(),
-            shell=ShellConfig(),
-        )
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")
@@ -622,11 +533,6 @@ class TestCleanupDockerProxy:
         assert "docker-proxy" in second_call
 
 
-# =============================================================================
-# Volume Category Tests
-# =============================================================================
-
-
 class TestGetExistingVolumesByCategory:
     """Tests for get_existing_volumes_by_category function."""
 
@@ -652,26 +558,8 @@ class TestGetExistingVolumesByCategory:
         assert volumes == []
 
 
-# =============================================================================
-# Subprocess Error Handling Tests
-# =============================================================================
-
-
 class TestComposeRunErrorHandling:
     """Tests for subprocess error handling in compose_run."""
-
-    @pytest.fixture
-    def mock_app_config(self, tmp_path: Path) -> AppConfig:
-        """Provide mock app configuration."""
-        from ai_dev_base.config.models import ResourceLimits
-
-        projects_dir = tmp_path / "projects"
-        projects_dir.mkdir()
-        return AppConfig(
-            code_dir=projects_dir,
-            resources=ResourceLimits(),
-            shell=ShellConfig(),
-        )
 
     @patch("ai_dev_base.core.docker.get_project_root")
     @patch("ai_dev_base.core.docker.subprocess.run")

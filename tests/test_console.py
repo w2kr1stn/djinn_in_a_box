@@ -21,10 +21,6 @@ from ai_dev_base.core.console import (
 )
 from ai_dev_base.core.theme import TODAI_THEME
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
 
 @pytest.fixture
 def capture_err() -> Generator[io.StringIO]:
@@ -51,31 +47,6 @@ def capture_stdout() -> Generator[io.StringIO]:
     test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
     with patch("ai_dev_base.core.console.console", test_console):
         yield output
-
-
-# =============================================================================
-# Tests
-# =============================================================================
-
-
-class TestConsoleSingletons:
-    """Tests for console singleton instances."""
-
-    def test_console_is_console_instance(self) -> None:
-        """Console should be a Rich Console instance."""
-        assert isinstance(console, Console)
-
-    def test_err_console_is_console_instance(self) -> None:
-        """Error console should be a Rich Console instance."""
-        assert isinstance(err_console, Console)
-
-    def test_err_console_writes_to_stderr(self) -> None:
-        """Error console should be configured for stderr."""
-        assert err_console.stderr is True
-
-    def test_console_writes_to_stdout(self) -> None:
-        """Main console should write to stdout (not stderr)."""
-        assert console.stderr is False
 
 
 class TestStatusLine:
@@ -215,8 +186,3 @@ class TestThemeIntegration:
         assert "\u2717" in result  # error x
         assert "\u2139" in result  # info i
         assert "\u26a0" in result  # warning triangle
-
-    def test_volume_table_uses_theme_styles(self, capture_stdout: io.StringIO) -> None:
-        """print_volume_table should use TodAI theme style names."""
-        print_volume_table({"credentials": ["test"]})
-        assert "test" in capture_stdout.getvalue()

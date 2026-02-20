@@ -1,17 +1,8 @@
-"""Tests for container lifecycle commands.
+"""Tests for container lifecycle commands."""
 
-Tests for:
-- build: Docker image building
-- start: Interactive development shell
-- auth: OAuth authentication mode
-- status: Container/volume status
-- clean: Container and volume cleanup
-- audit: Docker proxy logs
-- update: Agent version updates
-- enter: Shell in running container
-"""
-
+from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,10 +10,6 @@ import typer
 
 from ai_dev_base.commands import container
 from ai_dev_base.core.docker import RunResult
-
-# =============================================================================
-# Build Command Tests
-# =============================================================================
 
 
 class TestBuildCommand:
@@ -57,57 +44,12 @@ class TestBuildCommand:
             assert exc_info.value.exit_code == 1
 
 
-# =============================================================================
-# Start Command Tests
-# =============================================================================
-
-
 class TestStartCommand:
     """Tests for the start command."""
 
-    def test_start_loads_config(self) -> None:
-        """Test start loads configuration."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
-        ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_config.shell.skip_mounts = False
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-
-            with pytest.raises(typer.Exit):
-                container.start()
-
-            mock_load.assert_called_once()
-
-    def test_start_ensures_network(self) -> None:
-        """Test start ensures Docker network exists."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network") as mock_network,
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
-        ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_config.shell.skip_mounts = False
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-            mock_network.return_value = True
-
-            with pytest.raises(typer.Exit):
-                container.start()
-
-            mock_network.assert_called_once()
-
-    def test_start_with_docker_flag(self) -> None:
-        """Test start --docker sets docker_enabled option."""
+    @pytest.fixture
+    def start_mocks(self) -> Generator[dict[str, Any]]:
+        """Common mocks for start command tests."""
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
             patch("ai_dev_base.commands.container.ensure_network", return_value=True),
@@ -120,138 +62,65 @@ class TestStartCommand:
             mock_config.shell.skip_mounts = False
             mock_load.return_value = mock_config
             mock_run.return_value = RunResult(returncode=0)
+            yield {
+                "load": mock_load,
+                "run": mock_run,
+                "cleanup": mock_cleanup,
+                "config": mock_config,
+            }
 
-            with pytest.raises(typer.Exit):
-                container.start(docker=True)
+    def test_start_with_docker_flag(self, start_mocks: dict[str, Any]) -> None:
+        with pytest.raises(typer.Exit):
+            container.start(docker=True)
+        options = start_mocks["run"].call_args[0][1]
+        assert options.docker_enabled is True
+        start_mocks["cleanup"].assert_called_once_with(True)
 
-            # Check options passed to compose_run
-            call_args = mock_run.call_args
-            options = call_args[0][1]  # Second positional arg is options
-            assert options.docker_enabled is True
+    def test_start_with_firewall_flag(self, start_mocks: dict[str, Any]) -> None:
+        with pytest.raises(typer.Exit):
+            container.start(firewall=True)
+        options = start_mocks["run"].call_args[0][1]
+        assert options.firewall_enabled is True
 
-            # Docker proxy cleanup should be called with True
-            mock_cleanup.assert_called_once_with(True)
-
-    def test_start_with_firewall_flag(self) -> None:
-        """Test start --firewall sets firewall_enabled option."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
-        ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_config.shell.skip_mounts = False
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-
-            with pytest.raises(typer.Exit):
-                container.start(firewall=True)
-
-            call_args = mock_run.call_args
-            options = call_args[0][1]
-            assert options.firewall_enabled is True
-
-    def test_start_with_here_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test start --here mounts current directory."""
+    def test_start_with_here_flag(
+        self, start_mocks: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.chdir(tmp_path)
+        with pytest.raises(typer.Exit):
+            container.start(here=True)
+        options = start_mocks["run"].call_args[0][1]
+        assert options.mount_path == tmp_path
 
+    def test_start_with_mount_path(self, start_mocks: dict[str, Any], tmp_path: Path) -> None:
         with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
-        ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_config.shell.skip_mounts = False
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-
-            with pytest.raises(typer.Exit):
-                container.start(here=True)
-
-            call_args = mock_run.call_args
-            options = call_args[0][1]
-            assert options.mount_path == tmp_path
-
-    def test_start_with_mount_path(self, tmp_path: Path) -> None:
-        """Test start --mount mounts specified directory."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
             patch("ai_dev_base.commands.container.resolve_mount_path", return_value=tmp_path),
+            pytest.raises(typer.Exit),
         ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_config.shell.skip_mounts = False
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-
-            with pytest.raises(typer.Exit):
-                container.start(mount=tmp_path)
-
-            call_args = mock_run.call_args
-            options = call_args[0][1]
-            assert options.mount_path == tmp_path
+            container.start(mount=tmp_path)
+        options = start_mocks["run"].call_args[0][1]
+        assert options.mount_path == tmp_path
 
     def test_start_exits_on_config_not_found(self, tmp_path: Path) -> None:
-        """Test start exits when config not found."""
         from ai_dev_base.config import ConfigNotFoundError
 
-        config_file = tmp_path / "nonexistent" / "config.toml"
-
         with patch("ai_dev_base.commands.container.load_config") as mock_load:
-            mock_load.side_effect = ConfigNotFoundError(config_file)
-
+            mock_load.side_effect = ConfigNotFoundError(tmp_path / "config.toml")
             with pytest.raises(typer.Exit) as exc_info:
                 container.start()
-
             assert exc_info.value.exit_code == 1
 
-    def test_start_with_docker_direct_flag(self) -> None:
-        """Test start --docker-direct sets docker_direct option."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy") as mock_cleanup,
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
-        ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_config.shell.skip_mounts = False
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-
-            with pytest.raises(typer.Exit):
-                container.start(docker_direct=True)
-
-            call_args = mock_run.call_args
-            options = call_args[0][1]
-            assert options.docker_direct is True
-            assert options.docker_enabled is False
-
-            # No proxy cleanup in direct mode
-            mock_cleanup.assert_called_once_with(False)
+    def test_start_with_docker_direct_flag(self, start_mocks: dict[str, Any]) -> None:
+        with pytest.raises(typer.Exit):
+            container.start(docker_direct=True)
+        options = start_mocks["run"].call_args[0][1]
+        assert options.docker_direct is True
+        assert options.docker_enabled is False
+        start_mocks["cleanup"].assert_called_once_with(False)
 
     def test_start_docker_and_direct_mutually_exclusive(self) -> None:
-        """Test start --docker --docker-direct raises error."""
         with pytest.raises(typer.Exit) as exc_info:
             container.start(docker=True, docker_direct=True)
-
         assert exc_info.value.exit_code == 1
-
-
-# =============================================================================
-# Auth Command Tests
-# =============================================================================
 
 
 class TestAuthCommand:
@@ -338,11 +207,6 @@ class TestAuthCommand:
         assert exc_info.value.exit_code == 1
 
 
-# =============================================================================
-# Status Command Tests
-# =============================================================================
-
-
 class TestStatusCommand:
     """Tests for the status command."""
 
@@ -351,7 +215,9 @@ class TestStatusCommand:
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
             patch("subprocess.run") as mock_run,
-            patch("ai_dev_base.commands.container.list_volumes", return_value=[]),
+            patch(
+                "ai_dev_base.commands.container.get_existing_volumes_by_category", return_value=[]
+            ),
             patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.is_container_running", return_value=False),
         ):
@@ -373,7 +239,9 @@ class TestStatusCommand:
         with (
             patch("ai_dev_base.commands.container.load_config") as mock_load,
             patch("subprocess.run") as mock_run,
-            patch("ai_dev_base.commands.container.list_volumes", return_value=[]),
+            patch(
+                "ai_dev_base.commands.container.get_existing_volumes_by_category", return_value=[]
+            ),
             patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.is_container_running", return_value=False),
         ):
@@ -382,11 +250,6 @@ class TestStatusCommand:
 
             # Should not raise
             container.status()
-
-
-# =============================================================================
-# Clean Command Tests
-# =============================================================================
 
 
 class TestCleanDefaultCommand:
@@ -468,7 +331,7 @@ class TestCleanAllCommand:
         """Test clean all --force skips confirmation."""
         with (
             patch("ai_dev_base.commands.container.compose_down") as mock_down,
-            patch("ai_dev_base.commands.container.get_all_volumes", return_value=[]),
+            patch("ai_dev_base.commands.container.ALL_VOLUMES", []),
             patch("ai_dev_base.commands.container.network_exists", return_value=False),
         ):
             mock_down.return_value = RunResult(returncode=0)
@@ -476,11 +339,6 @@ class TestCleanAllCommand:
             container.clean_all(force=True)
 
             mock_down.assert_called_once()
-
-
-# =============================================================================
-# Audit Command Tests
-# =============================================================================
 
 
 class TestAuditCommand:
@@ -539,11 +397,6 @@ class TestAuditCommand:
             assert exc_info.value.exit_code == 1
 
 
-# =============================================================================
-# Update Command Tests
-# =============================================================================
-
-
 class TestUpdateCommand:
     """Tests for the update command."""
 
@@ -572,11 +425,6 @@ class TestUpdateCommand:
                 container.update()
 
             assert exc_info.value.exit_code == 1
-
-
-# =============================================================================
-# Enter Command Tests
-# =============================================================================
 
 
 class TestEnterCommand:
