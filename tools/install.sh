@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_FILE="${TOOLS_FILE:-$SCRIPT_DIR/tools.txt}"
 CACHE_DIR="$HOME/.cache/ai-dev-tools"
 INSTALLERS_DIR="$SCRIPT_DIR/installers"
+CACHE_TTL_DAYS="${TOOLS_CACHE_TTL:-7}"
 
 # Persistent tool directories (available to all installers)
 export TOOLS_DIR="$CACHE_DIR"
@@ -73,23 +74,35 @@ for tool in $tools; do
         continue
     fi
     
-    # Check cache - skip only if marker exists AND binary is still present
+    # Check cache - skip only if marker exists, binary present, AND marker is fresh
+    updating=false
     if [[ -f "$cache_marker" ]]; then
         binary=$(get_tool_binary "$tool")
-        if command -v "$binary" &>/dev/null; then
+        marker_age=$(( ($(date +%s) - $(stat -c %Y "$cache_marker")) / 86400 ))
+        if command -v "$binary" &>/dev/null && [[ $marker_age -lt $CACHE_TTL_DAYS ]]; then
             skipped=$((skipped + 1))
             continue
         fi
-        # Cache marker exists but binary is gone - reinstall
+        # Stale or missing binary: remove marker AND old binary/shim to prevent shadowing
         rm -f "$cache_marker"
+        rm -f "$TOOLS_BIN/${binary:-$tool}"
+        updating=true
     fi
-    
-    log_info "Installing $tool..."
-    
+
+    if [[ "$updating" == "true" ]]; then
+        log_info "Updating $tool..."
+    else
+        log_info "Installing $tool..."
+    fi
+
     # Run installer and capture version output
     if version=$("$installer" 2>&1 | tail -1); then
         echo "$version" > "$cache_marker"
-        log_ok "$tool installed ($version)"
+        if [[ "$updating" == "true" ]]; then
+            log_ok "$tool updated ($version)"
+        else
+            log_ok "$tool installed ($version)"
+        fi
         installed=$((installed + 1))
     else
         log_warn "Failed to install $tool"
@@ -97,7 +110,7 @@ for tool in $tools; do
 done
 
 if [[ $installed -gt 0 ]]; then
-    log_ok "$installed tool(s) installed, $skipped cached"
+    log_ok "$installed tool(s) installed/updated, $skipped up to date"
 elif [[ $skipped -gt 0 ]]; then
-    log_info "$skipped tool(s) already installed (cached)"
+    log_info "$skipped tool(s) up to date (TTL: ${CACHE_TTL_DAYS}d)"
 fi
