@@ -122,7 +122,9 @@ MCP_GATEWAY_URL="${MCP_GATEWAY_URL:-http://mcp-gateway:8811}"
 MCP_BASE_URL=$(echo "$MCP_GATEWAY_URL" | sed -E 's|/sse$||')
 MCP_HOST=$(echo "$MCP_BASE_URL" | sed -E 's|https?://([^/]+).*|\1|')
 
+MCP_REACHABLE=false
 if curl -s --connect-timeout 2 "http://${MCP_HOST}/" >/dev/null 2>&1; then
+    MCP_REACHABLE=true
     # Claude Code
     [[ ! -f ~/.claude/claude.json ]] && echo '{"mcpServers":{}}' > ~/.claude/claude.json
     jq --arg url "$MCP_BASE_URL" '.mcpServers["docker-gateway"] = {"type": "http", "url": $url}' ~/.claude/claude.json > ~/.claude/claude.json.tmp && mv ~/.claude/claude.json.tmp ~/.claude/claude.json
@@ -242,7 +244,7 @@ elif [[ "${DOCKER_ENABLED:-false}" == "true" ]]; then
 else
     printf "  Docker:       ✗ Disabled\n"
 fi
-printf "  MCP Gateway:  %s\n" "$(curl -s --connect-timeout 1 "http://${MCP_HOST}/" &>/dev/null && echo '✓ Connected' || echo '✗ Not connected')"
+printf "  MCP Gateway:  %s\n" "$([[ "$MCP_REACHABLE" == "true" ]] && echo '✓ Connected' || echo '✗ Not connected')"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
