@@ -14,19 +14,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
-from functools import wraps
 from pathlib import Path
-from typing import Annotated, ParamSpec, TypeVar
+from typing import Annotated
 
 import typer
 
 from ai_dev_base.core.console import console, err_console, error, info, success, warning
 from ai_dev_base.core.docker import ensure_network, is_container_running
 from ai_dev_base.core.paths import get_project_root
-
-P = ParamSpec("P")
-R = TypeVar("R")
 
 # =============================================================================
 # Constants
@@ -108,29 +103,25 @@ def get_mcp_dir() -> Path:
     return get_project_root() / "mcp"
 
 
-def require_mcp_cli(func: Callable[P, R]) -> Callable[P, R]:
-    """Decorator to check for MCP CLI before executing a command.
+def _ensure_mcp_cli() -> None:
+    """Check for MCP CLI and exit with error if not installed."""
+    try:
+        check_mcp_cli()
+    except MCPCliNotFoundError as e:
+        error(str(e))
+        raise typer.Exit(1) from None
 
-    Wraps the function with a check for the docker mcp CLI plugin.
-    If the plugin is not installed, displays an error and exits.
 
-    Example:
-        >>> @require_mcp_cli
-        ... def my_command():
-        ...     # docker mcp commands here
-        ...     pass
-    """
-
-    @wraps(func)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        try:
-            check_mcp_cli()
-        except MCPCliNotFoundError as e:
-            error(str(e))
-            raise typer.Exit(1) from None
-        return func(*args, **kwargs)
-
-    return wrapper
+def _run_mcp_compose(args: list[str], error_msg: str) -> None:
+    """Run a docker compose command in the MCP directory. Raises typer.Exit on failure."""
+    result = subprocess.run(
+        ["docker", "compose", *args],
+        cwd=get_mcp_dir(),
+        check=False,
+    )
+    if result.returncode != 0:
+        error(error_msg)
+        raise typer.Exit(result.returncode)
 
 
 # =============================================================================
@@ -138,7 +129,6 @@ def require_mcp_cli(func: Callable[P, R]) -> Callable[P, R]:
 # =============================================================================
 
 
-@require_mcp_cli
 def start() -> None:
     """Start the MCP Gateway service.
 
@@ -149,18 +139,11 @@ def start() -> None:
     - Starts the gateway via docker compose
     - Displays endpoint information on success
     """
+    _ensure_mcp_cli()
     ensure_network(AI_DEV_NETWORK)
     info("Starting MCP Gateway...")
 
-    result = subprocess.run(
-        ["docker", "compose", "up", "-d"],
-        cwd=get_mcp_dir(),
-        check=False,
-    )
-
-    if result.returncode != 0:
-        error("Failed to start MCP Gateway")
-        raise typer.Exit(result.returncode)
+    _run_mcp_compose(["up", "-d"], "Failed to start MCP Gateway")
 
     # Wait for container to be ready
     time.sleep(3)
@@ -192,14 +175,7 @@ def stop() -> None:
     Equivalent to: ./mcp.sh stop
     """
     warning("Stopping MCP Gateway...")
-    result = subprocess.run(
-        ["docker", "compose", "down"],
-        cwd=get_mcp_dir(),
-        check=False,
-    )
-    if result.returncode != 0:
-        error("Failed to stop MCP Gateway")
-        raise typer.Exit(result.returncode)
+    _run_mcp_compose(["down"], "Failed to stop MCP Gateway")
     success("MCP Gateway stopped")
 
 
@@ -209,14 +185,7 @@ def restart() -> None:
     Equivalent to: ./mcp.sh restart
     """
     warning("Restarting MCP Gateway...")
-    result = subprocess.run(
-        ["docker", "compose", "restart"],
-        cwd=get_mcp_dir(),
-        check=False,
-    )
-    if result.returncode != 0:
-        error("Failed to restart MCP Gateway")
-        raise typer.Exit(result.returncode)
+    _run_mcp_compose(["restart"], "Failed to restart MCP Gateway")
     time.sleep(2)
     success("MCP Gateway restarted")
 
@@ -330,7 +299,6 @@ def logs(
 # =============================================================================
 
 
-@require_mcp_cli
 def enable(
     server: Annotated[str, typer.Argument(help="MCP server name to enable")],
 ) -> None:
@@ -345,6 +313,7 @@ def enable(
     Args:
         server: Name of the MCP server to enable.
     """
+    _ensure_mcp_cli()
     require_running()
 
     info(f"Enabling MCP server: {server}")
@@ -360,7 +329,6 @@ def enable(
         raise typer.Exit(result.returncode)
 
 
-@require_mcp_cli
 def disable(
     server: Annotated[str, typer.Argument(help="MCP server name to disable")],
 ) -> None:
@@ -371,6 +339,7 @@ def disable(
     Args:
         server: Name of the MCP server to disable.
     """
+    _ensure_mcp_cli()
     require_running()
 
     warning(f"Disabling MCP server: {server}")
@@ -386,12 +355,12 @@ def disable(
         raise typer.Exit(result.returncode)
 
 
-@require_mcp_cli
 def servers() -> None:
     """List enabled MCP servers.
 
     Equivalent to: ./mcp.sh servers
     """
+    _ensure_mcp_cli()
     info("Enabled MCP Servers")
     err_console.print("=" * 40)
 
@@ -408,7 +377,6 @@ def servers() -> None:
         err_console.print("No servers enabled or gateway not running")
 
 
-@require_mcp_cli
 def catalog() -> None:
     """Show available servers in the catalog.
 
@@ -417,6 +385,7 @@ def catalog() -> None:
     Displays the docker-mcp catalog or provides instructions
     for initializing it.
     """
+    _ensure_mcp_cli()
     info("MCP Server Catalog")
     err_console.print("=" * 40)
 
@@ -566,7 +535,7 @@ def clean() -> None:
     if not typer.confirm("Are you sure?"):
         raise typer.Abort()
 
-    # Stop gateway
+    # Stop gateway (ignore errors — may not be running)
     subprocess.run(
         ["docker", "compose", "down"],
         cwd=get_mcp_dir(),

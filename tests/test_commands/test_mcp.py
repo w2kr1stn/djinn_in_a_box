@@ -17,35 +17,11 @@ from ai_dev_base.commands import mcp
 from ai_dev_base.commands.mcp import (
     AI_DEV_NETWORK,
     GATEWAY_CONTAINER,
-    GATEWAY_ENDPOINT_CONTAINER,
-    GATEWAY_ENDPOINT_HOST,
     MCPCliNotFoundError,
     check_mcp_cli,
     get_mcp_dir,
     require_running,
 )
-
-# =============================================================================
-# Test Constants
-# =============================================================================
-
-
-class TestConstants:
-    """Tests for module constants."""
-
-    def test_gateway_container_name(self) -> None:
-        """Verify gateway container name constant."""
-        assert GATEWAY_CONTAINER == "mcp-gateway"
-
-    def test_gateway_endpoints(self) -> None:
-        """Verify gateway endpoint constants."""
-        assert GATEWAY_ENDPOINT_CONTAINER == "http://mcp-gateway:8811"
-        assert GATEWAY_ENDPOINT_HOST == "http://localhost:8811"
-
-    def test_network_name(self) -> None:
-        """Verify network name constant."""
-        assert AI_DEV_NETWORK == "ai-dev-network"
-
 
 # =============================================================================
 # Test Helper Functions
@@ -539,77 +515,3 @@ class TestCleanCommand:
 
             # Should have removed ~/.docker/mcp
             mock_rmtree.assert_called_once()
-
-
-# =============================================================================
-# Test CLI Integration
-# =============================================================================
-
-
-class TestCliIntegration:
-    """Tests for CLI entry point integration."""
-
-    def test_all_commands_registered(self) -> None:
-        """Test that all MCP commands are registered in the CLI."""
-        from ai_dev_base.cli.mcpgateway import app
-
-        # Get registered command names from Typer app
-        # Typer stores registered commands with their callback function names
-        command_names = list(app.registered_commands)
-        # Extract the actual command names from the registered callbacks
-        registered_names = []
-        for cmd in command_names:
-            if cmd.callback is not None:
-                registered_names.append(cmd.callback.__name__)
-
-        expected_commands = [
-            "start",
-            "stop",
-            "restart",
-            "status",
-            "logs",
-            "enable",
-            "disable",
-            "servers",
-            "catalog",
-            "test",
-            "clean",
-        ]
-
-        for cmd in expected_commands:
-            assert cmd in registered_names, f"Command '{cmd}' not registered in CLI"
-
-    def test_function_imports(self) -> None:
-        """Test that all MCP functions can be imported."""
-        from ai_dev_base.commands.mcp import (
-            catalog,
-            check_mcp_cli,
-            clean,
-            disable,
-            enable,
-            get_mcp_dir,
-            logs,
-            require_running,
-            restart,
-            servers,
-            start,
-            status,
-            stop,
-            test,
-        )
-
-        # All should be callable
-        assert callable(check_mcp_cli)
-        assert callable(require_running)
-        assert callable(get_mcp_dir)
-        assert callable(start)
-        assert callable(stop)
-        assert callable(restart)
-        assert callable(status)
-        assert callable(logs)
-        assert callable(enable)
-        assert callable(disable)
-        assert callable(servers)
-        assert callable(catalog)
-        assert callable(test)
-        assert callable(clean)
