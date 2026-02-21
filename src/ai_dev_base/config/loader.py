@@ -78,22 +78,13 @@ def load_config(path: Path | None = None) -> AppConfig:
     # Transform nested TOML structure to flat Pydantic model
     # [general] -> top-level, [shell] -> shell, [resources] -> resources
     try:
-        config_dict = _transform_toml_to_config(data)
+        general = data.get("general", {})
+        config_dict = {**general, **{k: v for k, v in data.items() if k != "general"}}
         return AppConfig(**config_dict)
     except ValidationError as e:
         raise ConfigValidationError(
             f"Configuration validation failed for {config_path}:\n{_format_validation_errors(e)}"
         ) from e
-
-
-def _transform_toml_to_config(data: dict[str, Any]) -> dict[str, Any]:
-    """Transform TOML structure to AppConfig-compatible dict.
-
-    Flattens [general] section to top-level fields. Unknown sections/keys
-    are caught by Pydantic's extra="forbid" with proper error messages.
-    """
-    general = data.get("general", {})
-    return {**general, **{k: v for k, v in data.items() if k != "general"}}
 
 
 def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:

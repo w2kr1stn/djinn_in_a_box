@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AppConfig
 
+from ai_dev_base.core.console import warning
 from ai_dev_base.core.paths import get_project_root
 
 
@@ -75,8 +76,6 @@ def delete_network(name: str) -> bool:
         check=False,
     )
     if result.returncode != 0:
-        from ai_dev_base.core.console import warning
-
         stderr_msg = result.stderr.strip() if result.stderr else ""
         error_detail = stderr_msg or f"exit code {result.returncode}"
         warning(f"Failed to delete network '{name}': {error_detail}")
@@ -95,8 +94,6 @@ def ensure_network(name: str = "ai-dev-network") -> bool:
         check=False,
     )
     if result.returncode != 0:
-        from ai_dev_base.core.console import warning
-
         stderr_msg = result.stderr.strip() if result.stderr else ""
         error_detail = stderr_msg or f"exit code {result.returncode}"
         warning(f"Failed to create Docker network '{name}': {error_detail}")
@@ -358,8 +355,6 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
     if not docker_enabled:
         return True
 
-    from ai_dev_base.core.console import warning
-
     project_root = get_project_root()
     compose_files = get_compose_files(docker_enabled=True)
     success = True
@@ -420,8 +415,6 @@ def delete_volume(name: str) -> bool:
         check=False,
     )
     if result.returncode != 0:
-        from ai_dev_base.core.console import warning
-
         stderr_msg = result.stderr.strip() if result.stderr else ""
         error_detail = stderr_msg or f"exit code {result.returncode}"
         warning(f"Failed to delete volume '{name}': {error_detail}")

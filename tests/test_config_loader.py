@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -13,7 +12,6 @@ from ai_dev_base.config.loader import (
     ConfigNotFoundError,
     ConfigValidationError,
     _transform_config_to_toml,
-    _transform_toml_to_config,
     load_agents,
     load_config,
     save_config,
@@ -122,48 +120,6 @@ class TestConfigValidationError:
         error = ConfigValidationError("Test error")
 
         assert str(error) == "Test error"
-
-
-class TestTransformTomlToConfig:
-    """Tests for _transform_toml_to_config function."""
-
-    def test_extracts_general_section(self) -> None:
-        """Should extract code_dir and timezone from [general]."""
-        data = {
-            "general": {"code_dir": "/path", "timezone": "UTC"},
-        }
-        result = _transform_toml_to_config(data)
-
-        assert result["code_dir"] == "/path"
-        assert result["timezone"] == "UTC"
-
-    def test_passes_through_shell_section(self) -> None:
-        """Should pass through [shell] section."""
-        data = {
-            "general": {"code_dir": "/path"},
-            "shell": {"skip_mounts": True},
-        }
-        result = _transform_toml_to_config(data)
-
-        assert result["shell"]["skip_mounts"] is True
-
-    def test_passes_through_resources_section(self) -> None:
-        """Should pass through [resources] section."""
-        data = {
-            "general": {"code_dir": "/path"},
-            "resources": {"cpu_limit": 8},
-        }
-        result = _transform_toml_to_config(data)
-
-        assert result["resources"]["cpu_limit"] == 8
-
-    def test_handles_missing_sections(self) -> None:
-        """Should handle missing optional sections."""
-        data: dict[str, Any] = {"general": {}}
-        result = _transform_toml_to_config(data)
-
-        assert "shell" not in result
-        assert "resources" not in result
 
 
 class TestTransformConfigToToml:
