@@ -27,8 +27,9 @@ AI_DEV_NETWORK: str = "ai-dev-network"
 """Docker network name for AI Dev containers."""
 
 
-MCP_DIR: Path = get_project_root() / "mcp"
-"""Path to the mcp/ directory containing docker-compose.yml."""
+def _get_mcp_dir() -> Path:
+    """Return path to the mcp/ directory (lazy, avoids import-time crash)."""
+    return get_project_root() / "mcp"
 
 
 def _require_mcp_cli() -> None:
@@ -56,7 +57,7 @@ def _require_running() -> None:
 
 def _run_mcp_compose(args: list[str], error_msg: str) -> None:
     """Run a docker compose command in the MCP directory. Raises typer.Exit on failure."""
-    result = subprocess.run(["docker", "compose", *args], cwd=MCP_DIR, check=False)
+    result = subprocess.run(["docker", "compose", *args], cwd=_get_mcp_dir(), check=False)
     if result.returncode != 0:
         error(error_msg)
         raise typer.Exit(result.returncode)
@@ -88,7 +89,7 @@ def start() -> None:
         # Show logs for debugging
         subprocess.run(
             ["docker", "compose", "logs"],
-            cwd=MCP_DIR,
+            cwd=_get_mcp_dir(),
             check=False,
         )
         raise typer.Exit(1)
@@ -196,44 +197,38 @@ def logs(
     raise typer.Exit(result.returncode)
 
 
+def _toggle_server(server: str, action: str) -> None:
+    """Enable or disable an MCP server by action name."""
+    _require_mcp_cli()
+    _require_running()
+
+    status_fn = info if action == "enable" else warning
+    verb = "Enabling" if action == "enable" else "Disabling"
+    status_fn(f"{verb} MCP server: {server}")
+
+    result = subprocess.run(
+        ["docker", "mcp", "server", action, server],
+        check=False,
+    )
+    if result.returncode == 0:
+        success(f"Server '{server}' {action}d")
+    else:
+        error(f"Failed to {action} server '{server}'")
+        raise typer.Exit(result.returncode)
+
+
 def enable(
     server: Annotated[str, typer.Argument(help="MCP server name to enable")],
 ) -> None:
     """Enable an MCP server."""
-    _require_mcp_cli()
-    _require_running()
-
-    info(f"Enabling MCP server: {server}")
-    result = subprocess.run(
-        ["docker", "mcp", "server", "enable", server],
-        check=False,
-    )
-
-    if result.returncode == 0:
-        success(f"Server '{server}' enabled")
-    else:
-        error(f"Failed to enable server '{server}'")
-        raise typer.Exit(result.returncode)
+    _toggle_server(server, "enable")
 
 
 def disable(
     server: Annotated[str, typer.Argument(help="MCP server name to disable")],
 ) -> None:
     """Disable an MCP server."""
-    _require_mcp_cli()
-    _require_running()
-
-    warning(f"Disabling MCP server: {server}")
-    result = subprocess.run(
-        ["docker", "mcp", "server", "disable", server],
-        check=False,
-    )
-
-    if result.returncode == 0:
-        success(f"Server '{server}' disabled")
-    else:
-        error(f"Failed to disable server '{server}'")
-        raise typer.Exit(result.returncode)
+    _toggle_server(server, "disable")
 
 
 def servers() -> None:
@@ -384,7 +379,7 @@ def clean() -> None:
     # Stop gateway (ignore errors — may not be running)
     subprocess.run(
         ["docker", "compose", "down"],
-        cwd=MCP_DIR,
+        cwd=_get_mcp_dir(),
         capture_output=True,
         check=False,
     )

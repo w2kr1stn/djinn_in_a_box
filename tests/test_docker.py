@@ -450,16 +450,6 @@ class TestComposeDown:
         assert "down" in cmd
         assert "-v" not in cmd
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_down_with_volumes(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
-        """Test includes -v flag when remove_volumes=True."""
-        mock_root.return_value = Path("/project")
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        compose_down(remove_volumes=True)
-        cmd = mock_run.call_args[0][0]
-        assert "-v" in cmd
-
 
 class TestCleanupDockerProxy:
     """Tests for cleanup_docker_proxy function."""

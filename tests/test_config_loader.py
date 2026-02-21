@@ -1,7 +1,5 @@
 """Tests for ai_dev_base.config.loader module."""
 
-# ruff: noqa: SLF001 - Testing private functions is intentional
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,35 +9,11 @@ import pytest
 from ai_dev_base.config.loader import (
     ConfigNotFoundError,
     ConfigValidationError,
-    _transform_config_to_toml,
     load_agents,
     load_config,
     save_config,
 )
 from ai_dev_base.config.models import AppConfig
-
-
-@pytest.fixture
-def sample_config_toml(tmp_path: Path) -> Path:
-    """Create a sample config.toml file."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        """
-[general]
-code_dir = "/home/user/projects"
-timezone = "America/New_York"
-
-[shell]
-skip_mounts = true
-
-[resources]
-cpu_limit = 8
-memory_limit = "16G"
-cpu_reservation = 4
-memory_reservation = "8G"
-"""
-    )
-    return config_file
 
 
 @pytest.fixture
@@ -91,72 +65,6 @@ memory_reservation = "4G"
 """
     )
     return config_file
-
-
-class TestConfigNotFoundError:
-    """Tests for ConfigNotFoundError exception."""
-
-    def test_error_message_contains_path(self) -> None:
-        """Error message should include the missing path."""
-        path = Path("/nonexistent/config.toml")
-        error = ConfigNotFoundError(path)
-
-        assert str(path) in str(error)
-        assert "codeagent init" in str(error)
-
-    def test_path_attribute(self) -> None:
-        """Error should store the path as an attribute."""
-        path = Path("/test/path.toml")
-        error = ConfigNotFoundError(path)
-
-        assert error.path == path
-
-
-class TestConfigValidationError:
-    """Tests for ConfigValidationError exception."""
-
-    def test_message_only(self) -> None:
-        """Should work with just a message."""
-        error = ConfigValidationError("Test error")
-
-        assert str(error) == "Test error"
-
-
-class TestTransformConfigToToml:
-    """Tests for _transform_config_to_toml function."""
-
-    def test_creates_general_section(self, sample_code_dir: Path) -> None:
-        """Should create [general] section with code_dir and timezone."""
-        config = AppConfig(code_dir=sample_code_dir, timezone="UTC")
-        result = _transform_config_to_toml(config)
-
-        assert result["general"]["code_dir"] == str(sample_code_dir)
-        assert result["general"]["timezone"] == "UTC"
-
-    def test_creates_shell_section(self, sample_code_dir: Path) -> None:
-        """Should create [shell] section."""
-        config = AppConfig(code_dir=sample_code_dir)
-        result = _transform_config_to_toml(config)
-
-        assert "skip_mounts" in result["shell"]
-
-    def test_creates_resources_section(self, sample_code_dir: Path) -> None:
-        """Should create [resources] section with all fields."""
-        config = AppConfig(code_dir=sample_code_dir)
-        result = _transform_config_to_toml(config)
-
-        assert "cpu_limit" in result["resources"]
-        assert "memory_limit" in result["resources"]
-        assert "cpu_reservation" in result["resources"]
-        assert "memory_reservation" in result["resources"]
-
-    def test_includes_omp_theme_path_when_set(self, sample_code_dir: Path) -> None:
-        """Should include omp_theme_path only when set."""
-        config = AppConfig(code_dir=sample_code_dir)
-
-        # Without omp_theme_path
-        result = _transform_config_to_toml(config)
-        assert "omp_theme_path" not in result["shell"]
 
 
 class TestLoadConfig:

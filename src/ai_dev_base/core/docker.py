@@ -30,9 +30,6 @@ class ContainerOptions:
     mount_path: Path | None = None
     """Additional workspace mount path (maps to ~/workspace in container)."""
 
-    shell_mounts: bool = True
-    """Include shell configuration mounts (zshrc, oh-my-zsh, oh-my-posh)."""
-
 
 @dataclass
 class RunResult:
@@ -227,10 +224,8 @@ def compose_run(
         cmd.extend(["-v", mount_str])
         cmd.extend(["--workdir", "/home/dev/workspace"])
 
-    # Shell mounts
-    if options.shell_mounts:
-        shell_args = get_shell_mount_args(config)
-        cmd.extend(shell_args)
+    # Shell mounts (skip_mounts check is inside get_shell_mount_args)
+    cmd.extend(get_shell_mount_args(config))
 
     # Service name
     cmd.append(service)
@@ -296,11 +291,10 @@ def compose_up(
     *,
     detach: bool = True,
     docker_enabled: bool = False,
-    docker_direct: bool = False,
 ) -> RunResult:
     """Start compose services (detached by default)."""
     project_root = get_project_root()
-    compose_files = get_compose_files(docker_enabled=docker_enabled, docker_direct=docker_direct)
+    compose_files = get_compose_files(docker_enabled=docker_enabled)
 
     cmd = ["docker", "compose", *compose_files, "up"]
 
@@ -325,15 +319,12 @@ def compose_up(
     )
 
 
-def compose_down(*, remove_volumes: bool = False) -> RunResult:
+def compose_down() -> RunResult:
     """Stop and remove compose services."""
     project_root = get_project_root()
     compose_files = get_compose_files()
 
     cmd = ["docker", "compose", *compose_files, "down"]
-
-    if remove_volumes:
-        cmd.append("-v")
 
     result = subprocess.run(
         cmd,

@@ -31,10 +31,6 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
 """Volume categories for selective cleanup."""
 
 
-ALL_VOLUMES: Final[list[str]] = [vol for vols in VOLUME_CATEGORIES.values() for vol in vols]
-"""Flat list of all known volume names across all categories."""
-
-
 DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
     "claude": AgentConfig(
         binary="claude",

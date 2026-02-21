@@ -11,7 +11,6 @@ import os
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import Any
 
 import tomli_w
 from pydantic import ValidationError
@@ -180,8 +179,12 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
     # Ensure parent directory exists
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Transform AppConfig to TOML structure
-    toml_data = _transform_config_to_toml(config)
+    # Transform AppConfig to TOML structure: [general] wraps top-level fields
+    data = config.model_dump(mode="json", exclude_none=True)
+    toml_data = {
+        "general": {"code_dir": data.pop("code_dir"), "timezone": data.pop("timezone")},
+        **data,
+    }
 
     # Atomic write: write to temp file then rename to avoid corruption on interrupt
     fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
@@ -192,16 +195,3 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
     except BaseException:
         os.unlink(tmp_path)
         raise
-
-
-def _transform_config_to_toml(config: AppConfig) -> dict[str, Any]:
-    """Transform AppConfig to TOML-compatible nested structure."""
-    data = config.model_dump(mode="json", exclude_none=True)
-    # Wrap top-level fields into [general] section (TOML layout convention)
-    return {
-        "general": {
-            "code_dir": data.pop("code_dir"),
-            "timezone": data.pop("timezone"),
-        },
-        **data,
-    }

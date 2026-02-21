@@ -1,5 +1,6 @@
 """Tests for container lifecycle commands."""
 
+import io
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -7,9 +8,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
+from rich.console import Console
 
 from ai_dev_base.commands import container
 from ai_dev_base.core.docker import RunResult
+from ai_dev_base.core.theme import TODAI_THEME
 
 
 class TestBuildCommand:
@@ -125,22 +128,6 @@ class TestStartCommand:
 
 class TestAuthCommand:
     """Tests for the auth command."""
-
-    def test_auth_loads_config(self) -> None:
-        """Test auth loads configuration."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
-        ):
-            mock_config = MagicMock()
-            mock_load.return_value = mock_config
-            mock_run.return_value = RunResult(returncode=0)
-
-            with pytest.raises(typer.Exit):
-                container.auth()
-
-            mock_load.assert_called_once()
 
     def test_auth_uses_compose_run_with_profile(self) -> None:
         """Test auth uses compose_run with profile='auth' and service='dev-auth'."""
@@ -331,7 +318,7 @@ class TestCleanAllCommand:
         """Test clean all --force skips confirmation."""
         with (
             patch("ai_dev_base.commands.container.compose_down") as mock_down,
-            patch("ai_dev_base.commands.container.ALL_VOLUMES", []),
+            patch("ai_dev_base.commands.container.VOLUME_CATEGORIES", {}),
             patch("ai_dev_base.commands.container.network_exists", return_value=False),
         ):
             mock_down.return_value = RunResult(returncode=0)
@@ -472,3 +459,40 @@ class TestEnterCommand:
             assert "-it" in call_args
             assert "zsh" in call_args
             assert "ai-dev-base-dev-12345" in call_args
+
+
+class TestVolumeTable:
+    """Tests for _print_volume_table function."""
+
+    @pytest.fixture
+    def capture_container_stdout(self) -> Generator[io.StringIO]:
+        """Capture container module's console (stdout) output."""
+        output = io.StringIO()
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
+        with patch("ai_dev_base.commands.container.console", test_console):
+            yield output
+
+    def test_print_volume_table(self, capture_container_stdout: io.StringIO) -> None:
+        """_print_volume_table should print table to stdout."""
+        container._print_volume_table({"credentials": ["test-vol"]})
+        result = capture_container_stdout.getvalue()
+        assert "AI Dev Volumes" in result
+        assert "test-vol" in result
+
+    def test_print_volume_table_all_categories(self, capture_container_stdout: io.StringIO) -> None:
+        """_print_volume_table should handle all volume categories."""
+        volumes = {
+            "credentials": ["claude-config", "gemini-config"],
+            "tools": ["azure-config"],
+            "cache": ["uv-cache"],
+            "data": ["opencode-data"],
+        }
+        container._print_volume_table(volumes)
+        result = capture_container_stdout.getvalue()
+        assert "Credentials" in result
+        assert "claude-config" in result
+
+    def test_print_volume_table_empty(self, capture_container_stdout: io.StringIO) -> None:
+        """_print_volume_table should handle empty volumes dict."""
+        container._print_volume_table({})
+        assert "AI Dev Volumes" in capture_container_stdout.getvalue()

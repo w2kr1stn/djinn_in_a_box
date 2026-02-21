@@ -12,7 +12,6 @@ import typer
 from rich.table import Table
 
 from ai_dev_base.config import (
-    ALL_VOLUMES,
     VOLUME_CATEGORIES,
     ConfigNotFoundError,
     load_config,
@@ -528,7 +527,8 @@ def clean_all(
 
     # Delete all volumes
     info("Deleting all volumes...")
-    results = delete_volumes(ALL_VOLUMES)
+    all_volumes = [v for vols in VOLUME_CATEGORIES.values() for v in vols]
+    results = delete_volumes(all_volumes)
     for vol, deleted in results.items():
         if deleted:
             success(f"  Deleted: {vol}")
