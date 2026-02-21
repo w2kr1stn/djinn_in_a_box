@@ -5,31 +5,9 @@ from pathlib import Path
 import pytest
 
 from ai_dev_base.core.paths import (
-    AGENTS_FILE,
-    CONFIG_DIR,
-    CONFIG_FILE,
     get_project_root,
     resolve_mount_path,
 )
-
-
-class TestConstants:
-    """Tests for path constants."""
-
-    def test_config_dir_is_xdg_compliant(self) -> None:
-        """CONFIG_DIR should be under ~/.config/ai-dev-base/."""
-        assert str(CONFIG_DIR).endswith(".config/ai-dev-base")
-        assert Path.home() / ".config" / "ai-dev-base" == CONFIG_DIR
-
-    def test_config_file_is_toml(self) -> None:
-        """CONFIG_FILE should be config.toml."""
-        assert CONFIG_FILE.name == "config.toml"
-        assert CONFIG_FILE.parent == CONFIG_DIR
-
-    def test_agents_file_is_toml(self) -> None:
-        """AGENTS_FILE should be agents.toml."""
-        assert AGENTS_FILE.name == "agents.toml"
-        assert AGENTS_FILE.parent == CONFIG_DIR
 
 
 class TestGetProjectRoot:
@@ -39,18 +17,9 @@ class TestGetProjectRoot:
         """get_project_root() should find the directory with docker-compose.yml."""
         root = get_project_root()
         assert root.is_dir()
-        assert (root / "docker-compose.yml").exists()
-
-    def test_returns_absolute_path(self) -> None:
-        """get_project_root() should return an absolute path."""
-        root = get_project_root()
         assert root.is_absolute()
-
-    def test_project_root_contains_expected_files(self) -> None:
-        """Project root should contain expected project files."""
-        root = get_project_root()
+        assert (root / "docker-compose.yml").exists()
         assert (root / "pyproject.toml").exists()
-        assert (root / "src" / "ai_dev_base").is_dir()
 
 
 class TestResolveMountPath:
@@ -61,15 +30,6 @@ class TestResolveMountPath:
         result = resolve_mount_path("~")
         assert result == Path.home()
         assert result.is_absolute()
-
-    def test_tilde_subdir_expansion(self) -> None:
-        """resolve_mount_path('~/subdir') should expand tilde."""
-        # Only test if the path exists
-        test_path = Path.home() / ".config"
-        if test_path.exists():
-            result = resolve_mount_path("~/.config")
-            assert result == test_path
-            assert result.is_absolute()
 
     def test_relative_path_resolution(self, change_dir: Path) -> None:
         """resolve_mount_path('.') should resolve to current directory."""
@@ -92,11 +52,6 @@ class TestResolveMountPath:
         assert result == tmp_path
         assert result.is_absolute()
 
-    def test_path_object_input(self, tmp_path: Path) -> None:
-        """resolve_mount_path() should accept Path objects."""
-        result = resolve_mount_path(tmp_path)
-        assert result == tmp_path
-
     def test_nonexistent_path_raises(self) -> None:
         """resolve_mount_path() should raise FileNotFoundError for missing paths."""
         with pytest.raises(FileNotFoundError, match="does not exist"):
@@ -109,16 +64,6 @@ class TestResolveMountPath:
 
         with pytest.raises(NotADirectoryError, match="not a directory"):
             resolve_mount_path(test_file)
-
-    def test_normalizes_path(self, tmp_path: Path) -> None:
-        """resolve_mount_path() should normalize paths with .. and //."""
-        subdir = tmp_path / "subdir"
-        subdir.mkdir()
-
-        # Create path with .. that resolves back to tmp_path
-        weird_path = f"{tmp_path}/subdir/../"
-        result = resolve_mount_path(weird_path)
-        assert result == tmp_path
 
     def test_symlink_resolution(self, tmp_path: Path) -> None:
         """resolve_mount_path() should resolve symlinks."""

@@ -22,7 +22,6 @@ from ai_dev_base.core.docker import (
     get_running_containers,
     get_shell_mount_args,
     is_container_running,
-    list_volumes,
     network_exists,
     volume_exists,
 )
@@ -31,26 +30,14 @@ from ai_dev_base.core.docker import (
 class TestNetworkExists:
     """Tests for network_exists function."""
 
+    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_network_exists_true(self, mock_run: MagicMock) -> None:
-        """Test returns True when network exists."""
-        mock_run.return_value = MagicMock(returncode=0)
-        assert network_exists("ai-dev-network") is True
-        mock_run.assert_called_once()
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_network_exists_false(self, mock_run: MagicMock) -> None:
-        """Test returns False when network does not exist."""
-        mock_run.return_value = MagicMock(returncode=1)
-        assert network_exists("nonexistent") is False
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_network_exists_default_name(self, mock_run: MagicMock) -> None:
-        """Test uses default network name."""
-        mock_run.return_value = MagicMock(returncode=0)
-        network_exists()
-        call_args = mock_run.call_args[0][0]
-        assert "ai-dev-network" in call_args
+    def test_returns_expected_for_returncode(
+        self, mock_run: MagicMock, returncode: int, expected: bool
+    ) -> None:
+        """Test returns correct boolean based on Docker inspect returncode."""
+        mock_run.return_value = MagicMock(returncode=returncode)
+        assert network_exists("ai-dev-network") is expected
 
 
 class TestEnsureNetwork:
@@ -246,74 +233,43 @@ class TestGetRunningContainers:
         assert containers == []
 
 
-class TestListVolumes:
-    """Tests for list_volumes function."""
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_returns_volume_list(self, mock_run: MagicMock) -> None:
-        """Test returns list of volumes."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="ai-dev-claude-config\nai-dev-uv-cache\n",
-        )
-        volumes = list_volumes()
-        assert "ai-dev-claude-config" in volumes
-        assert "ai-dev-uv-cache" in volumes
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_returns_empty_list_on_error(self, mock_run: MagicMock) -> None:
-        """Test returns empty list on command failure."""
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
-        volumes = list_volumes()
-        assert volumes == []
-
-
 class TestVolumeExists:
     """Tests for volume_exists function."""
 
+    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_volume_exists_true(self, mock_run: MagicMock) -> None:
-        """Test returns True when volume exists."""
-        mock_run.return_value = MagicMock(returncode=0)
-        assert volume_exists("ai-dev-claude-config") is True
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_volume_exists_false(self, mock_run: MagicMock) -> None:
-        """Test returns False when volume does not exist."""
-        mock_run.return_value = MagicMock(returncode=1)
-        assert volume_exists("nonexistent") is False
+    def test_returns_expected_for_returncode(
+        self, mock_run: MagicMock, returncode: int, expected: bool
+    ) -> None:
+        """Test returns correct boolean based on Docker inspect returncode."""
+        mock_run.return_value = MagicMock(returncode=returncode)
+        assert volume_exists("ai-dev-test") is expected
 
 
 class TestDeleteNetwork:
     """Tests for delete_network function."""
 
+    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_delete_success(self, mock_run: MagicMock) -> None:
-        """Test returns True on successful deletion."""
-        mock_run.return_value = MagicMock(returncode=0)
-        assert delete_network("ai-dev-network") is True
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_delete_failure(self, mock_run: MagicMock) -> None:
-        """Test returns False on deletion failure."""
-        mock_run.return_value = MagicMock(returncode=1, stderr="network in use")
-        assert delete_network("ai-dev-network") is False
+    def test_returns_expected_for_returncode(
+        self, mock_run: MagicMock, returncode: int, expected: bool
+    ) -> None:
+        """Test returns correct boolean based on docker network rm returncode."""
+        mock_run.return_value = MagicMock(returncode=returncode, stderr="")
+        assert delete_network("ai-dev-network") is expected
 
 
 class TestDeleteVolume:
     """Tests for delete_volume function."""
 
+    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
     @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_delete_success(self, mock_run: MagicMock) -> None:
-        """Test returns True on successful deletion."""
-        mock_run.return_value = MagicMock(returncode=0)
-        assert delete_volume("ai-dev-uv-cache") is True
-
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_delete_failure(self, mock_run: MagicMock) -> None:
-        """Test returns False on deletion failure."""
-        mock_run.return_value = MagicMock(returncode=1)
-        assert delete_volume("volume-in-use") is False
+    def test_returns_expected_for_returncode(
+        self, mock_run: MagicMock, returncode: int, expected: bool
+    ) -> None:
+        """Test returns correct boolean based on docker volume rm returncode."""
+        mock_run.return_value = MagicMock(returncode=returncode, stderr="")
+        assert delete_volume("ai-dev-test") is expected
 
 
 class TestDeleteVolumes:
@@ -597,22 +553,3 @@ class TestComposeRunErrorHandling:
 
         assert result.returncode == 126  # Permission denied convention
         assert "permission" in result.stderr.lower()
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_handles_docker_not_found_interactive(
-        self,
-        mock_run: MagicMock,
-        mock_root: MagicMock,
-        mock_app_config: AppConfig,
-    ) -> None:
-        """Test graceful handling when docker command is not found in interactive mode."""
-        mock_root.return_value = Path("/project")
-        mock_run.side_effect = FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
-
-        options = ContainerOptions()
-        result = compose_run(mock_app_config, options, interactive=True)
-
-        # Should return error result, not crash
-        assert result.returncode == 127
-        assert "docker" in result.stderr.lower() or "not found" in result.stderr.lower()

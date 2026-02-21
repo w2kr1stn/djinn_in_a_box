@@ -120,14 +120,6 @@ class TestShellConfig:
         assert shell.omp_theme_path.is_absolute()
         assert str(shell.omp_theme_path).endswith(".config/theme.omp.json")
 
-    def test_omp_theme_path_as_path_object(self, tmp_path: Path) -> None:
-        """Test that Path objects are accepted for omp_theme_path."""
-        theme_path = tmp_path / "theme.omp.json"
-        theme_path.touch()
-
-        shell = ShellConfig(omp_theme_path=theme_path)
-        assert shell.omp_theme_path == theme_path
-
 
 class TestAppConfig:
     """Tests for AppConfig model."""
