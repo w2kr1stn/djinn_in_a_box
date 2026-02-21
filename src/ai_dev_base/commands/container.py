@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.table import Table
 
 from ai_dev_base.config import (
     ALL_VOLUMES,
@@ -23,7 +24,6 @@ from ai_dev_base.core.console import (
     error,
     header,
     info,
-    print_volume_table,
     status_line,
     success,
     warning,
@@ -49,10 +49,6 @@ from ai_dev_base.core.docker import (
 )
 from ai_dev_base.core.paths import get_project_root, resolve_mount_path
 
-# =============================================================================
-# Build Command
-# =============================================================================
-
 
 def build(
     no_cache: Annotated[
@@ -75,11 +71,6 @@ def build(
         if result.stderr:
             err_console.print(result.stderr)
         raise typer.Exit(result.returncode)
-
-
-# =============================================================================
-# Start Command
-# =============================================================================
 
 
 @handle_config_errors
@@ -199,11 +190,6 @@ def start(
     raise typer.Exit(result.returncode)
 
 
-# =============================================================================
-# Auth Command
-# =============================================================================
-
-
 @handle_config_errors
 def auth(
     docker: Annotated[
@@ -276,9 +262,27 @@ def auth(
     raise typer.Exit(result.returncode)
 
 
-# =============================================================================
-# Status Command
-# =============================================================================
+def _print_volume_table(volumes: dict[str, list[str]]) -> None:
+    """Print a formatted volume table to stdout."""
+    table = Table(
+        title="AI Dev Volumes",
+        title_style="table.title",
+        show_header=True,
+        header_style="table.header",
+    )
+
+    table.add_column("Category", style="table.category", width=15)
+    table.add_column("Volume", style="table.value")
+
+    entries = [(cat, vols) for cat, vols in volumes.items() if vols]
+    for i, (category, volume_list) in enumerate(entries):
+        table.add_row(category.title(), volume_list[0])
+        for vol in volume_list[1:]:
+            table.add_row("", vol)
+        if i < len(entries) - 1:
+            table.add_row("", "")
+
+    console.print(table)
 
 
 def status() -> None:
@@ -334,7 +338,7 @@ def status() -> None:
         cat: vols for cat in VOLUME_CATEGORIES if (vols := get_existing_volumes_by_category(cat))
     }
     if categorized:
-        print_volume_table(categorized)
+        _print_volume_table(categorized)
     else:
         err_console.print("  No volumes found")
 
@@ -378,10 +382,6 @@ def status() -> None:
     else:
         err_console.print("  [status.disabled]MCP Gateway: Not running[/status.disabled]")
 
-
-# =============================================================================
-# Clean Commands (Subcommand Group)
-# =============================================================================
 
 clean_app = typer.Typer(
     name="clean",
@@ -483,7 +483,7 @@ def clean_volumes(
             if (vols := get_existing_volumes_by_category(cat))
         }
         if categorized:
-            print_volume_table(categorized)
+            _print_volume_table(categorized)
         else:
             err_console.print("No volumes found.")
         blank()
@@ -557,11 +557,6 @@ def clean_all(
     success("Cleanup complete.")
 
 
-# =============================================================================
-# Audit Command
-# =============================================================================
-
-
 def audit(
     tail: Annotated[
         int,
@@ -583,11 +578,6 @@ def audit(
     )
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
-
-
-# =============================================================================
-# Update Command
-# =============================================================================
 
 
 def update() -> None:
@@ -613,11 +603,6 @@ def update() -> None:
         raise typer.Exit(result.returncode)
 
     success("Update completed successfully")
-
-
-# =============================================================================
-# Enter Command
-# =============================================================================
 
 
 def enter() -> None:

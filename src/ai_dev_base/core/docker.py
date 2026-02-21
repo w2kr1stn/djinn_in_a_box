@@ -12,10 +12,6 @@ if TYPE_CHECKING:
 
 from ai_dev_base.core.paths import get_project_root
 
-# =============================================================================
-# Data Classes for Container Options and Results
-# =============================================================================
-
 
 @dataclass
 class ContainerOptions:
@@ -51,11 +47,6 @@ class RunResult:
         return self.returncode == 0
 
 
-# =============================================================================
-# Docker Query Helpers
-# =============================================================================
-
-
 def _docker_inspect(resource: str, name: str) -> bool:
     """Check if a Docker resource exists via inspect. Returns True if found."""
     result = subprocess.run(["docker", resource, "inspect", name], capture_output=True, check=False)
@@ -68,11 +59,6 @@ def _docker_list(cmd: list[str]) -> list[str]:
     if result.returncode != 0 or not result.stdout.strip():
         return []
     return [line for line in result.stdout.strip().split("\n") if line]
-
-
-# =============================================================================
-# Network Management
-# =============================================================================
 
 
 def network_exists(name: str = "ai-dev-network") -> bool:
@@ -117,11 +103,6 @@ def ensure_network(name: str = "ai-dev-network") -> bool:
     return result.returncode == 0
 
 
-# =============================================================================
-# Compose File Management
-# =============================================================================
-
-
 def get_compose_files(
     docker_enabled: bool = False,
     docker_direct: bool = False,
@@ -136,11 +117,6 @@ def get_compose_files(
         files.extend(["-f", str(project_root / "docker-compose.docker-direct.yml")])
 
     return files
-
-
-# =============================================================================
-# Shell Mount Configuration
-# =============================================================================
 
 
 def get_shell_mount_args(config: AppConfig) -> list[str]:
@@ -174,11 +150,6 @@ def get_shell_mount_args(config: AppConfig) -> list[str]:
         args.extend(["-v", f"{omz_custom}:/home/dev/.oh-my-zsh/custom:ro"])
 
     return args
-
-
-# =============================================================================
-# Compose Operations
-# =============================================================================
 
 
 def compose_build(*, no_cache: bool = False) -> RunResult:
@@ -424,11 +395,6 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
     return success
 
 
-# =============================================================================
-# Container Status
-# =============================================================================
-
-
 def is_container_running(name: str) -> bool:
     """Check if a container is running by name (exact match)."""
     names = _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"])
@@ -438,16 +404,6 @@ def is_container_running(name: str) -> bool:
 def get_running_containers(prefix: str = "ai-dev") -> list[str]:
     """Get list of running containers matching a name prefix."""
     return _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"])
-
-
-# =============================================================================
-# Volume Management
-# =============================================================================
-
-
-def list_volumes(prefix: str = "ai-dev") -> list[str]:
-    """List Docker volumes matching a name prefix."""
-    return _docker_list(["docker", "volume", "ls", "-q", "--filter", f"name={prefix}"])
 
 
 def volume_exists(name: str) -> bool:

@@ -18,15 +18,12 @@ from pydantic import ValidationError
 
 from ai_dev_base.config.defaults import DEFAULT_AGENTS
 from ai_dev_base.config.models import AgentConfig, AppConfig
+from ai_dev_base.core.console import warning
 from ai_dev_base.core.paths import (
     AGENTS_FILE,
     CONFIG_FILE,
     get_project_root,
 )
-
-# =============================================================================
-# Custom Exceptions
-# =============================================================================
 
 
 class ConfigNotFoundError(FileNotFoundError):
@@ -48,11 +45,6 @@ def _format_validation_errors(e: ValidationError) -> str:
     return "\n".join(
         f"  - {'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
     )
-
-
-# =============================================================================
-# Configuration Loading
-# =============================================================================
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -105,27 +97,8 @@ def _transform_toml_to_config(data: dict[str, Any]) -> dict[str, Any]:
     Flattens [general] section to top-level fields. Unknown sections/keys
     are caught by Pydantic's extra="forbid" with proper error messages.
     """
-    result: dict[str, Any] = {}
-
-    # Flatten [general] section to top-level
     general = data.get("general", {})
-    if "code_dir" in general:
-        result["code_dir"] = general["code_dir"]
-    if "timezone" in general:
-        result["timezone"] = general["timezone"]
-
-    # Pass through nested sections (Pydantic extra="forbid" validates)
-    if "shell" in data:
-        result["shell"] = data["shell"]
-    if "resources" in data:
-        result["resources"] = data["resources"]
-
-    return result
-
-
-# =============================================================================
-# Agent Loading
-# =============================================================================
+    return {**general, **{k: v for k, v in data.items() if k != "general"}}
 
 
 def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
@@ -169,8 +142,6 @@ def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
         pass
 
     # Priority 4: Built-in defaults
-    from ai_dev_base.core.console import warning
-
     warning("No agents.toml found, using built-in defaults")
     return dict(DEFAULT_AGENTS)
 
@@ -211,11 +182,6 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
         raise ConfigValidationError(
             f"Invalid agent configuration in {path}:\n{_format_validation_errors(e)}"
         ) from e
-
-
-# =============================================================================
-# Configuration Saving
-# =============================================================================
 
 
 def save_config(config: AppConfig, path: Path | None = None) -> None:

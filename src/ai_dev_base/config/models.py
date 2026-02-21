@@ -12,10 +12,6 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# =============================================================================
-# Memory Format Validation
-# =============================================================================
-
 
 def validate_memory_format(value: str) -> str:
     """Validate Docker memory format string.
@@ -40,11 +36,6 @@ def validate_memory_format(value: str) -> str:
         raise ValueError(msg)
     # Normalize to uppercase suffix
     return value[:-1] + value[-1].upper()
-
-
-# =============================================================================
-# Agent Configuration
-# =============================================================================
 
 
 class AgentConfig(BaseModel):
@@ -90,11 +81,6 @@ class AgentConfig(BaseModel):
 
     prompt_template: str = '"$AGENT_PROMPT"'
     """Shell template for prompt injection. Uses env var expansion at runtime."""
-
-
-# =============================================================================
-# Resource Limits
-# =============================================================================
 
 
 class ResourceLimits(BaseModel):
@@ -152,11 +138,6 @@ class ResourceLimits(BaseModel):
         return self
 
 
-# =============================================================================
-# Shell Configuration
-# =============================================================================
-
-
 class ShellConfig(BaseModel):
     """Shell mounting configuration for the development container.
 
@@ -194,11 +175,6 @@ class ShellConfig(BaseModel):
         return path
 
 
-# =============================================================================
-# Main Application Configuration
-# =============================================================================
-
-
 class AppConfig(BaseModel):
     """Main application configuration for AI Dev Base.
 
@@ -230,21 +206,13 @@ class AppConfig(BaseModel):
 
     @field_validator("code_dir", mode="before")
     @classmethod
-    def expand_code_dir(cls, value: str | Path) -> Path:
-        """Expand tilde in code_dir path."""
-        if isinstance(value, str):
-            return Path(value).expanduser()
-        return value.expanduser()
-
-    @field_validator("code_dir", mode="after")
-    @classmethod
-    def validate_code_dir(cls, value: Path) -> Path:
-        """Validate code_dir exists and is a directory."""
-        # Expanduser should already be called by the 'before' validator
-        if not value.exists():
-            msg = f"code_dir does not exist: {value}"
+    def validate_code_dir(cls, value: str | Path) -> Path:
+        """Expand tilde and validate code_dir exists as a directory."""
+        path = Path(value).expanduser()
+        if not path.exists():
+            msg = f"code_dir does not exist: {path}"
             raise ValueError(msg)
-        if not value.is_dir():
-            msg = f"code_dir is not a directory: {value}"
+        if not path.is_dir():
+            msg = f"code_dir is not a directory: {path}"
             raise ValueError(msg)
-        return value
+        return path

@@ -22,10 +22,6 @@ from ai_dev_base.core.docker import (
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AgentConfig
 
-# =============================================================================
-# Command Building
-# =============================================================================
-
 
 def build_agent_command(
     agent_config: AgentConfig,
@@ -56,11 +52,6 @@ def build_agent_command(
     parts.append(agent_config.prompt_template)
 
     return " ".join(parts)
-
-
-# =============================================================================
-# Run Command
-# =============================================================================
 
 
 @handle_config_errors
@@ -230,11 +221,6 @@ def run(
     cleanup_docker_proxy(docker)
 
     raise typer.Exit(returncode)
-
-
-# =============================================================================
-# Agents List Command
-# =============================================================================
 
 
 @handle_config_errors

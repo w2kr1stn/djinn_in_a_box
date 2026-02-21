@@ -4,11 +4,8 @@ This module provides XDG-compliant configuration paths and utilities
 for resolving mount paths used in Docker container operations.
 """
 
+import functools
 from pathlib import Path
-
-# =============================================================================
-# XDG-Compliant Configuration Paths
-# =============================================================================
 
 CONFIG_DIR: Path = Path.home() / ".config" / "ai-dev-base"
 """XDG-compliant configuration directory (~/.config/ai-dev-base/)."""
@@ -20,11 +17,7 @@ AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 """Agent definitions file path (optional user override)."""
 
 
-# =============================================================================
-# Project Root Discovery
-# =============================================================================
-
-
+@functools.cache
 def get_project_root() -> Path:
     """Find the ai-dev-base project root directory.
 
@@ -52,10 +45,6 @@ def get_project_root() -> Path:
             return current
         current = current.parent
 
-    # Check root as final option
-    if (current / "docker-compose.yml").exists():
-        return current
-
     msg = (
         "Could not find ai-dev-base project root. "
         "No docker-compose.yml found in any parent directory of "
@@ -64,64 +53,14 @@ def get_project_root() -> Path:
     raise FileNotFoundError(msg)
 
 
-# =============================================================================
-# Mount Path Resolution
-# =============================================================================
-
-
 def resolve_mount_path(path: str | Path) -> Path:
     """Resolve and validate a mount path for Docker container mounts.
 
-    Handles the following path formats:
-    - Tilde expansion: ~ -> home directory
-    - Relative paths: resolved against current working directory
-    - Absolute paths: normalized
-
-    This mirrors the path resolution logic from the original dev.sh script:
-    ```bash
-    PARSED_MOUNT_PATH="${PARSED_MOUNT_PATH/#\\~/$HOME}"
-    if [[ -d "$PARSED_MOUNT_PATH" ]]; then
-        PARSED_MOUNT_PATH="$(cd "$PARSED_MOUNT_PATH" && pwd)"
-    ```
-
-    Args:
-        path: Path string or Path object to resolve. Can be:
-            - "~" or "~/subdir" (tilde expansion)
-            - "." or "./subdir" (relative path)
-            - "/absolute/path" (absolute path)
-
-    Returns:
-        Fully resolved absolute Path object.
-
-    Raises:
-        FileNotFoundError: If the resolved path does not exist.
-        NotADirectoryError: If the resolved path exists but is not a directory.
-
-    Example:
-        >>> # Tilde expansion
-        >>> home = resolve_mount_path("~")
-        >>> home == Path.home()
-        True
-
-        >>> # Relative path resolution
-        >>> cwd = resolve_mount_path(".")
-        >>> cwd == Path.cwd()
-        True
-
-        >>> # Absolute path normalization
-        >>> tmp = resolve_mount_path("/tmp")
-        >>> tmp.is_absolute()
-        True
+    Handles tilde expansion, relative paths, and absolute paths.
+    Raises FileNotFoundError or NotADirectoryError on invalid paths.
     """
-    # Convert to Path if string
     path_obj = Path(path) if isinstance(path, str) else path
-
-    # Expand tilde (~) to home directory
-    if str(path_obj).startswith("~"):
-        path_obj = path_obj.expanduser()
-
-    # Resolve to absolute path (handles relative paths and normalizes)
-    resolved = path_obj.resolve()
+    resolved = path_obj.expanduser().resolve()
 
     # Validate existence
     if not resolved.exists():

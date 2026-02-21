@@ -20,10 +20,6 @@ from ai_dev_base.config.loader import (
 )
 from ai_dev_base.config.models import AppConfig
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
 
 @pytest.fixture
 def sample_config_toml(tmp_path: Path) -> Path:
@@ -99,11 +95,6 @@ memory_reservation = "4G"
     return config_file
 
 
-# =============================================================================
-# ConfigNotFoundError Tests
-# =============================================================================
-
-
 class TestConfigNotFoundError:
     """Tests for ConfigNotFoundError exception."""
 
@@ -123,11 +114,6 @@ class TestConfigNotFoundError:
         assert error.path == path
 
 
-# =============================================================================
-# ConfigValidationError Tests
-# =============================================================================
-
-
 class TestConfigValidationError:
     """Tests for ConfigValidationError exception."""
 
@@ -136,11 +122,6 @@ class TestConfigValidationError:
         error = ConfigValidationError("Test error")
 
         assert str(error) == "Test error"
-
-
-# =============================================================================
-# TOML Transformation Tests
-# =============================================================================
 
 
 class TestTransformTomlToConfig:
@@ -222,11 +203,6 @@ class TestTransformConfigToToml:
         assert "omp_theme_path" not in result["shell"]
 
 
-# =============================================================================
-# load_config Tests
-# =============================================================================
-
-
 class TestLoadConfig:
     """Tests for load_config function."""
 
@@ -270,11 +246,6 @@ timezone = "Invalid"
 
         with pytest.raises(ConfigValidationError):
             load_config(invalid_file)
-
-
-# =============================================================================
-# load_agents Tests
-# =============================================================================
 
 
 class TestLoadAgents:
@@ -328,11 +299,6 @@ description = "Broken agent"
             load_agents(invalid_file)
 
 
-# =============================================================================
-# save_config Tests
-# =============================================================================
-
-
 class TestSaveConfig:
     """Tests for save_config function."""
 
@@ -356,8 +322,3 @@ class TestSaveConfig:
         save_config(config, output_path)
 
         assert output_path.exists()
-
-
-# =============================================================================
-# Utility Function Tests
-# =============================================================================

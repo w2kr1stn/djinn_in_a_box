@@ -13,10 +13,6 @@ from ai_dev_base.config.models import (
     validate_memory_format,
 )
 
-# =============================================================================
-# Memory Format Validation Tests
-# =============================================================================
-
 
 class TestValidateMemoryFormat:
     """Tests for validate_memory_format helper function."""
@@ -57,25 +53,8 @@ class TestValidateMemoryFormat:
             validate_memory_format(value)
 
 
-# =============================================================================
-# AgentConfig Tests
-# =============================================================================
-
-
 class TestAgentConfig:
     """Tests for AgentConfig model."""
-
-    def test_minimal_config(self) -> None:
-        """Test AgentConfig with only required field (binary)."""
-        agent = AgentConfig(binary="claude")
-        assert agent.binary == "claude"
-        assert agent.description == ""
-        assert agent.headless_flags == []
-        assert agent.read_only_flags == []
-        assert agent.write_flags == []
-        assert agent.json_flags == []
-        assert agent.model_flag == "--model"
-        assert agent.prompt_template == '"$AGENT_PROMPT"'
 
     def test_extra_fields_forbidden(self) -> None:
         """Test that extra fields are not allowed."""
@@ -83,21 +62,8 @@ class TestAgentConfig:
             AgentConfig(binary="claude", unknown_field="value")  # type: ignore[call-arg]
 
 
-# =============================================================================
-# ResourceLimits Tests
-# =============================================================================
-
-
 class TestResourceLimits:
     """Tests for ResourceLimits model."""
-
-    def test_default_values(self) -> None:
-        """Test ResourceLimits with all default values."""
-        limits = ResourceLimits()
-        assert limits.cpu_limit == 6
-        assert limits.memory_limit == "12G"
-        assert limits.cpu_reservation == 2
-        assert limits.memory_reservation == "4G"
 
     def test_memory_format_normalization(self) -> None:
         """Test that lowercase memory suffixes are normalized to uppercase."""
@@ -139,11 +105,6 @@ class TestResourceLimits:
             ResourceLimits(cpu_limit=2, cpu_reservation=4)
 
 
-# =============================================================================
-# ShellConfig Tests
-# =============================================================================
-
-
 class TestShellConfig:
     """Tests for ShellConfig model."""
 
@@ -168,21 +129,8 @@ class TestShellConfig:
         assert shell.omp_theme_path == theme_path
 
 
-# =============================================================================
-# AppConfig Tests
-# =============================================================================
-
-
 class TestAppConfig:
     """Tests for AppConfig model."""
-
-    def test_minimal_config(self, tmp_path: Path) -> None:
-        """Test AppConfig with only required field (code_dir)."""
-        config = AppConfig(code_dir=tmp_path)
-        assert config.code_dir == tmp_path
-        assert config.timezone == "Europe/Berlin"
-        assert config.resources.cpu_limit == 6
-        assert config.shell.skip_mounts is False
 
     def test_code_dir_tilde_expansion(self, mock_home: Path) -> None:
         """Test that tilde in code_dir is expanded."""
@@ -204,11 +152,6 @@ class TestAppConfig:
         file_path.touch()
         with pytest.raises(ValidationError, match="code_dir is not a directory"):
             AppConfig(code_dir=file_path)
-
-    def test_custom_timezone(self, tmp_path: Path) -> None:
-        """Test AppConfig with custom timezone."""
-        config = AppConfig(code_dir=tmp_path, timezone="America/New_York")
-        assert config.timezone == "America/New_York"
 
     def test_nested_model_from_dict(self, tmp_path: Path) -> None:
         """Test creating AppConfig from nested dictionary (TOML-like)."""

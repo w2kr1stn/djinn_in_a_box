@@ -10,7 +10,7 @@ from typing import Annotated
 
 import typer
 
-from ai_dev_base.core.console import console, err_console, error, info, success, warning
+from ai_dev_base.core.console import console, err_console, error, header, info, success, warning
 from ai_dev_base.core.docker import delete_network, ensure_network, is_container_running
 from ai_dev_base.core.paths import get_project_root
 
@@ -62,11 +62,6 @@ def _run_mcp_compose(args: list[str], error_msg: str) -> None:
         raise typer.Exit(result.returncode)
 
 
-# =============================================================================
-# Gateway Lifecycle Commands
-# =============================================================================
-
-
 def start() -> None:
     """Start the MCP Gateway service."""
     _require_mcp_cli()
@@ -116,8 +111,7 @@ def restart() -> None:
 
 def status() -> None:
     """Show gateway status and enabled servers."""
-    info("MCP Gateway Status")
-    err_console.print("=" * 40)
+    header("MCP Gateway Status")
 
     if is_container_running(GATEWAY_CONTAINER):
         err_console.print("Gateway: [status.enabled]Running[/status.enabled]")
@@ -202,11 +196,6 @@ def logs(
     raise typer.Exit(result.returncode)
 
 
-# =============================================================================
-# Server Management Commands
-# =============================================================================
-
-
 def enable(
     server: Annotated[str, typer.Argument(help="MCP server name to enable")],
 ) -> None:
@@ -250,8 +239,7 @@ def disable(
 def servers() -> None:
     """List enabled MCP servers."""
     _require_mcp_cli()
-    info("Enabled MCP Servers")
-    err_console.print("=" * 40)
+    header("Enabled MCP Servers")
 
     result = subprocess.run(
         ["docker", "mcp", "server", "ls"],
@@ -269,8 +257,7 @@ def servers() -> None:
 def catalog() -> None:
     """Show available servers in the catalog."""
     _require_mcp_cli()
-    info("MCP Server Catalog")
-    err_console.print("=" * 40)
+    header("MCP Server Catalog")
 
     result = subprocess.run(
         ["docker", "mcp", "catalog", "show", "docker-mcp"],
@@ -286,11 +273,6 @@ def catalog() -> None:
         err_console.print("Or browse online: https://hub.docker.com/search?q=mcp%2F")
     else:
         console.print(result.stdout.strip())
-
-
-# =============================================================================
-# Diagnostic Commands
-# =============================================================================
 
 
 def test() -> None:
