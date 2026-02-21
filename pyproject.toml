@@ -86,7 +86,6 @@ line-ending = "auto"
 [tool.pyright]
 pythonVersion = "3.14"
 typeCheckingMode = "strict"
-extraPaths = ["pulumi"]
 reportMissingImports = true
 reportMissingTypeStubs = false
 reportUnusedImport = true

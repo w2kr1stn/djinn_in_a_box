@@ -1,4 +1,6 @@
 """AI Dev Base - CLI tools for managing AI development containers."""
 
-__version__ = "1.0.0"
+from importlib.metadata import version
+
+__version__ = version("ai-dev-base")
 __all__ = ["__version__"]
