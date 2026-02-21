@@ -4,7 +4,6 @@ Status messages go to stderr to keep stdout clean for agent output.
 """
 
 from rich.console import Console
-from rich.table import Table
 
 from ai_dev_base.core.theme import ICONS, TODAI_THEME
 
@@ -45,29 +44,6 @@ def warning(message: str) -> None:
 def blank() -> None:
     """Print a blank line to stderr."""
     err_console.print()
-
-
-def print_volume_table(volumes: dict[str, list[str]]) -> None:
-    """Print a formatted volume table to stdout."""
-    table = Table(
-        title="AI Dev Volumes",
-        title_style="table.title",
-        show_header=True,
-        header_style="table.header",
-    )
-
-    table.add_column("Category", style="table.category", width=15)
-    table.add_column("Volume", style="table.value")
-
-    entries = [(cat, vols) for cat, vols in volumes.items() if vols]
-    for i, (category, volume_list) in enumerate(entries):
-        table.add_row(category.title(), volume_list[0])
-        for vol in volume_list[1:]:
-            table.add_row("", vol)
-        if i < len(entries) - 1:
-            table.add_row("", "")
-
-    console.print(table)
 
 
 def header(title: str) -> None:

@@ -14,7 +14,6 @@ from ai_dev_base.core.console import (
     error,
     header,
     info,
-    print_volume_table,
     status_line,
     success,
     warning,
@@ -119,32 +118,46 @@ class TestBlankAndHeader:
 
 
 class TestVolumeTable:
-    """Tests for print_volume_table function."""
+    """Tests for _print_volume_table function (in container.py)."""
 
-    def test_print_volume_table(self, capture_stdout: io.StringIO) -> None:
-        """print_volume_table should print table to stdout."""
-        print_volume_table({"credentials": ["test-vol"]})
-        result = capture_stdout.getvalue()
+    @pytest.fixture
+    def capture_container_stdout(self) -> Generator[io.StringIO]:
+        """Capture container module's console (stdout) output."""
+        output = io.StringIO()
+        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
+        with patch("ai_dev_base.commands.container.console", test_console):
+            yield output
+
+    def test_print_volume_table(self, capture_container_stdout: io.StringIO) -> None:
+        """_print_volume_table should print table to stdout."""
+        from ai_dev_base.commands.container import _print_volume_table
+
+        _print_volume_table({"credentials": ["test-vol"]})
+        result = capture_container_stdout.getvalue()
         assert "AI Dev Volumes" in result
         assert "test-vol" in result
 
-    def test_print_volume_table_all_categories(self, capture_stdout: io.StringIO) -> None:
-        """print_volume_table should handle all volume categories."""
+    def test_print_volume_table_all_categories(self, capture_container_stdout: io.StringIO) -> None:
+        """_print_volume_table should handle all volume categories."""
+        from ai_dev_base.commands.container import _print_volume_table
+
         volumes = {
             "credentials": ["claude-config", "gemini-config"],
             "tools": ["azure-config"],
             "cache": ["uv-cache"],
             "data": ["opencode-data"],
         }
-        print_volume_table(volumes)
-        result = capture_stdout.getvalue()
+        _print_volume_table(volumes)
+        result = capture_container_stdout.getvalue()
         assert "Credentials" in result
         assert "claude-config" in result
 
-    def test_print_volume_table_empty(self, capture_stdout: io.StringIO) -> None:
-        """print_volume_table should handle empty volumes dict."""
-        print_volume_table({})
-        assert "AI Dev Volumes" in capture_stdout.getvalue()
+    def test_print_volume_table_empty(self, capture_container_stdout: io.StringIO) -> None:
+        """_print_volume_table should handle empty volumes dict."""
+        from ai_dev_base.commands.container import _print_volume_table
+
+        _print_volume_table({})
+        assert "AI Dev Volumes" in capture_container_stdout.getvalue()
 
 
 class TestColorStyles:

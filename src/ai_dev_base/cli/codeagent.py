@@ -25,7 +25,7 @@ from ai_dev_base.config import (
     load_config,
     save_config,
 )
-from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
+from ai_dev_base.config.models import AppConfig
 from ai_dev_base.core.console import console, error, info, success, warning
 from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.paths import AGENTS_FILE, CONFIG_DIR, CONFIG_FILE, get_project_root
@@ -130,12 +130,7 @@ def init_config(
             raise typer.Exit(1)
 
     # Create configuration
-    config = AppConfig(
-        code_dir=code_path,
-        timezone=timezone,
-        resources=ResourceLimits(),
-        shell=ShellConfig(),
-    )
+    config = AppConfig(code_dir=code_path, timezone=timezone)
 
     # Save configuration
     save_config(config)

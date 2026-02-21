@@ -245,11 +245,7 @@ def auth(
         )
 
     # Run auth container via compose_run
-    options = ContainerOptions(
-        docker_enabled=docker,
-        docker_direct=docker_direct,
-        shell_mounts=True,
-    )
+    options = ContainerOptions(docker_enabled=docker, docker_direct=docker_direct)
     result = compose_run(config, options, service="dev-auth", profile="auth", interactive=True)
 
     # Cleanup docker proxy if it was started (not needed for direct mode)
