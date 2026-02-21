@@ -138,7 +138,7 @@ def get_shell_mount_args(config: AppConfig) -> list[str]:
     # Oh My Posh theme
     omp_theme = config.shell.omp_theme_path
     if omp_theme is None:
-        # Default location from dev.sh line 80
+        # Default OMP theme location
         omp_theme = home / ".oh-my-zsh/custom/themes/.zsh-theme-remote.omp.json"
 
     if omp_theme.exists():

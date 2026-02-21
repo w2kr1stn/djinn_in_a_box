@@ -2,7 +2,6 @@
 
 from ai_dev_base.config.defaults import (
     ALL_VOLUMES,
-    DEFAULT_AGENTS,
     VOLUME_CATEGORIES,
 )
 from ai_dev_base.config.loader import (
@@ -26,7 +25,6 @@ __all__ = [
     "ResourceLimits",
     "ShellConfig",
     # Defaults
-    "DEFAULT_AGENTS",
     "VOLUME_CATEGORIES",
     "ALL_VOLUMES",
     # Loader

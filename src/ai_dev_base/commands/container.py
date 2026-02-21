@@ -102,8 +102,6 @@ def start(
     The container has access to the configured projects directory
     and optionally Docker socket access and firewall restrictions.
 
-    Equivalent to: ./dev.sh start [options]
-
     Examples:
         codeagent start                         # Basic interactive shell
         codeagent start --docker                # With Docker access (proxy)
@@ -208,8 +206,6 @@ def auth(
 
     After authenticating all tools, exit and use 'codeagent start' for
     normal development with the isolated network.
-
-    Equivalent to: ./dev.sh auth [--docker]
 
     Example:
         codeagent auth                   # Authenticate CLI tools
@@ -397,7 +393,6 @@ def clean_default(ctx: typer.Context) -> None:
     Runs `docker compose down` to stop and remove containers.
     Volumes and networks are preserved.
 
-    Equivalent to: ./dev.sh clean containers
     """
     if ctx.invoked_subcommand is None:
         info("Stopping and removing containers...")
@@ -521,7 +516,6 @@ def clean_all(
     - All ai-dev volumes (credentials, tools, cache, data)
     - The ai-dev-network
 
-    Equivalent to: ./dev.sh clean --all
     """
     if not force:
         confirm = typer.confirm(
