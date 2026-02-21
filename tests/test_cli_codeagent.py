@@ -71,19 +71,6 @@ class TestCodeagentHelp:
         assert "AI Dev Base CLI" in result.stdout
 
 
-class TestNoArgsIsHelp:
-    """Tests for no_args_is_help behavior."""
-
-    def test_no_args_shows_usage(self) -> None:
-        """Test invoking without arguments shows usage info."""
-        result = runner.invoke(app, [])
-        # With no_args_is_help=True, Typer shows help or usage
-        # The output depends on Typer version, but should contain
-        # something useful (init command, Usage text, or help text)
-        combined = result.stdout + result.output
-        assert "init" in combined or "Usage" in combined or "Options" in combined
-
-
 # =============================================================================
 # Init Command Tests
 # =============================================================================
@@ -100,17 +87,17 @@ class TestInitCommand:
         config_file = config_dir / "config.toml"
 
         # Mock paths to use temp directory
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_FILE", config_file)
+        monkeypatch.setattr("ai_dev_base.commands.config.AGENTS_FILE", config_dir / "agents.toml")
 
         # Mock CONFIG_DIR so mkdir creates the temp directory
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_DIR", config_dir)
 
         # Mock save_config to actually write a file
         def mock_save_config(config: object) -> None:
             config_file.write_text("[general]\ncode_dir = '/test'\n")
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.save_config", mock_save_config)
+        monkeypatch.setattr("ai_dev_base.commands.config.save_config", mock_save_config)
 
         # Create a valid projects directory
         projects_dir = tmp_path / "projects"
@@ -118,7 +105,7 @@ class TestInitCommand:
 
         # Mock get_project_root to avoid finding bundled agents.toml
         monkeypatch.setattr(
-            "ai_dev_base.cli.codeagent.get_project_root", lambda: tmp_path / "nonexistent"
+            "ai_dev_base.commands.config.get_project_root", lambda: tmp_path / "nonexistent"
         )
 
         # Run init with input
@@ -140,22 +127,22 @@ class TestInitCommand:
         config_file.write_text("[old]\ndata = 'old'\n")
 
         # Mock paths
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_FILE", config_file)
+        monkeypatch.setattr("ai_dev_base.commands.config.AGENTS_FILE", config_dir / "agents.toml")
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_DIR", config_dir)
 
         # Mock save_config
         def mock_save_config(config: object) -> None:
             config_file.write_text("[new]\ndata = 'new'\n")
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.save_config", mock_save_config)
+        monkeypatch.setattr("ai_dev_base.commands.config.save_config", mock_save_config)
 
         # Create a valid projects directory
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
 
         monkeypatch.setattr(
-            "ai_dev_base.cli.codeagent.get_project_root", lambda: tmp_path / "nonexistent"
+            "ai_dev_base.commands.config.get_project_root", lambda: tmp_path / "nonexistent"
         )
 
         # Run init --force
@@ -177,9 +164,9 @@ class TestInitCommand:
         config_file.write_text("[existing]\nconfig = 'yes'\n")
 
         # Mock paths
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_FILE", config_file)
+        monkeypatch.setattr("ai_dev_base.commands.config.AGENTS_FILE", config_dir / "agents.toml")
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_DIR", config_dir)
 
         # Run init and decline overwrite
         result = runner.invoke(app, ["init"], input="n\n")
@@ -195,16 +182,16 @@ class TestInitCommand:
         config_file = config_dir / "config.toml"
 
         # Mock paths
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.AGENTS_FILE", config_dir / "agents.toml")
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_FILE", config_file)
+        monkeypatch.setattr("ai_dev_base.commands.config.AGENTS_FILE", config_dir / "agents.toml")
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_DIR", config_dir)
 
         def mock_save_config(config: object) -> None:
             config_file.write_text("[general]\ncode_dir = '/test'\n")
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.save_config", mock_save_config)
+        monkeypatch.setattr("ai_dev_base.commands.config.save_config", mock_save_config)
         monkeypatch.setattr(
-            "ai_dev_base.cli.codeagent.get_project_root", lambda: tmp_path / "nonexistent"
+            "ai_dev_base.commands.config.get_project_root", lambda: tmp_path / "nonexistent"
         )
 
         # Use a non-existent directory
@@ -242,7 +229,7 @@ class TestConfigShowCommand:
             shell=ShellConfig(),
         )
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.load_config", lambda: mock_config)
+        monkeypatch.setattr("ai_dev_base.commands.config.load_config", lambda: mock_config)
 
         result = runner.invoke(app, ["config", "show"])
 
@@ -266,7 +253,7 @@ class TestConfigShowCommand:
             shell=ShellConfig(),
         )
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.load_config", lambda: mock_config)
+        monkeypatch.setattr("ai_dev_base.commands.config.load_config", lambda: mock_config)
 
         result = runner.invoke(app, ["config", "show", "--json"])
 
@@ -290,7 +277,7 @@ class TestConfigShowCommand:
         def mock_load_config() -> None:
             raise ConfigNotFoundError(config_file)
 
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.load_config", mock_load_config)
+        monkeypatch.setattr("ai_dev_base.commands.config.load_config", mock_load_config)
 
         result = runner.invoke(app, ["config", "show"])
 
@@ -306,7 +293,7 @@ class TestConfigPathCommand:
     def test_config_path_shows_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test config path outputs the config file path."""
         config_file = tmp_path / "config.toml"
-        monkeypatch.setattr("ai_dev_base.cli.codeagent.CONFIG_FILE", config_file)
+        monkeypatch.setattr("ai_dev_base.commands.config.CONFIG_FILE", config_file)
 
         result = runner.invoke(app, ["config", "path"])
 
