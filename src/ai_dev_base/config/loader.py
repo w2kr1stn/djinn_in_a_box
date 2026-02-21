@@ -63,11 +63,6 @@ def load_config(path: Path | None = None) -> AppConfig:
     Raises:
         ConfigNotFoundError: If config file does not exist.
         ConfigValidationError: If config is invalid.
-
-    Example:
-        >>> config = load_config()
-        >>> config.code_dir
-        PosixPath('/home/user/projects')
     """
     config_path = path or CONFIG_FILE
 
@@ -115,11 +110,6 @@ def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
 
     Returns:
         Dict mapping agent names to AgentConfig.
-
-    Example:
-        >>> agents = load_agents()
-        >>> agents["claude"].binary
-        'claude'
     """
     # Priority 1: Explicit path
     if path is not None:
@@ -193,10 +183,6 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
     Args:
         config: AppConfig to save.
         path: Target path. Defaults to CONFIG_FILE.
-
-    Example:
-        >>> config = AppConfig(code_dir=Path.home() / "projects")
-        >>> save_config(config)  # Saves to ~/.config/ai-dev-base/config.toml
     """
     config_path = path or CONFIG_FILE
 

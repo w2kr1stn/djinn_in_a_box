@@ -30,11 +30,6 @@ def get_project_root() -> Path:
     Raises:
         FileNotFoundError: If no docker-compose.yml can be found in any
             parent directory.
-
-    Example:
-        >>> root = get_project_root()
-        >>> (root / "docker-compose.yml").exists()
-        True
     """
     # Start from this module's directory
     current = Path(__file__).resolve().parent

@@ -14,19 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 def validate_memory_format(value: str) -> str:
-    """Validate Docker memory format string.
-
-    Accepts formats like "12G", "4096M", "2g", "512m".
-
-    Args:
-        value: Memory string to validate.
-
-    Returns:
-        Validated memory string (uppercase suffix).
-
-    Raises:
-        ValueError: If format is invalid.
-    """
+    """Validate and normalize Docker memory format (e.g. '12G', '4096m' -> '4096M')."""
     pattern = r"^[1-9]\d*[GMKgmk]$"
     if not re.match(pattern, value):
         msg = (
@@ -44,16 +32,6 @@ class AgentConfig(BaseModel):
     Defines how to invoke a specific agent (Claude, Gemini, Codex, etc.)
     including the binary name, various flags for different modes, and
     prompt injection template.
-
-    Example:
-        >>> agent = AgentConfig(
-        ...     binary="claude",
-        ...     description="Anthropic Claude Code CLI",
-        ...     headless_flags=["-p"],
-        ...     write_flags=["--dangerously-skip-permissions"],
-        ... )
-        >>> agent.binary
-        'claude'
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -88,13 +66,6 @@ class ResourceLimits(BaseModel):
 
     Defines CPU and memory limits and reservations for Docker containers.
     Memory values use Docker's format (e.g., '12G', '4096M').
-
-    Example:
-        >>> limits = ResourceLimits(cpu_limit=4, memory_limit="8G")
-        >>> limits.cpu_limit
-        4
-        >>> limits.memory_limit
-        '8G'
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -143,11 +114,6 @@ class ShellConfig(BaseModel):
 
     Controls whether host shell configurations (zshrc, oh-my-zsh, oh-my-posh)
     are mounted into the container.
-
-    Example:
-        >>> shell = ShellConfig(skip_mounts=True)
-        >>> shell.skip_mounts
-        True
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -181,13 +147,6 @@ class AppConfig(BaseModel):
     This is the root configuration model that combines all settings:
     project directory, timezone, resource limits, shell options, and
     optionally agent overrides.
-
-    Example:
-        >>> config = AppConfig(code_dir=Path.home() / "projects")
-        >>> config.timezone
-        'Europe/Berlin'
-        >>> config.resources.cpu_limit
-        6
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
