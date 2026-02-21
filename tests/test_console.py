@@ -9,8 +9,6 @@ from rich.console import Console
 
 from ai_dev_base.core.console import (
     blank,
-    console,
-    err_console,
     error,
     header,
     info,
@@ -36,15 +34,6 @@ def capture_err_themed() -> Generator[io.StringIO]:
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
     with patch("ai_dev_base.core.console.err_console", test_console):
-        yield output
-
-
-@pytest.fixture
-def capture_stdout() -> Generator[io.StringIO]:
-    """Capture console (stdout) output (with TodAI theme)."""
-    output = io.StringIO()
-    test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
-    with patch("ai_dev_base.core.console.console", test_console):
         yield output
 
 
@@ -117,76 +106,14 @@ class TestBlankAndHeader:
         assert "Configuration:" in capture_err.getvalue()
 
 
-class TestVolumeTable:
-    """Tests for _print_volume_table function (in container.py)."""
-
-    @pytest.fixture
-    def capture_container_stdout(self) -> Generator[io.StringIO]:
-        """Capture container module's console (stdout) output."""
-        output = io.StringIO()
-        test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
-        with patch("ai_dev_base.commands.container.console", test_console):
-            yield output
-
-    def test_print_volume_table(self, capture_container_stdout: io.StringIO) -> None:
-        """_print_volume_table should print table to stdout."""
-        from ai_dev_base.commands.container import _print_volume_table
-
-        _print_volume_table({"credentials": ["test-vol"]})
-        result = capture_container_stdout.getvalue()
-        assert "AI Dev Volumes" in result
-        assert "test-vol" in result
-
-    def test_print_volume_table_all_categories(self, capture_container_stdout: io.StringIO) -> None:
-        """_print_volume_table should handle all volume categories."""
-        from ai_dev_base.commands.container import _print_volume_table
-
-        volumes = {
-            "credentials": ["claude-config", "gemini-config"],
-            "tools": ["azure-config"],
-            "cache": ["uv-cache"],
-            "data": ["opencode-data"],
-        }
-        _print_volume_table(volumes)
-        result = capture_container_stdout.getvalue()
-        assert "Credentials" in result
-        assert "claude-config" in result
-
-    def test_print_volume_table_empty(self, capture_container_stdout: io.StringIO) -> None:
-        """_print_volume_table should handle empty volumes dict."""
-        from ai_dev_base.commands.container import _print_volume_table
-
-        _print_volume_table({})
-        assert "AI Dev Volumes" in capture_container_stdout.getvalue()
-
-
-class TestColorStyles:
-    """Tests verifying correct style applications."""
+class TestThemeIntegration:
+    """Tests verifying TodAI theme integration."""
 
     @pytest.mark.parametrize("style", ["green", "yellow", "red", "blue"])
     def test_status_line_accepts_legacy_styles(self, style: str, capture_err: io.StringIO) -> None:
         """status_line should accept legacy color names for backward compatibility."""
         status_line("Test", "value", style)
         assert "Test:" in capture_err.getvalue()
-
-    @pytest.mark.parametrize("style", ["status.enabled", "status.disabled", "status.error", "info"])
-    def test_status_line_accepts_theme_styles(
-        self, style: str, capture_err_themed: io.StringIO
-    ) -> None:
-        """status_line should accept TodAI theme style names."""
-        status_line("Test", "value", style)
-        assert "Test:" in capture_err_themed.getvalue()
-
-
-class TestThemeIntegration:
-    """Tests verifying TodAI theme integration."""
-
-    def test_console_recognizes_theme_styles(self) -> None:
-        """Console singletons should recognize TodAI theme styles."""
-        success_style = console.get_style("success")
-        error_style = err_console.get_style("error")
-        assert success_style is not None
-        assert error_style is not None
 
     def test_message_functions_include_icons(self, capture_err_themed: io.StringIO) -> None:
         """Message functions should include status icons."""

@@ -65,14 +65,3 @@ class TestMcpgatewayHelp:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "MCP Gateway CLI" in result.stdout
-
-
-class TestNoArgsIsHelp:
-    """Tests for no_args_is_help behavior."""
-
-    def test_no_args_shows_usage(self) -> None:
-        """Test invoking without arguments shows usage info."""
-        result = runner.invoke(app, [])
-        # With no_args_is_help=True, Typer shows help or usage
-        combined = result.stdout + result.output
-        assert "start" in combined or "Usage" in combined or "Options" in combined

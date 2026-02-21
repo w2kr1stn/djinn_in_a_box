@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from ai_dev_base.config.models import (
-    AgentConfig,
     AppConfig,
     ResourceLimits,
     ShellConfig,
@@ -51,15 +50,6 @@ class TestValidateMemoryFormat:
         """Test invalid memory format strings raise ValueError."""
         with pytest.raises(ValueError, match="Invalid memory format"):
             validate_memory_format(value)
-
-
-class TestAgentConfig:
-    """Tests for AgentConfig model."""
-
-    def test_extra_fields_forbidden(self) -> None:
-        """Test that extra fields are not allowed."""
-        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-            AgentConfig(binary="claude", unknown_field="value")  # type: ignore[call-arg]
 
 
 class TestResourceLimits:

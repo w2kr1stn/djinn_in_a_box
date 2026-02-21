@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ import typer
 
 from ai_dev_base.commands.agent import build_agent_command
 from ai_dev_base.config.models import AgentConfig
+from ai_dev_base.core.docker import RunResult
 
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AppConfig
@@ -41,36 +43,6 @@ def gemini_config() -> AgentConfig:
         read_only_flags=[],
         write_flags=[],
         json_flags=["--output-format", "json"],
-        model_flag="-m",
-        prompt_template='"$AGENT_PROMPT"',
-    )
-
-
-@pytest.fixture
-def codex_config() -> AgentConfig:
-    """Codex agent configuration for testing."""
-    return AgentConfig(
-        binary="codex",
-        description="OpenAI Codex CLI",
-        headless_flags=["exec"],
-        read_only_flags=[],
-        write_flags=["--full-auto"],
-        json_flags=["--json"],
-        model_flag="--model",
-        prompt_template='"$AGENT_PROMPT"',
-    )
-
-
-@pytest.fixture
-def opencode_config() -> AgentConfig:
-    """OpenCode agent configuration for testing."""
-    return AgentConfig(
-        binary="opencode",
-        description="Anomaly OpenCode CLI",
-        headless_flags=["run"],
-        read_only_flags=["--agent", "plan"],
-        write_flags=[],
-        json_flags=["--format", "json"],
         model_flag="-m",
         prompt_template='"$AGENT_PROMPT"',
     )
@@ -214,7 +186,6 @@ class TestRunCommand:
         """Provide mock app configuration."""
         from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
 
-        # Create a valid projects dir
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
 
@@ -223,6 +194,21 @@ class TestRunCommand:
             resources=ResourceLimits(),
             shell=ShellConfig(),
         )
+
+    @pytest.fixture
+    def run_mocks(
+        self, mock_agent_configs: dict[str, AgentConfig], mock_app_config: AppConfig
+    ) -> Generator[dict[str, Any]]:
+        """Common mocks for run command tests."""
+        with (
+            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
+            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("ai_dev_base.commands.agent.ensure_network", return_value=True),
+            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
+            patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
+        ):
+            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+            yield {"run": mock_run, "cleanup": mock_cleanup}
 
     def test_run_validates_agent_name(
         self,
@@ -241,128 +227,62 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
 
-    def test_run_calls_compose_run(
-        self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
-    ) -> None:
+    def test_run_calls_compose_run(self, run_mocks: dict[str, Any]) -> None:
         """Test run calls compose_run with correct parameters."""
         from ai_dev_base.commands.agent import run
-        from ai_dev_base.core.docker import RunResult
 
-        with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
-            patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
-            pytest.raises(typer.Exit),
-        ):
-            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+        with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test prompt")
 
+        mock_run = run_mocks["run"]
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args[1]
         assert "AGENT_PROMPT" in call_kwargs["env"]
         assert call_kwargs["env"]["AGENT_PROMPT"] == "test prompt"
         assert call_kwargs["interactive"] is False
 
-    def test_run_with_write_flag(
-        self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
-    ) -> None:
+    def test_run_with_write_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --write uses write_flags."""
         from ai_dev_base.commands.agent import run
-        from ai_dev_base.core.docker import RunResult
 
-        with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
-            patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
-            pytest.raises(typer.Exit),
-        ):
-            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+        with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", write=True)
 
-        call_kwargs = mock_run.call_args[1]
+        call_kwargs = run_mocks["run"].call_args[1]
         assert "--dangerously-skip-permissions" in call_kwargs["command"]
 
-    def test_run_with_timeout(
-        self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
-    ) -> None:
+    def test_run_with_timeout(self, run_mocks: dict[str, Any]) -> None:
         """Test run --timeout passes timeout value."""
         from ai_dev_base.commands.agent import run
-        from ai_dev_base.core.docker import RunResult
 
-        with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
-            patch("ai_dev_base.commands.agent.cleanup_docker_proxy"),
-            pytest.raises(typer.Exit),
-        ):
-            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+        with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", timeout=300)
 
-        call_kwargs = mock_run.call_args[1]
+        call_kwargs = run_mocks["run"].call_args[1]
         assert call_kwargs["timeout"] == 300
 
-    def test_run_with_docker_flag(
-        self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
-    ) -> None:
+    def test_run_with_docker_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker enables docker option."""
         from ai_dev_base.commands.agent import run
-        from ai_dev_base.core.docker import RunResult
 
-        with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
-            patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
-            pytest.raises(typer.Exit),
-        ):
-            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+        with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker=True)
 
-        call_args = mock_run.call_args[0]
-        options = call_args[1]
+        options = run_mocks["run"].call_args[0][1]
         assert options.docker_enabled is True
-        mock_cleanup.assert_called_once_with(True)
+        run_mocks["cleanup"].assert_called_once_with(True)
 
-    def test_run_with_docker_direct_flag(
-        self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
-    ) -> None:
+    def test_run_with_docker_direct_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker-direct sets docker_direct option and skips proxy cleanup."""
         from ai_dev_base.commands.agent import run
-        from ai_dev_base.core.docker import RunResult
 
-        with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("ai_dev_base.commands.agent.ensure_network"),
-            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
-            patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
-            pytest.raises(typer.Exit),
-        ):
-            mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
+        with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker_direct=True)
 
-        call_args = mock_run.call_args[0]
-        options = call_args[1]
+        options = run_mocks["run"].call_args[0][1]
         assert options.docker_direct is True
         assert options.docker_enabled is False
-        mock_cleanup.assert_called_once_with(False)
+        run_mocks["cleanup"].assert_called_once_with(False)
 
     def test_run_docker_and_direct_mutually_exclusive(
         self,
