@@ -1,0 +1,104 @@
+[project]
+name = "djinn-in-a-box"
+version = "1.0.0"
+description = "Djinn in a Box - CLI tools for managing AI development containers"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Djinn in a Box Team" }]
+keywords = ["cli", "docker", "ai", "development"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=13.9.0",
+    "pydantic>=2.10.0",
+    "tomli-w>=1.0.0",
+]
+
+[project.scripts]
+fmt = "devops:format_code"
+test = "devops:test"
+clean = "devops:clean"
+djinn = "djinn_in_a_box.cli.djinn:app"
+mcpgateway = "djinn_in_a_box.cli.mcpgateway:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/djinn_in_a_box"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"devops.py" = "devops.py"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.8.3",
+    "pytest>=9.0.2",
+    "pytest-cov>=6.0.0",
+    "pyright>=1.1.408",
+    "ruff>=0.14.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/w2kr1stn/djinn_in_a_box"
+Repository = "https://github.com/w2kr1stn/djinn_in_a_box"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "N",   # pep8-naming
+    "B",   # flake8-bugbear
+    "I",   # isort
+    "UP",  # pyupgrade
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "B008",  # FastAPI Depends() pattern in argument defaults
+    "UP047", # Generic functions can use legacy TypeVar syntax (both are valid)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnusedImport = true
+reportUnusedVariable = true
+reportUnusedFunction = "warning"
+reportPrivateUsage = "warning"
+reportConstantRedefinition = "error"
+reportIncompatibleMethodOverride = "error"
+reportIncompatibleVariableOverride = "error"
+reportGeneralTypeIssues = "error"
+
+[tool.bandit]
+exclude_dirs = [".venv", "venv", "tests"]
+skips = []
+# Fail on Medium and High severity (ISO 27001 compliance)
+# Run with: uv run bandit -c pyproject.toml -r .
