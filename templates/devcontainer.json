@@ -1,0 +1,99 @@
+{
+    // ===========================================================================
+    // Project DevContainer - Uses djinn-in-a-box image
+    // ===========================================================================
+    // Copy this file to: your-project/.devcontainer/devcontainer.json
+    // ===========================================================================
+    "name": "Project Dev Environment",
+    // Use the pre-built base image
+    "image": "djinn-in-a-box:latest",
+    // -------------------------------------------------------------------------
+    // Workspace: Mount project directory into container
+    // -------------------------------------------------------------------------
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/dev/project,type=bind",
+    "workspaceFolder": "/home/dev/project",
+    // -------------------------------------------------------------------------
+    // Network: Connect to djinn-network (where MCP Gateway runs)
+    // -------------------------------------------------------------------------
+    "runArgs": [
+        "--network=djinn-network",
+        "--cap-add=NET_ADMIN"
+    ],
+    // -------------------------------------------------------------------------
+    // Environment: MCP Gateway URL
+    // -------------------------------------------------------------------------
+    "containerEnv": {
+        "MCP_GATEWAY_URL": "http://mcp-gateway:8811"
+    },
+    // -------------------------------------------------------------------------
+    // Persistent mounts (same as docker-compose, keeps credentials)
+    // -------------------------------------------------------------------------
+    "mounts": [
+        // Tool credentials & cache (Docker volumes)
+        "source=djinn-claude-config,target=/home/dev/.claude,type=volume",
+        "source=djinn-gemini-config,target=/home/dev/.gemini,type=volume",
+        "source=djinn-codex-config,target=/home/dev/.codex,type=volume",
+        "source=djinn-opencode-config,target=/home/dev/.opencode,type=volume",
+        "source=djinn-uv-cache,target=/home/dev/.cache/uv,type=volume",
+        "source=djinn-sops-config,target=/home/dev/.config/sops,type=volume",
+        // VS Code Server (persistent extensions & settings)
+        "source=djinn-vscode-server,target=/home/dev/.vscode-server,type=volume",
+        // VS Code Workspaces (persistent .code-workspace files)
+        "source=djinn-vscode-workspaces,target=/home/dev/workspaces,type=volume",
+        // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
+        "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
+    ],
+    // -------------------------------------------------------------------------
+    // User settings
+    // -------------------------------------------------------------------------
+    "remoteUser": "dev",
+    "containerUser": "dev",
+    // -------------------------------------------------------------------------
+    // VS Code extensions (optional - add what you need)
+    // -------------------------------------------------------------------------
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                // AI
+                "anthropic.claude-code",
+                // Python
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "charliermarsh.ruff",
+                // Git & CI
+                "eamodio.gitlens",
+                "github.vscode-github-actions",
+                // Docker
+                "ms-azuretools.vscode-docker",
+                // Theme & UI
+                "dcasella.monokai-plusplus",
+                "vscode-icons-team.vscode-icons",
+                "oderwat.indent-rainbow",
+                // General
+                "tamasfe.even-better-toml",
+                "editorconfig.editorconfig",
+                "esbenp.prettier-vscode"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "zsh"
+            }
+        }
+    }
+    // -------------------------------------------------------------------------
+    // Project-specific setup (customize per project)
+    // -------------------------------------------------------------------------
+    // "postCreateCommand": "uv sync",
+    // -------------------------------------------------------------------------
+    // Add project-specific tools via features (examples below)
+    // -------------------------------------------------------------------------
+    // "features": {
+    //   // Add Python
+    //   "ghcr.io/devcontainers/features/go:1": {},
+    //   // Add Rust
+    //   "ghcr.io/devcontainers/features/rust:1": {},
+    // }
+    // -------------------------------------------------------------------------
+    // NOTE: For OAuth authentication, first use `djinn auth` from the
+    // djinn-in-a-box directory to authenticate with host network.
+    // -------------------------------------------------------------------------
+}
