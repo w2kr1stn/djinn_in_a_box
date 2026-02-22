@@ -9,7 +9,7 @@ from typing import Annotated
 
 import typer
 
-from ai_dev_base.config import load_config, save_config
+from ai_dev_base.config.loader import load_config, save_config
 from ai_dev_base.config.models import AppConfig
 from ai_dev_base.core.console import console, error, info, success, warning
 from ai_dev_base.core.decorators import handle_config_errors
@@ -79,12 +79,12 @@ def init_config(
     # Copy bundled agents.toml if user config does not exist
     if not AGENTS_FILE.exists():
         try:
-            bundled_path: Path | None = get_project_root() / "config" / "agents.toml"
+            bundled = get_project_root() / "config" / "agents.toml"
         except FileNotFoundError:
-            bundled_path = None
+            bundled = None
 
-        if bundled_path and bundled_path.exists():
-            shutil.copy(bundled_path, AGENTS_FILE)
+        if bundled and bundled.exists():
+            shutil.copy(bundled, AGENTS_FILE)
             success(f"Agent definitions copied to {AGENTS_FILE}")
         else:
             warning("Bundled agents.toml not found. Using built-in defaults.")

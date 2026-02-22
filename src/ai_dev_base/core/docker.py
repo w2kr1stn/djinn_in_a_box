@@ -275,7 +275,7 @@ def compose_run(
                 stderr=result.stderr,
             )
     except subprocess.TimeoutExpired as e:
-        # text=True means stdout/stderr are already str (not bytes)
+        # Typeshed types stdout/stderr as bytes | None; str() satisfies Pyright
         stdout = str(e.stdout) if e.stdout is not None else ""
         stderr = str(e.stderr) if e.stderr is not None else f"Timeout after {timeout}s"
         # Return code 124 is conventional for timeout (like GNU timeout command)

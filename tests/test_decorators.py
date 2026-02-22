@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from ai_dev_base.config import ConfigNotFoundError, ConfigValidationError
+from ai_dev_base.config.loader import ConfigNotFoundError, ConfigValidationError
 from ai_dev_base.core.decorators import handle_config_errors
 
 

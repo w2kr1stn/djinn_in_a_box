@@ -270,7 +270,7 @@ class TestConfigShowCommand:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test config show shows error when config not found."""
-        from ai_dev_base.config import ConfigNotFoundError
+        from ai_dev_base.config.loader import ConfigNotFoundError
 
         config_file = tmp_path / "nonexistent" / "config.toml"
 

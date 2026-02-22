@@ -11,11 +11,8 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
-from ai_dev_base.config import (
-    VOLUME_CATEGORIES,
-    ConfigNotFoundError,
-    load_config,
-)
+from ai_dev_base.config.defaults import VOLUME_CATEGORIES
+from ai_dev_base.config.loader import ConfigNotFoundError, load_config
 from ai_dev_base.core.console import (
     blank,
     console,

@@ -8,7 +8,7 @@ from typing import ParamSpec, TypeVar
 
 import typer
 
-from ai_dev_base.config import ConfigNotFoundError, ConfigValidationError
+from ai_dev_base.config.loader import ConfigNotFoundError, ConfigValidationError
 from ai_dev_base.core.console import error
 
 P = ParamSpec("P")

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from ai_dev_base.config import load_agents, load_config
+from ai_dev_base.config.loader import load_agents, load_config
 from ai_dev_base.core.console import console, err_console, error, info, status_line
 from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
