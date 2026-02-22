@@ -7,11 +7,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import typer
+
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AppConfig
 
-from ai_dev_base.core.console import warning
+from ai_dev_base.core.console import error, warning
 from ai_dev_base.core.paths import get_project_root
+
+AI_DEV_NETWORK: str = "ai-dev-network"
+"""Docker network name for AI Dev containers."""
+
+
+def check_docker_flags(docker: bool, docker_direct: bool) -> None:
+    """Validate that --docker and --docker-direct are not both specified."""
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
 
 @dataclass
@@ -59,7 +71,7 @@ def _docker_list(cmd: list[str]) -> list[str]:
     return [line for line in result.stdout.strip().split("\n") if line]
 
 
-def network_exists(name: str = "ai-dev-network") -> bool:
+def network_exists(name: str = AI_DEV_NETWORK) -> bool:
     """Check if a Docker network exists."""
     return _docker_inspect("network", name)
 
@@ -79,7 +91,7 @@ def delete_network(name: str) -> bool:
     return result.returncode == 0
 
 
-def ensure_network(name: str = "ai-dev-network") -> bool:
+def ensure_network(name: str = AI_DEV_NETWORK) -> bool:
     """Ensure Docker network exists, creating it if needed. Returns True on success."""
     if _docker_inspect("network", name):
         return True
@@ -415,11 +427,3 @@ def delete_volume(name: str) -> bool:
 def delete_volumes(names: list[str]) -> dict[str, bool]:
     """Delete multiple volumes. Returns dict mapping name to success status."""
     return {name: delete_volume(name) for name in names}
-
-
-def get_existing_volumes_by_category(category: str) -> list[str]:
-    """Get existing volume names for a category (credentials/tools/cache/data)."""
-    from ai_dev_base.config.defaults import VOLUME_CATEGORIES
-
-    defined_volumes = VOLUME_CATEGORIES.get(category, [])
-    return [vol for vol in defined_volumes if volume_exists(vol)]

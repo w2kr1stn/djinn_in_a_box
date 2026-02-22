@@ -18,7 +18,6 @@ from ai_dev_base.core.docker import (
     delete_volumes,
     ensure_network,
     get_compose_files,
-    get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
     is_container_running,
@@ -477,31 +476,6 @@ class TestCleanupDockerProxy:
         second_call = mock_run.call_args_list[1][0][0]
         assert "rm" in second_call
         assert "docker-proxy" in second_call
-
-
-class TestGetExistingVolumesByCategory:
-    """Tests for get_existing_volumes_by_category function."""
-
-    @patch("ai_dev_base.core.docker.volume_exists")
-    def test_filters_existing_volumes(self, mock_exists: MagicMock) -> None:
-        """Test returns only volumes that exist."""
-
-        # Mock volume_exists to return True for some volumes
-        def exists_side_effect(name: str) -> bool:
-            return name in ["ai-dev-claude-config", "ai-dev-gemini-config"]
-
-        mock_exists.side_effect = exists_side_effect
-
-        volumes = get_existing_volumes_by_category("credentials")
-        assert "ai-dev-claude-config" in volumes
-        assert "ai-dev-gemini-config" in volumes
-
-    @patch("ai_dev_base.core.docker.volume_exists")
-    def test_returns_empty_for_unknown_category(self, mock_exists: MagicMock) -> None:
-        """Test returns empty list for unknown category."""
-        mock_exists.return_value = True
-        volumes = get_existing_volumes_by_category("unknown")
-        assert volumes == []
 
 
 class TestComposeRunErrorHandling:

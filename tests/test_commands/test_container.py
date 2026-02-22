@@ -203,7 +203,7 @@ class TestStatusCommand:
             patch("ai_dev_base.commands.container.load_config") as mock_load,
             patch("subprocess.run") as mock_run,
             patch(
-                "ai_dev_base.commands.container.get_existing_volumes_by_category", return_value=[]
+                "ai_dev_base.commands.container._get_existing_volumes_by_category", return_value=[]
             ),
             patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.is_container_running", return_value=False),
@@ -227,7 +227,7 @@ class TestStatusCommand:
             patch("ai_dev_base.commands.container.load_config") as mock_load,
             patch("subprocess.run") as mock_run,
             patch(
-                "ai_dev_base.commands.container.get_existing_volumes_by_category", return_value=[]
+                "ai_dev_base.commands.container._get_existing_volumes_by_category", return_value=[]
             ),
             patch("ai_dev_base.commands.container.network_exists", return_value=True),
             patch("ai_dev_base.commands.container.is_container_running", return_value=False),
@@ -263,7 +263,7 @@ class TestCleanVolumesCommand:
 
     def test_clean_volumes_lists_without_flags(self) -> None:
         """Test clean volumes without flags lists volumes."""
-        with patch("ai_dev_base.commands.container.get_existing_volumes_by_category") as mock_get:
+        with patch("ai_dev_base.commands.container._get_existing_volumes_by_category") as mock_get:
             mock_get.return_value = ["ai-dev-claude-config"]
 
             container.clean_volumes()
@@ -274,7 +274,7 @@ class TestCleanVolumesCommand:
     def test_clean_volumes_deletes_credentials(self) -> None:
         """Test clean volumes --credentials deletes credential volumes."""
         with (
-            patch("ai_dev_base.commands.container.get_existing_volumes_by_category") as mock_get,
+            patch("ai_dev_base.commands.container._get_existing_volumes_by_category") as mock_get,
             patch("ai_dev_base.commands.container.delete_volumes") as mock_delete,
         ):
             mock_get.return_value = ["ai-dev-claude-config"]

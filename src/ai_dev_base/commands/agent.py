@@ -13,7 +13,9 @@ from ai_dev_base.config import load_agents, load_config
 from ai_dev_base.core.console import console, err_console, error, info, status_line
 from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
+    AI_DEV_NETWORK,
     ContainerOptions,
+    check_docker_flags,
     cleanup_docker_proxy,
     compose_run,
     ensure_network,
@@ -128,9 +130,7 @@ def run(
         # With Docker access and timeout
         codeagent run claude "Build the Docker image" --docker --timeout 300
     """
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
+    check_docker_flags(docker, docker_direct)
 
     app_config = load_config()
     agent_configs = load_agents()
@@ -146,7 +146,7 @@ def run(
 
     # Ensure Docker network exists
     if not ensure_network():
-        error("Failed to create Docker network 'ai-dev-network'")
+        error(f"Failed to create Docker network '{AI_DEV_NETWORK}'")
         raise typer.Exit(1)
 
     # Determine workspace path (implicit --here: default to cwd)

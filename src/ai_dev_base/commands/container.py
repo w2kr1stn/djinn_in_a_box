@@ -29,7 +29,9 @@ from ai_dev_base.core.console import (
 )
 from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
+    AI_DEV_NETWORK,
     ContainerOptions,
+    check_docker_flags,
     cleanup_docker_proxy,
     compose_build,
     compose_down,
@@ -39,7 +41,6 @@ from ai_dev_base.core.docker import (
     delete_volume,
     delete_volumes,
     ensure_network,
-    get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
     is_container_running,
@@ -47,6 +48,12 @@ from ai_dev_base.core.docker import (
     volume_exists,
 )
 from ai_dev_base.core.paths import get_project_root, resolve_mount_path
+
+
+def _get_existing_volumes_by_category(category: str) -> list[str]:
+    """Get existing volume names for a category (credentials/tools/cache/data)."""
+    defined_volumes = VOLUME_CATEGORIES.get(category, [])
+    return [vol for vol in defined_volumes if volume_exists(vol)]
 
 
 def build(
@@ -108,14 +115,12 @@ def start(
         codeagent start --here                  # Mount cwd as workspace
         codeagent start -d -f --here            # Full options
     """
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
+    check_docker_flags(docker, docker_direct)
 
     config = load_config()
 
     if not ensure_network():
-        error("Failed to create Docker network 'ai-dev-network'")
+        error(f"Failed to create Docker network '{AI_DEV_NETWORK}'")
         raise typer.Exit(1)
 
     # Resolve mount path
@@ -211,9 +216,7 @@ def auth(
         codeagent auth --docker          # With Docker access (proxy)
         codeagent auth --docker-direct   # With Docker access (direct)
     """
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
+    check_docker_flags(docker, docker_direct)
 
     config = load_config()
 
@@ -326,7 +329,7 @@ def status() -> None:
     # Volumes
     header("Volumes")
     categorized = {
-        cat: vols for cat in VOLUME_CATEGORIES if (vols := get_existing_volumes_by_category(cat))
+        cat: vols for cat in VOLUME_CATEGORIES if (vols := _get_existing_volumes_by_category(cat))
     }
     if categorized:
         _print_volume_table(categorized)
@@ -470,7 +473,7 @@ def clean_volumes(
         categorized = {
             cat: vols
             for cat in VOLUME_CATEGORIES
-            if (vols := get_existing_volumes_by_category(cat))
+            if (vols := _get_existing_volumes_by_category(cat))
         }
         if categorized:
             _print_volume_table(categorized)
@@ -482,7 +485,7 @@ def clean_volumes(
 
     # Delete volumes in selected categories
     for category in categories_to_delete:
-        volumes = get_existing_volumes_by_category(category)
+        volumes = _get_existing_volumes_by_category(category)
         if not volumes:
             warning(f"No existing volumes in category '{category}'")
             continue
@@ -537,11 +540,11 @@ def clean_all(
 
     # Remove network
     info("Removing network...")
-    if network_exists("ai-dev-network"):
-        if delete_network("ai-dev-network"):
-            success("  Deleted: ai-dev-network")
+    if network_exists(AI_DEV_NETWORK):
+        if delete_network(AI_DEV_NETWORK):
+            success(f"  Deleted: {AI_DEV_NETWORK}")
     else:
-        err_console.print("  ai-dev-network does not exist")
+        err_console.print(f"  {AI_DEV_NETWORK} does not exist")
 
     blank()
     success("Cleanup complete.")

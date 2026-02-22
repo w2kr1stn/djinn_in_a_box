@@ -17,12 +17,6 @@ def mock_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def project_root() -> Path:
-    """Return the actual project root directory."""
-    return Path(__file__).parent.parent
-
-
-@pytest.fixture
 def change_dir(tmp_path: Path) -> Generator[Path]:
     """Temporarily change working directory to tmp_path."""
     original_cwd = Path.cwd()

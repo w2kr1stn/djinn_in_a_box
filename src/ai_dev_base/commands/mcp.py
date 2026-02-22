@@ -11,7 +11,12 @@ from typing import Annotated
 import typer
 
 from ai_dev_base.core.console import console, err_console, error, header, info, success, warning
-from ai_dev_base.core.docker import delete_network, ensure_network, is_container_running
+from ai_dev_base.core.docker import (
+    AI_DEV_NETWORK,
+    delete_network,
+    ensure_network,
+    is_container_running,
+)
 from ai_dev_base.core.paths import get_project_root
 
 GATEWAY_CONTAINER: str = "mcp-gateway"
@@ -22,9 +27,6 @@ GATEWAY_ENDPOINT_CONTAINER: str = "http://mcp-gateway:8811"
 
 GATEWAY_ENDPOINT_HOST: str = "http://localhost:8811"
 """MCP Gateway endpoint accessible from the host."""
-
-AI_DEV_NETWORK: str = "ai-dev-network"
-"""Docker network name for AI Dev containers."""
 
 
 def _get_mcp_dir() -> Path:
