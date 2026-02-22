@@ -1,0 +1,109 @@
+# =============================================================================
+# Djinn in a Box - Docker Socket Override
+# =============================================================================
+# Aktiviert Docker-Zugriff via sicherem Socket Proxy.
+# Wird automatisch geladen wenn: djinn start --docker
+#
+# Sicherheitsfeatures:
+#   - Docker Socket Proxy filtert gefaehrliche API-Aufrufe
+#   - Kein direkter Socket-Zugriff fuer den Dev-Container
+#   - Audit-Logging aller Docker-Operationen
+#   - Resource Limits fuer gespawnte Container
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Docker Socket Proxy (Sicherheitsschicht)
+  # ---------------------------------------------------------------------------
+  # Filtert Docker API Aufrufe und blockiert gefährliche Operationen.
+  # Dokumentation: https://github.com/Tecnativa/docker-socket-proxy
+  # ---------------------------------------------------------------------------
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: djinn-docker-proxy
+    
+    environment:
+      # -----------------------------------------------------------------------
+      # Erlaubte Operationen (1 = erlaubt, 0 = blockiert)
+      # -----------------------------------------------------------------------
+      # Lese-Operationen (sicher)
+      - CONTAINERS=1      # Container auflisten, inspizieren
+      - IMAGES=1          # Images auflisten, inspizieren
+      - NETWORKS=1        # Netzwerke auflisten
+      - VOLUMES=1         # Volumes auflisten
+      - INFO=1            # Docker Info abrufen
+      - VERSION=1         # Docker Version abrufen
+      
+      # Schreib-Operationen (kontrolliert erlaubt)
+      - POST=1            # POST-Requests (Container starten, etc.)
+      - ALLOW_START=1     # Container starten
+      - ALLOW_STOP=1      # Container stoppen
+      - ALLOW_RESTARTS=1  # Container neustarten
+      
+      # -----------------------------------------------------------------------
+      # Blockierte Operationen (Sicherheitskritisch)
+      # -----------------------------------------------------------------------
+      - BUILD=0           # Image Build (könnte Secrets leaken)
+      - COMMIT=0          # Container zu Image committen
+      - EXEC=0            # Exec in laufende Container (Escape-Risiko)
+      - SWARM=0           # Swarm-Operationen
+      - SECRETS=0         # Docker Secrets
+      - CONFIGS=0         # Docker Configs
+      - PLUGINS=0         # Plugin-Management
+      - SERVICES=0        # Swarm Services
+      - TASKS=0           # Swarm Tasks
+      - NODES=0           # Swarm Nodes
+      - AUTH=0            # Registry Auth (verhindert Credential-Leak)
+      
+      # Logging
+      - LOG_LEVEL=info
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    networks:
+      - djinn-network
+    
+    # Proxy läuft als root (erforderlich für Socket-Zugriff)
+    # aber der exponierte Port ist nur intern erreichbar
+    expose:
+      - "2375"
+    
+    # Healthcheck für Abhängigkeiten
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:2375/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    
+    restart: unless-stopped
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # Dev Container Erweiterung (Docker-Zugriff via Proxy)
+  # ---------------------------------------------------------------------------
+  dev:
+    depends_on:
+      docker-proxy:
+        condition: service_healthy
+    
+    environment:
+      # Docker CLI verbindet sich zum Proxy, nicht direkt zum Socket
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      # Marker für entrypoint.sh
+      - DOCKER_ENABLED=true
+
+  # ---------------------------------------------------------------------------
+  # Auth Container Erweiterung
+  # ---------------------------------------------------------------------------
+  dev-auth:
+    environment:
+      # Bei Host-Network: Proxy auf localhost
+      - DOCKER_HOST=tcp://localhost:2375
+      - DOCKER_ENABLED=true
