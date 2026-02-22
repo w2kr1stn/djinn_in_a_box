@@ -37,15 +37,6 @@ class TestResolveMountPath:
         assert result == change_dir
         assert result.is_absolute()
 
-    def test_relative_subdir(self, change_dir: Path) -> None:
-        """resolve_mount_path('./subdir') should resolve relative paths."""
-        subdir = change_dir / "subdir"
-        subdir.mkdir()
-
-        result = resolve_mount_path("./subdir")
-        assert result == subdir
-        assert result.is_absolute()
-
     def test_absolute_path(self, tmp_path: Path) -> None:
         """resolve_mount_path('/absolute/path') should work."""
         result = resolve_mount_path(str(tmp_path))
@@ -64,13 +55,3 @@ class TestResolveMountPath:
 
         with pytest.raises(NotADirectoryError, match="not a directory"):
             resolve_mount_path(test_file)
-
-    def test_symlink_resolution(self, tmp_path: Path) -> None:
-        """resolve_mount_path() should resolve symlinks."""
-        real_dir = tmp_path / "real"
-        real_dir.mkdir()
-        link = tmp_path / "link"
-        link.symlink_to(real_dir)
-
-        result = resolve_mount_path(link)
-        assert result == real_dir

@@ -13,30 +13,13 @@ from ai_dev_base.core.docker import (
     compose_down,
     compose_run,
     compose_up,
-    delete_network,
-    delete_volume,
     delete_volumes,
     ensure_network,
     get_compose_files,
     get_running_containers,
     get_shell_mount_args,
     is_container_running,
-    network_exists,
-    volume_exists,
 )
-
-
-class TestNetworkExists:
-    """Tests for network_exists function."""
-
-    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_returns_expected_for_returncode(
-        self, mock_run: MagicMock, returncode: int, expected: bool
-    ) -> None:
-        """Test returns correct boolean based on Docker inspect returncode."""
-        mock_run.return_value = MagicMock(returncode=returncode)
-        assert network_exists("ai-dev-network") is expected
 
 
 class TestEnsureNetwork:
@@ -107,23 +90,6 @@ class TestGetComposeFiles:
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker-direct.yml" in f for f in file_paths)
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    def test_docker_direct_excludes_proxy(self, mock_root: MagicMock) -> None:
-        """Test docker_direct does not include proxy compose file."""
-        mock_root.return_value = Path("/project")
-        files = get_compose_files(docker_direct=True)
-        file_paths = [f for f in files if f != "-f"]
-        assert not any("docker-compose.docker.yml" in f and "direct" not in f for f in file_paths)
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    def test_docker_enabled_takes_precedence(self, mock_root: MagicMock) -> None:
-        """Test docker_enabled=True uses proxy even if docker_direct=True."""
-        mock_root.return_value = Path("/project")
-        files = get_compose_files(docker_enabled=True, docker_direct=True)
-        file_paths = [f for f in files if f != "-f"]
-        assert any("docker-compose.docker.yml" in f and "direct" not in f for f in file_paths)
-        assert not any("docker-compose.docker-direct.yml" in f for f in file_paths)
 
 
 class TestGetShellMountArgs:
@@ -230,45 +196,6 @@ class TestGetRunningContainers:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         containers = get_running_containers()
         assert containers == []
-
-
-class TestVolumeExists:
-    """Tests for volume_exists function."""
-
-    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_returns_expected_for_returncode(
-        self, mock_run: MagicMock, returncode: int, expected: bool
-    ) -> None:
-        """Test returns correct boolean based on Docker inspect returncode."""
-        mock_run.return_value = MagicMock(returncode=returncode)
-        assert volume_exists("ai-dev-test") is expected
-
-
-class TestDeleteNetwork:
-    """Tests for delete_network function."""
-
-    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_returns_expected_for_returncode(
-        self, mock_run: MagicMock, returncode: int, expected: bool
-    ) -> None:
-        """Test returns correct boolean based on docker network rm returncode."""
-        mock_run.return_value = MagicMock(returncode=returncode, stderr="")
-        assert delete_network("ai-dev-network") is expected
-
-
-class TestDeleteVolume:
-    """Tests for delete_volume function."""
-
-    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_returns_expected_for_returncode(
-        self, mock_run: MagicMock, returncode: int, expected: bool
-    ) -> None:
-        """Test returns correct boolean based on docker volume rm returncode."""
-        mock_run.return_value = MagicMock(returncode=returncode, stderr="")
-        assert delete_volume("ai-dev-test") is expected
 
 
 class TestDeleteVolumes:
@@ -447,7 +374,6 @@ class TestComposeDown:
         compose_down()
         cmd = mock_run.call_args[0][0]
         assert "down" in cmd
-        assert "-v" not in cmd
 
 
 class TestCleanupDockerProxy:

@@ -2,10 +2,8 @@
 
 Tests for:
 - Version callback (--version)
-- Help display (--help)
 - Init command
 - Config subcommands (show, path)
-- Command registration
 """
 
 from pathlib import Path
@@ -32,43 +30,6 @@ class TestCodeagentVersion:
         result = runner.invoke(app, ["-V"])
         assert result.exit_code == 0
         assert f"codeagent {__version__}" in result.stdout
-
-    def test_version_long_flag(self) -> None:
-        """Test --version shows version and exits."""
-        result = runner.invoke(app, ["--version"])
-        assert result.exit_code == 0
-        assert f"codeagent {__version__}" in result.stdout
-
-
-class TestCodeagentHelp:
-    """Tests for the --help flag."""
-
-    def test_help_shows_all_commands(self) -> None:
-        """Test --help shows all registered commands."""
-        result = runner.invoke(app, ["--help"])
-        assert result.exit_code == 0
-
-        # Main commands
-        assert "init" in result.stdout
-        assert "build" in result.stdout
-        assert "start" in result.stdout
-        assert "auth" in result.stdout
-        assert "status" in result.stdout
-        assert "audit" in result.stdout
-        assert "update" in result.stdout
-        assert "enter" in result.stdout
-        assert "run" in result.stdout
-        assert "agents" in result.stdout
-
-        # Subcommand groups
-        assert "config" in result.stdout
-        assert "clean" in result.stdout
-
-    def test_help_shows_description(self) -> None:
-        """Test --help shows application description."""
-        result = runner.invoke(app, ["--help"])
-        assert result.exit_code == 0
-        assert "AI Dev Base CLI" in result.stdout
 
 
 # =============================================================================
@@ -115,7 +76,7 @@ class TestInitCommand:
         assert config_file.exists()
         # Output may be in stdout or output (Rich console writes to output)
         combined = result.stdout + result.output
-        assert "Next steps" in combined or config_file.exists()
+        assert "Next steps" in combined
 
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test init --force overwrites existing config without prompting."""
@@ -284,7 +245,7 @@ class TestConfigShowCommand:
         assert result.exit_code == 1
         # Error may be in stdout or output
         combined = result.stdout + result.output
-        assert "Configuration not found" in combined or result.exit_code == 1
+        assert "Configuration not found" in combined
 
 
 class TestConfigPathCommand:

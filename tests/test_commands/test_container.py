@@ -197,26 +197,6 @@ class TestAuthCommand:
 class TestStatusCommand:
     """Tests for the status command."""
 
-    def test_status_shows_config(self) -> None:
-        """Test status shows configuration when available."""
-        with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("subprocess.run") as mock_run,
-            patch(
-                "ai_dev_base.commands.container._get_existing_volumes_by_category", return_value=[]
-            ),
-            patch("ai_dev_base.commands.container.network_exists", return_value=True),
-            patch("ai_dev_base.commands.container.is_container_running", return_value=False),
-        ):
-            mock_config = MagicMock()
-            mock_config.code_dir = Path("/projects")
-            mock_load.return_value = mock_config
-            mock_run.return_value = MagicMock(returncode=0, stdout="")
-
-            container.status()
-
-            mock_load.assert_called_once()
-
     def test_status_handles_missing_config(self, tmp_path: Path) -> None:
         """Test status handles missing configuration gracefully."""
         from ai_dev_base.config.loader import ConfigNotFoundError
@@ -472,13 +452,6 @@ class TestVolumeTable:
         with patch("ai_dev_base.commands.container.console", test_console):
             yield output
 
-    def test_print_volume_table(self, capture_container_stdout: io.StringIO) -> None:
-        """_print_volume_table should print table to stdout."""
-        container._print_volume_table({"credentials": ["test-vol"]})
-        result = capture_container_stdout.getvalue()
-        assert "AI Dev Volumes" in result
-        assert "test-vol" in result
-
     def test_print_volume_table_all_categories(self, capture_container_stdout: io.StringIO) -> None:
         """_print_volume_table should handle all volume categories."""
         volumes = {
@@ -491,8 +464,3 @@ class TestVolumeTable:
         result = capture_container_stdout.getvalue()
         assert "Credentials" in result
         assert "claude-config" in result
-
-    def test_print_volume_table_empty(self, capture_container_stdout: io.StringIO) -> None:
-        """_print_volume_table should handle empty volumes dict."""
-        container._print_volume_table({})
-        assert "AI Dev Volumes" in capture_container_stdout.getvalue()

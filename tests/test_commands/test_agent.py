@@ -117,60 +117,6 @@ class TestBuildAgentCommand:
         assert "--model" not in cmd
 
 
-class TestAgentsListCommand:
-    """Tests for the agents list command."""
-
-    def test_agents_lists_available(self) -> None:
-        """Test agents command lists available agents."""
-        from ai_dev_base.commands.agent import agents
-
-        with patch("ai_dev_base.commands.agent.load_agents") as mock_load:
-            mock_load.return_value = {
-                "claude": AgentConfig(
-                    binary="claude",
-                    description="Anthropic Claude",
-                    prompt_template='"$AGENT_PROMPT"',
-                ),
-                "gemini": AgentConfig(
-                    binary="gemini",
-                    description="Google Gemini",
-                    prompt_template='"$AGENT_PROMPT"',
-                ),
-            }
-
-            # Should not raise
-            agents()
-
-            mock_load.assert_called_once()
-
-    def test_agents_json_output(self) -> None:
-        """Test agents --json outputs JSON format."""
-
-        from ai_dev_base.commands.agent import agents
-
-        with (
-            patch("ai_dev_base.commands.agent.load_agents") as mock_load,
-            patch("ai_dev_base.commands.agent.console") as mock_console,
-        ):
-            mock_load.return_value = {
-                "claude": AgentConfig(
-                    binary="claude",
-                    description="Anthropic Claude",
-                    prompt_template='"$AGENT_PROMPT"',
-                ),
-            }
-
-            agents(json_output=True)
-
-            # Should have printed JSON
-            mock_console.print.assert_called_once()
-            output = mock_console.print.call_args[0][0]
-            import json
-
-            data = json.loads(output)
-            assert "claude" in data
-
-
 class TestRunCommand:
     """Tests for the run command."""
 

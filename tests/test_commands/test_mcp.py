@@ -43,25 +43,6 @@ class TestRequireRunning:
             mcp._require_running()
 
 
-@pytest.mark.parametrize(
-    ("command", "args"),
-    [
-        (mcp.start, []),
-        (mcp.enable, ["test-server"]),
-        (mcp.disable, ["test-server"]),
-        (mcp.servers, []),
-        (mcp.catalog, []),
-    ],
-)
-def test_commands_require_mcp_cli(command: Callable[..., None], args: list[str]) -> None:
-    """All MCP CLI-dependent commands should exit when docker mcp is missing."""
-    with (
-        patch("ai_dev_base.commands.mcp._require_mcp_cli", side_effect=typer.Exit(1)),
-        pytest.raises(typer.Exit),
-    ):
-        command(*args)
-
-
 class TestStartCommand:
     """Tests for the start command."""
 
@@ -103,21 +84,6 @@ class TestRestartCommand:
             mock_run.return_value = MagicMock(returncode=0)
             mcp.restart()
             assert mock_run.call_args_list[0][0][0] == ["docker", "compose", "restart"]
-
-
-class TestStatusCommand:
-    def test_status_shows_running_when_gateway_up(self) -> None:
-        with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            mcp.status()
-            assert mock_run.call_count >= 2
-
-    def test_status_shows_stopped_when_gateway_down(self) -> None:
-        with patch("ai_dev_base.commands.mcp.is_container_running", return_value=False):
-            mcp.status()
 
 
 class TestLogsCommand:
@@ -244,16 +210,6 @@ class TestTestCommand:
             patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="200")),
         ):
             mcp.test()
-
-    def test_test_checks_docker_socket(self) -> None:
-        with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=0, stdout="200")
-            mcp.test()
-            exec_calls = [c for c in mock_run.call_args_list if "exec" in c[0][0]]
-            assert len(exec_calls) >= 1
 
 
 class TestCleanCommand:

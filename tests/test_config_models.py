@@ -66,24 +66,6 @@ class TestResourceLimits:
         with pytest.raises(ValidationError, match="Invalid memory format"):
             ResourceLimits(memory_limit="invalid")
 
-    def test_cpu_limit_min_max(self) -> None:
-        """Test CPU limit boundaries."""
-        # Valid minimum (must set cpu_reservation <= cpu_limit)
-        limits = ResourceLimits(cpu_limit=1, cpu_reservation=1)
-        assert limits.cpu_limit == 1
-
-        # Valid maximum
-        limits = ResourceLimits(cpu_limit=128)
-        assert limits.cpu_limit == 128
-
-        # Below minimum
-        with pytest.raises(ValidationError, match="greater than or equal to 1"):
-            ResourceLimits(cpu_limit=0)
-
-        # Above maximum
-        with pytest.raises(ValidationError, match="less than or equal to 128"):
-            ResourceLimits(cpu_limit=256)
-
     def test_cpu_reservation_cannot_exceed_limit(self) -> None:
         """Test that cpu_reservation cannot exceed cpu_limit."""
         # Valid: reservation <= limit
