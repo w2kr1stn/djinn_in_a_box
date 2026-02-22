@@ -1,0 +1,42 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-4-5-20250929:max",
+  "provider": {
+    "anthropic": {
+      "models": {
+        "claude-opus-4-5-20250929": {
+          "variants": {
+            "max": {
+              "thinking": {
+                "type": "enabled",
+                "budgetTokens": 32000
+              }
+            }
+          }
+        }
+      }
+    },
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (ai-station)",
+      "options": {
+        "baseURL": "http://ai-station:11434/v1"
+      },
+      "models": {
+        "gpt-oss-120b": {
+          "name": "GPT-OSS 120B (local)"
+        }
+      }
+    }
+  },
+  "lsp": {
+    "python": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"]
+    },
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"]
+    }
+  }
+}

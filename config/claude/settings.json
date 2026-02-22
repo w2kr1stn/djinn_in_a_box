@@ -1,0 +1,84 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__docker-gateway__mcp-find",
+      "mcp__docker-gateway__mcp-add",
+      "mcp__docker-gateway__mcp-exec",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs",
+      "WebSearch",
+      "Fetch",
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(xargs:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(sed:*)",
+      "Bash(rg:*)",
+      "Bash(echo:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(timeout:*)",
+      "Bash(sleep:*)",
+      "Bash(mkdir:*)",
+      "Bash(wc:*)",
+      "Bash(python:*)",
+      "Bash(uv:*)",
+      "Bash(ruff:*)",
+      "Bash(pytest:*)",
+      "Bash(git add:*)",
+      "Bash(git log:*)",
+      "Bash(gh view:*)",
+      "Bash(gh list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker:*)",
+      "Bash(npx:*)",
+      "Bash(npm:*)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/security_reminder_hook.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/post_edit_lint_hook.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+          "type": "command",
+          "command": "python3 ~/.claude/ready_notify_hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}
