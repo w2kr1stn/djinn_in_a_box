@@ -12,7 +12,7 @@ import typer
 from rich.table import Table
 
 from ai_dev_base.config.defaults import VOLUME_CATEGORIES
-from ai_dev_base.config.loader import ConfigNotFoundError, load_config
+from ai_dev_base.config.loader import load_config
 from ai_dev_base.core.console import (
     blank,
     console,
@@ -44,6 +44,7 @@ from ai_dev_base.core.docker import (
     network_exists,
     volume_exists,
 )
+from ai_dev_base.core.exceptions import ConfigNotFoundError
 from ai_dev_base.core.paths import get_project_root, resolve_mount_path
 
 

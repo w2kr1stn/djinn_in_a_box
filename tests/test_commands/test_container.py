@@ -104,7 +104,7 @@ class TestStartCommand:
         assert options.mount_path == tmp_path
 
     def test_start_exits_on_config_not_found(self, tmp_path: Path) -> None:
-        from ai_dev_base.config.loader import ConfigNotFoundError
+        from ai_dev_base.core.exceptions import ConfigNotFoundError
 
         with patch("ai_dev_base.commands.container.load_config") as mock_load:
             mock_load.side_effect = ConfigNotFoundError(tmp_path / "config.toml")
@@ -199,7 +199,7 @@ class TestStatusCommand:
 
     def test_status_handles_missing_config(self, tmp_path: Path) -> None:
         """Test status handles missing configuration gracefully."""
-        from ai_dev_base.config.loader import ConfigNotFoundError
+        from ai_dev_base.core.exceptions import ConfigNotFoundError
 
         config_file = tmp_path / "nonexistent" / "config.toml"
 

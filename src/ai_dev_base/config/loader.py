@@ -18,25 +18,12 @@ from pydantic import ValidationError
 from ai_dev_base.config.defaults import DEFAULT_AGENTS
 from ai_dev_base.config.models import AgentConfig, AppConfig
 from ai_dev_base.core.console import warning
+from ai_dev_base.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from ai_dev_base.core.paths import (
     AGENTS_FILE,
     CONFIG_FILE,
     get_project_root,
 )
-
-
-class ConfigNotFoundError(FileNotFoundError):
-    """Raised when config file is missing."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        super().__init__(
-            f"Configuration not found: {path}\nRun 'codeagent init' to create configuration."
-        )
-
-
-class ConfigValidationError(ValueError):
-    """Raised when config validation fails."""
 
 
 def _format_validation_errors(e: ValidationError) -> str:

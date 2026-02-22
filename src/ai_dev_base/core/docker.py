@@ -63,6 +63,13 @@ def _docker_inspect(resource: str, name: str) -> bool:
     return result.returncode == 0
 
 
+def _warn_subprocess_error(action: str, result: subprocess.CompletedProcess[str]) -> None:
+    """Log a warning with stderr detail for a failed subprocess command."""
+    stderr_msg = result.stderr.strip() if result.stderr else ""
+    error_detail = stderr_msg or f"exit code {result.returncode}"
+    warning(f"{action}: {error_detail}")
+
+
 def _docker_list(cmd: list[str]) -> list[str]:
     """Run a Docker command and return stdout lines, or empty list on failure."""
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -85,9 +92,7 @@ def delete_network(name: str) -> bool:
         check=False,
     )
     if result.returncode != 0:
-        stderr_msg = result.stderr.strip() if result.stderr else ""
-        error_detail = stderr_msg or f"exit code {result.returncode}"
-        warning(f"Failed to delete network '{name}': {error_detail}")
+        _warn_subprocess_error(f"Failed to delete network '{name}'", result)
     return result.returncode == 0
 
 
@@ -103,9 +108,7 @@ def ensure_network(name: str = AI_DEV_NETWORK) -> bool:
         check=False,
     )
     if result.returncode != 0:
-        stderr_msg = result.stderr.strip() if result.stderr else ""
-        error_detail = stderr_msg or f"exit code {result.returncode}"
-        warning(f"Failed to create Docker network '{name}': {error_detail}")
+        _warn_subprocess_error(f"Failed to create Docker network '{name}'", result)
     return result.returncode == 0
 
 
@@ -418,9 +421,7 @@ def delete_volume(name: str) -> bool:
         check=False,
     )
     if result.returncode != 0:
-        stderr_msg = result.stderr.strip() if result.stderr else ""
-        error_detail = stderr_msg or f"exit code {result.returncode}"
-        warning(f"Failed to delete volume '{name}': {error_detail}")
+        _warn_subprocess_error(f"Failed to delete volume '{name}'", result)
     return result.returncode == 0
 
 
