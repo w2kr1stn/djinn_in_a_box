@@ -1,0 +1,26 @@
+# =============================================================================
+# Optional CLI Tools
+# =============================================================================
+# Tools listed here are installed at container startup (with caching).
+# One tool per line. Comments (#) and empty lines are ignored.
+#
+# Usage:
+#   cp tools/tools.txt.example tools/tools.txt
+#   # Uncomment desired tools
+#   codeagent start
+#
+# Note: Tools are cached in a Docker volume - reinstall only on version change.
+# =============================================================================
+
+# --- Cloud CLIs ---
+# azure-cli          # Microsoft Azure CLI (az)
+# pulumi             # Pulumi Infrastructure as Code CLI
+
+# --- JavaScript ---
+# bun                # Bun JavaScript runtime & toolkit
+
+# --- Security ---
+# sops               # SOPS encrypted secrets management
+
+# --- Database Clients ---
+# psql               # PostgreSQL client (psql, pg_dump, etc.)
