@@ -338,8 +338,7 @@ class TestCleanupDockerProxy:
         """Test stops and removes docker-proxy when docker_enabled=True."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0)
-        result = cleanup_docker_proxy(docker_enabled=True)
-        assert result is True
+        cleanup_docker_proxy(docker_enabled=True)
         assert mock_run.call_count == 2
         # First call: stop docker-proxy
         first_call = mock_run.call_args_list[0][0][0]

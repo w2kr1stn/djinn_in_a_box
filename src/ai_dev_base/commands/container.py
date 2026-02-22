@@ -28,7 +28,6 @@ from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
     AI_DEV_NETWORK,
     ContainerOptions,
-    check_docker_flags,
     cleanup_docker_proxy,
     compose_build,
     compose_down,
@@ -113,7 +112,9 @@ def start(
         codeagent start --here                  # Mount cwd as workspace
         codeagent start -d -f --here            # Full options
     """
-    check_docker_flags(docker, docker_direct)
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
     config = load_config()
 
@@ -214,7 +215,9 @@ def auth(
         codeagent auth --docker          # With Docker access (proxy)
         codeagent auth --docker-direct   # With Docker access (direct)
     """
-    check_docker_flags(docker, docker_direct)
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
     config = load_config()
 

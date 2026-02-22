@@ -7,23 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import typer
-
 if TYPE_CHECKING:
     from ai_dev_base.config.models import AppConfig
 
-from ai_dev_base.core.console import error, warning
+from ai_dev_base.core.console import warning
 from ai_dev_base.core.paths import get_project_root
 
 AI_DEV_NETWORK: str = "ai-dev-network"
 """Docker network name for AI Dev containers."""
-
-
-def check_docker_flags(docker: bool, docker_direct: bool) -> None:
-    """Validate that --docker and --docker-direct are not both specified."""
-    if docker and docker_direct:
-        error("--docker and --docker-direct are mutually exclusive")
-        raise typer.Exit(1)
 
 
 @dataclass
@@ -304,17 +295,13 @@ def compose_run(
 def compose_up(
     services: list[str] | None = None,
     *,
-    detach: bool = True,
     docker_enabled: bool = False,
 ) -> RunResult:
-    """Start compose services (detached by default)."""
+    """Start compose services in detached mode."""
     project_root = get_project_root()
     compose_files = get_compose_files(docker_enabled=docker_enabled)
 
-    cmd = ["docker", "compose", *compose_files, "up"]
-
-    if detach:
-        cmd.append("-d")
+    cmd = ["docker", "compose", *compose_files, "up", "-d"]
 
     if services:
         cmd.extend(services)
@@ -356,14 +343,13 @@ def compose_down() -> RunResult:
     )
 
 
-def cleanup_docker_proxy(docker_enabled: bool) -> bool:
+def cleanup_docker_proxy(docker_enabled: bool) -> None:
     """Stop and remove docker-proxy if it was started. No-op if docker_enabled is False."""
     if not docker_enabled:
-        return True
+        return
 
     project_root = get_project_root()
     compose_files = get_compose_files(docker_enabled=True)
-    success = True
 
     # Stop the proxy
     stop_result = subprocess.run(
@@ -377,7 +363,6 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
         stderr_msg = stop_result.stderr.strip() if stop_result.stderr else ""
         if stderr_msg:
             warning(f"Failed to stop docker-proxy: {stderr_msg}")
-        success = False
 
     # Remove the proxy container
     rm_result = subprocess.run(
@@ -391,9 +376,6 @@ def cleanup_docker_proxy(docker_enabled: bool) -> bool:
         stderr_msg = rm_result.stderr.strip() if rm_result.stderr else ""
         if stderr_msg:
             warning(f"Failed to remove docker-proxy: {stderr_msg}")
-        success = False
-
-    return success
 
 
 def is_container_running(name: str) -> bool:

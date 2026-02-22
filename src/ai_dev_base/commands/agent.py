@@ -15,7 +15,6 @@ from ai_dev_base.core.decorators import handle_config_errors
 from ai_dev_base.core.docker import (
     AI_DEV_NETWORK,
     ContainerOptions,
-    check_docker_flags,
     cleanup_docker_proxy,
     compose_run,
     ensure_network,
@@ -130,7 +129,9 @@ def run(
         # With Docker access and timeout
         codeagent run claude "Build the Docker image" --docker --timeout 300
     """
-    check_docker_flags(docker, docker_direct)
+    if docker and docker_direct:
+        error("--docker and --docker-direct are mutually exclusive")
+        raise typer.Exit(1)
 
     app_config = load_config()
     agent_configs = load_agents()
