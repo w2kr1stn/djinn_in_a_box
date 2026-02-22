@@ -1,0 +1,42 @@
+# Environment configuration (contains local paths)
+.env
+packages.txt
+tools/tools.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Session/Task files (AI agent working files)
+.claude/
+CLAUDE.md
+PLAN.md
+TASKS.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+*.egg-info/
+.pytest_cache
+.ruff_cache
+
+# Test
+.coverage
+
+# Node
+node_modules/
+
+# Logs
+logs/
+*.log
+
+# Docker
+.docker/

@@ -1,0 +1,142 @@
+# =============================================================================
+# Djinn in a Box - Docker Compose (Basis-Konfiguration)
+# =============================================================================
+# Usage:
+#   djinn start              # Ohne Docker Socket (sicher)
+#   djinn start --docker     # Mit Docker Socket + Proxy
+#   djinn start --firewall   # Mit Netzwerk-Firewall
+#   djinn start --docker --firewall  # Beides kombiniert
+#
+# Configuration:
+#   Run `djinn init` to create ~/.config/djinn-in-a-box/config.toml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Shared Configuration (YAML Anchors)
+# -----------------------------------------------------------------------------
+x-common-volumes: &common-volumes
+  # AI Agent configs & credentials
+  - claude-config:/home/dev/.claude
+  - gemini-config:/home/dev/.gemini
+  - codex-config:/home/dev/.codex
+  - opencode-config:/home/dev/.opencode
+  - opencode-data:/home/dev/.local/share/opencode
+  - gh-config:/home/dev/.config/gh
+  # Cache
+  - uv-cache:/home/dev/.cache/uv
+  - tools-cache:/home/dev/.cache/djinn-tools
+  # Optional tool configs (authentication & settings)
+  - azure-config:/home/dev/.azure
+  - pulumi-config:/home/dev/.pulumi
+  - sops-config:/home/dev/.config/sops
+  # VS Code Server (persistent extensions & settings for Attach to Container)
+  - vscode-server:/home/dev/.vscode-server
+  # VS Code Workspaces (persistent .code-workspace files)
+  - vscode-workspaces:/home/dev/workspaces
+  # Host configs (read-only)
+  - ~/.ssh:/home/dev/.ssh:ro
+  - ~/.gitconfig:/home/dev/.gitconfig:ro
+  # Seed configs (read-only)
+  - ./config/claude:/home/dev/.claude_seed:ro
+  - ./config/gemini:/home/dev/.gemini_seed:ro
+  - ./config/opencode:/home/dev/.opencode/seed:ro
+  # Projects directory
+  - ${CODE_DIR:?Please set CODE_DIR in .env or environment}:/home/dev/projects
+  # D-Bus for host desktop notifications (optional)
+  - ${XDG_RUNTIME_DIR:-/run/user/1000}/bus:/run/user/${HOST_UID:-1000}/bus:ro
+
+x-common-environment: &common-environment
+  TZ: ${TZ:-Europe/Berlin}
+  UV_LINK_MODE: copy
+  LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://ai-station:11434/v1}
+  # Gemini CLI: Force file-based token storage instead of system keychain
+  # (keychain is not persistent in containers)
+  GEMINI_FORCE_FILE_STORAGE: "true"
+  # D-Bus for host desktop notifications
+  DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/${HOST_UID:-1000}/bus"
+
+x-resource-limits: &resource-limits
+  resources:
+    limits:
+      cpus: '${CPU_LIMIT:-6}'
+      memory: ${MEMORY_LIMIT:-12G}
+    reservations:
+      cpus: '${CPU_RESERVATION:-2}'
+      memory: ${MEMORY_RESERVATION:-4G}
+
+services:
+  # ---------------------------------------------------------------------------
+  # Main development container
+  # ---------------------------------------------------------------------------
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: djinn-in-a-box:latest
+    container_name: djinn
+    hostname: djinn
+    stdin_open: true
+    tty: true
+    networks:
+      - djinn-network
+    volumes: *common-volumes
+    environment:
+      <<: *common-environment
+      MCP_GATEWAY_URL: http://mcp-gateway:8811/
+      ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
+    cap_add:
+      - NET_ADMIN
+    deploy: *resource-limits
+    working_dir: /home/dev/projects
+
+  # ---------------------------------------------------------------------------
+  # OAuth authentication container (uses host network)
+  # ---------------------------------------------------------------------------
+  dev-auth:
+    image: djinn-in-a-box:latest
+    container_name: djinn-auth
+    hostname: djinn
+    stdin_open: true
+    tty: true
+    profiles:
+      - auth
+    network_mode: "host"
+    volumes: *common-volumes
+    environment:
+      <<: *common-environment
+      MCP_GATEWAY_URL: http://localhost:8811/
+    deploy: *resource-limits
+    working_dir: /home/dev/projects
+
+networks:
+  djinn-network:
+    external: true
+    name: djinn-network
+
+volumes:
+  claude-config:
+    name: djinn-claude-config
+  gemini-config:
+    name: djinn-gemini-config
+  codex-config:
+    name: djinn-codex-config
+  opencode-config:
+    name: djinn-opencode-config
+  opencode-data:
+    name: djinn-opencode-data
+  gh-config:
+    name: djinn-gh-config
+  uv-cache:
+    name: djinn-uv-cache
+  tools-cache:
+    name: djinn-tools-cache
+  azure-config:
+    name: djinn-azure-config
+  pulumi-config:
+    name: djinn-pulumi-config
+  sops-config:
+    name: djinn-sops-config
+  vscode-server:
+    name: djinn-vscode-server
+  vscode-workspaces:
+    name: djinn-vscode-workspaces
