@@ -1,11 +1,11 @@
 [project]
-name = "ai-dev-base"
+name = "djinn-in-a-box"
 version = "1.0.0"
-description = "AI Development Base - CLI tools for managing AI development containers"
+description = "Djinn in a Box - CLI tools for managing AI development containers"
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "MIT" }
-authors = [{ name = "AI Dev Base Team" }]
+authors = [{ name = "Djinn in a Box Team" }]
 keywords = ["cli", "docker", "ai", "development"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,15 +30,15 @@ dependencies = [
 fmt = "devops:format_code"
 test = "devops:test"
 clean = "devops:clean"
-codeagent = "ai_dev_base.cli.codeagent:app"
-mcpgateway = "ai_dev_base.cli.mcpgateway:app"
+djinn = "djinn_in_a_box.cli.djinn:app"
+mcpgateway = "djinn_in_a_box.cli.mcpgateway:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ai_dev_base"]
+packages = ["src/djinn_in_a_box"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "devops.py" = "devops.py"
@@ -53,8 +53,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/w2kr1stn/ai-dev-base"
-Repository = "https://github.com/w2kr1stn/ai-dev-base"
+Homepage = "https://github.com/w2kr1stn/djinn-in-a-box"
+Repository = "https://github.com/w2kr1stn/djinn-in-a-box"
 
 [tool.ruff]
 line-length = 100

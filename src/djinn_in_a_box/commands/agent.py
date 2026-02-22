@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from ai_dev_base.config.loader import load_agents, load_config
-from ai_dev_base.core.console import console, err_console, error, info, status_line
-from ai_dev_base.core.decorators import handle_config_errors
-from ai_dev_base.core.docker import (
-    AI_DEV_NETWORK,
+from djinn_in_a_box.config.loader import load_agents, load_config
+from djinn_in_a_box.core.console import console, err_console, error, info, status_line
+from djinn_in_a_box.core.decorators import handle_config_errors
+from djinn_in_a_box.core.docker import (
+    DJINN_NETWORK,
     ContainerOptions,
     cleanup_docker_proxy,
     compose_run,
@@ -21,7 +21,7 @@ from ai_dev_base.core.docker import (
 )
 
 if TYPE_CHECKING:
-    from ai_dev_base.config.models import AgentConfig
+    from djinn_in_a_box.config.models import AgentConfig
 
 
 def build_agent_command(
@@ -118,16 +118,16 @@ def run(
     Examples:
 
         # Simple read-only query
-        codeagent run claude "Explain this code"
+        djinn run claude "Explain this code"
 
         # Allow file modifications
-        codeagent run claude "Fix the bug in main.py" --write
+        djinn run claude "Fix the bug in main.py" --write
 
         # Use a specific model with JSON output
-        codeagent run gemini "Refactor this file" --write --model gemini-2.5-flash --json
+        djinn run gemini "Refactor this file" --write --model gemini-2.5-flash --json
 
         # With Docker access and timeout
-        codeagent run claude "Build the Docker image" --docker --timeout 300
+        djinn run claude "Build the Docker image" --docker --timeout 300
     """
     if docker and docker_direct:
         error("--docker and --docker-direct are mutually exclusive")
@@ -147,7 +147,7 @@ def run(
 
     # Ensure Docker network exists
     if not ensure_network():
-        error(f"Failed to create Docker network '{AI_DEV_NETWORK}'")
+        error(f"Failed to create Docker network '{DJINN_NETWORK}'")
         raise typer.Exit(1)
 
     # Determine workspace path (implicit --here: default to cwd)
@@ -243,13 +243,13 @@ def agents(
     Examples:
 
         # Simple list
-        codeagent agents
+        djinn agents
 
         # Detailed view
-        codeagent agents --verbose
+        djinn agents --verbose
 
         # JSON output for scripting
-        codeagent agents --json
+        djinn agents --json
     """
     agent_configs = load_agents()
 

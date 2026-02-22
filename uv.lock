@@ -3,43 +3,6 @@ revision = 3
 requires-python = ">=3.14"
 
 [[package]]
-name = "ai-dev-base"
-version = "1.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "pydantic" },
-    { name = "rich" },
-    { name = "tomli-w" },
-    { name = "typer" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "bandit" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.10.0" },
-    { name = "rich", specifier = ">=13.9.0" },
-    { name = "tomli-w", specifier = ">=1.0.0" },
-    { name = "typer", specifier = ">=0.15.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "bandit", specifier = ">=1.8.3" },
-    { name = "pyright", specifier = ">=1.1.408" },
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-cov", specifier = ">=6.0.0" },
-    { name = "ruff", specifier = ">=0.14.13" },
-]
-
-[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -117,6 +80,43 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/2f/838a5394c082ac57d85f57f6aba53093b30d9089781df72412126505716f/coverage-7.13.2-cp314-cp314t-win_amd64.whl", hash = "sha256:196bfeabdccc5a020a57d5a368c681e3a6ceb0447d153aeccc1ab4d70a5032ba", size = 223857, upload-time = "2026-01-25T12:59:58.201Z" },
     { url = "https://files.pythonhosted.org/packages/44/d4/b608243e76ead3a4298824b50922b89ef793e50069ce30316a65c1b4d7ef/coverage-7.13.2-cp314-cp314t-win_arm64.whl", hash = "sha256:69269ab58783e090bfbf5b916ab3d188126e22d6070bbfc93098fdd474ef937c", size = 221881, upload-time = "2026-01-25T13:00:00.449Z" },
     { url = "https://files.pythonhosted.org/packages/d2/db/d291e30fdf7ea617a335531e72294e0c723356d7fdde8fba00610a76bda9/coverage-7.13.2-py3-none-any.whl", hash = "sha256:40ce1ea1e25125556d8e76bd0b61500839a07944cc287ac21d5626f3e620cad5", size = 210943, upload-time = "2026-01-25T13:00:02.388Z" },
+]
+
+[[package]]
+name = "djinn-in-a-box"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "pydantic" },
+    { name = "rich" },
+    { name = "tomli-w" },
+    { name = "typer" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "bandit" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.10.0" },
+    { name = "rich", specifier = ">=13.9.0" },
+    { name = "tomli-w", specifier = ">=1.0.0" },
+    { name = "typer", specifier = ">=0.15.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "bandit", specifier = ">=1.8.3" },
+    { name = "pyright", specifier = ">=1.1.408" },
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-cov", specifier = ">=6.0.0" },
+    { name = "ruff", specifier = ">=0.14.13" },
 ]
 
 [[package]]

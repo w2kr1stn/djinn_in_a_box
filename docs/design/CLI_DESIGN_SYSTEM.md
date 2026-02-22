@@ -1,4 +1,4 @@
-# AI Dev Base CLI Design System
+# Djinn in a Box CLI Design System
 
 > **Version:** 1.0.0
 > **Framework:** Rich (Python)
@@ -175,7 +175,7 @@ header("Configuration")
 ### 5.3 Tables
 
 ```python
-table = Table(title="AI Dev Volumes", title_style="table.title")
+table = Table(title="Djinn Volumes", title_style="table.title")
 table.add_column("Category", style="table.category")
 table.add_column("Volume", style="table.value")
 ```
@@ -183,7 +183,7 @@ table.add_column("Volume", style="table.value")
 ### 5.4 Progress Output
 
 ```
-ℹ Building ai-dev-base image...
+ℹ Building djinn-in-a-box image...
 ✓ Build complete
 ⚠ Warning: Cache not available
 ✗ Error: Docker daemon not running
@@ -244,7 +244,7 @@ TODAI_THEME = Theme({
 
 ```python
 from rich.console import Console
-from ai_dev_base.core.theme import TODAI_THEME
+from djinn_in_a_box.core.theme import TODAI_THEME
 
 console = Console(theme=TODAI_THEME)
 err_console = Console(stderr=True, theme=TODAI_THEME)
@@ -257,7 +257,7 @@ err_console = Console(stderr=True, theme=TODAI_THEME)
 ### 7.1 Basic Output
 
 ```python
-from ai_dev_base.core.console import error, success, info, warning
+from djinn_in_a_box.core.console import error, success, info, warning
 
 # Messages
 success("Build complete")           # ✓ Build complete
@@ -269,9 +269,9 @@ info("Starting build...")           # ℹ Starting build...
 ### 7.2 Rich Markup
 
 ```python
-from ai_dev_base.core.console import console
+from djinn_in_a_box.core.console import console
 
-console.print("[primary]codeagent[/primary] [muted]v1.0.0[/muted]")
+console.print("[primary]djinn[/primary] [muted]v1.0.0[/muted]")
 console.print("[header]Configuration:[/header]")
 console.print("  [muted]1.[/muted] First step")
 console.print("  [success]✓[/success] Completed task")
@@ -280,7 +280,7 @@ console.print("  [success]✓[/success] Completed task")
 ### 7.3 Status Lines
 
 ```python
-from ai_dev_base.core.console import status_line, header
+from djinn_in_a_box.core.console import status_line, header
 
 header("Environment")
 status_line("Projects", "/home/user/projects")

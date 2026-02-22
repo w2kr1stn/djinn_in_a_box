@@ -1,4 +1,4 @@
-"""Configuration loading for AI Dev Base.
+"""Configuration loading for Djinn in a Box.
 
 Provides TOML-based configuration loading with:
 - Automatic validation via Pydantic models
@@ -15,11 +15,11 @@ from pathlib import Path
 import tomli_w
 from pydantic import ValidationError
 
-from ai_dev_base.config.defaults import DEFAULT_AGENTS
-from ai_dev_base.config.models import AgentConfig, AppConfig
-from ai_dev_base.core.console import warning
-from ai_dev_base.core.exceptions import ConfigNotFoundError, ConfigValidationError
-from ai_dev_base.core.paths import (
+from djinn_in_a_box.config.defaults import DEFAULT_AGENTS
+from djinn_in_a_box.config.models import AgentConfig, AppConfig
+from djinn_in_a_box.core.console import warning
+from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.paths import (
     AGENTS_FILE,
     CONFIG_FILE,
     get_project_root,
@@ -37,7 +37,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     """Load application config from TOML file.
 
     Loads configuration from the specified path or the default location
-    (~/.config/ai-dev-base/config.toml). The TOML structure is flattened
+    (~/.config/djinn-in-a-box/config.toml). The TOML structure is flattened
     and validated with Pydantic.
 
     Args:
@@ -78,7 +78,7 @@ def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
 
     Priority (first existing wins):
     1. Specified path (if provided)
-    2. User's ~/.config/ai-dev-base/agents.toml
+    2. User's ~/.config/djinn-in-a-box/agents.toml
     3. Bundled config/agents.toml in project root
     4. DEFAULT_AGENTS from defaults.py
 

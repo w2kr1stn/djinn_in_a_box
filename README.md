@@ -1,4 +1,4 @@
-# AI Dev Base
+# Djinn in a Box
 
 Minimales, wiederverwendbares Base-Image fuer AI-gestuetzte Entwicklung mit **Claude Code**, **Gemini CLI**, **Codex CLI** und **OpenCode**.
 
@@ -19,74 +19,74 @@ Minimales, wiederverwendbares Base-Image fuer AI-gestuetzte Entwicklung mit **Cl
 
 ```bash
 # Install CLI tools via uv
-cd ai-dev-base
+cd djinn-in-a-box
 uv tool install .
 
 # Or install in development mode
 uv sync
 ```
 
-After installation, `codeagent` and `mcpgateway` commands are available globally.
+After installation, `djinn` and `mcpgateway` commands are available globally.
 
 ## Quick Start
 
 ```bash
 # 1. Initialize configuration (interactive)
-codeagent init
+djinn init
 
 # 2. Build the Docker image
-codeagent build
+djinn build
 
 # 3. Authenticate with AI services (once)
-codeagent auth
+djinn auth
 # Im Container: claude, gemini auth, codex, opencode
 
 # 4. Start development shell (daily)
-codeagent start
+djinn start
 
 # Or start with Docker access
-codeagent start --docker
+djinn start --docker
 ```
 
 Die Credentials werden in persistenten Docker-Volumes gespeichert und ueberleben Container-Neustarts.
 
-> **Hinweis:** `codeagent auth` nutzt `network_mode: host` fuer OAuth-Callbacks. Nach der einmaligen Authentifizierung verwendet `codeagent start` ein dediziertes Docker-Netzwerk.
+> **Hinweis:** `djinn auth` nutzt `network_mode: host` fuer OAuth-Callbacks. Nach der einmaligen Authentifizierung verwendet `djinn start` ein dediziertes Docker-Netzwerk.
 
 ---
 
 ## CLI Commands
 
-### codeagent
+### djinn
 
 Container lifecycle and agent execution:
 
 ```bash
-codeagent --help              # Show all commands
-codeagent --version           # Show version
+djinn --help              # Show all commands
+djinn --version           # Show version
 
 # Setup
-codeagent init                # Initialize config interactively
-codeagent config show         # Show current configuration
-codeagent config path         # Show config file path
+djinn init                # Initialize config interactively
+djinn config show         # Show current configuration
+djinn config path         # Show config file path
 
 # Container lifecycle
-codeagent build               # Build Docker image
-codeagent start [options]     # Start interactive shell
-codeagent auth                # OAuth authentication
-codeagent status              # Show system status
-codeagent enter               # Attach to running container
-codeagent update              # Update CLI agent versions
+djinn build               # Build Docker image
+djinn start [options]     # Start interactive shell
+djinn auth                # OAuth authentication
+djinn status              # Show system status
+djinn enter               # Attach to running container
+djinn update              # Update CLI agent versions
 
 # Agent execution (headless)
-codeagent run claude "prompt" # Run agent non-interactively
-codeagent run gemini "prompt" --write --model gemini-2.5-pro
-codeagent agents              # List available agents
+djinn run claude "prompt" # Run agent non-interactively
+djinn run gemini "prompt" --write --model gemini-2.5-pro
+djinn agents              # List available agents
 
 # Cleanup
-codeagent clean               # Remove containers
-codeagent clean volumes       # List volumes by category
-codeagent clean volumes --credentials  # Delete auth tokens
-codeagent clean volumes --all # Remove ALL volumes
+djinn clean               # Remove containers
+djinn clean volumes       # List volumes by category
+djinn clean volumes --credentials  # Delete auth tokens
+djinn clean volumes --all # Remove ALL volumes
 ```
 
 ### Start Options
@@ -102,23 +102,23 @@ codeagent clean volumes --all # Remove ALL volumes
 
 ```bash
 # Einmalig: Authentifizierung
-codeagent auth
+djinn auth
 
 # Taeglicher Workflow
-codeagent start
+djinn start
 
 # Mit Docker-Zugriff
-codeagent start --docker
+djinn start --docker
 
 # Mit maximaler Sicherheit
-codeagent start --docker --firewall
+djinn start --docker --firewall
 
 # Nach Dockerfile-Aenderungen
-codeagent build
+djinn build
 
 # Kompletter Reset (loescht auch Auth-Credentials!)
-codeagent clean volumes --all
-codeagent build
+djinn clean volumes --all
+djinn build
 ```
 
 ### mcpgateway
@@ -150,10 +150,10 @@ mcpgateway clean              # Full reset
 
 ## Configuration
 
-Configuration is stored in `~/.config/ai-dev-base/`:
+Configuration is stored in `~/.config/djinn-in-a-box/`:
 
 ```
-~/.config/ai-dev-base/
+~/.config/djinn-in-a-box/
 |-- config.toml      # Main configuration
 |-- agents.toml      # Agent definitions (optional)
 ```
@@ -176,7 +176,7 @@ skip_mounts = false
 # omp_theme_path = "/path/to/custom/theme.omp.json"
 ```
 
-Run `codeagent init` for interactive setup or `codeagent config show` to view current settings.
+Run `djinn init` for interactive setup or `djinn config show` to view current settings.
 
 ---
 
@@ -196,14 +196,14 @@ Neben dem festen Projekt-Verzeichnis (`~/projects/`) kann ein zusaetzliches Verz
 ```bash
 # Aktuelles Verzeichnis mounten
 cd ~/.config
-codeagent start --here
+djinn start --here
 
 # Beliebigen Pfad mounten
-codeagent start --mount ~/dotfiles
+djinn start --mount ~/dotfiles
 
 # Kombiniert mit anderen Optionen
-codeagent start --docker --firewall --here
-codeagent start --docker --mount /etc/nginx
+djinn start --docker --firewall --here
+djinn start --docker --mount /etc/nginx
 ```
 
 ### Im Container
@@ -234,7 +234,7 @@ rm ~/workspace/wichtig.conf  # -> Datei ist SOFORT weg auf dem Host!
 cp -r ~/.config ~/.config.bak
 
 # Dann mounten
-codeagent start --mount ~/.config --docker
+djinn start --mount ~/.config --docker
 ```
 
 ### Workflow-Beispiele
@@ -242,15 +242,15 @@ codeagent start --mount ~/.config --docker
 ```bash
 # Dotfiles mit AI bearbeiten
 cd ~/dotfiles
-codeagent start --here --docker
+djinn start --here --docker
 # Im Container: claude "Refactore meine zsh config"
 
 # System-Configs analysieren (read-only empfohlen)
-codeagent start --mount /etc --docker
+djinn start --mount /etc --docker
 # Im Container: claude "Erklaere mir die nginx config"
 
 # An anderem Projekt arbeiten ohne config.toml zu aendern
-codeagent start --mount ~/anderes-projekt --docker
+djinn start --mount ~/anderes-projekt --docker
 ```
 
 ---
@@ -283,7 +283,7 @@ Der Container hat eine eigene `~/.zshrc`, die:
 ```bash
 # Im Projekt:
 mkdir -p .devcontainer
-cp /pfad/zu/ai-dev-base/templates/devcontainer.json .devcontainer/
+cp /pfad/zu/djinn-in-a-box/templates/devcontainer.json .devcontainer/
 ```
 
 Dann in VS Code: `Cmd+Shift+P` → "Reopen in Container"
@@ -294,18 +294,18 @@ Dann in VS Code: `Cmd+Shift+P` → "Reopen in Container"
 // .devcontainer/devcontainer.json
 {
   "name": "Mein Projekt",
-  "image": "ai-dev-base:latest",
+  "image": "djinn-in-a-box:latest",
   
   // Network mode für OAuth (wenn schon authentifiziert --> unwichtig)
   "runArgs": ["--network=host"],
   
   // Basis-Volumes (credentials)
   "mounts": [
-    "source=ai-dev-claude-config,target=/home/dev/.claude,type=volume",
-    "source=ai-dev-gemini-config,target=/home/dev/.gemini,type=volume",
-    "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
-    "source=ai-dev-opencode,target=/home/dev/.opencode,type=volume",
-    "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume"
+    "source=djinn-claude-config,target=/home/dev/.claude,type=volume",
+    "source=djinn-gemini-config,target=/home/dev/.gemini,type=volume",
+    "source=djinn-codex-config,target=/home/dev/.codex,type=volume",
+    "source=djinn-opencode,target=/home/dev/.opencode,type=volume",
+    "source=djinn-uv-cache,target=/home/dev/.cache/uv,type=volume"
   ],
   
   // Projekt Konfiguration, Projekt braucht z.B. Python
@@ -378,12 +378,12 @@ Alle Tool-Credentials und Caches werden in Docker-Volumes gespeichert – nicht 
 
 | Volume | Inhalt |
 |--------|--------|
-| `ai-dev-claude-config` | Claude Code Credentials & Settings |
-| `ai-dev-gemini-config` | Gemini CLI Credentials & Settings |
-| `ai-dev-codex-config` | Codex CLI Credentials & Settings |
-| `ai-dev-opencode` | OpenCode Credentials & Settings |
-| `ai-dev-uv-cache` | Python Package Cache |
-| `ai-dev-fnm-versions` | Node.js Installationen |
+| `djinn-claude-config` | Claude Code Credentials & Settings |
+| `djinn-gemini-config` | Gemini CLI Credentials & Settings |
+| `djinn-codex-config` | Codex CLI Credentials & Settings |
+| `djinn-opencode` | OpenCode Credentials & Settings |
+| `djinn-uv-cache` | Python Package Cache |
+| `djinn-fnm-versions` | Node.js Installationen |
 
 **Vorteil:** Lokales Home-Verzeichnis bleibt sauber. Die Credentials existieren nur im Docker-Kontext.
 
@@ -391,13 +391,13 @@ Alle Tool-Credentials und Caches werden in Docker-Volumes gespeichert – nicht 
 
 ```bash
 # Alle Volumes anzeigen
-docker volume ls | grep ai-dev
+docker volume ls | grep djinn
 
 # Ein Volume löschen (z.B. zum Reset)
-docker volume rm ai-dev-claude-config
+docker volume rm djinn-claude-config
 
 # Alle löschen
-docker volume rm $(docker volume ls -q | grep ai-dev)
+docker volume rm $(docker volume ls -q | grep djinn)
 ```
 
 ---
@@ -441,10 +441,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 | Modus | Command | Docker | Firewall | Empfohlen fuer |
 |-------|---------|--------|----------|----------------|
-| **Standard** | `codeagent start` | - | - | Normale Entwicklung |
-| **Docker** | `codeagent start --docker` | Proxy | - | Container-Entwicklung |
-| **Firewall** | `codeagent start --firewall` | - | Ja | Sensitive Projekte |
-| **Maximum** | `codeagent start --docker --firewall` | Proxy | Ja | **Allgemein empfohlen** |
+| **Standard** | `djinn start` | - | - | Normale Entwicklung |
+| **Docker** | `djinn start --docker` | Proxy | - | Container-Entwicklung |
+| **Firewall** | `djinn start --firewall` | - | Ja | Sensitive Projekte |
+| **Maximum** | `djinn start --docker --firewall` | Proxy | Ja | **Allgemein empfohlen** |
 
 ### Docker Socket Proxy
 
@@ -493,8 +493,8 @@ mcpgateway start
 mcpgateway enable duckduckgo    # Web-Suche
 mcpgateway enable memory        # Persistenter Speicher
 
-# 3. AI Dev Container starten
-codeagent start
+# 3. Djinn Container starten
+djinn start
 
 # 4. Claude Code nutzt jetzt automatisch den Gateway
 claude
@@ -538,7 +538,7 @@ apt-get install -y libffi-dev libssl-dev
 Sicherstellen, dass die Volumes gemountet sind:
 
 ```bash
-docker volume ls | grep ai-dev
+docker volume ls | grep djinn
 ```
 
 ### Workspace Mount funktioniert nicht
@@ -568,7 +568,7 @@ echo "vim" >> packages.txt
 echo "htop" >> packages.txt
 
 # Image neu bauen
-codeagent build
+djinn build
 ```
 
 Die `packages.txt` ist in `.gitignore` - jeder Entwickler kann eigene Pakete pflegen.
@@ -585,7 +585,7 @@ cp tools/tools.txt.example tools/tools.txt
 nano tools/tools.txt
 
 # Container starten - Tools werden automatisch installiert
-codeagent start
+djinn start
 ```
 
 **Verfügbare Tools:**
@@ -625,14 +625,14 @@ ENTRYPOINT ["/bin/bash"]
 
 ### Festes Projekt-Verzeichnis aendern
 
-In `~/.config/ai-dev-base/config.toml` anpassen:
+In `~/.config/djinn-in-a-box/config.toml` anpassen:
 
 ```toml
 [general]
 code_dir = "/dein/pfad/zu/projekten"
 ```
 
-Oder interaktiv mit `codeagent init --force`.
+Oder interaktiv mit `djinn init --force`.
 
 ### Shell-Mounts deaktivieren
 
@@ -663,14 +663,14 @@ If you previously used the Bash scripts (`dev.sh`, `mcp.sh`), here is the migrat
 
 | Old Command | New Command |
 |-------------|-------------|
-| `./scripts/dev.sh build` | `codeagent build` |
-| `./scripts/dev.sh start` | `codeagent start` |
-| `./scripts/dev.sh start --docker` | `codeagent start --docker` |
-| `./scripts/dev.sh auth` | `codeagent auth` |
-| `./scripts/dev.sh status` | `codeagent status` |
-| `./scripts/dev.sh clean` | `codeagent clean` |
-| `./scripts/dev.sh clean --all` | `codeagent clean volumes --all` |
-| `./scripts/dev.sh run claude "prompt"` | `codeagent run claude "prompt"` |
+| `./scripts/dev.sh build` | `djinn build` |
+| `./scripts/dev.sh start` | `djinn start` |
+| `./scripts/dev.sh start --docker` | `djinn start --docker` |
+| `./scripts/dev.sh auth` | `djinn auth` |
+| `./scripts/dev.sh status` | `djinn status` |
+| `./scripts/dev.sh clean` | `djinn clean` |
+| `./scripts/dev.sh clean --all` | `djinn clean volumes --all` |
+| `./scripts/dev.sh run claude "prompt"` | `djinn run claude "prompt"` |
 | `./mcp/mcp.sh start` | `mcpgateway start` |
 | `./mcp/mcp.sh enable <server>` | `mcpgateway enable <server>` |
 | `./mcp/mcp.sh status` | `mcpgateway status` |
@@ -681,13 +681,13 @@ Remove old shell wrappers from `~/.zshrc` or `~/.zshrc.local`:
 
 ```bash
 # OLD (can be removed):
-codeagent() {
-    local script_path="/path/to/ai-dev-base/scripts/dev.sh"
+djinn() {
+    local script_path="/path/to/djinn-in-a-box/scripts/dev.sh"
     ...
 }
 
 mcpgateway() {
-    local script_path="/path/to/ai-dev-base/mcp/mcp.sh"
+    local script_path="/path/to/djinn-in-a-box/mcp/mcp.sh"
     ...
 }
 

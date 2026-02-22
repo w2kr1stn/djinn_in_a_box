@@ -1,10 +1,10 @@
-"""Tests for ai_dev_base.core.paths module."""
+"""Tests for djinn_in_a_box.core.paths module."""
 
 from pathlib import Path
 
 import pytest
 
-from ai_dev_base.core.paths import resolve_mount_path
+from djinn_in_a_box.core.paths import resolve_mount_path
 
 
 class TestResolveMountPath:

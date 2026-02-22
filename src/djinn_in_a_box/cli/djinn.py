@@ -1,4 +1,4 @@
-"""CodeAgent CLI — container lifecycle management for AI Dev Base."""
+"""Djinn CLI — container lifecycle management for Djinn in a Box."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import Annotated
 
 import typer
 
-from ai_dev_base import __version__
-from ai_dev_base.commands.agent import agents, run
-from ai_dev_base.commands.config import config_path, config_show, init_config
-from ai_dev_base.commands.container import (
+from djinn_in_a_box import __version__
+from djinn_in_a_box.commands.agent import agents, run
+from djinn_in_a_box.commands.config import config_path, config_show, init_config
+from djinn_in_a_box.commands.container import (
     audit,
     auth,
     build,
@@ -21,8 +21,8 @@ from ai_dev_base.commands.container import (
 )
 
 app = typer.Typer(
-    name="codeagent",
-    help="AI Dev Base CLI - Manage AI development containers",
+    name="djinn",
+    help="Djinn in a Box CLI - Manage AI development containers",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
@@ -31,7 +31,7 @@ app = typer.Typer(
 def _version_callback(value: bool) -> None:
     """Show version and exit."""
     if value:
-        typer.echo(f"codeagent {__version__}")
+        typer.echo(f"djinn {__version__}")
         raise typer.Exit()
 
 
@@ -48,20 +48,20 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """AI Dev Base CLI - Manage AI development containers.
+    """Djinn in a Box CLI - Manage AI development containers.
 
-    The AI Dev Base provides a containerized development environment
+    The Djinn in a Box provides a containerized development environment
     with pre-configured CLI coding agents (Claude, Gemini, Codex, OpenCode).
 
     [info.bold]Quick start:[/info.bold]
 
-        codeagent init            # First-time setup
+        djinn init            # First-time setup
 
-        codeagent build           # Build the Docker image
+        djinn build           # Build the Docker image
 
-        codeagent start           # Start development shell
+        djinn start           # Start development shell
 
-        codeagent run claude "Hello world"  # Run an agent
+        djinn run claude "Hello world"  # Run an agent
     """
 
 

@@ -3,7 +3,7 @@
 set -e
 
 PULUMI_VERSION="${PULUMI_VERSION:-latest}"
-INSTALL_ROOT="${TOOLS_DIR:-$HOME/.cache/ai-dev-tools}"
+INSTALL_ROOT="${TOOLS_DIR:-$HOME/.cache/djinn-tools}"
 INSTALL_BIN="${TOOLS_BIN:-$INSTALL_ROOT/bin}"
 
 mkdir -p "$INSTALL_BIN"

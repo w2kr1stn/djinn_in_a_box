@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Dev Base Image
+# Djinn in a Box Image
 # Minimal base with: fnm (Node), uv (Python), Claude Code, Codex, Gemini CLI
 # + Docker CLI für Container-Management (optional aktivierbar)
 # =============================================================================
@@ -100,8 +100,8 @@ RUN uv tool install ruff
 
 # Shell config (.zshrc)
 RUN cat > ~/.zshrc << 'EOF'
-export PATH="$HOME/.cache/ai-dev-tools/bin:$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
-export LD_LIBRARY_PATH="$HOME/.cache/ai-dev-tools/lib:${LD_LIBRARY_PATH:-}"
+export PATH="$HOME/.cache/djinn-tools/bin:$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
+export LD_LIBRARY_PATH="$HOME/.cache/djinn-tools/lib:${LD_LIBRARY_PATH:-}"
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
 plugins=(git zsh-autosuggestions docker)

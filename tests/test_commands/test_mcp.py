@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 
-from ai_dev_base.commands import mcp
-from ai_dev_base.commands.mcp import AI_DEV_NETWORK, GATEWAY_CONTAINER
+from djinn_in_a_box.commands import mcp
+from djinn_in_a_box.commands.mcp import DJINN_NETWORK, GATEWAY_CONTAINER
 
 
 class TestRequireMcpCli:
@@ -32,14 +32,14 @@ class TestRequireRunning:
 
     def test_exits_when_gateway_not_running(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=False),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=False),
             pytest.raises(typer.Exit) as exc_info,
         ):
             mcp._require_running()
         assert exc_info.value.exit_code == 1
 
     def test_passes_when_gateway_running(self) -> None:
-        with patch("ai_dev_base.commands.mcp.is_container_running", return_value=True):
+        with patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True):
             mcp._require_running()
 
 
@@ -48,21 +48,21 @@ class TestStartCommand:
 
     def test_start_ensures_network_and_runs_compose(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp._require_mcp_cli"),
-            patch("ai_dev_base.commands.mcp.ensure_network") as mock_network,
+            patch("djinn_in_a_box.commands.mcp._require_mcp_cli"),
+            patch("djinn_in_a_box.commands.mcp.ensure_network") as mock_network,
             patch("subprocess.run") as mock_run,
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True),
             patch("time.sleep"),
         ):
             mock_run.return_value = MagicMock(returncode=0)
             mcp.start()
-            mock_network.assert_called_once_with(AI_DEV_NETWORK)
+            mock_network.assert_called_once_with(DJINN_NETWORK)
             assert mock_run.call_args_list[0][0][0] == ["docker", "compose", "up", "-d"]
 
     def test_start_exits_on_compose_failure(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp._require_mcp_cli"),
-            patch("ai_dev_base.commands.mcp.ensure_network"),
+            patch("djinn_in_a_box.commands.mcp._require_mcp_cli"),
+            patch("djinn_in_a_box.commands.mcp.ensure_network"),
             patch("subprocess.run", return_value=MagicMock(returncode=1)),
             patch("time.sleep"),
             pytest.raises(typer.Exit),
@@ -73,14 +73,14 @@ class TestStartCommand:
 class TestLogsCommand:
     def test_logs_requires_running_gateway(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=False),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=False),
             pytest.raises(typer.Exit),
         ):
             mcp.logs()
 
     def test_logs_runs_docker_logs(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
             pytest.raises(typer.Exit) as exc_info,
         ):
@@ -93,7 +93,7 @@ class TestLogsCommand:
 
     def test_logs_with_follow_flag(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
             pytest.raises(typer.Exit),
         ):
@@ -103,7 +103,7 @@ class TestLogsCommand:
 
     def test_logs_with_tail_option(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
             pytest.raises(typer.Exit),
         ):
@@ -128,8 +128,8 @@ class TestEnableDisableCommands:
         self, command: Callable[..., None], server: str, expected_action: str
     ) -> None:
         with (
-            patch("ai_dev_base.commands.mcp._require_mcp_cli"),
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=False),
+            patch("djinn_in_a_box.commands.mcp._require_mcp_cli"),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=False),
             pytest.raises(typer.Exit),
         ):
             command(server)
@@ -138,8 +138,8 @@ class TestEnableDisableCommands:
         self, command: Callable[..., None], server: str, expected_action: str
     ) -> None:
         with (
-            patch("ai_dev_base.commands.mcp._require_mcp_cli"),
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.mcp._require_mcp_cli"),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -156,7 +156,7 @@ class TestEnableDisableCommands:
 class TestServersCommand:
     def test_servers_runs_docker_mcp_ls(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp._require_mcp_cli"),
+            patch("djinn_in_a_box.commands.mcp._require_mcp_cli"),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="duckduckgo\nmemory")
@@ -167,7 +167,7 @@ class TestServersCommand:
 class TestCatalogCommand:
     def test_catalog_runs_docker_mcp_catalog(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp._require_mcp_cli"),
+            patch("djinn_in_a_box.commands.mcp._require_mcp_cli"),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="catalog data")
@@ -185,7 +185,7 @@ class TestTestCommand:
     def test_test_checks_container_status(self) -> None:
         with (
             patch(
-                "ai_dev_base.commands.mcp.is_container_running", return_value=False
+                "djinn_in_a_box.commands.mcp.is_container_running", return_value=False
             ) as mock_running,
             patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")),
             pytest.raises(typer.Exit),
@@ -196,7 +196,7 @@ class TestTestCommand:
 
     def test_test_checks_localhost_endpoint(self) -> None:
         with (
-            patch("ai_dev_base.commands.mcp.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.mcp.is_container_running", return_value=True),
             patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="200")),
         ):
             mcp.test()
@@ -221,7 +221,7 @@ class TestCleanCommand:
                 "docker",
                 "network",
                 "rm",
-                AI_DEV_NETWORK,
+                DJINN_NETWORK,
             ]
 
     def test_clean_removes_mcp_config_dir(self) -> None:

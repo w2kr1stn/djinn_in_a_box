@@ -3,7 +3,7 @@
 # Update CLI Agent Versions in Dockerfile
 # =============================================================================
 # Fetches latest versions from npm and updates the Dockerfile ARG defaults.
-# After running this script, rebuild the image with: codeagent build
+# After running this script, rebuild the image with: djinn build
 # =============================================================================
 
 set -euo pipefail
@@ -68,8 +68,8 @@ if [[ "$updates_made" == "true" ]]; then
     git diff --no-color "$DOCKERFILE" | head -30
     echo ""
     echo -e "Next steps:"
-    echo -e "  1. ${BLUE}codeagent build${NC}   # Rebuild image with new versions"
-    echo -e "  2. ${BLUE}codeagent start${NC}   # Start container"
+    echo -e "  1. ${BLUE}djinn build${NC}   # Rebuild image with new versions"
+    echo -e "  2. ${BLUE}djinn start${NC}   # Start container"
 else
     echo -e "${GREEN}All CLI agents are already up to date.${NC}"
 fi

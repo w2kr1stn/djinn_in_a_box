@@ -11,9 +11,9 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
-from ai_dev_base.config.defaults import VOLUME_CATEGORIES
-from ai_dev_base.config.loader import load_config
-from ai_dev_base.core.console import (
+from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
+from djinn_in_a_box.config.loader import load_config
+from djinn_in_a_box.core.console import (
     blank,
     console,
     err_console,
@@ -24,9 +24,9 @@ from ai_dev_base.core.console import (
     success,
     warning,
 )
-from ai_dev_base.core.decorators import handle_config_errors
-from ai_dev_base.core.docker import (
-    AI_DEV_NETWORK,
+from djinn_in_a_box.core.decorators import handle_config_errors
+from djinn_in_a_box.core.docker import (
+    DJINN_NETWORK,
     ContainerOptions,
     cleanup_docker_proxy,
     compose_build,
@@ -43,8 +43,8 @@ from ai_dev_base.core.docker import (
     network_exists,
     volume_exists,
 )
-from ai_dev_base.core.exceptions import ConfigNotFoundError
-from ai_dev_base.core.paths import get_project_root, resolve_mount_path
+from djinn_in_a_box.core.exceptions import ConfigNotFoundError
+from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 
 
 def _get_existing_volumes_by_category(category: str) -> list[str]:
@@ -63,12 +63,12 @@ def build(
 
     Must be done before first use and after Dockerfile changes.
     """
-    info("Building ai-dev-base image...")
+    info("Building djinn-in-a-box image...")
 
     result = compose_build(no_cache=no_cache)
 
     if result.success:
-        success("Done! Run 'codeagent start' to begin.")
+        success("Done! Run 'djinn start' to begin.")
     else:
         error(f"Build failed with exit code {result.returncode}")
         if result.stderr:
@@ -106,11 +106,11 @@ def start(
     and optionally Docker socket access and firewall restrictions.
 
     Examples:
-        codeagent start                         # Basic interactive shell
-        codeagent start --docker                # With Docker access (proxy)
-        codeagent start --docker-direct         # With Docker access (direct)
-        codeagent start --here                  # Mount cwd as workspace
-        codeagent start -d -f --here            # Full options
+        djinn start                         # Basic interactive shell
+        djinn start --docker                # With Docker access (proxy)
+        djinn start --docker-direct         # With Docker access (direct)
+        djinn start --here                  # Mount cwd as workspace
+        djinn start -d -f --here            # Full options
     """
     if docker and docker_direct:
         error("--docker and --docker-direct are mutually exclusive")
@@ -119,7 +119,7 @@ def start(
     config = load_config()
 
     if not ensure_network():
-        error(f"Failed to create Docker network '{AI_DEV_NETWORK}'")
+        error(f"Failed to create Docker network '{DJINN_NETWORK}'")
         raise typer.Exit(1)
 
     # Resolve mount path
@@ -135,7 +135,7 @@ def start(
 
     # Print status output (to stderr, matching Bash format)
     blank()
-    info("Starting AI Dev environment...")
+    info("Starting Djinn environment...")
     blank()
 
     status_line("Projects", str(config.code_dir))
@@ -207,13 +207,13 @@ def auth(
     This mode uses network_mode: host so OAuth callbacks from CLI tools
     (Claude Code, Gemini CLI, Codex) can reach localhost.
 
-    After authenticating all tools, exit and use 'codeagent start' for
+    After authenticating all tools, exit and use 'djinn start' for
     normal development with the isolated network.
 
     Example:
-        codeagent auth                   # Authenticate CLI tools
-        codeagent auth --docker          # With Docker access (proxy)
-        codeagent auth --docker-direct   # With Docker access (direct)
+        djinn auth                   # Authenticate CLI tools
+        djinn auth --docker          # With Docker access (proxy)
+        djinn auth --docker-direct   # With Docker access (direct)
     """
     if docker and docker_direct:
         error("--docker and --docker-direct are mutually exclusive")
@@ -221,11 +221,11 @@ def auth(
 
     config = load_config()
 
-    info("Starting AI Dev with host network for OAuth authentication...")
+    info("Starting Djinn with host network for OAuth authentication...")
     blank()
     err_console.print("This mode uses network_mode: host so OAuth callbacks work.")
     err_console.print(
-        "After authenticating Claude Code, Gemini CLI and Codex, exit and use 'codeagent start'"
+        "After authenticating Claude Code, Gemini CLI and Codex, exit and use 'djinn start'"
     )
     blank()
 
@@ -260,7 +260,7 @@ def auth(
 def _print_volume_table(volumes: dict[str, list[str]]) -> None:
     """Print a formatted volume table to stdout."""
     table = Table(
-        title="AI Dev Volumes",
+        title="Djinn Volumes",
         title_style="table.title",
         show_header=True,
         header_style="table.header",
@@ -298,7 +298,7 @@ def status() -> None:
         config = load_config()
         err_console.print(f"  CODE_DIR: {config.code_dir}")
     except ConfigNotFoundError:
-        warning("Configuration not found. Run 'codeagent init' to create one.")
+        warning("Configuration not found. Run 'djinn init' to create one.")
 
     blank()
 
@@ -310,7 +310,7 @@ def status() -> None:
             "ps",
             "-a",
             "--filter",
-            "name=ai-dev",
+            "name=djinn",
             "--filter",
             "name=mcp-",
             "--format",
@@ -347,7 +347,7 @@ def status() -> None:
             "network",
             "ls",
             "--filter",
-            "name=ai-dev",
+            "name=djinn",
             "--format",
             "table {{.Name}}\t{{.Driver}}",
         ],
@@ -366,7 +366,7 @@ def status() -> None:
     header("Services")
 
     # Docker Proxy Status
-    if is_container_running("ai-dev-docker-proxy"):
+    if is_container_running("djinn-docker-proxy"):
         success("  Docker Proxy: Running")
     else:
         err_console.print("  [status.disabled]Docker Proxy: Not running[/status.disabled]")
@@ -435,14 +435,14 @@ def clean_volumes(
     With a volume name argument, deletes that specific volume.
 
     Examples:
-        codeagent clean volumes                    # List all volumes
-        codeagent clean volumes --credentials      # Delete credential volumes
-        codeagent clean volumes ai-dev-uv-cache    # Delete specific volume
+        djinn clean volumes                    # List all volumes
+        djinn clean volumes --credentials      # Delete credential volumes
+        djinn clean volumes djinn-uv-cache    # Delete specific volume
     """
     # If a specific volume name is provided, delete it
     if name:
-        if not name.startswith("ai-dev-"):
-            error(f"Refusing to delete volume '{name}': only ai-dev-* volumes are managed")
+        if not name.startswith("djinn-"):
+            error(f"Refusing to delete volume '{name}': only djinn-* volumes are managed")
             raise typer.Exit(1)
         if volume_exists(name):
             info(f"Deleting volume: {name}")
@@ -511,9 +511,9 @@ def clean_all(
     """Remove EVERYTHING: containers, volumes, and network.
 
     This is a destructive operation that removes:
-    - All ai-dev containers
-    - All ai-dev volumes (credentials, tools, cache, data)
-    - The ai-dev-network
+    - All djinn containers
+    - All djinn volumes (credentials, tools, cache, data)
+    - The djinn-network
 
     """
     if not force:
@@ -541,11 +541,11 @@ def clean_all(
 
     # Remove network
     info("Removing network...")
-    if network_exists(AI_DEV_NETWORK):
-        if delete_network(AI_DEV_NETWORK):
-            success(f"  Deleted: {AI_DEV_NETWORK}")
+    if network_exists(DJINN_NETWORK):
+        if delete_network(DJINN_NETWORK):
+            success(f"  Deleted: {DJINN_NETWORK}")
     else:
-        err_console.print(f"  {AI_DEV_NETWORK} does not exist")
+        err_console.print(f"  {DJINN_NETWORK} does not exist")
 
     blank()
     success("Cleanup complete.")
@@ -558,16 +558,16 @@ def audit(
     ] = 50,
 ) -> None:
     """Show Docker proxy audit log."""
-    if not is_container_running("ai-dev-docker-proxy"):
+    if not is_container_running("djinn-docker-proxy"):
         error("Docker Proxy is not running.")
-        err_console.print("Start with: codeagent start --docker")
+        err_console.print("Start with: djinn start --docker")
         raise typer.Exit(1)
 
     info(f"Docker Proxy Audit Log (last {tail} lines):")
     blank()
 
     result = subprocess.run(
-        ["docker", "logs", "--tail", str(tail), "ai-dev-docker-proxy"],
+        ["docker", "logs", "--tail", str(tail), "djinn-docker-proxy"],
         check=False,
     )
     if result.returncode != 0:
@@ -605,10 +605,10 @@ def enter() -> None:
         error("Cannot enter container: no TTY available (stdin is not a terminal)")
         raise typer.Exit(1)
 
-    containers = get_running_containers("ai-dev-base-dev")
+    containers = get_running_containers("djinn-in-a-box-dev")
     if not containers:
-        error("No running ai-dev-base container found.")
-        err_console.print("Start one with: codeagent start")
+        error("No running djinn-in-a-box container found.")
+        err_console.print("Start one with: djinn start")
         raise typer.Exit(1)
 
     container = containers[0]

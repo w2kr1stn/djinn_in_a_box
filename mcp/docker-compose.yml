@@ -46,7 +46,7 @@ services:
     # Network: Dedicated network for AI tools communication
     # -------------------------------------------------------------------------
     networks:
-      - ai-dev-network
+      - djinn-network
     
     # -------------------------------------------------------------------------
     # Port mapping - Only expose locally (127.0.0.1)
@@ -76,9 +76,9 @@ services:
 # Networks
 # =============================================================================
 networks:
-  ai-dev-network:
+  djinn-network:
     external: true
-    name: ai-dev-network
+    name: djinn-network
     driver: bridge
 
 

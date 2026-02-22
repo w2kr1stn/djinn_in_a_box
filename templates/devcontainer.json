@@ -1,22 +1,22 @@
 {
     // ===========================================================================
-    // Project DevContainer - Uses ai-dev-base image
+    // Project DevContainer - Uses djinn-in-a-box image
     // ===========================================================================
     // Copy this file to: your-project/.devcontainer/devcontainer.json
     // ===========================================================================
     "name": "Project Dev Environment",
     // Use the pre-built base image
-    "image": "ai-dev-base:latest",
+    "image": "djinn-in-a-box:latest",
     // -------------------------------------------------------------------------
     // Workspace: Mount project directory into container
     // -------------------------------------------------------------------------
     "workspaceMount": "source=${localWorkspaceFolder},target=/home/dev/project,type=bind",
     "workspaceFolder": "/home/dev/project",
     // -------------------------------------------------------------------------
-    // Network: Connect to ai-dev-network (where MCP Gateway runs)
+    // Network: Connect to djinn-network (where MCP Gateway runs)
     // -------------------------------------------------------------------------
     "runArgs": [
-        "--network=ai-dev-network",
+        "--network=djinn-network",
         "--cap-add=NET_ADMIN"
     ],
     // -------------------------------------------------------------------------
@@ -30,16 +30,16 @@
     // -------------------------------------------------------------------------
     "mounts": [
         // Tool credentials & cache (Docker volumes)
-        "source=ai-dev-claude-config,target=/home/dev/.claude,type=volume",
-        "source=ai-dev-gemini-config,target=/home/dev/.gemini,type=volume",
-        "source=ai-dev-codex-config,target=/home/dev/.codex,type=volume",
-        "source=ai-dev-opencode-config,target=/home/dev/.opencode,type=volume",
-        "source=ai-dev-uv-cache,target=/home/dev/.cache/uv,type=volume",
-        "source=ai-dev-sops-config,target=/home/dev/.config/sops,type=volume",
+        "source=djinn-claude-config,target=/home/dev/.claude,type=volume",
+        "source=djinn-gemini-config,target=/home/dev/.gemini,type=volume",
+        "source=djinn-codex-config,target=/home/dev/.codex,type=volume",
+        "source=djinn-opencode-config,target=/home/dev/.opencode,type=volume",
+        "source=djinn-uv-cache,target=/home/dev/.cache/uv,type=volume",
+        "source=djinn-sops-config,target=/home/dev/.config/sops,type=volume",
         // VS Code Server (persistent extensions & settings)
-        "source=ai-dev-vscode-server,target=/home/dev/.vscode-server,type=volume",
+        "source=djinn-vscode-server,target=/home/dev/.vscode-server,type=volume",
         // VS Code Workspaces (persistent .code-workspace files)
-        "source=ai-dev-vscode-workspaces,target=/home/dev/workspaces,type=volume",
+        "source=djinn-vscode-workspaces,target=/home/dev/workspaces,type=volume",
         // Host configs (zsh, git, oh-my-zsh) - optional, comment out if not needed
         "source=${localEnv:HOME}/.gitconfig,target=/home/dev/.gitconfig,type=bind,readonly"
     ],
@@ -93,7 +93,7 @@
     //   "ghcr.io/devcontainers/features/rust:1": {},
     // }
     // -------------------------------------------------------------------------
-    // NOTE: For OAuth authentication, first use `codeagent auth` from the
-    // ai-dev-base directory to authenticate with host network.
+    // NOTE: For OAuth authentication, first use `djinn auth` from the
+    // djinn-in-a-box directory to authenticate with host network.
     // -------------------------------------------------------------------------
 }

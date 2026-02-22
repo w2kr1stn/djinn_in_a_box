@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 import typer
 
-from ai_dev_base.core.decorators import handle_config_errors
-from ai_dev_base.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.decorators import handle_config_errors
+from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 
 
 class TestHandleConfigErrors:

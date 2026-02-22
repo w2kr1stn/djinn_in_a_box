@@ -2,7 +2,7 @@
 # Bun - JavaScript runtime & toolkit
 set -e
 
-INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
+INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
 mkdir -p "$INSTALL_DIR"
 

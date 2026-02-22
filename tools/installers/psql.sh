@@ -3,8 +3,8 @@
 # Uses official PostgreSQL apt repo for latest version (not Debian's older packages)
 set -e
 
-INSTALL_BIN="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
-INSTALL_LIB="${TOOLS_LIB:-$HOME/.cache/ai-dev-tools/lib}"
+INSTALL_BIN="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
+INSTALL_LIB="${TOOLS_LIB:-$HOME/.cache/djinn-tools/lib}"
 
 mkdir -p "$INSTALL_BIN" "$INSTALL_LIB"
 

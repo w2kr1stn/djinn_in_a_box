@@ -1,10 +1,10 @@
-"""Pytest configuration and fixtures for AI Dev Base tests."""
+"""Pytest configuration and fixtures for Djinn in a Box tests."""
 
 from pathlib import Path
 
 import pytest
 
-from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
+from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
 
 
 @pytest.fixture

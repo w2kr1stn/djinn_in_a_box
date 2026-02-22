@@ -1,8 +1,8 @@
 # =============================================================================
-# AI Dev Base - Direct Docker Socket Override
+# Djinn in a Box - Direct Docker Socket Override
 # =============================================================================
 # Aktiviert direkten Docker-Socket-Zugriff OHNE Security-Proxy.
-# Wird automatisch geladen wenn: codeagent start --docker-direct
+# Wird automatisch geladen wenn: djinn start --docker-direct
 #
 # WARNUNG: Kein API-Filtering! Der Container erhaelt vollen Docker-Zugriff,
 # gleichbedeutend mit Root-Zugriff auf den Host.

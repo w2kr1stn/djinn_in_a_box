@@ -1,4 +1,4 @@
-"""Pydantic models for AI Dev Base configuration.
+"""Pydantic models for Djinn in a Box configuration.
 
 Provides type-safe configuration models with validation and sensible defaults.
 All models use Pydantic v2 with strict typing and TOML-compatible serialization.
@@ -142,7 +142,7 @@ class ShellConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """Main application configuration for AI Dev Base.
+    """Main application configuration for Djinn in a Box.
 
     This is the root configuration model that combines all settings:
     project directory, timezone, resource limits, shell options, and

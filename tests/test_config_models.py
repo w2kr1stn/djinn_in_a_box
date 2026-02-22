@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from ai_dev_base.config.models import (
+from djinn_in_a_box.config.models import (
     AppConfig,
     ResourceLimits,
     ShellConfig,

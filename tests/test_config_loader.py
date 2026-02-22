@@ -1,4 +1,4 @@
-"""Tests for ai_dev_base.config.loader module."""
+"""Tests for djinn_in_a_box.config.loader module."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from ai_dev_base.config.loader import (
+from djinn_in_a_box.config.loader import (
     ConfigNotFoundError,
     ConfigValidationError,
     load_agents,
     load_config,
     save_config,
 )
-from ai_dev_base.config.models import AppConfig
+from djinn_in_a_box.config.models import AppConfig
 
 
 @pytest.fixture
@@ -133,11 +133,11 @@ class TestLoadAgents:
     def test_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should fall back to DEFAULT_AGENTS when no files exist."""
         monkeypatch.setattr(
-            "ai_dev_base.config.loader.AGENTS_FILE",
+            "djinn_in_a_box.config.loader.AGENTS_FILE",
             Path("/nonexistent/agents.toml"),
         )
         monkeypatch.setattr(
-            "ai_dev_base.config.loader.get_project_root",
+            "djinn_in_a_box.config.loader.get_project_root",
             lambda: Path("/nonexistent"),
         )
 

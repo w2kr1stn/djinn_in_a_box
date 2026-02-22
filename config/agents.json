@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Single source of truth for CLI agent headless mode configuration. Used by codeagent CLI.",
+  "$comment": "Single source of truth for CLI agent headless mode configuration. Used by djinn CLI.",
   "agents": {
     "claude": {
       "binary": "claude",

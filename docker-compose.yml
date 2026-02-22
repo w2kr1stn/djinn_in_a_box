@@ -1,14 +1,14 @@
 # =============================================================================
-# AI Dev Base - Docker Compose (Basis-Konfiguration)
+# Djinn in a Box - Docker Compose (Basis-Konfiguration)
 # =============================================================================
 # Usage:
-#   codeagent start              # Ohne Docker Socket (sicher)
-#   codeagent start --docker     # Mit Docker Socket + Proxy
-#   codeagent start --firewall   # Mit Netzwerk-Firewall
-#   codeagent start --docker --firewall  # Beides kombiniert
+#   djinn start              # Ohne Docker Socket (sicher)
+#   djinn start --docker     # Mit Docker Socket + Proxy
+#   djinn start --firewall   # Mit Netzwerk-Firewall
+#   djinn start --docker --firewall  # Beides kombiniert
 #
 # Configuration:
-#   Run `codeagent init` to create ~/.config/ai-dev-base/config.toml
+#   Run `djinn init` to create ~/.config/djinn-in-a-box/config.toml
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -24,7 +24,7 @@ x-common-volumes: &common-volumes
   - gh-config:/home/dev/.config/gh
   # Cache
   - uv-cache:/home/dev/.cache/uv
-  - tools-cache:/home/dev/.cache/ai-dev-tools
+  - tools-cache:/home/dev/.cache/djinn-tools
   # Optional tool configs (authentication & settings)
   - azure-config:/home/dev/.azure
   - pulumi-config:/home/dev/.pulumi
@@ -72,13 +72,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ai-dev-base:latest
-    container_name: ai-dev
-    hostname: ai-dev
+    image: djinn-in-a-box:latest
+    container_name: djinn
+    hostname: djinn
     stdin_open: true
     tty: true
     networks:
-      - ai-dev-network
+      - djinn-network
     volumes: *common-volumes
     environment:
       <<: *common-environment
@@ -93,9 +93,9 @@ services:
   # OAuth authentication container (uses host network)
   # ---------------------------------------------------------------------------
   dev-auth:
-    image: ai-dev-base:latest
-    container_name: ai-dev-auth
-    hostname: ai-dev
+    image: djinn-in-a-box:latest
+    container_name: djinn-auth
+    hostname: djinn
     stdin_open: true
     tty: true
     profiles:
@@ -109,34 +109,34 @@ services:
     working_dir: /home/dev/projects
 
 networks:
-  ai-dev-network:
+  djinn-network:
     external: true
-    name: ai-dev-network
+    name: djinn-network
 
 volumes:
   claude-config:
-    name: ai-dev-claude-config
+    name: djinn-claude-config
   gemini-config:
-    name: ai-dev-gemini-config
+    name: djinn-gemini-config
   codex-config:
-    name: ai-dev-codex-config
+    name: djinn-codex-config
   opencode-config:
-    name: ai-dev-opencode-config
+    name: djinn-opencode-config
   opencode-data:
-    name: ai-dev-opencode-data
+    name: djinn-opencode-data
   gh-config:
-    name: ai-dev-gh-config
+    name: djinn-gh-config
   uv-cache:
-    name: ai-dev-uv-cache
+    name: djinn-uv-cache
   tools-cache:
-    name: ai-dev-tools-cache
+    name: djinn-tools-cache
   azure-config:
-    name: ai-dev-azure-config
+    name: djinn-azure-config
   pulumi-config:
-    name: ai-dev-pulumi-config
+    name: djinn-pulumi-config
   sops-config:
-    name: ai-dev-sops-config
+    name: djinn-sops-config
   vscode-server:
-    name: ai-dev-vscode-server
+    name: djinn-vscode-server
   vscode-workspaces:
-    name: ai-dev-vscode-workspaces
+    name: djinn-vscode-workspaces

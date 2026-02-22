@@ -1,1 +1,1 @@
-"""Tests for AI Dev Base CLI commands."""
+"""Tests for Djinn in a Box CLI commands."""

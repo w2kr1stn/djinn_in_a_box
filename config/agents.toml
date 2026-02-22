@@ -1,8 +1,8 @@
 # =============================================================================
-# AI Dev Base - Default Agent Configurations
+# Djinn in a Box - Default Agent Configurations
 # =============================================================================
 # This is the bundled default configuration for CLI coding agents.
-# Copy to ~/.config/ai-dev-base/agents.toml to customize.
+# Copy to ~/.config/djinn-in-a-box/agents.toml to customize.
 #
 # Each agent defines:
 #   binary          - Executable binary name

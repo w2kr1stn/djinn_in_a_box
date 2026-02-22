@@ -10,14 +10,14 @@ from typing import Annotated
 
 import typer
 
-from ai_dev_base.core.console import console, err_console, error, header, info, success, warning
-from ai_dev_base.core.docker import (
-    AI_DEV_NETWORK,
+from djinn_in_a_box.core.console import console, err_console, error, header, info, success, warning
+from djinn_in_a_box.core.docker import (
+    DJINN_NETWORK,
     delete_network,
     ensure_network,
     is_container_running,
 )
-from ai_dev_base.core.paths import get_project_root
+from djinn_in_a_box.core.paths import get_project_root
 
 GATEWAY_CONTAINER: str = "mcp-gateway"
 """Name of the MCP Gateway container."""
@@ -68,7 +68,7 @@ def _run_mcp_compose(args: list[str], error_msg: str) -> None:
 def start() -> None:
     """Start the MCP Gateway service."""
     _require_mcp_cli()
-    ensure_network(AI_DEV_NETWORK)
+    ensure_network(DJINN_NETWORK)
     info("Starting MCP Gateway...")
 
     _run_mcp_compose(["up", "-d"], "Failed to start MCP Gateway")
@@ -318,7 +318,7 @@ def test() -> None:
             "run",
             "--rm",
             "--network",
-            AI_DEV_NETWORK,
+            DJINN_NETWORK,
             "curlimages/curl:latest",
             "-s",
             "--connect-timeout",
@@ -387,7 +387,7 @@ def clean() -> None:
     )
 
     # Remove network
-    delete_network(AI_DEV_NETWORK)
+    delete_network(DJINN_NETWORK)
 
     # Remove MCP config directory (~/.docker/mcp)
     mcp_config = Path.home() / ".docker" / "mcp"

@@ -9,11 +9,11 @@ from typing import Annotated
 
 import typer
 
-from ai_dev_base.config.loader import load_config, save_config
-from ai_dev_base.config.models import AppConfig
-from ai_dev_base.core.console import console, error, info, success, warning
-from ai_dev_base.core.decorators import handle_config_errors
-from ai_dev_base.core.paths import AGENTS_FILE, CONFIG_DIR, CONFIG_FILE, get_project_root
+from djinn_in_a_box.config.loader import load_config, save_config
+from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.console import console, error, info, success, warning
+from djinn_in_a_box.core.decorators import handle_config_errors
+from djinn_in_a_box.core.paths import AGENTS_FILE, CONFIG_DIR, CONFIG_FILE, get_project_root
 
 
 def init_config(
@@ -26,16 +26,16 @@ def init_config(
         ),
     ] = False,
 ) -> None:
-    """Initialize configuration in ~/.config/ai-dev-base/.
+    """Initialize configuration in ~/.config/djinn-in-a-box/.
 
     Creates config.toml with user-provided settings through interactive prompts.
     Run this once before using other commands.
 
     [info.bold]Example:[/info.bold]
 
-        codeagent init              # Interactive setup
+        djinn init              # Interactive setup
 
-        codeagent init --force      # Overwrite existing config
+        djinn init --force      # Overwrite existing config
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -46,7 +46,7 @@ def init_config(
             raise typer.Abort()
 
     # Interactive prompts
-    info("AI Dev Base Configuration Setup")
+    info("Djinn in a Box Configuration Setup")
     console.print()
 
     code_dir = typer.prompt(
@@ -91,9 +91,9 @@ def init_config(
 
     console.print()
     console.print("[primary.bold]Next steps:[/primary.bold]")
-    console.print("  [muted]1.[/muted] codeagent build    [muted]# Build the Docker image[/muted]")
-    console.print("  [muted]2.[/muted] codeagent auth     [muted]# Authenticate with AI[/muted]")
-    console.print("  [muted]3.[/muted] codeagent start    [muted]# Start development shell[/muted]")
+    console.print("  [muted]1.[/muted] djinn build    [muted]# Build the Docker image[/muted]")
+    console.print("  [muted]2.[/muted] djinn auth     [muted]# Authenticate with AI[/muted]")
+    console.print("  [muted]3.[/muted] djinn start    [muted]# Start development shell[/muted]")
 
 
 @handle_config_errors
@@ -109,13 +109,13 @@ def config_show(
 ) -> None:
     """Show current configuration.
 
-    Displays all settings from ~/.config/ai-dev-base/config.toml.
+    Displays all settings from ~/.config/djinn-in-a-box/config.toml.
 
     [info.bold]Example:[/info.bold]
 
-        codeagent config show           # Human-readable output
+        djinn config show           # Human-readable output
 
-        codeagent config show --json    # JSON output for scripting
+        djinn config show --json    # JSON output for scripting
     """
     config = load_config()
 
@@ -155,8 +155,8 @@ def config_path() -> None:
 
     [info.bold]Example:[/info.bold]
 
-        codeagent config path           # Show path
+        djinn config path           # Show path
 
-        vim $(codeagent config path)    # Edit config directly
+        vim $(djinn config path)    # Edit config directly
     """
     console.print(str(CONFIG_FILE))

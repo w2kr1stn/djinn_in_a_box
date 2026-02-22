@@ -1,4 +1,4 @@
-# MCP Gateway fuer AI Dev Container
+# MCP Gateway fuer Djinn Container
 
 Dieses Setup stellt einen Docker MCP Gateway bereit, der MCP Server aus dem [Docker MCP Catalog](https://hub.docker.com/search?q=mcp%2F) fuer alle CLI Coding Agents verfuegbar macht.
 
@@ -47,11 +47,11 @@ docker mcp --help
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    ai-dev-network (Bridge)                      │
+│                    djinn-network (Bridge)                      │
 │                                                                 │
 │  ┌─────────────────┐           ┌─────────────────────────────┐  │
-│  │  MCP Gateway    │           │    AI Dev Container         │  │
-│  │  (mcp-gateway)  │◄─────────►│  (ai-dev)                   │  │
+│  │  MCP Gateway    │           │    Djinn Container         │  │
+│  │  (mcp-gateway)  │◄─────────►│  (djinn)                   │  │
 │  │                 │   SSE     │                             │  │
 │  │  :8811          │           │  Claude Code / Codex        │  │
 │  └────────┬────────┘           └─────────────────────────────┘  │
@@ -103,10 +103,10 @@ mcpgateway enable fetch
 mcpgateway servers
 ```
 
-### 3. AI Dev Container starten
+### 3. Djinn Container starten
 
 ```bash
-codeagent start
+djinn start
 
 # Im Container: Claude Code nutzt automatisch den Gateway
 claude
@@ -158,12 +158,12 @@ mcpgateway enable duckduckgo
 mcpgateway enable memory
 
 # Einmalig: OAuth-Authentifizierung
-codeagent auth    # Host-Netzwerk fuer OAuth
+djinn auth    # Host-Netzwerk fuer OAuth
 # -> Claude Code und Codex authentifizieren
 exit
 
 # Taeglich: Normal arbeiten
-codeagent start   # Dediziertes Netzwerk
+djinn start   # Dediziertes Netzwerk
 claude            # MCP Tools verfuegbar
 ```
 
@@ -176,7 +176,7 @@ claude            # MCP Tools verfuegbar
 mcpgateway status
 
 # 2. Netzwerk existiert?
-docker network ls | grep ai-dev
+docker network ls | grep djinn
 
 # 3. Verbindung testen
 mcpgateway test
@@ -234,7 +234,7 @@ ls -la /var/run/docker.sock
 - **Gateway Image**: `docker/mcp-gateway:latest`
 - **Transport**: Streaming HTTP (kompatibel mit Claude Code & Codex)
 - **Port**: 8811 (nur localhost)
-- **Netzwerk**: `ai-dev-network` (Bridge)
+- **Netzwerk**: `djinn-network` (Bridge)
 - **Config**: `~/.docker/mcp` (Host) → `/root/.docker/mcp` (Container)
 - **Endpoint (Container)**: `http://mcp-gateway:8811`
 - **Endpoint (Host)**: `http://localhost:8811`
@@ -257,7 +257,7 @@ docker mcp server ls
 ### 2. Claude Code Konfiguration prüfen
 
 ```bash
-# Im AI Dev Container
+# Im Djinn Container
 cat ~/.claude/claude.json | jq .mcpServers
 
 # Erwartete Ausgabe:
@@ -275,7 +275,7 @@ claude mcp list
 ### 3. Codex CLI Konfiguration prüfen
 
 ```bash
-# Im AI Dev Container
+# Im Djinn Container
 cat ~/.codex/config.toml
 
 # Erwartete Ausgabe (relevant):
@@ -324,7 +324,7 @@ mcpgateway logs
 ### 7. Netzwerk-Konnektivität prüfen
 
 ```bash
-# Im AI Dev Container
+# Im Djinn Container
 curl -s http://mcp-gateway:8811/ | head -20
 
 # Sollte JSON oder HTTP-Response zeigen

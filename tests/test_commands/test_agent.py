@@ -9,12 +9,12 @@ from unittest.mock import patch
 import pytest
 import typer
 
-from ai_dev_base.commands.agent import build_agent_command
-from ai_dev_base.config.models import AgentConfig
-from ai_dev_base.core.docker import RunResult
+from djinn_in_a_box.commands.agent import build_agent_command
+from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.core.docker import RunResult
 
 if TYPE_CHECKING:
-    from ai_dev_base.config.models import AppConfig
+    from djinn_in_a_box.config.models import AppConfig
 
 
 @pytest.fixture
@@ -132,11 +132,11 @@ class TestRunCommand:
     ) -> Generator[dict[str, Any]]:
         """Common mocks for run command tests."""
         with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("ai_dev_base.commands.agent.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.agent.compose_run") as mock_run,
-            patch("ai_dev_base.commands.agent.cleanup_docker_proxy") as mock_cleanup,
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
+            patch("djinn_in_a_box.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("djinn_in_a_box.commands.agent.ensure_network", return_value=True),
+            patch("djinn_in_a_box.commands.agent.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.agent.cleanup_docker_proxy") as mock_cleanup,
         ):
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
             yield {"run": mock_run, "cleanup": mock_cleanup}
@@ -147,11 +147,11 @@ class TestRunCommand:
         mock_app_config: AppConfig,
     ) -> None:
         """Test run validates the agent name."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
+            patch("djinn_in_a_box.commands.agent.load_agents", return_value=mock_agent_configs),
             pytest.raises(typer.Exit) as exc_info,
         ):
             run(agent="invalid", prompt="test prompt")
@@ -160,7 +160,7 @@ class TestRunCommand:
 
     def test_run_calls_compose_run(self, run_mocks: dict[str, Any]) -> None:
         """Test run calls compose_run with correct parameters."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test prompt")
@@ -174,7 +174,7 @@ class TestRunCommand:
 
     def test_run_with_write_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --write uses write_flags."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", write=True)
@@ -184,7 +184,7 @@ class TestRunCommand:
 
     def test_run_with_timeout(self, run_mocks: dict[str, Any]) -> None:
         """Test run --timeout passes timeout value."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", timeout=300)
@@ -194,7 +194,7 @@ class TestRunCommand:
 
     def test_run_with_docker_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker enables docker option."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker=True)
@@ -205,7 +205,7 @@ class TestRunCommand:
 
     def test_run_with_docker_direct_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker-direct sets docker_direct option and skips proxy cleanup."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker_direct=True)
@@ -221,11 +221,11 @@ class TestRunCommand:
         mock_app_config: AppConfig,
     ) -> None:
         """Test run fails when both --docker and --docker-direct are used."""
-        from ai_dev_base.commands.agent import run
+        from djinn_in_a_box.commands.agent import run
 
         with (
-            patch("ai_dev_base.commands.agent.load_config", return_value=mock_app_config),
-            patch("ai_dev_base.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
+            patch("djinn_in_a_box.commands.agent.load_agents", return_value=mock_agent_configs),
             pytest.raises(typer.Exit) as exc_info,
         ):
             run(agent="claude", prompt="test", docker=True, docker_direct=True)

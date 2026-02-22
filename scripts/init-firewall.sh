@@ -8,7 +8,7 @@
 # Usage: Run as root at container startup
 #   docker run --cap-add=NET_ADMIN ... 
 #
-# NOTE: This script is for the AI Dev Container, not the MCP Gateway.
+# NOTE: This script is for the Djinn Container, not the MCP Gateway.
 #       The MCP Gateway and MCP Servers have their own isolation.
 # =============================================================================
 

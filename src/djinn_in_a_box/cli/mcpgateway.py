@@ -1,11 +1,11 @@
-"""MCP Gateway CLI — MCP server management for AI Dev Base."""
+"""MCP Gateway CLI — MCP server management for Djinn in a Box."""
 
 from typing import Annotated
 
 import typer
 
-from ai_dev_base import __version__
-from ai_dev_base.commands import mcp
+from djinn_in_a_box import __version__
+from djinn_in_a_box.commands import mcp
 
 app = typer.Typer(
     name="mcpgateway",

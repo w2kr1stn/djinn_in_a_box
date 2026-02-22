@@ -2,8 +2,8 @@
 # Microsoft Azure CLI (installed via uv for persistence)
 set -e
 
-INSTALL_BIN="${TOOLS_BIN:-$HOME/.cache/ai-dev-tools/bin}"
-INSTALL_TOOLS="${TOOLS_DIR:-$HOME/.cache/ai-dev-tools}/uv-tools"
+INSTALL_BIN="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
+INSTALL_TOOLS="${TOOLS_DIR:-$HOME/.cache/djinn-tools}/uv-tools"
 
 mkdir -p "$INSTALL_BIN" "$INSTALL_TOOLS"
 

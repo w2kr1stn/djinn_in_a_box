@@ -1,10 +1,10 @@
-# AI Dev Base CLI - Complete Implementation Guide
+# Djinn in a Box CLI - Complete Implementation Guide
 
 > **Version**: 0.1.0
 > **Architecture**: Python Typer CLI with Pydantic Configuration
 > **License**: MIT
 
-This document provides a comprehensive technical reference for the AI Dev Base CLI application. After reading this guide, you will understand every component, their interactions, data flows, and implementation patterns used throughout the codebase.
+This document provides a comprehensive technical reference for the Djinn in a Box CLI application. After reading this guide, you will understand every component, their interactions, data flows, and implementation patterns used throughout the codebase.
 
 ---
 
@@ -29,7 +29,7 @@ This document provides a comprehensive technical reference for the AI Dev Base C
 
 ### 1.1 Purpose
 
-AI Dev Base CLI is a Python application that manages Docker-based development environments for AI coding agents. It replaces the original Bash script implementation (`dev.sh`, `agent_runner.py`, `mcp.sh`) with a type-safe, maintainable Python codebase.
+Djinn in a Box CLI is a Python application that manages Docker-based development environments for AI coding agents. It replaces the original Bash script implementation (`dev.sh`, `agent_runner.py`, `mcp.sh`) with a type-safe, maintainable Python codebase.
 
 ### 1.2 Key Capabilities
 
@@ -44,7 +44,7 @@ AI Dev Base CLI is a Python application that manages Docker-based development en
 ### 1.3 Two CLI Entry Points
 
 ```
-codeagent    # Main CLI for container and agent management
+djinn    # Main CLI for container and agent management
 mcpgateway   # Dedicated CLI for MCP Gateway operations
 ```
 
@@ -57,7 +57,7 @@ mcpgateway   # Dedicated CLI for MCP Gateway operations
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         CLI Layer                               │
-│   cli/codeagent.py              cli/mcpgateway.py               │
+│   cli/djinn.py              cli/mcpgateway.py               │
 │   (Typer apps, command          (Typer app, command             │
 │    registration, callbacks)      registration)                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -93,7 +93,7 @@ mcpgateway   # Dedicated CLI for MCP Gateway operations
 ### 2.2 Dependency Flow
 
 ```
-cli/codeagent.py ──────┬──► commands/agent.py ──────┬──► config/loader.py
+cli/djinn.py ──────┬──► commands/agent.py ──────┬──► config/loader.py
                        │                            │
                        ├──► commands/container.py ──┤──► config/models.py
                        │                            │
@@ -117,16 +117,16 @@ cli/mcpgateway.py ─────┴──► commands/mcp.py ──────
 ## 3. Package Structure
 
 ```
-ai-dev-base/
+djinn-in-a-box/
 ├── pyproject.toml                    # Package configuration, entry points
 ├── src/
-│   └── ai_dev_base/
+│   └── djinn_in_a_box/
 │       ├── __init__.py               # Package version
 │       ├── py.typed                  # PEP 561 marker
 │       │
 │       ├── cli/                      # CLI entry points
 │       │   ├── __init__.py
-│       │   ├── codeagent.py          # Main CLI application
+│       │   ├── djinn.py          # Main CLI application
 │       │   └── mcpgateway.py         # MCP Gateway CLI
 │       │
 │       ├── commands/                 # Command implementations
@@ -165,17 +165,17 @@ ai-dev-base/
 
 ```toml
 [project.scripts]
-codeagent = "ai_dev_base.cli.codeagent:app"
-mcpgateway = "ai_dev_base.cli.mcpgateway:app"
+djinn = "djinn_in_a_box.cli.djinn:app"
+mcpgateway = "djinn_in_a_box.cli.mcpgateway:app"
 ```
 
 When installed via `pip install .` or `uv pip install .`, these create executable commands:
-- `codeagent` → Invokes `ai_dev_base.cli.codeagent:app`
-- `mcpgateway` → Invokes `ai_dev_base.cli.mcpgateway:app`
+- `djinn` → Invokes `djinn_in_a_box.cli.djinn:app`
+- `mcpgateway` → Invokes `djinn_in_a_box.cli.mcpgateway:app`
 
-### 4.2 cli/codeagent.py - Main CLI
+### 4.2 cli/djinn.py - Main CLI
 
-**File**: `src/ai_dev_base/cli/codeagent.py` (~300 lines)
+**File**: `src/djinn_in_a_box/cli/djinn.py` (~300 lines)
 
 #### 4.2.1 Application Structure
 
@@ -183,8 +183,8 @@ When installed via `pip install .` or `uv pip install .`, these create executabl
 import typer
 
 app = typer.Typer(
-    name="codeagent",
-    help="AI Dev Base CLI - Manage AI coding agent containers",
+    name="djinn",
+    help="Djinn in a Box CLI - Manage AI coding agent containers",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
@@ -195,7 +195,7 @@ app = typer.Typer(
 Commands are registered from the commands layer:
 
 ```python
-from ai_dev_base.commands import agent, container
+from djinn_in_a_box.commands import agent, container
 
 # Direct command registration
 app.command(name="run")(agent.run)
@@ -237,7 +237,7 @@ def init(
     code_dir: Annotated[Path | None, typer.Option(...)] = None,
     force: Annotated[bool, typer.Option(...)] = False,
 ) -> None:
-    """Initialize AI Dev Base configuration."""
+    """Initialize Djinn in a Box configuration."""
 ```
 
 The `init` command:
@@ -252,27 +252,27 @@ The `init` command:
 ```python
 def version_callback(value: bool) -> None:
     if value:
-        console.print(f"AI Dev Base CLI v{__version__}")
+        console.print(f"Djinn in a Box CLI v{__version__}")
         raise typer.Exit()
 
 @app.callback()
 def main(
     version: Annotated[bool | None, typer.Option("--version", "-v", ...)] = None,
 ) -> None:
-    """AI Dev Base CLI - Manage AI coding agent containers."""
+    """Djinn in a Box CLI - Manage AI coding agent containers."""
     if version:
         version_callback(version)
 ```
 
 ### 4.3 cli/mcpgateway.py - MCP Gateway CLI
 
-**File**: `src/ai_dev_base/cli/mcpgateway.py` (~50 lines)
+**File**: `src/djinn_in_a_box/cli/mcpgateway.py` (~50 lines)
 
 A thin wrapper that registers commands from `commands/mcp.py`:
 
 ```python
 import typer
-from ai_dev_base.commands import mcp
+from djinn_in_a_box.commands import mcp
 
 app = typer.Typer(
     name="mcpgateway",
@@ -305,7 +305,7 @@ app.command(name="clean")(mcp.clean)
 
 ### 5.1 commands/agent.py - Agent Execution
 
-**File**: `src/ai_dev_base/commands/agent.py` (~337 lines)
+**File**: `src/djinn_in_a_box/commands/agent.py` (~337 lines)
 
 #### 5.1.1 build_agent_command()
 
@@ -388,7 +388,7 @@ def agents(
 
 ### 5.2 commands/container.py - Container Lifecycle
 
-**File**: `src/ai_dev_base/commands/container.py` (~700 lines)
+**File**: `src/djinn_in_a_box/commands/container.py` (~700 lines)
 
 #### 5.2.1 Commands Overview
 
@@ -453,14 +453,14 @@ def clean_volumes(
 ```
 
 Volume categories from `defaults.py`:
-- `credentials`: `ai-dev-*-credentials`
-- `tools`: `ai-dev-*-tools`, `ai-dev-*-tools-cache`
-- `cache`: `ai-dev-*-cache`, `ai-dev-*-uv-cache`
-- `data`: `ai-dev-*-data`, `ai-dev-*-share`
+- `credentials`: `djinn-*-credentials`
+- `tools`: `djinn-*-tools`, `djinn-*-tools-cache`
+- `cache`: `djinn-*-cache`, `djinn-*-uv-cache`
+- `data`: `djinn-*-data`, `djinn-*-share`
 
 ### 5.3 commands/mcp.py - MCP Gateway
 
-**File**: `src/ai_dev_base/commands/mcp.py` (~595 lines)
+**File**: `src/djinn_in_a_box/commands/mcp.py` (~595 lines)
 
 #### 5.3.1 Constants
 
@@ -468,7 +468,7 @@ Volume categories from `defaults.py`:
 GATEWAY_CONTAINER: str = "mcp-gateway"
 GATEWAY_ENDPOINT_CONTAINER: str = "http://mcp-gateway:8811"
 GATEWAY_ENDPOINT_HOST: str = "http://localhost:8811"
-AI_DEV_NETWORK: str = "ai-dev-network"
+AI_DEV_NETWORK: str = "djinn-network"
 ```
 
 #### 5.3.2 Helper Functions
@@ -539,7 +539,7 @@ docker mcp CLI plugin:      Installed/Not installed
 
 **clean()**: Full reset with confirmation
 - Stops gateway
-- Removes ai-dev-network
+- Removes djinn-network
 - Removes ~/.docker/mcp directory
 
 ---
@@ -548,7 +548,7 @@ docker mcp CLI plugin:      Installed/Not installed
 
 ### 6.1 config/models.py - Pydantic Models
 
-**File**: `src/ai_dev_base/config/models.py` (~346 lines)
+**File**: `src/djinn_in_a_box/config/models.py` (~346 lines)
 
 #### 6.1.1 AgentConfig
 
@@ -678,7 +678,7 @@ class AgentsConfig(BaseModel):
 
 ### 6.2 config/loader.py - TOML Operations
 
-**File**: `src/ai_dev_base/config/loader.py` (~250 lines)
+**File**: `src/djinn_in_a_box/config/loader.py` (~250 lines)
 
 #### 6.2.1 Custom Exceptions
 
@@ -700,7 +700,7 @@ def load_config() -> AppConfig:
     if not CONFIG_FILE.exists():
         raise ConfigNotFoundError(
             f"Configuration not found: {CONFIG_FILE}\n"
-            "Run 'codeagent init' to create it."
+            "Run 'djinn init' to create it."
         )
 
     try:
@@ -803,33 +803,33 @@ def migrate_from_env() -> AppConfig | None:
 
 ### 6.3 config/defaults.py - Default Values
 
-**File**: `src/ai_dev_base/config/defaults.py` (~150 lines)
+**File**: `src/djinn_in_a_box/config/defaults.py` (~150 lines)
 
 #### 6.3.1 Volume Categories
 
 ```python
 VOLUME_CATEGORIES: dict[str, list[str]] = {
     "credentials": [
-        "ai-dev-claude-credentials",
-        "ai-dev-gemini-credentials",
-        "ai-dev-opencode-credentials",
+        "djinn-claude-credentials",
+        "djinn-gemini-credentials",
+        "djinn-opencode-credentials",
     ],
     "tools": [
-        "ai-dev-claude-tools",
-        "ai-dev-claude-tools-cache",
-        "ai-dev-gemini-tools",
-        "ai-dev-gemini-tools-cache",
-        "ai-dev-opencode-tools",
-        "ai-dev-opencode-tools-cache",
+        "djinn-claude-tools",
+        "djinn-claude-tools-cache",
+        "djinn-gemini-tools",
+        "djinn-gemini-tools-cache",
+        "djinn-opencode-tools",
+        "djinn-opencode-tools-cache",
     ],
     "cache": [
-        "ai-dev-npm-cache",
-        "ai-dev-uv-cache",
-        "ai-dev-pip-cache",
+        "djinn-npm-cache",
+        "djinn-uv-cache",
+        "djinn-pip-cache",
     ],
     "data": [
-        "ai-dev-share",
-        "ai-dev-data",
+        "djinn-share",
+        "djinn-data",
     ],
 }
 ```
@@ -893,7 +893,7 @@ DEFAULT_RESOURCES = ResourceLimits(
 Following XDG Base Directory Specification:
 
 ```
-~/.config/ai-dev-base/
+~/.config/djinn-in-a-box/
 ├── config.toml      # Main application configuration
 └── agents.toml      # Agent configurations (optional)
 ```
@@ -939,7 +939,7 @@ description = "Google Gemini CLI"
 
 ### 7.1 core/docker.py - Docker Operations
 
-**File**: `src/ai_dev_base/core/docker.py` (~780 lines)
+**File**: `src/djinn_in_a_box/core/docker.py` (~780 lines)
 
 #### 7.1.1 Data Classes
 
@@ -964,7 +964,7 @@ class RunResult:
 #### 7.1.2 Network Operations
 
 ```python
-AI_DEV_NETWORK = "ai-dev-network"
+AI_DEV_NETWORK = "djinn-network"
 
 def network_exists(name: str = AI_DEV_NETWORK) -> bool:
     """Check if Docker network exists."""
@@ -1079,7 +1079,7 @@ def compose_run(
 #### 7.1.5 Volume Operations
 
 ```python
-def list_volumes(pattern: str = "ai-dev-*") -> list[str]:
+def list_volumes(pattern: str = "djinn-*") -> list[str]:
     """List Docker volumes matching pattern."""
     result = subprocess.run(
         ["docker", "volume", "ls", "--filter", f"name={pattern}", "--format", "{{.Name}}"],
@@ -1138,7 +1138,7 @@ def cleanup_docker_proxy(was_enabled: bool) -> bool:
 
 ### 7.2 core/console.py - Rich Output
 
-**File**: `src/ai_dev_base/core/console.py` (~250 lines)
+**File**: `src/djinn_in_a_box/core/console.py` (~250 lines)
 
 Provides consistent, styled terminal output using the TodAI Design System.
 Status messages go to stderr to keep stdout clean for agent output.
@@ -1147,7 +1147,7 @@ Status messages go to stderr to keep stdout clean for agent output.
 
 ```python
 from rich.console import Console
-from ai_dev_base.core.theme import ICONS, TODAI_THEME
+from djinn_in_a_box.core.theme import ICONS, TODAI_THEME
 
 console: Console = Console(theme=TODAI_THEME)        # stdout
 err_console: Console = Console(stderr=True, theme=TODAI_THEME)  # stderr
@@ -1200,7 +1200,7 @@ from rich.table import Table
 def create_volume_table(volumes: dict[str, list[str]]) -> Table:
     """Create a Rich table for volume listing with theme styling."""
     table = Table(
-        title="AI Dev Volumes",
+        title="Djinn Volumes",
         title_style="table.title",
         show_header=True,
         header_style="table.header",
@@ -1227,14 +1227,14 @@ def create_volume_table(volumes: dict[str, list[str]]) -> Table:
 
 ### 7.3 core/paths.py - Path Utilities
 
-**File**: `src/ai_dev_base/core/paths.py` (~100 lines)
+**File**: `src/djinn_in_a_box/core/paths.py` (~100 lines)
 
 #### 7.3.1 Configuration Paths
 
 ```python
 from pathlib import Path
 
-CONFIG_DIR: Path = Path.home() / ".config" / "ai-dev-base"
+CONFIG_DIR: Path = Path.home() / ".config" / "djinn-in-a-box"
 CONFIG_FILE: Path = CONFIG_DIR / "config.toml"
 AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 ```
@@ -1243,7 +1243,7 @@ AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 
 ```python
 def get_project_root() -> Path:
-    """Get the AI Dev Base project root directory.
+    """Get the Djinn in a Box project root directory.
 
     Searches upward from the package location for docker-compose.yml.
     """
@@ -1291,7 +1291,7 @@ def resolve_mount_path(path: Path | None, code_dir: Path) -> Path:
 
 ### 7.4 core/decorators.py - Error Handling
 
-**File**: `src/ai_dev_base/core/decorators.py` (~50 lines)
+**File**: `src/djinn_in_a_box/core/decorators.py` (~50 lines)
 
 ```python
 from collections.abc import Callable
@@ -1318,8 +1318,8 @@ def handle_config_errors(func: Callable[P, R]) -> Callable[P, R]:
     """
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        from ai_dev_base.config import ConfigNotFoundError
-        from ai_dev_base.core.console import error
+        from djinn_in_a_box.config import ConfigNotFoundError
+        from djinn_in_a_box.core.console import error
 
         try:
             return func(*args, **kwargs)
@@ -1340,7 +1340,7 @@ This preserves full type safety through the decorator, allowing Pyright to verif
 
 ### 7.5 core/theme.py - TodAI Design Theme
 
-**File**: `src/ai_dev_base/core/theme.py` (~187 lines)
+**File**: `src/djinn_in_a_box/core/theme.py` (~187 lines)
 
 Defines the central theme system for consistent CLI output based on the TodAI Design System.
 
@@ -1437,7 +1437,7 @@ ICONS: dict[str, str] = {
 #### 7.5.4 Usage
 
 ```python
-from ai_dev_base.core.theme import TODAI_THEME, ICONS
+from djinn_in_a_box.core.theme import TODAI_THEME, ICONS
 from rich.console import Console
 
 console = Console(theme=TODAI_THEME)
@@ -1450,10 +1450,10 @@ console.print("  [muted]1.[/muted] Run tests")
 
 ## 8. Process Flows
 
-### 8.1 First-Time Setup (codeagent init)
+### 8.1 First-Time Setup (djinn init)
 
 ```
-User runs: codeagent init
+User runs: djinn init
            │
            ▼
 ┌──────────────────────────────┐
@@ -1500,10 +1500,10 @@ no --force        │
 └──────────────────────────────┘
 ```
 
-### 8.2 Running an Agent (codeagent run)
+### 8.2 Running an Agent (djinn run)
 
 ```
-User runs: codeagent run claude "Fix the bug" --write
+User runs: djinn run claude "Fix the bug" --write
            │
            ▼
 ┌──────────────────────────────┐
@@ -1526,7 +1526,7 @@ User runs: codeagent run claude "Fix the bug" --write
            ▼
 ┌──────────────────────────────┐
 │ ensure_network()             │
-│ Create ai-dev-network        │
+│ Create djinn-network        │
 └──────────────────────────────┘
            │
            ▼
@@ -1642,10 +1642,10 @@ User runs: mcpgateway start
  endpoints
 ```
 
-### 8.4 Container Start (codeagent start)
+### 8.4 Container Start (djinn start)
 
 ```
-User runs: codeagent start --docker --mount /path/to/project
+User runs: djinn start --docker --mount /path/to/project
            │
            ▼
 ┌──────────────────────────────┐
@@ -1759,7 +1759,7 @@ def enable(server: str) -> None:
 def start(...) -> None:
     # ...
     if not network_exists() and not ensure_network():
-        error("Failed to create Docker network 'ai-dev-network'")
+        error("Failed to create Docker network 'djinn-network'")
         raise typer.Exit(1)
 ```
 
@@ -1786,8 +1786,8 @@ def stop() -> None:
 Errors are printed via `error()` from `core/console.py`:
 
 ```python
-error("Configuration not found: ~/.config/ai-dev-base/config.toml")
-# Output: Error: Configuration not found: ~/.config/ai-dev-base/config.toml
+error("Configuration not found: ~/.config/djinn-in-a-box/config.toml")
+# Output: Error: Configuration not found: ~/.config/djinn-in-a-box/config.toml
 ```
 
 The `error()` function writes to stderr via `err_console`, keeping stdout clean for agent output.
@@ -1876,7 +1876,7 @@ def run(
 ```
 tests/
 ├── conftest.py              # Shared fixtures
-├── test_cli_codeagent.py    # CLI entry point tests
+├── test_cli_djinn.py    # CLI entry point tests
 ├── test_cli_mcpgateway.py   # MCP CLI tests
 ├── test_commands_agent.py   # Agent command tests
 ├── test_commands_container.py  # Container command tests
@@ -1896,11 +1896,11 @@ tests/
 @pytest.fixture
 def temp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create temporary config directory."""
-    config_dir = tmp_path / ".config" / "ai-dev-base"
+    config_dir = tmp_path / ".config" / "djinn-in-a-box"
     config_dir.mkdir(parents=True)
-    monkeypatch.setattr("ai_dev_base.core.paths.CONFIG_DIR", config_dir)
-    monkeypatch.setattr("ai_dev_base.core.paths.CONFIG_FILE", config_dir / "config.toml")
-    monkeypatch.setattr("ai_dev_base.core.paths.AGENTS_FILE", config_dir / "agents.toml")
+    monkeypatch.setattr("djinn_in_a_box.core.paths.CONFIG_DIR", config_dir)
+    monkeypatch.setattr("djinn_in_a_box.core.paths.CONFIG_FILE", config_dir / "config.toml")
+    monkeypatch.setattr("djinn_in_a_box.core.paths.AGENTS_FILE", config_dir / "agents.toml")
     return config_dir
 
 
@@ -1968,7 +1968,7 @@ def test_handle_config_errors_catches_exception():
 
 ### 12.1 Adding a New Agent
 
-1. **Edit `~/.config/ai-dev-base/agents.toml`**:
+1. **Edit `~/.config/djinn-in-a-box/agents.toml`**:
    ```toml
    [agents.myagent]
    binary = "myagent"
@@ -2004,7 +2004,7 @@ def test_handle_config_errors_catches_exception():
 
 2. **Register in CLI**:
    ```python
-   # cli/codeagent.py
+   # cli/djinn.py
    app.command(name="my-command")(container.my_new_command)
    ```
 
@@ -2013,8 +2013,8 @@ def test_handle_config_errors_catches_exception():
 ```python
 # config/defaults.py
 VOLUME_CATEGORIES["my-category"] = [
-    "ai-dev-my-volume-1",
-    "ai-dev-my-volume-2",
+    "djinn-my-volume-1",
+    "djinn-my-volume-2",
 ]
 ```
 
@@ -2058,29 +2058,29 @@ def require_docker(func: Callable[P, R]) -> Callable[P, R]:
 
 ## Appendix A: Command Reference
 
-### codeagent
+### djinn
 
 ```
-codeagent --help
-codeagent --version
+djinn --help
+djinn --version
 
-codeagent init [--code-dir PATH] [--force]
-codeagent config show
-codeagent config path
+djinn init [--code-dir PATH] [--force]
+djinn config show
+djinn config path
 
-codeagent build [--no-cache] [--pull/--no-pull] [--progress auto|plain|tty]
-codeagent start [--mount PATH] [--docker] [--firewall] [--cmd COMMAND]
-codeagent enter
-codeagent status
-codeagent auth [claude|gemini|opencode|all]
-codeagent audit
-codeagent update
+djinn build [--no-cache] [--pull/--no-pull] [--progress auto|plain|tty]
+djinn start [--mount PATH] [--docker] [--firewall] [--cmd COMMAND]
+djinn enter
+djinn status
+djinn auth [claude|gemini|opencode|all]
+djinn audit
+djinn update
 
-codeagent run AGENT PROMPT [--write] [--json] [--model MODEL] [--docker] [--firewall] [--mount PATH] [--timeout SECONDS]
-codeagent agents [--verbose] [--json]
+djinn run AGENT PROMPT [--write] [--json] [--model MODEL] [--docker] [--firewall] [--mount PATH] [--timeout SECONDS]
+djinn agents [--verbose] [--json]
 
-codeagent clean volumes [--category CATEGORY] [--all] [--force]
-codeagent clean all [--force]
+djinn clean volumes [--category CATEGORY] [--all] [--force]
+djinn clean all [--force]
 ```
 
 ### mcpgateway
@@ -2123,9 +2123,9 @@ mcpgateway clean
 
 ```
 pyproject.toml
-    └── defines entry points → cli/codeagent.py, cli/mcpgateway.py
+    └── defines entry points → cli/djinn.py, cli/mcpgateway.py
 
-cli/codeagent.py
+cli/djinn.py
     ├── imports → commands/agent.py
     ├── imports → commands/container.py
     ├── imports → config/__init__.py (re-exports)

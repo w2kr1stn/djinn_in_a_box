@@ -1,8 +1,8 @@
 # =============================================================================
-# AI Dev Base - Docker Socket Override
+# Djinn in a Box - Docker Socket Override
 # =============================================================================
 # Aktiviert Docker-Zugriff via sicherem Socket Proxy.
-# Wird automatisch geladen wenn: codeagent start --docker
+# Wird automatisch geladen wenn: djinn start --docker
 #
 # Sicherheitsfeatures:
 #   - Docker Socket Proxy filtert gefaehrliche API-Aufrufe
@@ -20,7 +20,7 @@ services:
   # ---------------------------------------------------------------------------
   docker-proxy:
     image: tecnativa/docker-socket-proxy:latest
-    container_name: ai-dev-docker-proxy
+    container_name: djinn-docker-proxy
     
     environment:
       # -----------------------------------------------------------------------
@@ -62,7 +62,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     
     networks:
-      - ai-dev-network
+      - djinn-network
     
     # Proxy läuft als root (erforderlich für Socket-Zugriff)
     # aber der exponierte Port ist nur intern erreichbar

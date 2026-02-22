@@ -5,7 +5,7 @@ Status messages go to stderr to keep stdout clean for agent output.
 
 from rich.console import Console
 
-from ai_dev_base.core.theme import ICONS, TODAI_THEME
+from djinn_in_a_box.core.theme import ICONS, TODAI_THEME
 
 console: Console = Console(theme=TODAI_THEME)
 """Main console for stdout output (tables, agent output)."""

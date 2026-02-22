@@ -1,31 +1,31 @@
-"""Default values and constants for AI Dev Base configuration."""
+"""Default values and constants for Djinn in a Box configuration."""
 
 from __future__ import annotations
 
 from typing import Final
 
-from ai_dev_base.config.models import AgentConfig
+from djinn_in_a_box.config.models import AgentConfig
 
 VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     "credentials": [
-        "ai-dev-claude-config",
-        "ai-dev-gemini-config",
-        "ai-dev-codex-config",
-        "ai-dev-opencode-config",
-        "ai-dev-gh-config",
+        "djinn-claude-config",
+        "djinn-gemini-config",
+        "djinn-codex-config",
+        "djinn-opencode-config",
+        "djinn-gh-config",
     ],
     "tools": [
-        "ai-dev-azure-config",
-        "ai-dev-pulumi-config",
-        "ai-dev-tools-cache",
+        "djinn-azure-config",
+        "djinn-pulumi-config",
+        "djinn-tools-cache",
     ],
     "cache": [
-        "ai-dev-uv-cache",
-        "ai-dev-vscode-server",
+        "djinn-uv-cache",
+        "djinn-vscode-server",
     ],
     "data": [
-        "ai-dev-opencode-data",
-        "ai-dev-vscode-workspaces",
+        "djinn-opencode-data",
+        "djinn-vscode-workspaces",
     ],
 }
 """Volume categories for selective cleanup."""

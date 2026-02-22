@@ -1,6 +1,6 @@
 # Docker Socket Security Analysis
 
-## Sicherheitsanalyse: Docker Socket Zugriff für AI Dev Container
+## Sicherheitsanalyse: Docker Socket Zugriff für Djinn Container
 
 Diese Analyse bewertet die Sicherheitsimplikationen des Docker-Zugriffs im Kontext eines Entwicklungscontainers für AI Coding Agents (Claude Code, Gemini CLI, Codex).
 
@@ -19,10 +19,10 @@ Diese Analyse bewertet die Sicherheitsimplikationen des Docker-Zugriffs im Konte
 │  │       │                                                │    │ │
 │  │       ▼                                                │    │ │
 │  │  ┌─────────────────────────────────────────────────┐  │    │ │
-│  │  │              ai-dev-network                      │  │    │ │
+│  │  │              djinn-network                      │  │    │ │
 │  │  │                                                  │  │    │ │
 │  │  │  ┌──────────────┐      ┌──────────────────┐    │  │    │ │
-│  │  │  │ docker-proxy │◄─────│     ai-dev       │    │  │    │ │
+│  │  │  │ docker-proxy │◄─────│     djinn       │    │  │    │ │
 │  │  │  │              │      │   (Dev Container) │    │  │    │ │
 │  │  │  │ FILTERS:     │      │                  │    │  │    │ │
 │  │  │  │ ✓ run/start  │      │ Claude Code      │    │  │    │ │
@@ -57,16 +57,16 @@ Legende:
 
 | Modus | Command | Docker | Firewall | Sicherheit |
 |-------|---------|--------|----------|------------|
-| **Standard** | `codeagent start` | - | - | Hoch |
-| **Docker** | `codeagent start --docker` | Proxy | - | Mittel |
-| **Firewall** | `codeagent start --firewall` | - | Ja | Hoch |
-| **Maximum** | `codeagent start --docker --firewall` | Proxy | Ja | **Empfohlen** |
+| **Standard** | `djinn start` | - | - | Hoch |
+| **Docker** | `djinn start --docker` | Proxy | - | Mittel |
+| **Firewall** | `djinn start --firewall` | - | Ja | Hoch |
+| **Maximum** | `djinn start --docker --firewall` | Proxy | Ja | **Empfohlen** |
 
 ### Warum ein Toggle?
 
 1. **Principle of Least Privilege**: Docker-Zugriff nur wenn benoetigt
 2. **Explizite Aktivierung**: Bewusste Entscheidung bei jedem Start
-3. **Audit Trail**: `codeagent status` zeigt aktuelle Konfiguration
+3. **Audit Trail**: `djinn status` zeigt aktuelle Konfiguration
 4. **Flexibilitaet**: Verschiedene Sicherheitslevel fuer verschiedene Tasks
 
 ---
@@ -165,7 +165,7 @@ docker run --privileged -v /:/host alpine
 
 **Mitigation:**
 - Resource Limits im Compose
-- Monitoring via `codeagent audit`
+- Monitoring via `djinn audit`
 - Firewall fuer Netzwerk-Exfiltration
 
 ### 2. Resource Exhaustion
@@ -187,7 +187,7 @@ deploy:
 
 **Mitigation:**
 - `--firewall` Flag für strikte Egress-Kontrolle
-- Isoliertes `ai-dev-network`
+- Isoliertes `djinn-network`
 
 ---
 
@@ -197,12 +197,12 @@ deploy:
 
 ```markdown
 ## Vor der Session
-- [ ] Brauche ich Docker-Zugriff? Wenn nein: `codeagent start`
-- [ ] Wenn ja: `codeagent start --docker --firewall`
+- [ ] Brauche ich Docker-Zugriff? Wenn nein: `djinn start`
+- [ ] Wenn ja: `djinn start --docker --firewall`
 
 ## Nach der Session
-- [ ] `codeagent status` - Unbekannte Container?
-- [ ] `codeagent audit` - Verdaechtige Requests?
+- [ ] `djinn status` - Unbekannte Container?
+- [ ] `djinn audit` - Verdaechtige Requests?
 ```
 
 ### Wöchentlich
@@ -216,14 +216,14 @@ deploy:
 ### Bei Verdacht
 
 ```bash
-# Alle ai-dev Container stoppen
-docker stop $(docker ps -q --filter "network=ai-dev-network")
+# Alle djinn Container stoppen
+docker stop $(docker ps -q --filter "network=djinn-network")
 
 # Proxy-Logs prüfen
-docker logs ai-dev-docker-proxy 2>&1 | grep -i "blocked\|error\|denied"
+docker logs djinn-docker-proxy 2>&1 | grep -i "blocked\|error\|denied"
 
 # Netzwerk-Aktivität prüfen
-docker network inspect ai-dev-network
+docker network inspect djinn-network
 ```
 
 ---
@@ -234,10 +234,10 @@ docker network inspect ai-dev-network
 
 ```bash
 # Via CLI
-codeagent audit
+djinn audit
 
 # Direkt
-docker logs -f ai-dev-docker-proxy
+docker logs -f djinn-docker-proxy
 ```
 
 ### Log-Format
@@ -253,7 +253,7 @@ time="2024-01-15T10:30:47Z" level=warning msg="Blocked: POST /v1.43/exec/abc123/
 ```bash
 # Einfaches Monitoring-Script
 #!/bin/bash
-docker logs -f ai-dev-docker-proxy 2>&1 | while read line; do
+docker logs -f djinn-docker-proxy 2>&1 | while read line; do
     if echo "$line" | grep -qi "blocked"; then
         notify-send "Docker Proxy Alert" "$line"
     fi
@@ -322,7 +322,7 @@ Fuer dein Szenario (Einzelbenutzer, lokale Entwicklung, AI-Agents):
 
 ```bash
 # Standard-Workflow
-codeagent start --docker --firewall
+djinn start --docker --firewall
 ```
 
 Diese Kombination bietet:

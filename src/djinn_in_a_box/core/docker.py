@@ -1,4 +1,4 @@
-"""Docker and Docker Compose operations for AI Dev Base."""
+"""Docker and Docker Compose operations for Djinn in a Box."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ai_dev_base.config.models import AppConfig
+    from djinn_in_a_box.config.models import AppConfig
 
-from ai_dev_base.core.console import warning
-from ai_dev_base.core.paths import get_project_root
+from djinn_in_a_box.core.console import warning
+from djinn_in_a_box.core.paths import get_project_root
 
-AI_DEV_NETWORK: str = "ai-dev-network"
-"""Docker network name for AI Dev containers."""
+DJINN_NETWORK: str = "djinn-network"
+"""Docker network name for Djinn containers."""
 
 
 @dataclass
@@ -69,7 +69,7 @@ def _docker_list(cmd: list[str]) -> list[str]:
     return [line for line in result.stdout.strip().split("\n") if line]
 
 
-def network_exists(name: str = AI_DEV_NETWORK) -> bool:
+def network_exists(name: str = DJINN_NETWORK) -> bool:
     """Check if a Docker network exists."""
     return _docker_inspect("network", name)
 
@@ -87,7 +87,7 @@ def delete_network(name: str) -> bool:
     return result.returncode == 0
 
 
-def ensure_network(name: str = AI_DEV_NETWORK) -> bool:
+def ensure_network(name: str = DJINN_NETWORK) -> bool:
     """Ensure Docker network exists, creating it if needed. Returns True on success."""
     if _docker_inspect("network", name):
         return True
@@ -384,7 +384,7 @@ def is_container_running(name: str) -> bool:
     return name in names
 
 
-def get_running_containers(prefix: str = "ai-dev") -> list[str]:
+def get_running_containers(prefix: str = "djinn") -> list[str]:
     """Get list of running containers matching a name prefix."""
     return _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"])
 

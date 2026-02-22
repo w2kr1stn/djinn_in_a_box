@@ -10,7 +10,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_FILE="${TOOLS_FILE:-$SCRIPT_DIR/tools.txt}"
-CACHE_DIR="$HOME/.cache/ai-dev-tools"
+CACHE_DIR="$HOME/.cache/djinn-tools"
 INSTALLERS_DIR="$SCRIPT_DIR/installers"
 
 # Persistent tool directories (available to all installers)

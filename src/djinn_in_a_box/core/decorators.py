@@ -8,8 +8,8 @@ from typing import ParamSpec, TypeVar
 
 import typer
 
-from ai_dev_base.core.console import error
-from ai_dev_base.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.console import error
+from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 
 P = ParamSpec("P")
 R = TypeVar("R")

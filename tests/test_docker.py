@@ -1,12 +1,12 @@
-"""Tests for ai_dev_base.core.docker module."""
+"""Tests for djinn_in_a_box.core.docker module."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai_dev_base.config.models import AppConfig, ShellConfig
-from ai_dev_base.core.docker import (
+from djinn_in_a_box.config.models import AppConfig, ShellConfig
+from djinn_in_a_box.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
     compose_build,
@@ -23,15 +23,15 @@ from ai_dev_base.core.docker import (
 class TestEnsureNetwork:
     """Tests for ensure_network function."""
 
-    @patch("ai_dev_base.core.docker._docker_inspect")
+    @patch("djinn_in_a_box.core.docker._docker_inspect")
     def test_network_already_exists(self, mock_inspect: MagicMock) -> None:
         """Test returns True when network already exists."""
         mock_inspect.return_value = True
         result = ensure_network()
         assert result is True
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    @patch("ai_dev_base.core.docker._docker_inspect")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker._docker_inspect")
     def test_creates_network(self, mock_inspect: MagicMock, mock_run: MagicMock) -> None:
         """Test creates network and returns True."""
         mock_inspect.return_value = False
@@ -44,8 +44,8 @@ class TestEnsureNetwork:
         assert "network" in call_args
         assert "create" in call_args
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    @patch("ai_dev_base.core.docker._docker_inspect")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker._docker_inspect")
     def test_create_network_fails(self, mock_inspect: MagicMock, mock_run: MagicMock) -> None:
         """Test returns False when network creation fails."""
         mock_inspect.return_value = False
@@ -57,7 +57,7 @@ class TestEnsureNetwork:
 class TestGetComposeFiles:
     """Tests for get_compose_files function."""
 
-    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_without_docker(self, mock_root: MagicMock) -> None:
         """Test returns only base compose file when docker_enabled=False."""
         mock_root.return_value = Path("/project")
@@ -67,7 +67,7 @@ class TestGetComposeFiles:
         assert "docker-compose.yml" in files[1]
         assert "docker-compose.docker.yml" not in str(files)
 
-    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_with_docker(self, mock_root: MagicMock) -> None:
         """Test returns both compose files when docker_enabled=True."""
         mock_root.return_value = Path("/project")
@@ -79,7 +79,7 @@ class TestGetComposeFiles:
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker.yml" in f for f in file_paths)
 
-    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_with_docker_direct(self, mock_root: MagicMock) -> None:
         """Test returns docker-direct compose file when docker_direct=True."""
         mock_root.return_value = Path("/project")
@@ -146,49 +146,49 @@ class TestGetShellMountArgs:
 class TestIsContainerRunning:
     """Tests for is_container_running function."""
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_container_running(self, mock_run: MagicMock) -> None:
         """Test returns True when container is running."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="ai-dev-docker-proxy\n",
+            stdout="djinn-docker-proxy\n",
         )
-        assert is_container_running("ai-dev-docker-proxy") is True
+        assert is_container_running("djinn-docker-proxy") is True
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_container_not_running(self, mock_run: MagicMock) -> None:
         """Test returns False when container is not running."""
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="",
         )
-        assert is_container_running("ai-dev-docker-proxy") is False
+        assert is_container_running("djinn-docker-proxy") is False
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_partial_match_rejected(self, mock_run: MagicMock) -> None:
         """Test partial name matches are rejected."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="ai-dev-docker-proxy-2\n",
+            stdout="djinn-docker-proxy-2\n",
         )
-        assert is_container_running("ai-dev-docker-proxy") is False
+        assert is_container_running("djinn-docker-proxy") is False
 
 
 class TestGetRunningContainers:
     """Tests for get_running_containers function."""
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_returns_container_list(self, mock_run: MagicMock) -> None:
         """Test returns list of running containers."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="ai-dev\nai-dev-docker-proxy\n",
+            stdout="djinn\ndjinn-docker-proxy\n",
         )
         containers = get_running_containers()
-        assert "ai-dev" in containers
-        assert "ai-dev-docker-proxy" in containers
+        assert "djinn" in containers
+        assert "djinn-docker-proxy" in containers
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_returns_empty_list_on_error(self, mock_run: MagicMock) -> None:
         """Test returns empty list on command failure."""
         mock_run.return_value = MagicMock(returncode=1, stdout="")
@@ -199,7 +199,7 @@ class TestGetRunningContainers:
 class TestDeleteVolumes:
     """Tests for delete_volumes function."""
 
-    @patch("ai_dev_base.core.docker.delete_volume")
+    @patch("djinn_in_a_box.core.docker.delete_volume")
     def test_deletes_multiple_volumes(self, mock_delete: MagicMock) -> None:
         """Test deletes multiple volumes and returns status dict."""
         mock_delete.side_effect = [True, False, True]
@@ -212,8 +212,8 @@ class TestDeleteVolumes:
 class TestComposeBuild:
     """Tests for compose_build function."""
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_build_success(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test returns successful RunResult."""
         mock_root.return_value = Path("/project")
@@ -229,8 +229,8 @@ class TestComposeBuild:
         assert "compose" in cmd
         assert "build" in cmd
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_build_no_cache(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
         """Test includes --no-cache flag when requested."""
         mock_root.return_value = Path("/project")
@@ -243,8 +243,8 @@ class TestComposeBuild:
 class TestComposeRun:
     """Tests for compose_run function."""
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_run_headless_with_timeout(
         self,
         mock_run: MagicMock,
@@ -270,8 +270,8 @@ class TestComposeRun:
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["timeout"] == 300
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_run_handles_timeout_expiration(
         self,
         mock_run: MagicMock,
@@ -297,8 +297,8 @@ class TestComposeRun:
         assert result.returncode == 124
         assert "Timeout" in result.stderr
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_run_headless_mode(
         self,
         mock_run: MagicMock,
@@ -325,15 +325,15 @@ class TestComposeRun:
 class TestCleanupDockerProxy:
     """Tests for cleanup_docker_proxy function."""
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_skips_when_docker_disabled(self, mock_root: MagicMock, mock_run: MagicMock) -> None:
         """Test does nothing when docker_enabled=False."""
         cleanup_docker_proxy(docker_enabled=False)
         mock_run.assert_not_called()
 
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    @patch("ai_dev_base.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_stops_and_removes_proxy(self, mock_root: MagicMock, mock_run: MagicMock) -> None:
         """Test stops and removes docker-proxy when docker_enabled=True."""
         mock_root.return_value = Path("/project")
@@ -351,8 +351,8 @@ class TestCleanupDockerProxy:
 class TestComposeRunErrorHandling:
     """Tests for subprocess error handling in compose_run."""
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_handles_docker_not_found(
         self,
         mock_run: MagicMock,
@@ -370,8 +370,8 @@ class TestComposeRunErrorHandling:
         assert result.returncode == 127  # Command not found convention
         assert "docker" in result.stderr.lower() or "not found" in result.stderr.lower()
 
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_handles_permission_error(
         self,
         mock_run: MagicMock,

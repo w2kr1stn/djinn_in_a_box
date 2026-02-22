@@ -1,7 +1,7 @@
 #!/bin/zsh
 
 # =============================================================================
-# AI Dev Base - Entrypoint Script
+# Djinn in a Box - Entrypoint Script
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -13,7 +13,7 @@ if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
 fi
 
 # Fix ownership of volume-mounted directories (Docker creates them as root)
-for dir in ~/.cache/uv ~/.cache/ai-dev-tools ~/.local/share/fnm ~/.azure ~/.pulumi ~/.config/sops ~/.vscode-server ~/workspaces; do
+for dir in ~/.cache/uv ~/.cache/djinn-tools ~/.local/share/fnm ~/.azure ~/.pulumi ~/.config/sops ~/.vscode-server ~/workspaces; do
     if [[ -d "$dir" ]] && [[ ! -w "$dir" ]]; then
         sudo chown -R $(id -u):$(id -g) "$dir"
     fi
@@ -227,7 +227,7 @@ elif [[ -n "${DOCKER_HOST:-}" ]]; then
 else
     echo ""
     echo "🐳 Docker Access: Disabled"
-    echo "   Enable with: codeagent start --docker"
+    echo "   Enable with: djinn start --docker"
     echo ""
 fi
 

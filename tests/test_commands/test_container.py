@@ -10,9 +10,9 @@ import pytest
 import typer
 from rich.console import Console
 
-from ai_dev_base.commands import container
-from ai_dev_base.core.docker import RunResult
-from ai_dev_base.core.theme import TODAI_THEME
+from djinn_in_a_box.commands import container
+from djinn_in_a_box.core.docker import RunResult
+from djinn_in_a_box.core.theme import TODAI_THEME
 
 
 class TestBuildCommand:
@@ -20,7 +20,7 @@ class TestBuildCommand:
 
     def test_build_exits_on_failure(self) -> None:
         """Test build exits with error code on failure."""
-        with patch("ai_dev_base.commands.container.compose_build") as mock_build:
+        with patch("djinn_in_a_box.commands.container.compose_build") as mock_build:
             mock_build.return_value = RunResult(returncode=1, stderr="Build failed")
 
             with pytest.raises(typer.Exit) as exc_info:
@@ -36,11 +36,11 @@ class TestStartCommand:
     def start_mocks(self) -> Generator[dict[str, Any]]:
         """Common mocks for start command tests."""
         with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.ensure_network", return_value=True),
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy") as mock_cleanup,
-            patch("ai_dev_base.commands.container.get_shell_mount_args", return_value=[]),
+            patch("djinn_in_a_box.commands.container.load_config") as mock_load,
+            patch("djinn_in_a_box.commands.container.ensure_network", return_value=True),
+            patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
+            patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
         ):
             mock_config = MagicMock()
             mock_config.code_dir = Path("/projects")
@@ -78,7 +78,7 @@ class TestStartCommand:
 
     def test_start_with_mount_path(self, start_mocks: dict[str, Any], tmp_path: Path) -> None:
         with (
-            patch("ai_dev_base.commands.container.resolve_mount_path", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.container.resolve_mount_path", return_value=tmp_path),
             pytest.raises(typer.Exit),
         ):
             container.start(mount=tmp_path)
@@ -86,9 +86,9 @@ class TestStartCommand:
         assert options.mount_path == tmp_path
 
     def test_start_exits_on_config_not_found(self, tmp_path: Path) -> None:
-        from ai_dev_base.core.exceptions import ConfigNotFoundError
+        from djinn_in_a_box.core.exceptions import ConfigNotFoundError
 
-        with patch("ai_dev_base.commands.container.load_config") as mock_load:
+        with patch("djinn_in_a_box.commands.container.load_config") as mock_load:
             mock_load.side_effect = ConfigNotFoundError(tmp_path / "config.toml")
             with pytest.raises(typer.Exit) as exc_info:
                 container.start()
@@ -114,9 +114,9 @@ class TestAuthCommand:
     def test_auth_uses_compose_run_with_profile(self) -> None:
         """Test auth uses compose_run with profile='auth' and service='dev-auth'."""
         with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
+            patch("djinn_in_a_box.commands.container.load_config") as mock_load,
+            patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.container.cleanup_docker_proxy"),
         ):
             mock_config = MagicMock()
             mock_load.return_value = mock_config
@@ -134,10 +134,10 @@ class TestAuthCommand:
     def test_auth_with_docker_starts_proxy(self) -> None:
         """Test auth --docker starts docker proxy separately."""
         with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.compose_up") as mock_up,
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy"),
+            patch("djinn_in_a_box.commands.container.load_config") as mock_load,
+            patch("djinn_in_a_box.commands.container.compose_up") as mock_up,
+            patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.container.cleanup_docker_proxy"),
             patch("time.sleep"),
         ):
             mock_config = MagicMock()
@@ -153,10 +153,10 @@ class TestAuthCommand:
     def test_auth_with_docker_direct_skips_proxy(self) -> None:
         """Test auth --docker-direct does not start proxy."""
         with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
-            patch("ai_dev_base.commands.container.compose_run") as mock_run,
-            patch("ai_dev_base.commands.container.cleanup_docker_proxy") as mock_cleanup,
-            patch("ai_dev_base.commands.container.compose_up") as mock_up,
+            patch("djinn_in_a_box.commands.container.load_config") as mock_load,
+            patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
+            patch("djinn_in_a_box.commands.container.compose_up") as mock_up,
         ):
             mock_config = MagicMock()
             mock_load.return_value = mock_config
@@ -181,18 +181,19 @@ class TestStatusCommand:
 
     def test_status_handles_missing_config(self, tmp_path: Path) -> None:
         """Test status handles missing configuration gracefully."""
-        from ai_dev_base.core.exceptions import ConfigNotFoundError
+        from djinn_in_a_box.core.exceptions import ConfigNotFoundError
 
         config_file = tmp_path / "nonexistent" / "config.toml"
 
         with (
-            patch("ai_dev_base.commands.container.load_config") as mock_load,
+            patch("djinn_in_a_box.commands.container.load_config") as mock_load,
             patch("subprocess.run") as mock_run,
             patch(
-                "ai_dev_base.commands.container._get_existing_volumes_by_category", return_value=[]
+                "djinn_in_a_box.commands.container._get_existing_volumes_by_category",
+                return_value=[],
             ),
-            patch("ai_dev_base.commands.container.network_exists", return_value=True),
-            patch("ai_dev_base.commands.container.is_container_running", return_value=False),
+            patch("djinn_in_a_box.commands.container.network_exists", return_value=True),
+            patch("djinn_in_a_box.commands.container.is_container_running", return_value=False),
         ):
             mock_load.side_effect = ConfigNotFoundError(config_file)
             mock_run.return_value = MagicMock(returncode=0, stdout="")
@@ -208,7 +209,7 @@ class TestCleanDefaultCommand:
         """Test clean without subcommand runs compose down."""
         from typer import Context
 
-        with patch("ai_dev_base.commands.container.compose_down") as mock_down:
+        with patch("djinn_in_a_box.commands.container.compose_down") as mock_down:
             mock_down.return_value = RunResult(returncode=0)
 
             # Create a mock context with no invoked subcommand
@@ -225,8 +226,10 @@ class TestCleanVolumesCommand:
 
     def test_clean_volumes_lists_without_flags(self) -> None:
         """Test clean volumes without flags lists volumes."""
-        with patch("ai_dev_base.commands.container._get_existing_volumes_by_category") as mock_get:
-            mock_get.return_value = ["ai-dev-claude-config"]
+        with patch(
+            "djinn_in_a_box.commands.container._get_existing_volumes_by_category",
+        ) as mock_get:
+            mock_get.return_value = ["djinn-claude-config"]
 
             container.clean_volumes()
 
@@ -236,11 +239,13 @@ class TestCleanVolumesCommand:
     def test_clean_volumes_deletes_credentials(self) -> None:
         """Test clean volumes --credentials deletes credential volumes."""
         with (
-            patch("ai_dev_base.commands.container._get_existing_volumes_by_category") as mock_get,
-            patch("ai_dev_base.commands.container.delete_volumes") as mock_delete,
+            patch(
+                "djinn_in_a_box.commands.container._get_existing_volumes_by_category",
+            ) as mock_get,
+            patch("djinn_in_a_box.commands.container.delete_volumes") as mock_delete,
         ):
-            mock_get.return_value = ["ai-dev-claude-config"]
-            mock_delete.return_value = {"ai-dev-claude-config": True}
+            mock_get.return_value = ["djinn-claude-config"]
+            mock_delete.return_value = {"djinn-claude-config": True}
 
             container.clean_volumes(credentials=True)
 
@@ -250,18 +255,18 @@ class TestCleanVolumesCommand:
     def test_clean_volumes_deletes_specific_volume(self) -> None:
         """Test clean volumes <name> deletes specific volume."""
         with (
-            patch("ai_dev_base.commands.container.volume_exists", return_value=True),
-            patch("ai_dev_base.commands.container.delete_volume") as mock_delete,
+            patch("djinn_in_a_box.commands.container.volume_exists", return_value=True),
+            patch("djinn_in_a_box.commands.container.delete_volume") as mock_delete,
         ):
             mock_delete.return_value = True
 
-            container.clean_volumes(name="ai-dev-test-volume")
+            container.clean_volumes(name="djinn-test-volume")
 
-            mock_delete.assert_called_once_with("ai-dev-test-volume")
+            mock_delete.assert_called_once_with("djinn-test-volume")
 
     def test_clean_volumes_errors_on_nonexistent(self) -> None:
         """Test clean volumes <name> errors if volume doesn't exist."""
-        with patch("ai_dev_base.commands.container.volume_exists", return_value=False):
+        with patch("djinn_in_a_box.commands.container.volume_exists", return_value=False):
             with pytest.raises(typer.Exit) as exc_info:
                 container.clean_volumes(name="nonexistent-volume")
 
@@ -279,9 +284,9 @@ class TestCleanAllCommand:
     def test_clean_all_with_force_skips_confirmation(self) -> None:
         """Test clean all --force skips confirmation."""
         with (
-            patch("ai_dev_base.commands.container.compose_down") as mock_down,
-            patch("ai_dev_base.commands.container.VOLUME_CATEGORIES", {}),
-            patch("ai_dev_base.commands.container.network_exists", return_value=False),
+            patch("djinn_in_a_box.commands.container.compose_down") as mock_down,
+            patch("djinn_in_a_box.commands.container.VOLUME_CATEGORIES", {}),
+            patch("djinn_in_a_box.commands.container.network_exists", return_value=False),
         ):
             mock_down.return_value = RunResult(returncode=0)
 
@@ -295,7 +300,7 @@ class TestAuditCommand:
 
     def test_audit_requires_proxy_running(self) -> None:
         """Test audit requires docker proxy to be running."""
-        with patch("ai_dev_base.commands.container.is_container_running", return_value=False):
+        with patch("djinn_in_a_box.commands.container.is_container_running", return_value=False):
             with pytest.raises(typer.Exit) as exc_info:
                 container.audit()
 
@@ -304,7 +309,7 @@ class TestAuditCommand:
     def test_audit_shows_logs(self) -> None:
         """Test audit shows proxy logs."""
         with (
-            patch("ai_dev_base.commands.container.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.container.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -320,7 +325,7 @@ class TestAuditCommand:
     def test_audit_with_tail_option(self) -> None:
         """Test audit -n option sets tail count."""
         with (
-            patch("ai_dev_base.commands.container.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.container.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -335,7 +340,7 @@ class TestAuditCommand:
     def test_audit_propagates_error_exit_code(self) -> None:
         """Test audit propagates error exit code from docker logs."""
         with (
-            patch("ai_dev_base.commands.container.is_container_running", return_value=True),
+            patch("djinn_in_a_box.commands.container.is_container_running", return_value=True),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=1)
@@ -357,7 +362,7 @@ class TestUpdateCommand:
         script_path.write_text("#!/bin/bash\necho 'update'")
 
         with (
-            patch("ai_dev_base.commands.container.get_project_root", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.container.get_project_root", return_value=tmp_path),
             patch("subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -369,7 +374,7 @@ class TestUpdateCommand:
 
     def test_update_errors_if_script_missing(self, tmp_path: Path) -> None:
         """Test update errors if script doesn't exist."""
-        with patch("ai_dev_base.commands.container.get_project_root", return_value=tmp_path):
+        with patch("djinn_in_a_box.commands.container.get_project_root", return_value=tmp_path):
             with pytest.raises(typer.Exit) as exc_info:
                 container.update()
 
@@ -381,7 +386,7 @@ class TestEnterCommand:
 
     def test_enter_requires_tty(self) -> None:
         """Test enter requires a TTY."""
-        with patch("ai_dev_base.commands.container.sys") as mock_sys:
+        with patch("djinn_in_a_box.commands.container.sys") as mock_sys:
             mock_sys.stdin.isatty.return_value = False
             with pytest.raises(typer.Exit) as exc_info:
                 container.enter()
@@ -389,10 +394,10 @@ class TestEnterCommand:
             assert exc_info.value.exit_code == 1
 
     def test_enter_requires_running_container(self) -> None:
-        """Test enter requires a running ai-dev container."""
+        """Test enter requires a running djinn container."""
         with (
-            patch("ai_dev_base.commands.container.sys") as mock_sys,
-            patch("ai_dev_base.commands.container.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.container.sys") as mock_sys,
+            patch("djinn_in_a_box.commands.container.get_running_containers", return_value=[]),
         ):
             mock_sys.stdin.isatty.return_value = True
             with pytest.raises(typer.Exit) as exc_info:
@@ -403,12 +408,12 @@ class TestEnterCommand:
     def test_enter_opens_shell(self) -> None:
         """Test enter opens zsh shell in running container."""
         with (
-            patch("ai_dev_base.commands.container.sys") as mock_sys,
-            patch("ai_dev_base.commands.container.get_running_containers") as mock_get,
+            patch("djinn_in_a_box.commands.container.sys") as mock_sys,
+            patch("djinn_in_a_box.commands.container.get_running_containers") as mock_get,
             patch("subprocess.run") as mock_run,
         ):
             mock_sys.stdin.isatty.return_value = True
-            mock_get.return_value = ["ai-dev-base-dev-12345"]
+            mock_get.return_value = ["djinn-in-a-box-dev-12345"]
             mock_run.return_value = MagicMock(returncode=0)
 
             with pytest.raises(typer.Exit) as exc_info:
@@ -420,7 +425,7 @@ class TestEnterCommand:
             assert "exec" in call_args
             assert "-it" in call_args
             assert "zsh" in call_args
-            assert "ai-dev-base-dev-12345" in call_args
+            assert "djinn-in-a-box-dev-12345" in call_args
 
 
 class TestVolumeTable:
@@ -431,7 +436,7 @@ class TestVolumeTable:
         """Capture container module's console (stdout) output."""
         output = io.StringIO()
         test_console = Console(file=output, force_terminal=True, no_color=True, theme=TODAI_THEME)
-        with patch("ai_dev_base.commands.container.console", test_console):
+        with patch("djinn_in_a_box.commands.container.console", test_console):
             yield output
 
     def test_print_volume_table_all_categories(self, capture_container_stdout: io.StringIO) -> None:

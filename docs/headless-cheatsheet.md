@@ -1,6 +1,6 @@
 # Headless Mode Cheatsheet
 
-Quick reference for running CLI agents in headless mode via `codeagent run`.
+Quick reference for running CLI agents in headless mode via `djinn run`.
 
 ---
 
@@ -26,32 +26,32 @@ Quick reference for running CLI agents in headless mode via `codeagent run`.
 
 ---
 
-## CLI Usage (codeagent run)
+## CLI Usage (djinn run)
 
 ```bash
 # Claude mit Opus (read-only, Analyse)
-codeagent run claude "Erklaere die Architektur" --model opus
+djinn run claude "Erklaere die Architektur" --model opus
 
 # Claude mit Sonnet (write, schneller)
-codeagent run claude "Fix den Bug in main.py" --write --model sonnet
+djinn run claude "Fix den Bug in main.py" --write --model sonnet
 
 # Gemini Pro (tiefes Reasoning)
-codeagent run gemini "Refactore die Auth-Logik" --write --model gemini-2.5-pro
+djinn run gemini "Refactore die Auth-Logik" --write --model gemini-2.5-pro
 
 # Gemini Flash (schnell)
-codeagent run gemini "Fasse die README zusammen" --model gemini-2.5-flash
+djinn run gemini "Fasse die README zusammen" --model gemini-2.5-flash
 
 # JSON-Output fuer Scripting
-codeagent run claude "Liste alle TODOs" --model sonnet --json | jq '.result'
+djinn run claude "Liste alle TODOs" --model sonnet --json | jq '.result'
 
 # Anderes Workspace-Verzeichnis
-codeagent run claude "Analysiere dieses Projekt" --model opus --mount ~/anderes-projekt
+djinn run claude "Analysiere dieses Projekt" --model opus --mount ~/anderes-projekt
 
 # Mit Docker-Zugriff
-codeagent run claude "Build und teste das Projekt" --docker
+djinn run claude "Build und teste das Projekt" --docker
 
 # Verfuegbare Agents anzeigen
-codeagent agents
+djinn agents
 ```
 
 ---
