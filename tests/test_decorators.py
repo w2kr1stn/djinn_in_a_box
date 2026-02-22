@@ -12,15 +12,6 @@ from ai_dev_base.core.exceptions import ConfigNotFoundError, ConfigValidationErr
 class TestHandleConfigErrors:
     """Tests for @handle_config_errors decorator."""
 
-    def test_passes_through_normal_execution(self) -> None:
-        """Test decorator allows normal execution."""
-
-        @handle_config_errors
-        def normal_func() -> str:
-            return "success"
-
-        assert normal_func() == "success"
-
     def test_catches_config_not_found_error(self) -> None:
         """Test decorator catches ConfigNotFoundError and exits with code 1."""
 

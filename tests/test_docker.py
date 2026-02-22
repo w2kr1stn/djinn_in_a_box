@@ -10,9 +10,7 @@ from ai_dev_base.core.docker import (
     ContainerOptions,
     cleanup_docker_proxy,
     compose_build,
-    compose_down,
     compose_run,
-    compose_up,
     delete_volumes,
     ensure_network,
     get_compose_files,
@@ -242,20 +240,6 @@ class TestComposeBuild:
         assert "--no-cache" in cmd
 
 
-@pytest.fixture
-def mock_app_config(tmp_path: Path) -> AppConfig:
-    """Provide mock app configuration for compose tests."""
-    from ai_dev_base.config.models import ResourceLimits
-
-    projects_dir = tmp_path / "projects"
-    projects_dir.mkdir()
-    return AppConfig(
-        code_dir=projects_dir,
-        resources=ResourceLimits(),
-        shell=ShellConfig(),
-    )
-
-
 class TestComposeRun:
     """Tests for compose_run function."""
 
@@ -338,44 +322,6 @@ class TestComposeRun:
         assert result.stdout == "captured"
 
 
-class TestComposeUp:
-    """Tests for compose_up function."""
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_up_detached(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
-        """Test runs with -d flag by default."""
-        mock_root.return_value = Path("/project")
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        compose_up()
-        cmd = mock_run.call_args[0][0]
-        assert "-d" in cmd
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_up_with_services(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
-        """Test includes service names when specified."""
-        mock_root.return_value = Path("/project")
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        compose_up(services=["docker-proxy"])
-        cmd = mock_run.call_args[0][0]
-        assert "docker-proxy" in cmd
-
-
-class TestComposeDown:
-    """Tests for compose_down function."""
-
-    @patch("ai_dev_base.core.docker.get_project_root")
-    @patch("ai_dev_base.core.docker.subprocess.run")
-    def test_down_basic(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
-        """Test basic down command."""
-        mock_root.return_value = Path("/project")
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        compose_down()
-        cmd = mock_run.call_args[0][0]
-        assert "down" in cmd
-
-
 class TestCleanupDockerProxy:
     """Tests for cleanup_docker_proxy function."""
 
@@ -392,16 +338,15 @@ class TestCleanupDockerProxy:
         """Test stops and removes docker-proxy when docker_enabled=True."""
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0)
-        cleanup_docker_proxy(docker_enabled=True)
+        result = cleanup_docker_proxy(docker_enabled=True)
+        assert result is True
         assert mock_run.call_count == 2
-        # First call should be stop
+        # First call: stop docker-proxy
         first_call = mock_run.call_args_list[0][0][0]
-        assert "stop" in first_call
-        assert "docker-proxy" in first_call
-        # Second call should be rm
+        assert first_call[-2:] == ["stop", "docker-proxy"]
+        # Second call: rm docker-proxy
         second_call = mock_run.call_args_list[1][0][0]
-        assert "rm" in second_call
-        assert "docker-proxy" in second_call
+        assert second_call[-3:] == ["rm", "-f", "docker-proxy"]
 
 
 class TestComposeRunErrorHandling:

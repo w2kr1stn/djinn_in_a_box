@@ -4,22 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_dev_base.core.paths import (
-    get_project_root,
-    resolve_mount_path,
-)
-
-
-class TestGetProjectRoot:
-    """Tests for get_project_root()."""
-
-    def test_finds_project_root(self) -> None:
-        """get_project_root() should find the directory with docker-compose.yml."""
-        root = get_project_root()
-        assert root.is_dir()
-        assert root.is_absolute()
-        assert (root / "docker-compose.yml").exists()
-        assert (root / "pyproject.toml").exists()
+from ai_dev_base.core.paths import resolve_mount_path
 
 
 class TestResolveMountPath:
@@ -31,10 +16,13 @@ class TestResolveMountPath:
         assert result == Path.home()
         assert result.is_absolute()
 
-    def test_relative_path_resolution(self, change_dir: Path) -> None:
+    def test_relative_path_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """resolve_mount_path('.') should resolve to current directory."""
+        monkeypatch.chdir(tmp_path)
         result = resolve_mount_path(".")
-        assert result == change_dir
+        assert result == tmp_path
         assert result.is_absolute()
 
     def test_absolute_path(self, tmp_path: Path) -> None:

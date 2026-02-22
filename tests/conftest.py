@@ -1,10 +1,10 @@
 """Pytest configuration and fixtures for AI Dev Base tests."""
 
-import os
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+
+from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
 
 
 @pytest.fixture
@@ -17,11 +17,12 @@ def mock_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def change_dir(tmp_path: Path) -> Generator[Path]:
-    """Temporarily change working directory to tmp_path."""
-    original_cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        yield tmp_path
-    finally:
-        os.chdir(original_cwd)
+def mock_app_config(tmp_path: Path) -> AppConfig:
+    """Provide mock app configuration for tests."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    return AppConfig(
+        code_dir=projects_dir,
+        resources=ResourceLimits(),
+        shell=ShellConfig(),
+    )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -126,20 +125,6 @@ class TestRunCommand:
     ) -> dict[str, AgentConfig]:
         """Provide mock agent configurations from top-level fixtures."""
         return {"claude": claude_config, "gemini": gemini_config}
-
-    @pytest.fixture
-    def mock_app_config(self, tmp_path: Path) -> AppConfig:
-        """Provide mock app configuration."""
-        from ai_dev_base.config.models import AppConfig, ResourceLimits, ShellConfig
-
-        projects_dir = tmp_path / "projects"
-        projects_dir.mkdir()
-
-        return AppConfig(
-            code_dir=projects_dir,
-            resources=ResourceLimits(),
-            shell=ShellConfig(),
-        )
 
     @pytest.fixture
     def run_mocks(

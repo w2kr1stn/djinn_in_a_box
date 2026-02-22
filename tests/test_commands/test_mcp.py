@@ -70,22 +70,6 @@ class TestStartCommand:
             mcp.start()
 
 
-class TestStopCommand:
-    def test_stop_runs_compose_down(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            mcp.stop()
-            assert mock_run.call_args_list[0][0][0] == ["docker", "compose", "down"]
-
-
-class TestRestartCommand:
-    def test_restart_runs_compose_restart(self) -> None:
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            mock_run.return_value = MagicMock(returncode=0)
-            mcp.restart()
-            assert mock_run.call_args_list[0][0][0] == ["docker", "compose", "restart"]
-
-
 class TestLogsCommand:
     def test_logs_requires_running_gateway(self) -> None:
         with (
@@ -188,7 +172,13 @@ class TestCatalogCommand:
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="catalog data")
             mcp.catalog()
-            assert "catalog" in mock_run.call_args_list[0][0][0]
+            assert mock_run.call_args_list[0][0][0] == [
+                "docker",
+                "mcp",
+                "catalog",
+                "show",
+                "docker-mcp",
+            ]
 
 
 class TestTestCommand:

@@ -82,10 +82,6 @@ class TestShellConfig:
 
     def test_omp_theme_path_expansion(self, mock_home: Path) -> None:
         """Test that tilde in omp_theme_path is expanded."""
-        theme_path = mock_home / ".config" / "theme.omp.json"
-        theme_path.parent.mkdir(parents=True, exist_ok=True)
-        theme_path.touch()
-
         shell = ShellConfig(omp_theme_path="~/.config/theme.omp.json")
         # Should be expanded to absolute path
         assert shell.omp_theme_path is not None

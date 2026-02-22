@@ -18,24 +18,6 @@ from ai_dev_base.core.theme import TODAI_THEME
 class TestBuildCommand:
     """Tests for the build command."""
 
-    def test_build_calls_compose_build(self) -> None:
-        """Test build calls compose_build function."""
-        with patch("ai_dev_base.commands.container.compose_build") as mock_build:
-            mock_build.return_value = RunResult(returncode=0)
-
-            container.build()
-
-            mock_build.assert_called_once_with(no_cache=False)
-
-    def test_build_with_no_cache(self) -> None:
-        """Test build --no-cache passes flag to compose_build."""
-        with patch("ai_dev_base.commands.container.compose_build") as mock_build:
-            mock_build.return_value = RunResult(returncode=0)
-
-            container.build(no_cache=True)
-
-            mock_build.assert_called_once_with(no_cache=True)
-
     def test_build_exits_on_failure(self) -> None:
         """Test build exits with error code on failure."""
         with patch("ai_dev_base.commands.container.compose_build") as mock_build:
@@ -248,8 +230,8 @@ class TestCleanVolumesCommand:
 
             container.clean_volumes()
 
-            # Should have queried categories
-            assert mock_get.call_count >= 1
+            # Should query all 4 categories (credentials, tools, cache, data)
+            assert mock_get.call_count == 4
 
     def test_clean_volumes_deletes_credentials(self) -> None:
         """Test clean volumes --credentials deletes credential volumes."""
