@@ -7,7 +7,7 @@
 # ## Migration Guide
 #
 # 1. Install the CLI tools:
-#    cd djinn-in-a-box
+#    cd djinn_in_a_box
 #    uv tool install .
 #
 # 2. Remove old shell wrappers from ~/.zshrc or ~/.zshrc.local:

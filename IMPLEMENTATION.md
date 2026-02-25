@@ -111,7 +111,7 @@ cli/mcpgateway.py ─┴──► commands/mcp.py ────────┴─
 ## 3. Package Structure
 
 ```
-djinn-in-a-box/
+djinn_in_a_box/
 ├── pyproject.toml                    # Package configuration, entry points
 ├── devops.py                         # Task runner (fmt, test, clean)
 ├── src/
@@ -414,7 +414,7 @@ class AppConfig(BaseModel):
 
 ```python
 def load_config(path: Path | None = None) -> AppConfig:
-    """Load config from TOML. Defaults to ~/.config/djinn-in-a-box/config.toml."""
+    """Load config from TOML. Defaults to ~/.config/djinn_in_a_box/config.toml."""
 ```
 
 Transforms nested TOML `[general]` section to flat Pydantic model. Uses atomic writes via `tempfile.mkstemp()` + `os.replace()`.
@@ -425,7 +425,7 @@ Transforms nested TOML `[general]` section to flat Pydantic model. Uses atomic w
 def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
 ```
 
-Priority chain: explicit path → `~/.config/djinn-in-a-box/agents.toml` → bundled `config/agents.toml` → `DEFAULT_AGENTS`
+Priority chain: explicit path → `~/.config/djinn_in_a_box/agents.toml` → bundled `config/agents.toml` → `DEFAULT_AGENTS`
 
 #### save_config()
 
@@ -497,7 +497,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
 
 ### 6.4 Configuration File Locations
 
-XDG-compliant: `~/.config/djinn-in-a-box/`
+XDG-compliant: `~/.config/djinn_in_a_box/`
 
 #### config.toml
 
@@ -649,7 +649,7 @@ ICONS: dict[str, str] = {
 ### 7.4 core/paths.py — Path Utilities (70 lines)
 
 ```python
-CONFIG_DIR: Path = Path.home() / ".config" / "djinn-in-a-box"
+CONFIG_DIR: Path = Path.home() / ".config" / "djinn_in_a_box"
 CONFIG_FILE: Path = CONFIG_DIR / "config.toml"
 AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 
@@ -711,7 +711,7 @@ Validate code_dir (offer to create if missing)
 AppConfig(...) → save_config() (atomic write)
   │
   ▼
-Copy bundled agents.toml → ~/.config/djinn-in-a-box/agents.toml
+Copy bundled agents.toml → ~/.config/djinn_in_a_box/agents.toml
   │
   ▼
 Display next steps: build → auth → start
@@ -918,7 +918,7 @@ def mock_app_config(tmp_path: Path) -> AppConfig:
 
 ### 12.1 Adding a New Agent
 
-Edit `~/.config/djinn-in-a-box/agents.toml` or add to `DEFAULT_AGENTS` in `config/defaults.py`.
+Edit `~/.config/djinn_in_a_box/agents.toml` or add to `DEFAULT_AGENTS` in `config/defaults.py`.
 
 ### 12.2 Adding a New Command
 

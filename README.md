@@ -19,7 +19,7 @@ Minimales, wiederverwendbares Base-Image fuer AI-gestuetzte Entwicklung mit **Cl
 
 ```bash
 # Install CLI tools via uv
-cd djinn-in-a-box
+cd djinn_in_a_box
 uv tool install .
 
 # Or install in development mode
@@ -150,10 +150,10 @@ mcpgateway clean              # Full reset
 
 ## Configuration
 
-Configuration is stored in `~/.config/djinn-in-a-box/`:
+Configuration is stored in `~/.config/djinn_in_a_box/`:
 
 ```
-~/.config/djinn-in-a-box/
+~/.config/djinn_in_a_box/
 |-- config.toml      # Main configuration
 |-- agents.toml      # Agent definitions (optional)
 ```
@@ -283,7 +283,7 @@ Der Container hat eine eigene `~/.zshrc`, die:
 ```bash
 # Im Projekt:
 mkdir -p .devcontainer
-cp /pfad/zu/djinn-in-a-box/templates/devcontainer.json .devcontainer/
+cp /pfad/zu/djinn_in_a_box/templates/devcontainer.json .devcontainer/
 ```
 
 Dann in VS Code: `Cmd+Shift+P` → "Reopen in Container"
@@ -625,7 +625,7 @@ ENTRYPOINT ["/bin/bash"]
 
 ### Festes Projekt-Verzeichnis aendern
 
-In `~/.config/djinn-in-a-box/config.toml` anpassen:
+In `~/.config/djinn_in_a_box/config.toml` anpassen:
 
 ```toml
 [general]
@@ -682,12 +682,12 @@ Remove old shell wrappers from `~/.zshrc` or `~/.zshrc.local`:
 ```bash
 # OLD (can be removed):
 djinn() {
-    local script_path="/path/to/djinn-in-a-box/scripts/dev.sh"
+    local script_path="/path/to/djinn_in_a_box/scripts/dev.sh"
     ...
 }
 
 mcpgateway() {
-    local script_path="/path/to/djinn-in-a-box/mcp/mcp.sh"
+    local script_path="/path/to/djinn_in_a_box/mcp/mcp.sh"
     ...
 }
 
