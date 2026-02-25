@@ -44,7 +44,7 @@ class TestInitCommand:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test init creates config.toml in config directory."""
-        config_dir = tmp_path / ".config" / "djinn-in-a-box"
+        config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
 
         # Mock paths to use temp directory
@@ -82,7 +82,7 @@ class TestInitCommand:
 
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test init --force overwrites existing config without prompting."""
-        config_dir = tmp_path / ".config" / "djinn-in-a-box"
+        config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
 
         # Create existing config
@@ -121,7 +121,7 @@ class TestInitCommand:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test init prompts when config exists and user declines."""
-        config_dir = tmp_path / ".config" / "djinn-in-a-box"
+        config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
 
         # Create existing config
@@ -145,7 +145,7 @@ class TestInitCommand:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test init offers to create non-existent projects directory."""
-        config_dir = tmp_path / ".config" / "djinn-in-a-box"
+        config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
 
         # Mock paths

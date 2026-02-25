@@ -94,6 +94,6 @@
     // }
     // -------------------------------------------------------------------------
     // NOTE: For OAuth authentication, first use `djinn auth` from the
-    // djinn-in-a-box directory to authenticate with host network.
+    // djinn_in_a_box directory to authenticate with host network.
     // -------------------------------------------------------------------------
 }

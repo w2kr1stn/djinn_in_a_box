@@ -26,7 +26,7 @@ def init_config(
         ),
     ] = False,
 ) -> None:
-    """Initialize configuration in ~/.config/djinn-in-a-box/.
+    """Initialize configuration in ~/.config/djinn_in_a_box/.
 
     Creates config.toml with user-provided settings through interactive prompts.
     Run this once before using other commands.
@@ -109,7 +109,7 @@ def config_show(
 ) -> None:
     """Show current configuration.
 
-    Displays all settings from ~/.config/djinn-in-a-box/config.toml.
+    Displays all settings from ~/.config/djinn_in_a_box/config.toml.
 
     [info.bold]Example:[/info.bold]
 

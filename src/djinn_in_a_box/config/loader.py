@@ -37,7 +37,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     """Load application config from TOML file.
 
     Loads configuration from the specified path or the default location
-    (~/.config/djinn-in-a-box/config.toml). The TOML structure is flattened
+    (~/.config/djinn_in_a_box/config.toml). The TOML structure is flattened
     and validated with Pydantic.
 
     Args:
@@ -78,7 +78,7 @@ def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
 
     Priority (first existing wins):
     1. Specified path (if provided)
-    2. User's ~/.config/djinn-in-a-box/agents.toml
+    2. User's ~/.config/djinn_in_a_box/agents.toml
     3. Bundled config/agents.toml in project root
     4. DEFAULT_AGENTS from defaults.py
 

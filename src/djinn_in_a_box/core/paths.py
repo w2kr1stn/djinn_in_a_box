@@ -7,8 +7,8 @@ for resolving mount paths used in Docker container operations.
 import functools
 from pathlib import Path
 
-CONFIG_DIR: Path = Path.home() / ".config" / "djinn-in-a-box"
-"""XDG-compliant configuration directory (~/.config/djinn-in-a-box/)."""
+CONFIG_DIR: Path = Path.home() / ".config" / "djinn_in_a_box"
+"""XDG-compliant configuration directory (~/.config/djinn_in_a_box/)."""
 
 CONFIG_FILE: Path = CONFIG_DIR / "config.toml"
 """Main configuration file path."""
@@ -19,7 +19,7 @@ AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 
 @functools.cache
 def get_project_root() -> Path:
-    """Find the djinn-in-a-box project root directory.
+    """Find the djinn_in_a_box project root directory.
 
     Searches upward from this module's location for a directory containing
     docker-compose.yml. This is the canonical marker for the project root.
@@ -41,7 +41,7 @@ def get_project_root() -> Path:
         current = current.parent
 
     msg = (
-        "Could not find djinn-in-a-box project root. "
+        "Could not find djinn_in_a_box project root. "
         "No docker-compose.yml found in any parent directory of "
         f"{Path(__file__).resolve()}"
     )
