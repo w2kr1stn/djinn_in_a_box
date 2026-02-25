@@ -8,8 +8,11 @@
 #   djinn start --docker --firewall  # Beides kombiniert
 #
 # Configuration:
-#   Run `djinn init` to create ~/.config/djinn-in-a-box/config.toml
+#   Run `djinn init` to create ~/.config/djinn_in_a_box/config.toml
 # =============================================================================
+
+# Pin project name to ensure stable volume labels regardless of directory name.
+name: djinn-in-a-box
 
 # -----------------------------------------------------------------------------
 # Shared Configuration (YAML Anchors)
