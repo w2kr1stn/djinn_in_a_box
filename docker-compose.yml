@@ -1,0 +1,136 @@
+# =============================================================================
+# Djinn in a Box - Docker Compose (Base Configuration)
+# =============================================================================
+# Usage:
+#   djinn start              # Without Docker socket (secure)
+#   djinn start --docker     # With Docker socket + proxy
+#   djinn start --firewall   # With network firewall
+#   djinn start --docker --firewall  # Both combined
+#
+# Configuration:
+#   Run `djinn init` to create ~/.config/djinn_in_a_box/config.toml
+# =============================================================================
+
+# Pin project name to ensure stable volume labels regardless of directory name.
+name: djinn-in-a-box
+
+# -----------------------------------------------------------------------------
+# Shared Configuration (YAML Anchors)
+# -----------------------------------------------------------------------------
+x-common-volumes: &common-volumes
+  # AI Agent configs & credentials (bind-mounts; optionally mirrored across machines)
+  - ${DJINN_CONFIG_ROOT:?Run 'djinn init' to set DJINN_CONFIG_ROOT}/claude:/home/dev/.claude
+  - ${DJINN_CONFIG_ROOT}/gemini:/home/dev/.gemini
+  - ${DJINN_CONFIG_ROOT}/codex:/home/dev/.codex
+  - ${DJINN_CONFIG_ROOT}/opencode:/home/dev/.opencode
+  - opencode-data:/home/dev/.local/share/opencode
+  - ${DJINN_CONFIG_ROOT}/gh:/home/dev/.config/gh
+  # Cache (host-local named volumes, rebuildable)
+  - uv-cache:/home/dev/.cache/uv
+  - tools-cache:/home/dev/.cache/djinn-tools
+  # VS Code Server (persistent extensions & settings for Attach to Container)
+  - vscode-server:/home/dev/.vscode-server
+  # VS Code Workspaces (persistent .code-workspace files)
+  - vscode-workspaces:/home/dev/workspaces
+  # Host configs (read-only)
+  - ~/.ssh:/home/dev/.ssh:ro
+  - ~/.gitconfig:/home/dev/.gitconfig:ro
+  # Seed configs (rw for reverse-sync of settings.json on exit)
+  - ./config/claude:/home/dev/.claude_seed
+  # Generic workflow seed → ~/.claude (nested over the live mount; in-place editable, shadows old install)
+  - ./config/claude/skills:/home/dev/.claude/skills
+  - ./config/claude/commands:/home/dev/.claude/commands
+  - ./config/claude/agents:/home/dev/.claude/agents
+  - ./config/claude/context:/home/dev/.claude/context
+  - ./config/claude/scripts:/home/dev/.claude/scripts
+  - ./config/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md
+  - ./config/gemini:/home/dev/.gemini_seed
+  - ./config/opencode:/home/dev/.opencode/seed
+  # Shared MCP server registry (all CLI tools, local-only)
+  - ./config/mcp-servers.json:/home/dev/.config/mcp-servers.json:ro
+  # Projects directory
+  - ${CODE_DIR:?Run 'djinn init' to set CODE_DIR}:/home/dev/projects
+  # Consumer session workspaces (bidirectional bind-mount)
+  - ${HOME}/.djinn/sessions:/home/dev/sessions
+
+x-common-environment: &common-environment
+  TZ: ${TZ:-UTC}
+  UV_LINK_MODE: copy
+  # Host-local LLM endpoint (e.g. Ollama on the host)
+  LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://host.docker.internal:11434/v1}
+  # Gemini CLI: Force file-based token storage instead of system keychain
+  # (keychain is not persistent in containers)
+  GEMINI_FORCE_FILE_STORAGE: "true"
+
+x-resource-limits: &resource-limits
+  resources:
+    limits:
+      cpus: '${CPU_LIMIT:-4}'
+      memory: ${MEMORY_LIMIT:-8G}
+    reservations:
+      cpus: '${CPU_RESERVATION:-1}'
+      memory: ${MEMORY_RESERVATION:-2G}
+
+services:
+  # ---------------------------------------------------------------------------
+  # Main development container
+  # ---------------------------------------------------------------------------
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: djinn-in-a-box:latest
+    container_name: djinn
+    hostname: djinn
+    stdin_open: true
+    tty: true
+    networks:
+      - djinn-network
+    volumes: *common-volumes
+    environment:
+      <<: *common-environment
+      MCP_GATEWAY_URL: http://mcp-gateway:8811/
+      ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
+    extra_hosts:
+      # Expose the host (for MCP servers running as host services, e.g. a local MCP server)
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - NET_ADMIN
+    deploy: *resource-limits
+    working_dir: /home/dev/projects
+
+  # ---------------------------------------------------------------------------
+  # OAuth authentication container (uses host network)
+  # ---------------------------------------------------------------------------
+  dev-auth:
+    image: djinn-in-a-box:latest
+    container_name: djinn-auth
+    hostname: djinn
+    stdin_open: true
+    tty: true
+    profiles:
+      - auth
+    network_mode: "host"
+    volumes: *common-volumes
+    environment:
+      <<: *common-environment
+      MCP_GATEWAY_URL: http://localhost:8811/
+    deploy: *resource-limits
+    working_dir: /home/dev/projects
+
+networks:
+  djinn-network:
+    external: true
+    name: djinn-network
+
+volumes:
+  opencode-data:
+    name: djinn-opencode-data
+  uv-cache:
+    name: djinn-uv-cache
+  tools-cache:
+    name: djinn-tools-cache
+  vscode-server:
+    name: djinn-vscode-server
+  vscode-workspaces:
+    name: djinn-vscode-workspaces

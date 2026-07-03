@@ -1,0 +1,180 @@
+#!/bin/zsh
+
+# -----------------------------------------------------------------------------
+# merge_settings: Deep-merge two JSON settings files with selective replacement.
+# Most keys are recursively merged (overlay wins on conflicts). Plugin-related
+# keys (enabledPlugins, extraKnownMarketplaces) are fully replaced by the
+# overlay to prevent stale entries from persisting on the Docker volume.
+#   $1 = base file    (e.g. volume settings)
+#   $2 = overlay file (e.g. seed settings — authoritative for plugin keys)
+#   $3 = output file
+# -----------------------------------------------------------------------------
+merge_settings() {
+    local base=$1 overlay=$2 output=$3
+    jq -s '
+      .[0] as $vol | .[1] as $seed |
+      ($vol * $seed) |
+      if $seed | has("enabledPlugins")
+        then .enabledPlugins = $seed.enabledPlugins else . end |
+      if $seed | has("extraKnownMarketplaces")
+        then .extraKnownMarketplaces = $seed.extraKnownMarketplaces
+      elif $vol | has("extraKnownMarketplaces")
+        then del(.extraKnownMarketplaces)
+      else . end
+    ' "$base" "$overlay" > "$output"
+}
+
+# -----------------------------------------------------------------------------
+# sync_seed: Clean-sync managed dirs/files from read-only seed to volume.
+# Subdirectories are fully replaced (rm + cp). Root files are overwritten.
+# A .seed-manifest tracks synced files to detect and remove stale entries.
+#   $1 = label       (for logging)
+#   $2 = seed_dir    (read-only bind mount from host)
+#   $3 = target_dir  (persistent Docker volume)
+#   $4 = config_file (path for settings.json deep-merge, optional)
+# -----------------------------------------------------------------------------
+sync_seed() {
+    local label=$1 seed_dir=$2 target_dir=$3 config_file=${4:-}
+    local manifest="${target_dir}/.seed-manifest"
+    local tmp_manifest="${manifest}.tmp"
+
+    if [[ ! -d "$seed_dir" ]] || [[ -z "$(ls -A "$seed_dir" 2>/dev/null)" ]]; then
+        return
+    fi
+
+    echo "  [seed-sync] ${label}:"
+    : > "$tmp_manifest"
+
+    # Phase 1: Clean-replace subdirectories (seed = source of truth)
+    for dir in "$seed_dir"/*(N/); do
+        local dirname=${dir:t}
+        echo "    ↻ ${dirname}/"
+        rm -rf "${target_dir}/${dirname}"
+        cp -r "$dir" "${target_dir}/${dirname}"
+        # No `|| true`: a swallowed manifest-append failure would poison Phase 3
+        # into deleting freshly copied files as "stale" — fail loudly instead.
+        find "${target_dir}/${dirname}" -type f -printf "${dirname}/%P\n" >> "$tmp_manifest"
+    done
+
+    # Phase 2: Overwrite root-level files (skip settings.json — handled via merge)
+    for file in "$seed_dir"/*(N.); do
+        local filename=${file:t}
+        [[ "$filename" == "settings.json" ]] && continue
+        echo "    ↻ ${filename}"
+        cp "$file" "${target_dir}/${filename}"
+        echo "$filename" >> "$tmp_manifest"
+    done
+
+    # Phase 3: Remove stale files tracked by previous manifest
+    if [[ -f "$manifest" ]]; then
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            if ! grep -qxF "$entry" "$tmp_manifest"; then
+                if [[ -e "${target_dir}/${entry}" ]]; then
+                    echo "    ✕ ${entry} (stale)"
+                    rm -f "${target_dir}/${entry}"
+                fi
+            fi
+        done < "$manifest"
+        find "$target_dir" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    fi
+
+    # Phase 4: Persist new manifest
+    sort -o "$manifest" "$tmp_manifest"
+    rm -f "$tmp_manifest"
+
+    # Phase 5: Deep-merge settings.json (seed wins; plugin keys fully replaced)
+    if [[ -n "$config_file" ]] && [[ -f "$seed_dir/settings.json" ]]; then
+        if [[ -f "$config_file" ]]; then
+            echo "    ⊕ settings.json (merged)"
+            if merge_settings "$config_file" "$seed_dir/settings.json" "${config_file}.tmp"; then
+                mv "${config_file}.tmp" "$config_file"
+            else
+                rm -f "${config_file}.tmp"
+                local bad=""
+                jq -e . "$config_file" >/dev/null 2>&1 || bad="$config_file"
+                jq -e . "$seed_dir/settings.json" >/dev/null 2>&1 \
+                    || bad="${bad:+${bad}, }${seed_dir}/settings.json"
+                echo "    ✗ settings merge failed — ${bad:-unknown input} is not valid JSON; keeping existing settings." >&2
+            fi
+        else
+            echo "    + settings.json (init)"
+            cp "$seed_dir/settings.json" "$config_file"
+        fi
+    fi
+
+    # MCP servers are registered centrally from mcp-servers.json.
+}
+
+# -----------------------------------------------------------------------------
+# Claude Code: generic workflow seed → ~/.claude settings.json.
+# skills/commands/agents/context/scripts/CLAUDE.md + hooks are NESTED BIND-MOUNTS
+# (docker-compose) — in-place editable, no copy. Only settings.json is merged here:
+# the generic baseline (config/claude/settings.json, tracked) ⊕ the personal overlay
+# (config/claude/settings.local.json, git-ignored) — local wins.
+# -----------------------------------------------------------------------------
+claude_settings_merge() {
+    local seed_dir=$1 target_settings_file=$2
+
+    if [[ ! -f "$seed_dir/CLAUDE.md" || ! -f "$seed_dir/settings.json" ]]; then
+        local missing=""
+        [[ -f "$seed_dir/CLAUDE.md" ]] || missing="CLAUDE.md"
+        [[ -f "$seed_dir/settings.json" ]] || missing="${missing:+${missing}, }settings.json"
+        echo "  [workflow] ✗ config/claude seed incomplete (missing: ${missing}) — skipping settings merge." >&2
+        echo "             Run \`djinn init\` on the host (or restart via \`djinn start\`, which reseeds automatically)." >&2
+    else
+        local base="$seed_dir/settings.json" out="$target_settings_file"
+        if [[ -f "$seed_dir/settings.local.json" ]]; then
+            if merge_settings "$base" "$seed_dir/settings.local.json" "$out.tmp"; then
+                mv "$out.tmp" "$out" && echo "    ⊕ settings.json (baseline ⊕ local)"
+            else
+                rm -f "$out.tmp"
+                # jq parses BOTH inputs — pinpoint the actual offender instead of
+                # blaming one unconditionally (the hand-edited baseline is at
+                # least as likely to be malformed as the machine-written overlay).
+                local bad=""
+                jq -e . "$base" >/dev/null 2>&1 || bad="$base"
+                jq -e . "$seed_dir/settings.local.json" >/dev/null 2>&1 \
+                    || bad="${bad:+${bad}, }${seed_dir}/settings.local.json"
+                echo "  [workflow] ✗ settings merge failed — ${bad:-unknown input} is not valid JSON." >&2
+                echo "             Fix it on the host under config/claude/. Keeping existing settings." >&2
+                # A fresh volume must still get a permissions baseline — but never
+                # a malformed one.
+                if [[ ! -f "$out" ]]; then
+                    if jq -e . "$base" >/dev/null 2>&1; then
+                        cp "$base" "$out"
+                    else
+                        echo "  [workflow] ⚠ baseline itself is invalid — no settings.json initialised." >&2
+                    fi
+                fi
+            fi
+        else
+            echo "  [workflow] ⚠ no settings.local.json — keeping existing settings; baseline only if none yet" >&2
+            # NEVER clobber an existing volume settings.json with the bare baseline: a missing personal
+            # overlay (e.g. a fresh git pull — settings.local.json is git-ignored) must not wipe the
+            # user's prefs/marketplace. Only initialise from the baseline when no settings.json exists yet.
+            [[ -f "$out" ]] || cp "$base" "$out"
+        fi
+    fi
+}
+
+# Reverse-sync: Copy config files from volume back to seed mounts so
+# changes made inside the container are captured in the host repo.
+reverse_sync_file() {
+    local volume_file=$1 seed_file=$2
+    local seed_dir_path
+    seed_dir_path="$(dirname "$seed_file")"
+    # Missing volume file / missing seed dir are normal states — skip silently.
+    [[ -f "$volume_file" && -d "$seed_dir_path" ]] && {
+        if [[ ! -w "$seed_dir_path" ]]; then
+            # Same user outcome as a failed cp — same signal (not a silent skip).
+            echo "  ⚠ could not persist ${volume_file} → ${seed_file} (target directory not writable)" >&2
+        elif ! diff -q "$volume_file" "$seed_file" &>/dev/null; then
+            # Best-effort with warning: a single failed persist must not abort the
+            # session-end sync chain or clobber the shell's exit code (set -e).
+            cp "$volume_file" "$seed_file" \
+                || echo "  ⚠ could not persist ${volume_file} → ${seed_file}" >&2
+        fi
+    }
+    return 0
+}

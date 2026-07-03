@@ -1,0 +1,48 @@
+# This file is documentation only - to override agents, copy it to
+# ~/.config/djinn_in_a_box/agents.toml (the only honored override path).
+#
+# Define each agent under [agents.<name>].
+# Supported fields mirror the built-in defaults:
+#
+# [agents.example]
+# binary = "example"
+# description = "Example CLI"
+# headless_flags = ["run"]
+# read_only_flags = ["--read-only"]
+# write_flags = ["--write"]
+# json_flags = ["--json"]
+# model_flag = "--model"
+#
+# Built-in defaults, shown as commented examples:
+#
+# [agents.claude]
+# binary = "claude"
+# description = "Anthropic Claude Code CLI"
+# headless_flags = ["-p"]
+# read_only_flags = ["--permission-mode", "plan"]
+# write_flags = ["--dangerously-skip-permissions"]
+# json_flags = ["--output-format", "json"]
+# model_flag = "--model"
+#
+# [agents.gemini]
+# binary = "gemini"
+# description = "Google Gemini CLI"
+# headless_flags = ["-p"]
+# json_flags = ["--output-format", "json"]
+# model_flag = "-m"
+#
+# [agents.codex]
+# binary = "codex"
+# description = "OpenAI Codex CLI"
+# headless_flags = ["exec"]
+# write_flags = ["--full-auto"]
+# json_flags = ["--json"]
+# model_flag = "--model"
+#
+# [agents.opencode]
+# binary = "opencode"
+# description = "OpenCode CLI"
+# headless_flags = ["run"]
+# read_only_flags = ["--agent", "plan"]
+# json_flags = ["--format", "json"]
+# model_flag = "-m"

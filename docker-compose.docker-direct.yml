@@ -1,0 +1,22 @@
+# =============================================================================
+# Djinn in a Box - Direct Docker Socket Override
+# =============================================================================
+# Enables direct Docker socket access WITHOUT security proxy.
+# Loaded automatically when: djinn start --docker-direct
+#
+# WARNING: No API filtering! The container receives full Docker access,
+# equivalent to root access on the host.
+# Only use for: Dockerfile development, debugging, CI/CD workflows.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Dev Container Extension (direct Docker socket)
+  # ---------------------------------------------------------------------------
+  dev:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_ENABLED=true
+      - DOCKER_DIRECT=true
+

@@ -1,0 +1,10 @@
+# Optional installer names, one per line.
+# Each name must match tools/installers/<name>.sh without the .sh suffix.
+# Blank lines and comments are ignored.
+#
+# Install-cache convention: the installed binary should be named like the
+# installer and support `--version`; otherwise the cache check fails and the
+# tool is reinstalled on every container start (a diagnostic line is printed).
+# Installers with different semantics should implement their own idempotence.
+#
+# example-installer

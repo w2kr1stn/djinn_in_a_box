@@ -1,0 +1,100 @@
+# =============================================================================
+# Djinn in a Box - Docker Socket Override
+# =============================================================================
+# Enables Docker access via a secure socket proxy.
+# Loaded automatically when: djinn start --docker
+#
+# Security features:
+#   - Docker Socket Proxy filters dangerous API calls
+#   - No direct socket access for the dev container
+#   - Audit logging of all Docker operations
+#   - Resource limits for spawned containers
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Docker Socket Proxy (security layer)
+  # ---------------------------------------------------------------------------
+  # Filters Docker API calls and blocks dangerous operations.
+  # Docs: https://github.com/Tecnativa/docker-socket-proxy
+  # ---------------------------------------------------------------------------
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: djinn-docker-proxy
+    
+    environment:
+      # -----------------------------------------------------------------------
+      # Allowed operations (1 = allowed, 0 = blocked)
+      # -----------------------------------------------------------------------
+      # Read operations (safe)
+      - CONTAINERS=1      # List/inspect containers
+      - IMAGES=1          # List/inspect images
+      - NETWORKS=1        # List networks
+      - VOLUMES=1         # List volumes
+      - INFO=1            # Retrieve Docker info
+      - VERSION=1         # Retrieve Docker version
+      
+      # Write operations (controlled)
+      - POST=1            # POST requests (start containers, etc.)
+      - ALLOW_START=1     # Start containers
+      - ALLOW_STOP=1      # Stop containers
+      - ALLOW_RESTARTS=1  # Restart containers
+      
+      # -----------------------------------------------------------------------
+      # Blocked operations (security-critical)
+      # -----------------------------------------------------------------------
+      - BUILD=0           # Image build (could leak secrets)
+      - COMMIT=0          # Commit container to image
+      - EXEC=0            # Exec into running containers (escape risk)
+      - SWARM=0           # Swarm operations
+      - SECRETS=0         # Docker Secrets
+      - CONFIGS=0         # Docker Configs
+      - PLUGINS=0         # Plugin management
+      - SERVICES=0        # Swarm Services
+      - TASKS=0           # Swarm Tasks
+      - NODES=0           # Swarm Nodes
+      - AUTH=0            # Registry Auth (prevents credential leak)
+      
+      # Logging
+      - LOG_LEVEL=info
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    networks:
+      - djinn-network
+    
+    # Proxy runs as root (required for socket access)
+    # but the exposed port is only internally accessible
+    expose:
+      - "2375"
+    
+    # Healthcheck for dependencies
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:2375/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    
+    restart: unless-stopped
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # Dev Container Extension (Docker access via proxy)
+  # ---------------------------------------------------------------------------
+  dev:
+    depends_on:
+      docker-proxy:
+        condition: service_healthy
+    
+    environment:
+      # Docker CLI connects to the proxy, not directly to the socket
+      - DOCKER_HOST=tcp://docker-proxy:2375
+      # Marker for entrypoint.sh
+      - DOCKER_ENABLED=true

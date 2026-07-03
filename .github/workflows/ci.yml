@@ -1,0 +1,43 @@
+name: CI
+
+"on":
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run Ruff
+        run: uv run ruff check src/ tests/
+
+      - name: Run Pyright
+        run: uv run pyright src/
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Run Bandit
+        run: uvx bandit -r src/ --severity-level medium --confidence-level medium

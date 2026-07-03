@@ -1,0 +1,4 @@
+# Optional Debian packages, one per line.
+# Blank lines and comments are ignored.
+#
+# curl
