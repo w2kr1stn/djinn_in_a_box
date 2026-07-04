@@ -10,7 +10,16 @@ from typing import Annotated
 
 import typer
 
-from djinn_in_a_box.core.console import console, err_console, error, header, info, success, warning
+from djinn_in_a_box.core.console import (
+    console,
+    err_console,
+    error,
+    info,
+    rule,
+    status_line,
+    success,
+    warning,
+)
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     delete_network,
@@ -87,10 +96,9 @@ def start() -> None:
     if is_container_running(GATEWAY_CONTAINER):
         success("MCP Gateway is running")
         err_console.print()
-        err_console.print(f"Endpoint: {GATEWAY_ENDPOINT_CONTAINER} (from containers)")
-        err_console.print(f"          {GATEWAY_ENDPOINT_HOST} (from host)")
-        err_console.print()
-        err_console.print("Next steps:")
+        status_line("Endpoint", f"{GATEWAY_ENDPOINT_CONTAINER} (from containers)")
+        status_line("Host", f"{GATEWAY_ENDPOINT_HOST} (from host)")
+        rule("Next steps")
         err_console.print("  mcpgateway enable duckduckgo    # Enable web search")
         err_console.print("  mcpgateway enable memory        # Enable persistent memory")
         err_console.print("  mcpgateway servers              # List enabled servers")
@@ -122,10 +130,10 @@ def restart() -> None:
 
 def status() -> None:
     """Show gateway status and enabled servers."""
-    header("MCP Gateway Status")
+    rule("MCP Gateway Status")
 
     if is_container_running(GATEWAY_CONTAINER):
-        err_console.print("Gateway: [status.enabled]Running[/status.enabled]")
+        status_line("Gateway", "Running", "status.enabled")
         err_console.print()
 
         # Show container details
@@ -145,8 +153,7 @@ def status() -> None:
         if result.stdout.strip():
             err_console.print(result.stdout.strip())
 
-        err_console.print()
-        info("Enabled Servers:")
+        rule("Enabled Servers")
         result = subprocess.run(
             ["docker", "mcp", "server", "ls"],
             capture_output=True,
@@ -158,8 +165,7 @@ def status() -> None:
         else:
             err_console.print("  (none)")
 
-        err_console.print()
-        info("Running MCP Containers:")
+        rule("Running MCP Containers")
         result = subprocess.run(
             [
                 "docker",
@@ -186,7 +192,7 @@ def status() -> None:
         else:
             err_console.print("  (none)")
     else:
-        err_console.print("Gateway: [status.error]Stopped[/status.error]")
+        status_line("Gateway", "Stopped", "status.error")
         err_console.print()
         err_console.print("Start with: mcpgateway start")
 
@@ -248,7 +254,7 @@ def disable(
 def servers() -> None:
     """List enabled MCP servers."""
     _require_mcp_cli()
-    header("Enabled MCP Servers")
+    rule("Enabled MCP Servers")
 
     result = subprocess.run(
         ["docker", "mcp", "server", "ls"],
@@ -266,7 +272,7 @@ def servers() -> None:
 def catalog() -> None:
     """Show available servers in the catalog."""
     _require_mcp_cli()
-    header("MCP Server Catalog")
+    rule("MCP Server Catalog")
 
     result = subprocess.run(
         ["docker", "mcp", "catalog", "show", "docker-mcp"],
@@ -286,36 +292,44 @@ def catalog() -> None:
 
 def test() -> None:
     """Test gateway connectivity (container, endpoints, socket, CLI plugin)."""
-    info("Testing MCP Gateway...")
+    rule("Testing MCP Gateway")
     err_console.print()
 
     all_passed = True
 
     # Container status
-    err_console.print("Container status: ", end="")
     if is_container_running(GATEWAY_CONTAINER):
-        err_console.print("[status.enabled]Running[/status.enabled]")
+        status_line("Container", "Running", "status.enabled")
     else:
-        err_console.print("[status.error]Not running[/status.error]")
+        status_line("Container", "Not running", "status.error")
         all_passed = False
 
     # Localhost endpoint
-    err_console.print("Localhost endpoint (host access): ", end="")
     try:
         result = subprocess.run(
-            ["curl", "-s", "--connect-timeout", "2", "-o", "/dev/null",
-             "-w", "%{http_code}", f"{GATEWAY_ENDPOINT_HOST}/"],
-            capture_output=True, text=True, check=False,
+            [
+                "curl",
+                "-s",
+                "--connect-timeout",
+                "2",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                f"{GATEWAY_ENDPOINT_HOST}/",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode == 0 and result.stdout in ("200", "404"):
-            err_console.print("[status.enabled]OK[/status.enabled]")
+            status_line("Localhost", "OK", "status.enabled")
         else:
-            err_console.print("[status.disabled]Not responding[/status.disabled]")
+            status_line("Localhost", "Not responding", "status.disabled")
     except FileNotFoundError:
-        err_console.print("[status.disabled]curl not installed[/status.disabled]")
+        status_line("Localhost", "curl not installed", "status.disabled")
 
     # Container endpoint (via docker network)
-    err_console.print("Container endpoint (network access): ", end="")
     result = subprocess.run(
         [
             "docker",
@@ -338,36 +352,31 @@ def test() -> None:
         check=False,
     )
     if result.returncode == 0 and result.stdout in ("200", "404"):
-        err_console.print("[status.enabled]OK[/status.enabled]")
+        status_line("Network", "OK", "status.enabled")
     else:
-        err_console.print(
-            "[status.disabled]Not responding (network may not exist yet)[/status.disabled]"
-        )
+        status_line("Network", "Not responding (network may not exist yet)", "status.disabled")
 
     # Docker socket access
-    err_console.print("Docker socket access: ", end="")
     result = subprocess.run(
         ["docker", "exec", GATEWAY_CONTAINER, "ls", "/var/run/docker.sock"],
         capture_output=True,
         check=False,
     )
     if result.returncode == 0:
-        err_console.print("[status.enabled]OK[/status.enabled]")
+        status_line("Docker sock", "OK", "status.enabled")
     else:
-        err_console.print("[status.error]Failed[/status.error]")
+        status_line("Docker sock", "Failed", "status.error")
         all_passed = False
 
     # CLI plugin
-    err_console.print("docker mcp CLI plugin: ", end="")
     cli_check = subprocess.run(["docker", "mcp", "--help"], capture_output=True, check=False)
     if cli_check.returncode == 0:
-        err_console.print("[status.enabled]Installed[/status.enabled]")
+        status_line("MCP plugin", "Installed", "status.enabled")
     else:
-        err_console.print("[status.disabled]Not installed[/status.disabled]")
+        status_line("MCP plugin", "Not installed", "status.disabled")
 
     # Show endpoint URLs
-    err_console.print()
-    err_console.print("MCP Gateway URLs:")
+    rule("MCP Gateway URLs")
     err_console.print(f"  Streamable HTTP: {GATEWAY_ENDPOINT_CONTAINER}/mcp")
 
     if not all_passed:
