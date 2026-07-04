@@ -35,7 +35,7 @@ def main(
     The MCP Gateway provides Model Context Protocol servers to AI coding
     agents running in the development container.
 
-    [bold]Quick start:[/bold]
+    [header]Quick start:[/header]
 
         mcpgateway start          # Start the gateway
 

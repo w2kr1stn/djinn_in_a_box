@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.table import Table
+from rich.text import Text
 
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core.console import blank, console, error, header, status_line, warning
+from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     ensure_host_env,
@@ -319,6 +321,7 @@ _STYLE: dict[Status, str] = {
     Status.FAIL: "status.error",
 }
 _GLYPH: dict[Status, str] = {Status.PASS: "✓", Status.WARN: "⚠", Status.FAIL: "✗"}
+_LABEL: dict[Status, str] = {Status.PASS: "PASS", Status.WARN: "WARN", Status.FAIL: "FAIL"}
 
 
 def _doctor_fix(config: AppConfig) -> bool:
@@ -404,15 +407,33 @@ def doctor(
         config = None
         config_error = str(e)
 
-    header("Djinn Doctor")
-    blank()
+    rule("Djinn Doctor")
 
     checks = run_checks(config, config_error)
+    table = Table(
+        title="Djinn Doctor",
+        title_style="table.title",
+        header_style="table.header",
+        border_style="border",
+    )
+    table.add_column("Check", style="table.category")
+    table.add_column("Status")
+    table.add_column("Detail", style="table.value")
+    table.add_column("Remedy", style="muted")
     for check in checks:
         glyph = _GLYPH[check.status]
-        status_line(check.name, f"{glyph} {check.detail}", _STYLE[check.status])
-        if check.remedy:
-            console.print(f"      [muted]{check.remedy}[/muted]")
+        detail = (
+            Text(check.detail, style="path")
+            if check.name in {"Projects dir", "Config root"}
+            else check.detail
+        )
+        table.add_row(
+            check.name,
+            Text(f"{glyph} {_LABEL[check.status]}", style=_STYLE[check.status]),
+            detail,
+            check.remedy,
+        )
+    console.print(table)
 
     blank()
     failed = [c for c in checks if c.status is Status.FAIL]

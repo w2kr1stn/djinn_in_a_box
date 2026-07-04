@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
+from rich.table import Table
 
 from djinn_in_a_box.config.loader import load_agents, load_config
-from djinn_in_a_box.core.console import console, err_console, error, info, status_line
+from djinn_in_a_box.core.console import console, err_console, error, info, rule, status_line
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
@@ -23,6 +24,15 @@ from djinn_in_a_box.core.docker import (
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AgentConfig
+
+
+def _agent_table(title: str) -> Table:
+    return Table(
+        title=title,
+        title_style="table.title",
+        header_style="table.header",
+        border_style="border",
+    )
 
 
 def build_agent_command(
@@ -166,9 +176,9 @@ def run(
         status_line("Model", model)
 
     if write:
-        status_line("Mode", "Read/Write (--write)", "warning")
+        status_line("Mode", "Read/Write (--write)", "status.disabled")
     else:
-        status_line("Mode", "Read-only (plan/analysis)", "success")
+        status_line("Mode", "Read-only (plan/analysis)", "status.enabled")
 
     if docker:
         status_line("Docker", "Enabled (proxy)")
@@ -256,21 +266,29 @@ def agents(
 
     if verbose:
         for name, cfg in sorted(agent_configs.items()):
-            console.print(f"[primary.bold]{name}[/primary.bold]: {cfg.description or cfg.binary}")
-            console.print(f"  [muted]Binary:[/muted]      {cfg.binary}")
-            console.print(f"  [muted]Model flag:[/muted]  {cfg.model_flag}")
+            table = _agent_table(name)
+            table.add_column("Setting", style="table.category")
+            table.add_column("Value", style="table.value")
+            table.add_row("Description", cfg.description or cfg.binary)
+            table.add_row("Binary", cfg.binary)
+            table.add_row("Model flag", cfg.model_flag)
             if cfg.headless_flags:
-                console.print(f"  [muted]Headless:[/muted]    {' '.join(cfg.headless_flags)}")
+                table.add_row("Headless", " ".join(cfg.headless_flags))
             if cfg.write_flags:
-                console.print(f"  [muted]Write mode:[/muted]  {' '.join(cfg.write_flags)}")
+                table.add_row("Write mode", " ".join(cfg.write_flags))
             if cfg.read_only_flags:
-                console.print(f"  [muted]Read-only:[/muted]   {' '.join(cfg.read_only_flags)}")
+                table.add_row("Read-only", " ".join(cfg.read_only_flags))
             if cfg.json_flags:
-                console.print(f"  [muted]JSON flags:[/muted]  {' '.join(cfg.json_flags)}")
+                table.add_row("JSON flags", " ".join(cfg.json_flags))
+            console.print(table)
             console.print()
     else:
-        console.print("[header]Available Agents:[/header]")
+        rule("Available Agents")
         console.print()
+        table = _agent_table("Available Agents")
+        table.add_column("Agent", style="table.category")
+        table.add_column("Description", style="table.value")
         for name, cfg in sorted(agent_configs.items()):
             desc = cfg.description or cfg.binary
-            console.print(f"  [primary]{name}[/primary]: {desc}")
+            table.add_row(name, desc)
+        console.print(table)

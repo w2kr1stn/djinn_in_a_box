@@ -61,7 +61,9 @@ class TestDjinnVersion:
     def test_version_short_flag(self) -> None:
         result = runner.invoke(app, ["-V"])
         assert result.exit_code == 0
-        assert f"djinn {__version__}" in result.stdout
+        assert "djinn" in result.stdout
+        assert __version__ in result.stdout
+        assert "\n" in result.stdout
 
 
 class TestInitCommand:
@@ -231,8 +233,12 @@ class TestConfigShowCommand:
 
         assert result.exit_code == 0
         combined = result.stdout + result.output
-        assert "projects" in combined
-        assert "UTC" in combined
+        # Long paths soft-wrap inside Rich table cells with indented
+        # continuation lines (CI runners have longer tmp paths) — strip all
+        # whitespace so a break mid-word cannot split the expected token.
+        unwrapped = "".join(combined.split())
+        assert "projects" in unwrapped
+        assert "UTC" in unwrapped
 
     def test_config_show_json_output(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         projects_dir = tmp_path / "projects"

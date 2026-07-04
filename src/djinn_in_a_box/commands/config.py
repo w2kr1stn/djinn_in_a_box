@@ -11,10 +11,12 @@ from typing import Annotated
 
 import typer
 from pydantic import ValidationError
+from rich.table import Table
+from rich.text import Text
 
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
-from djinn_in_a_box.core.console import console, error, info, success, warning
+from djinn_in_a_box.core.console import console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import ensure_host_env
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
@@ -33,6 +35,23 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "shell.skip_mounts",
     "shell.omp_theme_path",
 )
+
+
+def _print_config_table(
+    title: str,
+    rows: list[tuple[str, object]],
+    *,
+    path_labels: set[str] | None = None,
+) -> None:
+    rule(title)
+    path_labels = path_labels or set()
+    table = Table.grid(padding=(0, 2))
+    table.add_column("Setting", style="table.category", no_wrap=True)
+    table.add_column("Value", style="table.value", overflow="fold")
+    for label, value in rows:
+        rendered_value = Text(str(value), style="path") if label in path_labels else str(value)
+        table.add_row(label, rendered_value)
+    console.print(table)
 
 
 def init_config(
@@ -194,8 +213,7 @@ def init_config(
     if created:
         success(f"Seeded {len(created)} default config file(s)")
 
-    console.print()
-    console.print("[primary.bold]Next steps:[/primary.bold]")
+    rule("Next steps")
     console.print("  [muted]1.[/muted] djinn build    [muted]# Build the Docker image[/muted]")
     console.print("  [muted]2.[/muted] djinn auth     [muted]# Authenticate with AI[/muted]")
     console.print("  [muted]3.[/muted] djinn start    [muted]# Start development shell[/muted]")
@@ -420,26 +438,37 @@ def config_show(
         console.print(output, highlight=False)
     else:
         # Human-readable output
-        info("Current Configuration")
-        console.print(f"  [muted]Config file:[/muted] {CONFIG_FILE}")
+        rule("Current Configuration")
+        console.print(
+            Text.assemble("  ", ("Config file:", "muted"), " ", (str(CONFIG_FILE), "path"))
+        )
         console.print()
 
-        console.print("[primary.bold]General[/primary.bold]")
-        console.print(f"  code_dir:  {config.code_dir}")
-        console.print(f"  timezone:  {config.timezone}")
+        _print_config_table(
+            "General",
+            [
+                ("code_dir", config.code_dir),
+                ("timezone", config.timezone),
+            ],
+            path_labels={"code_dir"},
+        )
         console.print()
 
-        console.print("[primary.bold]Resources[/primary.bold]")
-        console.print(f"  cpu_limit:          {config.resources.cpu_limit}")
-        console.print(f"  memory_limit:       {config.resources.memory_limit}")
-        console.print(f"  cpu_reservation:    {config.resources.cpu_reservation}")
-        console.print(f"  memory_reservation: {config.resources.memory_reservation}")
+        _print_config_table(
+            "Resources",
+            [
+                ("cpu_limit", config.resources.cpu_limit),
+                ("memory_limit", config.resources.memory_limit),
+                ("cpu_reservation", config.resources.cpu_reservation),
+                ("memory_reservation", config.resources.memory_reservation),
+            ],
+        )
         console.print()
 
-        console.print("[primary.bold]Shell[/primary.bold]")
-        console.print(f"  skip_mounts: {config.shell.skip_mounts}")
+        shell_rows: list[tuple[str, object]] = [("skip_mounts", config.shell.skip_mounts)]
         if config.shell.omp_theme_path:
-            console.print(f"  omp_theme_path: {config.shell.omp_theme_path}")
+            shell_rows.append(("omp_theme_path", config.shell.omp_theme_path))
+        _print_config_table("Shell", shell_rows, path_labels={"omp_theme_path"})
 
 
 def config_path() -> None:
