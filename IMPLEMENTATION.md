@@ -33,6 +33,9 @@ stores, and local command choices remain outside the published source.
 ├── docker-compose.yml
 ├── docker-compose.docker.yml
 ├── docker-compose.docker-direct.yml
+├── docs/
+│   └── design/
+│       └── CLI_DESIGN_SYSTEM.md
 ├── src/djinn_in_a_box/
 │   ├── cli/
 │   │   ├── djinn.py
@@ -51,6 +54,7 @@ stores, and local command choices remain outside the published source.
 │   │   └── models.py
 │   └── core/
 │       ├── __init__.py
+│       ├── banner.py
 │       ├── console.py
 │       ├── decorators.py
 │       ├── docker.py
@@ -62,9 +66,13 @@ stores, and local command choices remain outside the published source.
 │       └── theme.py
 ├── scripts/
 │   ├── entrypoint.sh
+│   ├── output-lib.sh
 │   ├── seed-lib.sh
 │   ├── mcp-register.sh
-│   └── init-firewall.sh
+│   ├── init-firewall.sh
+│   └── update-agents.sh
+├── tools/
+│   └── install.sh
 ├── templates/seed/
 │   ├── config/
 │   ├── packages.txt
@@ -112,6 +120,56 @@ Docker Compose + container entrypoint
 
 `mcpgateway` is a separate Typer app in `cli/mcpgateway.py` that delegates to
 `commands/mcp.py`.
+
+## CLI Output System
+
+The implementation rationale and visual contract live in
+`docs/design/CLI_DESIGN_SYSTEM.md`. The runtime source of truth is split by
+producer:
+
+- `core/theme.py` owns Python Rich styling. It defines eight branded hex
+  palette constants (`PRIMARY`, `SECONDARY`, `SUCCESS`, `ERROR`, `WARNING`,
+  `PATH`, `MUTED`, `BORDER`) plus `INFO = "blue"`, deliberately using
+  terminal-adaptive ANSI blue color 4 for informational output. `DJINN_THEME`
+  exposes semantic roles including `success`, `error`, `warning`, `info`,
+  `info.bold`, `path`, `primary`, `secondary`, `muted`, and `border`. Derived
+  roles map back to the palette: `header`, `table.title`, and `table.header`
+  use bold `primary`; `table.category` uses `secondary`; `table.value` uses
+  `muted`; `status.enabled`, `status.disabled`, and `status.error` use
+  `success`, `warning`, and `error`.
+- `tests/test_core/test_theme.py` pins the palette and derived-role mapping. It
+  also gates command and CLI modules against literal Rich color usage: palette
+  hex values must appear once in `theme.py`, and command/CLI Python files must
+  not introduce literal hex colors or named Rich color style literals.
+- `core/console.py` defines `console` for stdout and `err_console` for stderr.
+  Operational UI helpers (`success()`, `error()`, `warning()`, `info()`,
+  `status_line()`, `blank()`, `header()`, and `rule()`) print through
+  `err_console`. `rule()` owns section spacing by writing one leading blank
+  line, then a border-styled rule with an optional `primary.bold` title.
+  `status_line(..., value_style=None)` supports styling values independently,
+  with `value_style="path"` used for filesystem paths such as Projects,
+  Workspace, CODE_DIR, and sync roots.
+- `core/banner.py` renders the `djinn start` banner to `err_console`. Full mode
+  shows the Braille djinn logo with a `PRIMARY` to `SECONDARY` vertical gradient
+  next to the block wordmark. Wordmark mode keeps the wordmark without Braille.
+  Plain mode prints `Djinn in a Box`. The degradation predicates are:
+  plain-required output (`NO_COLOR`/Rich `no_color` or dumb terminal),
+  non-UTF-8 output, and insufficient full-banner capability (no color or width
+  below 70 columns), which degrades from full to wordmark after UTF-8 passes.
+- `scripts/output-lib.sh` owns container startup shell UI. It is sourceable from
+  both zsh and bash, guarded by `_DJINN_OUTPUT_LIB_LOADED` so repeated sourcing
+  does not re-declare readonly constants. With `COLORTERM=truecolor` or `24bit`
+  it emits exact RGB escapes matching the Python palette; otherwise it uses
+  ANSI-256 fallbacks, while `info` intentionally remains basic ANSI blue in
+  both tiers. Per no-color.org, `NO_COLOR` disables color only when present with
+  a non-empty value. `DJINN_TERM_WIDTH` takes precedence for shell rule width,
+  followed by `COLUMNS`, `tput cols`, `stty size`, and finally 80 columns.
+  Public helpers are `ui_section`, `ui_ok`, `ui_warn`, `ui_err`, `ui_info`,
+  `ui_item`, and `ui_boxed`.
+
+Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
+`scripts/seed-lib.sh` marker output, `scripts/init-firewall.sh`,
+`tools/install.sh`, and `scripts/update-agents.sh`.
 
 ## Configuration Model
 
@@ -224,6 +282,9 @@ Captured Compose calls such as `compose_build()`, `compose_up()`,
 `compose_down()`, and Docker proxy cleanup route through `_run_compose()`.
 `compose_run()` is the sanctioned interactive/headless run site; it also builds
 `host_env = _compose_host_env(config)` before calling `subprocess.run()`.
+When stdout or stderr is a TTY, `build_compose_env()` also renders
+`DJINN_TERM_WIDTH` from `shutil.get_terminal_size().columns`; otherwise that
+variable is left to inherited host environment or Compose defaults.
 
 `ensure_host_env(config)` provisions bind-mount sources before Compose runs, so
 the Docker daemon does not auto-create missing paths as root-owned directories.
@@ -295,7 +356,6 @@ seed mounts and persistent container locations.
 ```text
 container start
   |
-  +-- optional firewall setup
   +-- volume ownership repair for cache/workspace paths
   +-- source seed-lib.sh
   +-- restore ~/.claude.json from the Claude volume when present
@@ -304,9 +364,16 @@ container start
   +-- sync_seed opencode ~/.opencode/seed -> ~/.config/opencode
   +-- source mcp-register.sh and register MCP servers
   +-- install optional cached tools
+  +-- print security summary, including firewall, Docker access, and MCP state
   +-- run interactive zsh
   +-- reverse-sync selected settings files on exit
 ```
+
+Shell-side startup output is sectioned through `scripts/output-lib.sh`:
+`Seed & Config`, `MCP`, `Tools`, and `Security`. `mcp-register.sh` captures
+third-party CLI output from MCP add/remove commands and passes non-empty output
+through `ui_boxed`, so external tool chatter stays visibly nested under the MCP
+section while remaining on stderr.
 
 For Claude, `docker-compose.yml` mounts selected directories and files from
 root-level `config/claude` directly into the live `~/.claude` tree. Only
@@ -334,9 +401,11 @@ Common mounts include:
 - `${CODE_DIR}` to `/home/dev/projects`
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
 
-The base Compose environment sets `TZ`, `UV_LINK_MODE=copy`,
-`LOCAL_ENDPOINT`, and `GEMINI_FORCE_FILE_STORAGE=true`. Resource limits use the
-Compose variables rendered by `build_compose_env()`.
+The base Compose environment sets `TZ`, `NO_COLOR`, `DJINN_TERM_WIDTH`,
+`UV_LINK_MODE=copy`, `LOCAL_ENDPOINT`, and `GEMINI_FORCE_FILE_STORAGE=true`.
+`NO_COLOR` and `DJINN_TERM_WIDTH` propagate the host's plain-output and terminal
+width decisions into the container shell UI. Resource limits use the Compose
+variables rendered by `build_compose_env()`.
 
 `docker-compose.docker.yml` adds a Docker socket proxy service and sets
 `DOCKER_HOST=tcp://docker-proxy:2375` for the dev container. The proxy allows
@@ -374,7 +443,8 @@ backed by named volumes.
 - `build()`: loads config, runs `preflight(config)`, refreshes build-time
   local-only files via `_sync_build_files()`, then calls `compose_build()`.
 - `start()`: resolves Docker mode, preflights, ensures `djinn-network`, resolves
-  `--here` or `--mount`, prints status, then calls `compose_run()` for `dev`.
+  `--here` or `--mount`, prints the banner plus `Environment` and `Container`
+  rules on stderr, then calls `compose_run()` for `dev`.
 - `auth()`: starts the `dev-auth` profile with host networking; proxy mode
   starts `docker-proxy` separately because the auth container uses host network.
 - `status()`: reports config, containers, known volumes, config-root paths,
@@ -544,7 +614,8 @@ AppConfig
   +-- build_compose_env(config)
   +-- _compose_host_env(config)
   v
-docker compose parses ${CODE_DIR}, ${DJINN_CONFIG_ROOT}, TZ, resources
+docker compose parses ${CODE_DIR}, ${DJINN_CONFIG_ROOT}, TZ, NO_COLOR,
+DJINN_TERM_WIDTH, resources
   |
   v
 container receives bind mounts, named volumes, and selected -e variables
@@ -553,13 +624,21 @@ container receives bind mounts, named volumes, and selected -e variables
 Container startup:
 
 ```text
+djinn start
+  |
+  +-- banner()
+  +-- Environment rule: Projects, Docker, Firewall, Workspace, Shell, Audio
+  +-- Container rule
+  v
 entrypoint.sh
   |
+  +-- optional pre-seed firewall initialization
   +-- repair writable volume ownership
-  +-- merge/copy seed config
-  +-- register MCP servers
-  +-- install optional tools
-  +-- run shell or command
+  +-- Seed & Config: merge/copy seed config
+  +-- MCP: register MCP servers and box third-party CLI output
+  +-- Tools: install optional tools
+  +-- Security: summarize firewall, Docker access, and MCP gateway state
+  +-- run interactive shell
   +-- reverse-sync selected settings on exit
 ```
 
