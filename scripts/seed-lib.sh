@@ -1,5 +1,33 @@
 #!/bin/zsh
 
+if ! whence -w ui_info >/dev/null 2>&1; then
+    ui_section() { echo "[info] $1" >&2; }
+    ui_ok() { echo "[ok] $1" >&2; }
+    ui_warn() { echo "[warn] $1" >&2; }
+    ui_err() { echo "[err] $1" >&2; }
+    ui_info() { echo "[info] $1" >&2; }
+    ui_item() {
+        local marker=$1
+        local message=$2
+        local plain_marker=${3:-}
+        local plain_message=${5:-$message}
+
+        if [[ -z "$plain_marker" ]]; then
+            case "$marker" in
+                "↻") plain_marker="[sync]" ;;
+                "⊕") plain_marker="[merge]" ;;
+                "✕") plain_marker="[stale]" ;;
+                "+") plain_marker="[init]" ;;
+                "-") plain_marker="[off]" ;;
+                "!") plain_marker="[warn]" ;;
+                *) plain_marker="[info]" ;;
+            esac
+        fi
+
+        echo "$plain_marker $plain_message" >&2
+    }
+fi
+
 # -----------------------------------------------------------------------------
 # merge_settings: Deep-merge two JSON settings files with selective replacement.
 # Most keys are recursively merged (overlay wins on conflicts). Plugin-related
@@ -42,13 +70,13 @@ sync_seed() {
         return
     fi
 
-    echo "  [seed-sync] ${label}:"
+    ui_info "[seed-sync] ${label}:"
     : > "$tmp_manifest"
 
     # Phase 1: Clean-replace subdirectories (seed = source of truth)
     for dir in "$seed_dir"/*(N/); do
         local dirname=${dir:t}
-        echo "    ↻ ${dirname}/"
+        ui_item "↻" "${dirname}/"
         rm -rf "${target_dir}/${dirname}"
         cp -r "$dir" "${target_dir}/${dirname}"
         # No `|| true`: a swallowed manifest-append failure would poison Phase 3
@@ -60,7 +88,7 @@ sync_seed() {
     for file in "$seed_dir"/*(N.); do
         local filename=${file:t}
         [[ "$filename" == "settings.json" ]] && continue
-        echo "    ↻ ${filename}"
+        ui_item "↻" "${filename}"
         cp "$file" "${target_dir}/${filename}"
         echo "$filename" >> "$tmp_manifest"
     done
@@ -71,7 +99,7 @@ sync_seed() {
             [[ -z "$entry" ]] && continue
             if ! grep -qxF "$entry" "$tmp_manifest"; then
                 if [[ -e "${target_dir}/${entry}" ]]; then
-                    echo "    ✕ ${entry} (stale)"
+                    ui_item "✕" "${entry} (stale)"
                     rm -f "${target_dir}/${entry}"
                 fi
             fi
@@ -86,7 +114,7 @@ sync_seed() {
     # Phase 5: Deep-merge settings.json (seed wins; plugin keys fully replaced)
     if [[ -n "$config_file" ]] && [[ -f "$seed_dir/settings.json" ]]; then
         if [[ -f "$config_file" ]]; then
-            echo "    ⊕ settings.json (merged)"
+            ui_item "⊕" "settings.json (merged)"
             if merge_settings "$config_file" "$seed_dir/settings.json" "${config_file}.tmp"; then
                 mv "${config_file}.tmp" "$config_file"
             else
@@ -95,10 +123,10 @@ sync_seed() {
                 jq -e . "$config_file" >/dev/null 2>&1 || bad="$config_file"
                 jq -e . "$seed_dir/settings.json" >/dev/null 2>&1 \
                     || bad="${bad:+${bad}, }${seed_dir}/settings.json"
-                echo "    ✗ settings merge failed — ${bad:-unknown input} is not valid JSON; keeping existing settings." >&2
+                ui_err "settings merge failed — ${bad:-unknown input} is not valid JSON; keeping existing settings."
             fi
         else
-            echo "    + settings.json (init)"
+            ui_item "+" "settings.json (init)"
             cp "$seed_dir/settings.json" "$config_file"
         fi
     fi
@@ -120,13 +148,13 @@ claude_settings_merge() {
         local missing=""
         [[ -f "$seed_dir/CLAUDE.md" ]] || missing="CLAUDE.md"
         [[ -f "$seed_dir/settings.json" ]] || missing="${missing:+${missing}, }settings.json"
-        echo "  [workflow] ✗ config/claude seed incomplete (missing: ${missing}) — skipping settings merge." >&2
-        echo "             Run \`djinn init\` on the host (or restart via \`djinn start\`, which reseeds automatically)." >&2
+        ui_err "[workflow] config/claude seed incomplete (missing: ${missing}) — skipping settings merge."
+        ui_info "Run \`djinn init\` on the host (or restart via \`djinn start\`, which reseeds automatically)."
     else
         local base="$seed_dir/settings.json" out="$target_settings_file"
         if [[ -f "$seed_dir/settings.local.json" ]]; then
             if merge_settings "$base" "$seed_dir/settings.local.json" "$out.tmp"; then
-                mv "$out.tmp" "$out" && echo "    ⊕ settings.json (baseline ⊕ local)"
+                mv "$out.tmp" "$out" && ui_item "⊕" "settings.json (baseline ⊕ local)" "" "" "settings.json (baseline + local)"
             else
                 rm -f "$out.tmp"
                 # jq parses BOTH inputs — pinpoint the actual offender instead of
@@ -136,20 +164,20 @@ claude_settings_merge() {
                 jq -e . "$base" >/dev/null 2>&1 || bad="$base"
                 jq -e . "$seed_dir/settings.local.json" >/dev/null 2>&1 \
                     || bad="${bad:+${bad}, }${seed_dir}/settings.local.json"
-                echo "  [workflow] ✗ settings merge failed — ${bad:-unknown input} is not valid JSON." >&2
-                echo "             Fix it on the host under config/claude/. Keeping existing settings." >&2
+                ui_err "[workflow] settings merge failed — ${bad:-unknown input} is not valid JSON."
+                ui_info "Fix it on the host under config/claude/. Keeping existing settings."
                 # A fresh volume must still get a permissions baseline — but never
                 # a malformed one.
                 if [[ ! -f "$out" ]]; then
                     if jq -e . "$base" >/dev/null 2>&1; then
                         cp "$base" "$out"
                     else
-                        echo "  [workflow] ⚠ baseline itself is invalid — no settings.json initialised." >&2
+                        ui_warn "[workflow] baseline itself is invalid — no settings.json initialised."
                     fi
                 fi
             fi
         else
-            echo "  [workflow] ⚠ no settings.local.json — keeping existing settings; baseline only if none yet" >&2
+            ui_warn "[workflow] no settings.local.json — keeping existing settings; baseline only if none yet"
             # NEVER clobber an existing volume settings.json with the bare baseline: a missing personal
             # overlay (e.g. a fresh git pull — settings.local.json is git-ignored) must not wipe the
             # user's prefs/marketplace. Only initialise from the baseline when no settings.json exists yet.
@@ -168,12 +196,12 @@ reverse_sync_file() {
     [[ -f "$volume_file" && -d "$seed_dir_path" ]] && {
         if [[ ! -w "$seed_dir_path" ]]; then
             # Same user outcome as a failed cp — same signal (not a silent skip).
-            echo "  ⚠ could not persist ${volume_file} → ${seed_file} (target directory not writable)" >&2
+            ui_warn "could not persist ${volume_file} → ${seed_file} (target directory not writable)"
         elif ! diff -q "$volume_file" "$seed_file" &>/dev/null; then
             # Best-effort with warning: a single failed persist must not abort the
             # session-end sync chain or clobber the shell's exit code (set -e).
             cp "$volume_file" "$seed_file" \
-                || echo "  ⚠ could not persist ${volume_file} → ${seed_file}" >&2
+                || ui_warn "could not persist ${volume_file} → ${seed_file}"
         fi
     }
     return 0

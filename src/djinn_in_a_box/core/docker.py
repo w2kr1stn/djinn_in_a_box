@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -168,6 +169,16 @@ def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
     return files
 
 
+def _host_terminal_width() -> str | None:
+    if not (sys.stdout.isatty() or sys.stderr.isatty()):
+        return None
+
+    columns = shutil.get_terminal_size().columns
+    if columns <= 0:
+        return None
+    return str(columns)
+
+
 def build_compose_env(config: AppConfig | None) -> dict[str, str]:
     """Render docker-compose interpolation variables from the loaded config.
 
@@ -178,20 +189,25 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
     ``config=None`` → best-effort placeholders for the two guarded vars only,
     for teardown / by-name operations (down/stop/rm act by project/container name).
     """
+    terminal_width = _host_terminal_width()
     if config is None:
-        return {
+        env = {
             "CODE_DIR": str(Path.home()),
             "DJINN_CONFIG_ROOT": str(get_config_root()),
         }
-    return {
-        "CODE_DIR": str(config.code_dir),
-        "DJINN_CONFIG_ROOT": str(get_config_root(config)),
-        "TZ": config.timezone,
-        "CPU_LIMIT": str(config.resources.cpu_limit),
-        "MEMORY_LIMIT": config.resources.memory_limit,
-        "CPU_RESERVATION": str(config.resources.cpu_reservation),
-        "MEMORY_RESERVATION": config.resources.memory_reservation,
-    }
+    else:
+        env = {
+            "CODE_DIR": str(config.code_dir),
+            "DJINN_CONFIG_ROOT": str(get_config_root(config)),
+            "TZ": config.timezone,
+            "CPU_LIMIT": str(config.resources.cpu_limit),
+            "MEMORY_LIMIT": config.resources.memory_limit,
+            "CPU_RESERVATION": str(config.resources.cpu_reservation),
+            "MEMORY_RESERVATION": config.resources.memory_reservation,
+        }
+    if terminal_width is not None:
+        env["DJINN_TERM_WIDTH"] = terminal_width
+    return env
 
 
 def _compose_host_env(config: AppConfig | None) -> dict[str, str]:

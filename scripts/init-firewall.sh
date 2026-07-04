@@ -14,6 +14,42 @@
 
 set -euo pipefail
 
+OUTPUT_LIB="${OUTPUT_LIB:-/home/dev/output-lib.sh}"
+_djinn_define_plain_ui_fallbacks() {
+    ui_section() { echo "[info] $1" >&2; }
+    ui_ok() { echo "[ok] $1" >&2; }
+    ui_warn() { echo "[warn] $1" >&2; }
+    ui_err() { echo "[err] $1" >&2; }
+    ui_info() { echo "[info] $1" >&2; }
+    ui_item() {
+        local marker=$1
+        local message=$2
+        local plain_marker=${3:-}
+        local plain_message=${5:-$message}
+
+        if [[ -z "$plain_marker" ]]; then
+            case "$marker" in
+                "↻") plain_marker="[sync]" ;;
+                "⊕") plain_marker="[merge]" ;;
+                "✕") plain_marker="[stale]" ;;
+                "+") plain_marker="[init]" ;;
+                "-") plain_marker="[off]" ;;
+                "!") plain_marker="[warn]" ;;
+                *) plain_marker="[info]" ;;
+            esac
+        fi
+
+        echo "$plain_marker $plain_message" >&2
+    }
+}
+
+if [[ -r "$OUTPUT_LIB" ]] && source "$OUTPUT_LIB"; then
+    :
+else
+    _djinn_define_plain_ui_fallbacks
+    ui_warn "output library not found at $OUTPUT_LIB; using plain startup output."
+fi
+
 # -----------------------------------------------------------------------------
 # Whitelisted domains
 # -----------------------------------------------------------------------------
@@ -66,8 +102,8 @@ resolve_domain() {
 # -----------------------------------------------------------------------------
 # Apply firewall rules
 # -----------------------------------------------------------------------------
-echo ""
-echo "🔒 Initializing firewall..."
+echo "" >&2
+ui_info "Initializing firewall..."
 
 # Flush existing rules
 iptables -F OUTPUT 2>/dev/null || true
@@ -85,37 +121,37 @@ iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 # -----------------------------------------------------------------------------
 # Allow Docker internal networks (for MCP Gateway + Docker Proxy)
 # -----------------------------------------------------------------------------
-echo ""
-echo "📡 Allowing Docker internal networks..."
+echo "" >&2
+ui_info "Allowing Docker internal networks..."
 for network in "${DOCKER_NETWORKS[@]}"; do
     iptables -A OUTPUT -d "$network" -j ACCEPT
-    echo "  ✓ Allowed network: $network"
+    ui_ok "Allowed network: $network"
 done
 
 # -----------------------------------------------------------------------------
 # Allow whitelisted domains
 # -----------------------------------------------------------------------------
-echo ""
-echo "🌐 Allowing whitelisted domains..."
+echo "" >&2
+ui_info "Allowing whitelisted domains..."
 for domain in "${ALLOWED_DOMAINS[@]}"; do
     ip=$(resolve_domain "$domain")
     if [ -n "$ip" ]; then
         iptables -A OUTPUT -d "$ip" -j ACCEPT
-        echo "  ✓ Allowed: $domain ($ip)"
+        ui_ok "Allowed: $domain ($ip)"
     else
-        echo "  ⚠ Could not resolve: $domain"
+        ui_warn "Could not resolve: $domain"
     fi
 done
 
 # Default deny
 iptables -A OUTPUT -j DROP
 
-echo ""
-echo "🔒 Firewall initialized. Outbound traffic restricted to whitelist."
-echo ""
-echo "Allowed:"
-echo "  - Docker internal networks (MCP Gateway, Docker Proxy, etc.)"
-echo "  - Whitelisted domains (package registries, AI APIs, etc.)"
-echo ""
-echo "To add domains at runtime:"
-echo "  iptables -I OUTPUT -d \$(getent hosts example.com | awk '{print \$1}') -j ACCEPT"
+echo "" >&2
+ui_ok "Firewall initialized. Outbound traffic restricted to whitelist."
+echo "" >&2
+ui_info "Allowed:"
+ui_info "Docker internal networks (MCP Gateway, Docker Proxy, etc.)"
+ui_info "Whitelisted domains (package registries, AI APIs, etc.)"
+echo "" >&2
+ui_info "To add domains at runtime:"
+ui_info "iptables -I OUTPUT -d \$(getent hosts example.com | awk '{print \$1}') -j ACCEPT"

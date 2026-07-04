@@ -11,6 +11,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "seed-lib.sh"
+OUTPUT_LIB = ROOT / "scripts" / "output-lib.sh"
+RAW_UI_MARKERS = ("✓", "⚠", "✗", "ℹ", "↻", "⊕", "✕")
+
+
+def assert_plain_startup_output(output: str) -> None:
+    assert "\x1b[" not in output
+    for marker in RAW_UI_MARKERS:
+        assert marker not in output
 
 
 def run_seed_lib(tmp_path: Path, command: str) -> subprocess.CompletedProcess[str]:
@@ -22,14 +30,18 @@ def run_seed_lib(tmp_path: Path, command: str) -> subprocess.CompletedProcess[st
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        "NO_COLOR": "1",
         "PATH": f"{Path(jq).parent}:/usr/bin:/bin",
     }
+    env.pop("DJINN_FORCE_UI_COLOR", None)
 
     return subprocess.run(
         [
             zsh,
             "-c",
-            f"set -euo pipefail; source {shlex.quote(str(SCRIPT))}; {command}",
+            "set -euo pipefail; "
+            f"source {shlex.quote(str(OUTPUT_LIB))}; "
+            f"source {shlex.quote(str(SCRIPT))}; {command}",
         ],
         check=False,
         capture_output=True,
@@ -40,6 +52,35 @@ def run_seed_lib(tmp_path: Path, command: str) -> subprocess.CompletedProcess[st
 
 def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_sync_seed_uses_plain_ascii_markers_for_seed_sync_path(tmp_path: Path) -> None:
+    seed_dir = tmp_path / "seed"
+    target_dir = tmp_path / "target"
+    (seed_dir / "commands").mkdir(parents=True)
+    target_dir.mkdir()
+    (seed_dir / "commands" / "build.md").write_text("build\n", encoding="utf-8")
+    (seed_dir / "notes.md").write_text("notes\n", encoding="utf-8")
+    write_json(seed_dir / "settings.json", {"seed": True})
+    write_json(target_dir / "settings.json", {"volume": True})
+    (target_dir / "old.md").write_text("old\n", encoding="utf-8")
+    (target_dir / ".seed-manifest").write_text("old.md\n", encoding="utf-8")
+
+    result = run_seed_lib(
+        tmp_path,
+        "sync_seed "
+        f"gemini {shlex.quote(str(seed_dir))} {shlex.quote(str(target_dir))} "
+        f"{shlex.quote(str(target_dir / 'settings.json'))}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert_plain_startup_output(result.stderr)
+    assert "[info] [seed-sync] gemini:" in result.stderr
+    assert "[sync] commands/" in result.stderr
+    assert "[sync] notes.md" in result.stderr
+    assert "[stale] old.md (stale)" in result.stderr
+    assert "[merge] settings.json (merged)" in result.stderr
 
 
 def test_minimal_claude_seed_without_skills_dir_merges_settings(tmp_path: Path) -> None:
@@ -94,6 +135,8 @@ def test_claude_settings_local_overlay_wins_over_baseline(tmp_path: Path) -> Non
     )
 
     assert result.returncode == 0, result.stderr
+    assert_plain_startup_output(result.stderr)
+    assert "[merge] settings.json (baseline + local)" in result.stderr
     merged = json.loads(target_settings.read_text(encoding="utf-8"))
     assert merged == {
         "env": {"mode": "local", "kept": True},

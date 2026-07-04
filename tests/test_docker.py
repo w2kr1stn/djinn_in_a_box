@@ -1,5 +1,6 @@
 """Tests for djinn_in_a_box.core.docker module."""
 
+import os
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,7 @@ from djinn_in_a_box.core.docker import (
     DockerMode,
     backup_sync_path,
     backup_volume,
+    build_compose_env,
     cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
@@ -103,6 +105,49 @@ class TestGetComposeFiles:
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker-direct.yml" in f for f in file_paths)
+
+
+class TestBuildComposeEnv:
+    """Tests for docker compose host interpolation environment."""
+
+    def test_sets_terminal_width_when_output_is_tty(self, tmp_path: Path) -> None:
+        config = AppConfig(code_dir=tmp_path)
+        stdout = MagicMock()
+        stdout.isatty.return_value = True
+        stderr = MagicMock()
+        stderr.isatty.return_value = False
+
+        with (
+            patch("djinn_in_a_box.core.docker.sys.stdout", stdout),
+            patch("djinn_in_a_box.core.docker.sys.stderr", stderr),
+            patch(
+                "djinn_in_a_box.core.docker.shutil.get_terminal_size",
+                return_value=os.terminal_size((123, 40)),
+            ),
+        ):
+            env = build_compose_env(config)
+
+        assert env["DJINN_TERM_WIDTH"] == "123"
+
+    def test_does_not_set_terminal_width_without_tty(self, tmp_path: Path) -> None:
+        config = AppConfig(code_dir=tmp_path)
+        stdout = MagicMock()
+        stdout.isatty.return_value = False
+        stderr = MagicMock()
+        stderr.isatty.return_value = False
+
+        with (
+            patch("djinn_in_a_box.core.docker.sys.stdout", stdout),
+            patch("djinn_in_a_box.core.docker.sys.stderr", stderr),
+            patch(
+                "djinn_in_a_box.core.docker.shutil.get_terminal_size",
+                return_value=os.terminal_size((80, 24)),
+            ) as get_terminal_size,
+        ):
+            env = build_compose_env(config)
+
+        assert "DJINN_TERM_WIDTH" not in env
+        get_terminal_size.assert_not_called()
 
 
 class TestGetShellMountArgs:

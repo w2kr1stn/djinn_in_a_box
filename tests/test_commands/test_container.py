@@ -1,6 +1,7 @@
 """Tests for container lifecycle commands."""
 
 import io
+import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,14 @@ class TestStartCommand:
     @pytest.fixture
     def start_mocks(self) -> Generator[dict[str, Any]]:
         """Common mocks for start command tests."""
+        err_output = io.StringIO()
+        test_err_console = Console(
+            file=err_output,
+            force_terminal=True,
+            no_color=True,
+            width=100,
+            theme=DJINN_THEME,
+        )
         with (
             patch("djinn_in_a_box.commands.container.load_config") as mock_load,
             patch("djinn_in_a_box.commands.container.preflight"),
@@ -74,6 +83,8 @@ class TestStartCommand:
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
+            patch("djinn_in_a_box.commands.container.banner") as mock_banner,
+            patch("djinn_in_a_box.core.console.err_console", test_err_console),
         ):
             mock_config = MagicMock()
             mock_config.code_dir = Path("/projects")
@@ -85,6 +96,8 @@ class TestStartCommand:
                 "run": mock_run,
                 "cleanup": mock_cleanup,
                 "config": mock_config,
+                "banner": mock_banner,
+                "err_output": err_output,
             }
 
     def test_start_with_docker_flag(self, start_mocks: dict[str, Any]) -> None:
@@ -92,6 +105,7 @@ class TestStartCommand:
             container.start(docker=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.docker_mode is DockerMode.PROXY
+        start_mocks["banner"].assert_called_once_with()
         start_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, start_mocks["config"])
 
     def test_start_with_firewall_flag(self, start_mocks: dict[str, Any]) -> None:
@@ -133,6 +147,22 @@ class TestStartCommand:
         options = start_mocks["run"].call_args[0][1]
         assert options.docker_mode is DockerMode.DIRECT
         start_mocks["cleanup"].assert_called_once_with(DockerMode.DIRECT, start_mocks["config"])
+
+    def test_start_renders_environment_and_container_rules(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        with pytest.raises(typer.Exit):
+            container.start()
+
+        rendered = start_mocks["err_output"].getvalue()
+        assert "Environment" in rendered
+        assert "Container" in rendered
+        rendered_plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
+        assert "\n\n─ Container" in rendered_plain
+        assert "\n\n\n─ Container" not in rendered_plain
+        start_mocks["run"].assert_called_once()
+        assert start_mocks["run"].call_args.args[0] is start_mocks["config"]
+        assert start_mocks["run"].call_args.kwargs["interactive"] is True
 
     def test_start_docker_and_direct_mutually_exclusive(self) -> None:
         with pytest.raises(typer.Exit) as exc_info:

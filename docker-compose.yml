@@ -55,6 +55,8 @@ x-common-volumes: &common-volumes
 
 x-common-environment: &common-environment
   TZ: ${TZ:-UTC}
+  NO_COLOR: ${NO_COLOR:-}
+  DJINN_TERM_WIDTH: ${DJINN_TERM_WIDTH:-}
   UV_LINK_MODE: copy
   # Host-local LLM endpoint (e.g. Ollama on the host)
   LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://host.docker.internal:11434/v1}
