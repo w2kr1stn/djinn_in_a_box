@@ -5,6 +5,7 @@ from collections.abc import Callable
 import typer
 
 from djinn_in_a_box import __version__
+from djinn_in_a_box.core.console import console
 
 
 def version_callback(name: str) -> Callable[[bool], None]:
@@ -12,7 +13,10 @@ def version_callback(name: str) -> Callable[[bool], None]:
 
     def callback(value: bool) -> None:
         if value:
-            typer.echo(f"{name} {__version__}")
+            console.print(
+                f"[primary.bold]{name}[/primary.bold] "
+                f"[secondary]{__version__}[/secondary]"
+            )
             raise typer.Exit()
 
     return callback
