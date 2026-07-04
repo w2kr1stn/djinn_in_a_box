@@ -15,13 +15,14 @@ from djinn_in_a_box.commands.doctor import preflight
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.console import (
     blank,
     console,
     err_console,
     error,
-    header,
     info,
+    rule,
     status_line,
     success,
     warning,
@@ -98,6 +99,7 @@ def build(
     result = compose_build(config, no_cache=no_cache)
 
     if result.success:
+        blank()
         success("Done! Run 'djinn start' to begin.")
     else:
         error(f"Build failed with exit code {result.returncode}")
@@ -167,11 +169,10 @@ def start(
             raise typer.Exit(1) from None
 
     # Print status output (to stderr, matching Bash format)
-    blank()
-    info("Starting Djinn environment...")
-    blank()
+    banner()
+    rule("Environment")
 
-    status_line("Projects", str(config.code_dir))
+    status_line("Projects", str(config.code_dir), value_style="path")
 
     if docker:
         status_line("Docker", "Enabled (via secure proxy)", "status.enabled")
@@ -186,7 +187,7 @@ def start(
         status_line("Firewall", "Disabled (use --firewall to enable)", "status.disabled")
 
     if mount_path:
-        status_line("Workspace", str(mount_path), "status.enabled")
+        status_line("Workspace", str(mount_path), "status.enabled", value_style="path")
 
     # Shell mount status
     shell_args = get_shell_mount_args(config)
@@ -213,7 +214,7 @@ def start(
             "Use --docker (proxy) for safer operation."
         )
 
-    blank()
+    rule("Container")
 
     # Run container
     options = ContainerOptions(
@@ -307,6 +308,7 @@ def _print_resource_table(title: str, value_header: str, entries: dict[str, list
         title_style="table.title",
         show_header=True,
         header_style="table.header",
+        border_style="border",
     )
 
     table.add_column("Category", style="table.category", width=15)
@@ -321,6 +323,27 @@ def _print_resource_table(title: str, value_header: str, entries: dict[str, list
             table.add_row("", "")
 
     console.print(table)
+
+
+def _print_docker_table(title: str, columns: list[str], output: str) -> bool:
+    rows = [line.split("\t") for line in output.strip().splitlines() if line.strip()]
+    if not rows:
+        return False
+
+    table = Table(
+        title=title,
+        title_style="table.title",
+        show_header=True,
+        header_style="table.header",
+        border_style="border",
+    )
+    for index, column in enumerate(columns):
+        style = "table.category" if index == 0 else "table.value"
+        table.add_column(column, style=style)
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+    return True
 
 
 def _list_existing_volumes() -> dict[str, list[str]]:
@@ -368,17 +391,17 @@ def status() -> None:
         raise typer.Exit(1)
 
     # Configuration
-    header("Configuration")
+    rule("Configuration")
     try:
         config = load_config()
-        err_console.print(f"  CODE_DIR: {config.code_dir}")
+        status_line("CODE_DIR", str(config.code_dir), value_style="path")
     except ConfigNotFoundError:
         warning("Configuration not found. Run 'djinn init' to create one.")
 
     blank()
 
     # Containers
-    header("Containers")
+    rule("Containers")
     result = subprocess.run(
         [
             "docker",
@@ -389,21 +412,19 @@ def status() -> None:
             "--filter",
             "name=mcp-",
             "--format",
-            "table {{.Names}}\t{{.Status}}\t{{.Image}}",
+            "{{.Names}}\t{{.Status}}\t{{.Image}}",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.stdout.strip():
-        console.print(result.stdout.strip())
-    else:
+    if not _print_docker_table("Djinn Containers", ["Names", "Status", "Image"], result.stdout):
         err_console.print("  No containers found")
 
     blank()
 
     # Volumes
-    header("Volumes")
+    rule("Volumes")
     volume_entries = _list_existing_volumes()
     if volume_entries:
         _print_resource_table("Djinn Volumes", "Volume", volume_entries)
@@ -413,8 +434,8 @@ def status() -> None:
     blank()
 
     # Synced Paths
-    header("Synced Paths")
-    err_console.print(f"  Root: {get_config_root(config)}")
+    rule("Synced Paths")
+    status_line("Root", str(get_config_root(config)), value_style="path")
     sync_entries = _list_existing_sync_paths(config)
     if sync_entries:
         _print_resource_table("Djinn Sync Paths", "Path", sync_entries)
@@ -424,7 +445,7 @@ def status() -> None:
     blank()
 
     # Networks
-    header("Networks")
+    rule("Networks")
     result = subprocess.run(
         [
             "docker",
@@ -433,33 +454,31 @@ def status() -> None:
             "--filter",
             "name=djinn",
             "--format",
-            "table {{.Name}}\t{{.Driver}}",
+            "{{.Name}}\t{{.Driver}}",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.stdout.strip():
-        console.print(result.stdout.strip())
-    else:
+    if not _print_docker_table("Djinn Networks", ["Name", "Driver"], result.stdout):
         err_console.print("  No networks found")
 
     blank()
 
     # Service Status
-    header("Services")
+    rule("Services")
 
     # Docker Proxy Status
     if is_container_running("djinn-docker-proxy"):
-        success("  Docker Proxy: Running")
+        status_line("Docker Proxy", "Running", "status.enabled")
     else:
-        err_console.print("  [status.disabled]Docker Proxy: Not running[/status.disabled]")
+        status_line("Docker Proxy", "Not running", "status.disabled")
 
     # MCP Gateway Status
     if is_container_running("mcp-gateway"):
-        success("  MCP Gateway: Running")
+        status_line("MCP Gateway", "Running", "status.enabled")
     else:
-        err_console.print("  [status.disabled]MCP Gateway: Not running[/status.disabled]")
+        status_line("MCP Gateway", "Not running", "status.disabled")
 
 
 clean_app = typer.Typer(
@@ -566,15 +585,14 @@ def clean_volumes(
 
     if not selected:
         config = _load_optional_config()
-        info("Volumes by category:")
+        rule("Volumes by category")
         blank()
         volume_entries = _list_existing_volumes()
         if volume_entries:
             _print_resource_table("Djinn Volumes", "Volume", volume_entries)
         else:
             err_console.print("  No volumes found")
-        blank()
-        info("Sync paths by category:")
+        rule("Sync paths by category")
         blank()
         sync_entries = _list_existing_sync_paths(config)
         if sync_entries:
@@ -701,7 +719,7 @@ def audit(
         err_console.print("Start with: djinn start --docker")
         raise typer.Exit(1)
 
-    info(f"Docker Proxy Audit Log (last {tail} lines):")
+    rule(f"Docker Proxy Audit Log (last {tail} lines):")
     blank()
 
     result = subprocess.run(
@@ -734,6 +752,7 @@ def update() -> None:
         error(f"Update failed with exit code {result.returncode}")
         raise typer.Exit(result.returncode)
 
+    blank()
     success("Update completed successfully")
 
 

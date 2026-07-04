@@ -149,6 +149,7 @@ RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true \
     && date +%s > ~/.build-timestamp
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
+COPY --chown=dev:dev scripts/output-lib.sh /home/dev/output-lib.sh
 COPY --chown=dev:dev scripts/seed-lib.sh /home/dev/seed-lib.sh
 COPY --chown=dev:dev scripts/mcp-register.sh /home/dev/mcp-register.sh
 RUN chmod +x ~/entrypoint.sh ~/mcp-register.sh

@@ -12,6 +12,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_FILE="${TOOLS_FILE:-$SCRIPT_DIR/tools.txt}"
 CACHE_DIR="$HOME/.cache/djinn-tools"
 INSTALLERS_DIR="$SCRIPT_DIR/installers"
+OUTPUT_LIB="${OUTPUT_LIB:-/home/dev/output-lib.sh}"
+
+define_plain_ui_fallbacks() {
+    ui_info() { echo "[info] $1" >&2; }
+    ui_ok() { echo "[ok] $1" >&2; }
+    ui_warn() { echo "[warn] $1" >&2; }
+    ui_err() { echo "[err] $1" >&2; }
+}
+
+if [[ -r "$OUTPUT_LIB" ]] && source "$OUTPUT_LIB"; then
+    :
+else
+    define_plain_ui_fallbacks
+fi
 
 # Persistent tool directories (available to all installers)
 export TOOLS_DIR="$CACHE_DIR"
@@ -43,7 +57,7 @@ if [[ -z "$tools" ]]; then
     exit 0
 fi
 
-echo "[tools] Checking optional tools..."
+ui_info "[tools] Checking optional tools..."
 
 installed=0
 skipped=0
@@ -53,7 +67,7 @@ for tool in $tools; do
     cache_marker="$CACHE_DIR/${tool}.installed"
 
     if [[ ! -f "$installer" ]]; then
-        echo "[tools] Unknown tool: $tool (no installer found)"
+        ui_warn "[tools] Unknown tool: $tool (no installer found)"
         continue
     fi
 
@@ -70,25 +84,25 @@ for tool in $tools; do
         fi
         # Loud diagnostic: without it a nonconforming installer (binary name !=
         # installer name, or no --version) reinstalls silently on EVERY start.
-        echo "[tools] Cache check failed for $tool ($bin_path missing or '--version' failed) — reinstalling"
+        ui_warn "[tools] Cache check failed for $tool ($bin_path missing or '--version' failed) — reinstalling"
         rm -f "$cache_marker"
     fi
 
-    echo "[tools] Installing $tool..."
+    ui_info "[tools] Installing $tool..."
 
     if output=$("$installer" 2>&1); then
         version=$(echo "$output" | tail -1)
         echo "$version" > "$cache_marker"
-        echo "[tools] ✓ $tool installed ($version)"
+        ui_ok "[tools] $tool installed ($version)"
         installed=$((installed + 1))
     else
-        echo "[tools] ✗ Failed to install $tool"
+        ui_err "[tools] Failed to install $tool"
         echo "$output" | tail -3 | sed 's/^/    /'
     fi
 done
 
 if [[ $installed -gt 0 ]]; then
-    echo "[tools] $installed tool(s) installed, $skipped already installed"
+    ui_ok "[tools] $installed tool(s) installed, $skipped already installed"
 elif [[ $skipped -gt 0 ]]; then
-    echo "[tools] $skipped tool(s) already installed (cached)"
+    ui_ok "[tools] $skipped tool(s) already installed (cached)"
 fi
