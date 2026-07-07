@@ -24,6 +24,14 @@ Versioning before and after the first stable release.
 - Propagated `NO_COLOR` and terminal width into Compose startup so container
   shell output follows host plain-output and wrapping behavior.
 
+### Fixed
+
+- Optional tools no longer reinstall on every container start when their binary
+  name differs from the installer name or they lack a `--version` flag (for
+  example Azure CLI's `az` binary and Pulumi's `version` subcommand). Installer
+  scripts can declare a `# djinn-verify: <command>` header; the cache check
+  falls back to `<tool> --version` when the header is absent.
+
 ## [0.1.0] - 2026-07-03
 
 ### Added
