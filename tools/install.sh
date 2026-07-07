@@ -10,8 +10,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_FILE="${TOOLS_FILE:-$SCRIPT_DIR/tools.txt}"
-CACHE_DIR="$HOME/.cache/djinn-tools"
-INSTALLERS_DIR="$SCRIPT_DIR/installers"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/djinn-tools}"
+INSTALLERS_DIR="${INSTALLERS_DIR:-$SCRIPT_DIR/installers}"
 OUTPUT_LIB="${OUTPUT_LIB:-/home/dev/output-lib.sh}"
 
 define_plain_ui_fallbacks() {
@@ -71,20 +71,32 @@ for tool in $tools; do
         continue
     fi
 
-    # Check cache: marker exists AND binary executes successfully.
-    # Convention: the installer name matches the binary name and the binary
-    # supports --version (installers with different semantics should implement
-    # their own idempotence check).
+    # Check cache: marker exists AND the verify command succeeds.
+    # Default convention: the installer name matches the binary name and the
+    # binary supports --version. Installers with different semantics can declare
+    # an override near the top of the installer script:
+    #   # djinn-verify: <command>
     if [[ -f "$cache_marker" ]]; then
-        bin_path="$TOOLS_BIN/$tool"
-        version_cmd=("$bin_path" --version)
-        if [[ -f "$bin_path" ]] && "${version_cmd[@]}" &>/dev/null; then
+        verify_label=""
+        verify_cmd=()
+        if verify_line=$(grep -m 1 '^# djinn-verify:' "$installer"); then
+            verify_label="${verify_line#\# djinn-verify:}"
+            read -ra verify_cmd <<< "$verify_label"
+            verify_label="${verify_cmd[*]}"
+        else
+            bin_path="$TOOLS_BIN/$tool"
+            verify_cmd=("$bin_path" --version)
+            verify_label="${verify_cmd[*]}"
+        fi
+
+        if [[ ${#verify_cmd[@]} -gt 0 ]] && "${verify_cmd[@]}" &>/dev/null; then
             skipped=$((skipped + 1))
             continue
         fi
-        # Loud diagnostic: without it a nonconforming installer (binary name !=
-        # installer name, or no --version) reinstalls silently on EVERY start.
-        ui_warn "[tools] Cache check failed for $tool ($bin_path missing or '--version' failed) — reinstalling"
+        # Loud diagnostic: without it a stale or incorrect verifier can reinstall
+        # silently on EVERY start.
+        ui_warn \
+            "[tools] Cache check failed for $tool (verify command failed: $verify_label) — reinstalling"
         rm -f "$cache_marker"
     fi
 
