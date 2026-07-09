@@ -9,6 +9,10 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- Persistent `age` encryption identity store: `${DJINN_CONFIG_ROOT}/age` is
+  provisioned as a credential directory and bind-mounted at `~/.config/age`, so
+  `age` keys survive container restarts and are captured by `djinn backup`
+  (SOPS users set `SOPS_AGE_KEY_FILE` to a key under that path).
 - Shared CLI output design system with a central palette, semantic Rich roles,
   path styling, and terminal-adaptive informational output.
 - Startup banner with degraded wordmark and plain-text modes for narrow,
@@ -31,6 +35,15 @@ Versioning before and after the first stable release.
   example Azure CLI's `az` binary and Pulumi's `version` subcommand). Installer
   scripts can declare a `# djinn-verify: <command>` header; the cache check
   falls back to `<tool> --version` when the header is absent.
+
+### Security
+
+- Credential directories under the config root are created with mode `0700`,
+  matching the `~/.ssh` precedent. The mode applies on creation only; existing
+  directories are not tightened retroactively.
+- Documented the credential trust model: credentials are stored unencrypted,
+  are readable by every agent in the container, and `djinn backup` archives are
+  unencrypted.
 
 ## [0.1.0] - 2026-07-03
 

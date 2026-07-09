@@ -25,6 +25,8 @@ x-common-volumes: &common-volumes
   - ${DJINN_CONFIG_ROOT}/opencode:/home/dev/.opencode
   - opencode-data:/home/dev/.local/share/opencode
   - ${DJINN_CONFIG_ROOT}/gh:/home/dev/.config/gh
+  # age encryption identities (e.g. age -i ~/.config/age/keys.txt)
+  - ${DJINN_CONFIG_ROOT}/age:/home/dev/.config/age
   # Cache (host-local named volumes, rebuildable)
   - uv-cache:/home/dev/.cache/uv
   - tools-cache:/home/dev/.cache/djinn-tools

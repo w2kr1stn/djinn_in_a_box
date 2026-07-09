@@ -518,7 +518,7 @@ def clean_volumes(
         bool,
         typer.Option(
             "--credentials",
-            help="Clear credential sync paths (claude, gemini, codex, opencode, gh)",
+            help="Clear credential sync paths (claude, gemini, codex, opencode, gh, age)",
         ),
     ] = False,
     repo_dotfiles: Annotated[

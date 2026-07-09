@@ -290,6 +290,8 @@ variable is left to inherited host environment or Compose defaults.
 the Docker daemon does not auto-create missing paths as root-owned directories.
 It creates credential subdirectories from `SYNC_PATHS["credentials"]`,
 `~/.djinn/sessions`, `~/.djinn/backups`, `~/.ssh`, and `~/.gitconfig`.
+Credential subdirectories and `~/.ssh` are created with mode `0700`. The mode
+applies on creation only; directories that already exist are left unchanged.
 
 ## Host-Side Seeding
 
@@ -394,6 +396,7 @@ Common mounts include:
 - `${DJINN_CONFIG_ROOT}/codex` to `/home/dev/.codex`
 - `${DJINN_CONFIG_ROOT}/opencode` to `/home/dev/.opencode`
 - `${DJINN_CONFIG_ROOT}/gh` to `/home/dev/.config/gh`
+- `${DJINN_CONFIG_ROOT}/age` to `/home/dev/.config/age`
 - named volumes for caches, OpenCode data, VS Code server state, and workspace
   metadata
 - read-only `~/.ssh` and `~/.gitconfig`
@@ -552,7 +555,7 @@ Category definitions come from `config/defaults.py`:
   `djinn-vscode-server`
 - `VOLUME_CATEGORIES["data"]`: `djinn-opencode-data`,
   `djinn-vscode-workspaces`
-- `SYNC_PATHS["credentials"]`: `claude`, `gemini`, `codex`, `opencode`, `gh`
+- `SYNC_PATHS["credentials"]`: `claude`, `gemini`, `codex`, `opencode`, `gh`, `age`
 - `SYNC_PATHS["repo-dotfiles"]`: `repo-dotfiles`
 
 `backup()` refuses to run while Djinn containers are active. It stages one

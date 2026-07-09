@@ -36,7 +36,9 @@ Djinn gives you one repeatable container image and several ways to use it:
 Credentials are separated by CLI. By default, Claude Code, Gemini CLI, Codex CLI,
 OpenCode, and the GitHub CLI each get their own host directory under the
 configured Djinn config root. The container sees those directories at the paths
-each CLI expects.
+each CLI expects. An `age` encryption identity directory is provisioned the same
+way and appears at `~/.config/age`, so plain `age` keys persist across runs
+(`age -i ~/.config/age/keys.txt`); SOPS users set `SOPS_AGE_KEY_FILE` to that path.
 
 ## Requirements
 
@@ -323,6 +325,7 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `${DJINN_CONFIG_ROOT}/codex` | `/home/dev/.codex` | Codex CLI credentials and state |
 | `${DJINN_CONFIG_ROOT}/opencode` | `/home/dev/.opencode` | OpenCode state |
 | `${DJINN_CONFIG_ROOT}/gh` | `/home/dev/.config/gh` | GitHub CLI state |
+| `${DJINN_CONFIG_ROOT}/age` | `/home/dev/.config/age` | age encryption identities (`keys.txt`) |
 | `${CODE_DIR}` | `/home/dev/projects` | Your projects directory |
 | `${HOME}/.djinn/sessions` | `/home/dev/sessions` | Session workspaces |
 | `~/.ssh` | `/home/dev/.ssh:ro` | Read-only SSH access |
@@ -348,6 +351,29 @@ Named volumes are Docker-managed and host-local:
 The backup command includes credentials, repo-dotfiles, and data by default. It
 does not include cache volumes unless you explicitly request the `cache`
 category.
+
+## Credential Security
+
+Djinn isolates credentials per CLI. It does not encrypt them. Understand the
+model before you store a high-value key such as an `age` identity.
+
+- **Cleartext on the host.** Credential directories under the config root are
+  ordinary files guarded by filesystem permissions. Djinn creates new credential
+  directories with mode `0700`. Directories that already exist are not tightened
+  retroactively.
+- **Readable by every agent in the container.** Each credential is mounted where
+  its tool expects it, so the `dev` user — and therefore every coding agent you
+  run — can read all of them. An `age` identity is a master decryption key. An
+  agent running in write mode (`--dangerously-skip-permissions`, `--full-auto`)
+  acts without approval, so a prompt injection reaching that agent can read the
+  key. Run `djinn start --firewall` when an agent processes untrusted content, so
+  a leaked secret cannot be sent outbound.
+- **Backups are unencrypted.** `djinn backup` writes a plain `tar.gz` under
+  `~/.djinn/backups/` that contains the credential directories. Protect that
+  directory as carefully as the credentials themselves.
+
+Read [DOCKER-SOCKET-SECURITY.md](DOCKER-SOCKET-SECURITY.md) before enabling
+Docker socket access, which widens this surface further.
 
 ## Resources
 
@@ -397,7 +423,7 @@ djinn backup
 By default, this backs up:
 
 - `credentials`: config-root directories for Claude Code, Gemini CLI, Codex CLI,
-  OpenCode, and the GitHub CLI
+  OpenCode, the GitHub CLI, and the `age` encryption identity store
 - `repo-dotfiles`: the optional config-root `repo-dotfiles` directory if present
 - `data`: the OpenCode data and VS Code workspace named volumes
 
