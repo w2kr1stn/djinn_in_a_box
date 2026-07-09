@@ -555,7 +555,9 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     """
     root = get_config_root(config)
     for name in SYNC_PATHS.get("credentials", []):
-        (root / name).mkdir(parents=True, exist_ok=True)
+        # 0700: credential stores hold secrets (OAuth tokens, age identities).
+        # Applies on creation only, matching the ~/.ssh precedent below.
+        (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
 
     djinn_dir = Path.home() / ".djinn"
     for sub in ("sessions", "backups"):

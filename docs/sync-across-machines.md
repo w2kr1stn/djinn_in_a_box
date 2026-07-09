@@ -70,7 +70,7 @@ djinn restore
 ```
 
 By default, `djinn backup` archives existing credential/config-root paths
-(`claude`, `gemini`, `codex`, `opencode`, `gh`), `repo-dotfiles`, and data
+(`claude`, `gemini`, `codex`, `opencode`, `gh`, `age`), `repo-dotfiles`, and data
 volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`). Cache volumes are
 not included by default because they are rebuildable.
 

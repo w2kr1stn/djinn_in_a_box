@@ -54,4 +54,19 @@ def test_resource_limit_defaults_are_conservative() -> None:
 
 
 def test_credentials_sync_paths_are_decoupled_from_work_tools() -> None:
-    assert SYNC_PATHS["credentials"] == ["claude", "gemini", "codex", "opencode", "gh"]
+    assert SYNC_PATHS["credentials"] == [
+        "claude",
+        "gemini",
+        "codex",
+        "opencode",
+        "gh",
+        "age",
+    ]
+
+
+def test_compose_mounts_age_credential_store() -> None:
+    """The age identity store is bind-mounted so age keys persist across runs."""
+    compose_file = project_root() / "docker-compose.yml"
+    compose = yaml.safe_load(compose_file.read_text())
+    dev_volumes = compose["services"]["dev"]["volumes"]
+    assert "${DJINN_CONFIG_ROOT}/age:/home/dev/.config/age" in dev_volumes

@@ -27,6 +27,9 @@ SYNC_PATHS: Final[dict[str, list[str]]] = {
         "codex",
         "opencode",
         "gh",
+        # "age" persists age encryption identities at ~/.config/age (age -i);
+        # SOPS users point SOPS_AGE_KEY_FILE here. A key store, not a coding CLI.
+        "age",
     ],
     "repo-dotfiles": [
         "repo-dotfiles",
