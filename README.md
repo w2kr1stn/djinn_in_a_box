@@ -234,9 +234,9 @@ Djinn has four built-in agent definitions:
 
 | Agent name | Binary | Default headless mode | Notes |
 | --- | --- | --- | --- |
-| `claude` | `claude` | `claude -p` | read-only uses `--permission-mode plan`; write mode uses `--dangerously-skip-permissions` |
+| `claude` | `claude` | `claude -p` | default model is `sonnet`; read-only uses `--permission-mode plan`; write mode uses `--dangerously-skip-permissions` |
 | `gemini` | `gemini` | `gemini -p` | model flag is `-m` |
-| `codex` | `codex` | `codex exec` | write mode uses `--full-auto` |
+| `codex` | `codex` | `codex exec` | default model is `gpt-5.6-terra`; write mode uses `--full-auto` |
 | `opencode` | `opencode` | `opencode run` | read-only uses `--agent plan`; model flag is `-m` |
 
 List the effective definitions:
@@ -270,7 +270,8 @@ djinn agents --verbose
 
 Define agents under `[agents.<name>]`. Supported fields are `binary`,
 `description`, `headless_flags`, `read_only_flags`, `write_flags`, `json_flags`,
-`model_flag`, and `prompt_template`.
+`model_flag`, `default_model`, and `prompt_template`. An explicit `--model`
+value overrides `default_model` for that invocation.
 
 ## Container Entry Points
 

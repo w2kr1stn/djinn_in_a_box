@@ -48,6 +48,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         write_flags=["--dangerously-skip-permissions"],
         json_flags=["--output-format", "json"],
         model_flag="--model",
+        default_model="sonnet",
     ),
     "gemini": AgentConfig(
         binary="gemini",
@@ -63,6 +64,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         write_flags=["--full-auto"],
         json_flags=["--json"],
         model_flag="--model",
+        default_model="gpt-5.6-terra",
     ),
     "opencode": AgentConfig(
         binary="opencode",

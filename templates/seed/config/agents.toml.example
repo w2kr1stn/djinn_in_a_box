@@ -12,6 +12,7 @@
 # write_flags = ["--write"]
 # json_flags = ["--json"]
 # model_flag = "--model"
+# default_model = "example-model"
 #
 # Built-in defaults, shown as commented examples:
 #
@@ -23,6 +24,7 @@
 # write_flags = ["--dangerously-skip-permissions"]
 # json_flags = ["--output-format", "json"]
 # model_flag = "--model"
+# default_model = "sonnet"
 #
 # [agents.gemini]
 # binary = "gemini"
@@ -38,6 +40,7 @@
 # write_flags = ["--full-auto"]
 # json_flags = ["--json"]
 # model_flag = "--model"
+# default_model = "gpt-5.6-terra"
 #
 # [agents.opencode]
 # binary = "opencode"

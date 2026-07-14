@@ -49,8 +49,11 @@ def build_agent_command(
     parts: list[str] = [shlex.quote(agent_config.binary)]
     parts.extend(shlex.quote(f) for f in agent_config.headless_flags)
 
-    if model:
-        parts.extend([shlex.quote(agent_config.model_flag), shlex.quote(model)])
+    effective_model = model if model is not None else agent_config.default_model
+    if effective_model:
+        parts.extend(
+            [shlex.quote(agent_config.model_flag), shlex.quote(effective_model)]
+        )
 
     if write:
         parts.extend(shlex.quote(f) for f in agent_config.write_flags)
@@ -272,6 +275,8 @@ def agents(
             table.add_row("Description", cfg.description or cfg.binary)
             table.add_row("Binary", cfg.binary)
             table.add_row("Model flag", cfg.model_flag)
+            if cfg.default_model:
+                table.add_row("Default model", cfg.default_model)
             if cfg.headless_flags:
                 table.add_row("Headless", " ".join(cfg.headless_flags))
             if cfg.write_flags:

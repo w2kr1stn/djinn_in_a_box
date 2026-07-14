@@ -76,6 +76,21 @@ class TestBuildAgentCommand:
         assert "--model" in cmd
         assert "sonnet" in cmd
 
+    def test_uses_configured_default_model(self) -> None:
+        config = AgentConfig(binary="codex", default_model="gpt-5.6-terra")
+
+        cmd = build_agent_command(config)
+
+        assert "--model gpt-5.6-terra" in cmd
+
+    def test_explicit_model_overrides_configured_default(self) -> None:
+        config = AgentConfig(binary="codex", default_model="gpt-5.6-terra")
+
+        cmd = build_agent_command(config, model="gpt-5.6")
+
+        assert "--model gpt-5.6" in cmd
+        assert "gpt-5.6-terra" not in cmd
+
     def test_with_json_output(self, claude_config: AgentConfig) -> None:
         """Test command generation with JSON output enabled."""
         cmd = build_agent_command(claude_config, json_output=True)

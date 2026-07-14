@@ -59,6 +59,7 @@ class TestSessionCommand:
 
             runner.invoke(app, ["session", "--project", "testproj"])
             mock_instance.run_interactive.assert_called_once()
+            assert mock_instance.run_interactive.call_args.kwargs["model"] is None
 
     def test_headless_calls_run_headless(self, tmp_path: Path) -> None:
         workspace = tmp_path / ".djinn" / "sessions" / "testproj"
@@ -75,3 +76,4 @@ class TestSessionCommand:
 
             runner.invoke(app, ["session", "--project", "testproj", "--prompt", "hello"])
             mock_instance.run_headless.assert_called_once()
+            assert mock_instance.run_headless.call_args.kwargs["model"] is None

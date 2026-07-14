@@ -30,6 +30,7 @@ read_only_flags = ["--readonly"]
 write_flags = ["--write"]
 json_flags = ["--json"]
 model_flag = "-m"
+default_model = "test-model"
 prompt_template = "$PROMPT"
 """
     )
@@ -129,6 +130,7 @@ class TestLoadAgents:
         assert "test-agent" in agents
         assert agents["test-agent"].binary == "test-cli"
         assert agents["test-agent"].description == "Test Agent"
+        assert agents["test-agent"].default_model == "test-model"
 
     def test_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should fall back to DEFAULT_AGENTS when no files exist."""
@@ -142,6 +144,7 @@ class TestLoadAgents:
         assert "claude" in agents
         assert "gemini" in agents
         assert "codex" in agents
+        assert agents["codex"].default_model == "gpt-5.6-terra"
         assert "opencode" in agents
 
     def test_raises_validation_error_for_invalid_agents(self, tmp_path: Path) -> None:

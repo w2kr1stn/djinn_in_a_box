@@ -361,3 +361,25 @@ class TestResolveAgent:
     def test_raises_for_unknown_agent(self, session_mgr: SessionManager) -> None:
         with pytest.raises(ValueError, match="Unknown agent: unknown"):
             session_mgr._resolve_agent("unknown")
+
+
+class TestSessionModelResolution:
+    def test_interactive_command_uses_agent_default_model(
+        self, session_mgr: SessionManager
+    ) -> None:
+        config = AgentConfig(binary="codex", default_model="gpt-5.6-terra")
+
+        command = session_mgr._build_host_interactive_command(config, None, None)
+
+        assert command == ["codex", "--model", "gpt-5.6-terra"]
+
+    def test_interactive_command_prefers_explicit_model(
+        self, session_mgr: SessionManager
+    ) -> None:
+        config = AgentConfig(binary="codex", default_model="gpt-5.6-terra")
+
+        command = session_mgr._build_host_interactive_command(
+            config, "gpt-5.6", None
+        )
+
+        assert command == ["codex", "--model", "gpt-5.6"]

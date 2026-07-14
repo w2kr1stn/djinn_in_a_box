@@ -200,7 +200,9 @@ uppercase suffix. Reservations cannot exceed limits.
 - `omp_theme_path = None`
 
 `AgentConfig` defines CLI agent invocation shape: binary, headless flags,
-read-only flags, write flags, JSON flags, model flag, and prompt template.
+read-only flags, write flags, JSON flags, model flag, optional default model,
+and prompt template. The bundled defaults pin Claude to `sonnet` and Codex to
+`gpt-5.6-terra`.
 
 ## Config File Loading
 
@@ -501,7 +503,8 @@ This keeps Docker-down failures from creating unrelated host artifacts.
 
 `build_agent_command(agent_config, write, json_output, model)` assembles a shell
 command string from `AgentConfig`. It appends the prompt template, which expands
-`$AGENT_PROMPT` inside the container.
+`$AGENT_PROMPT` inside the container. An explicit `model` takes precedence;
+otherwise the command uses `AgentConfig.default_model` when configured.
 
 `run()` loads app config and agent config, validates the requested agent, ensures
 the Docker network, mounts the current directory by default, and calls
@@ -512,6 +515,10 @@ the Docker network, mounts the current directory by default, and calls
 ## Session Workspace Contract
 
 `commands/session.py` exposes `djinn session`.
+
+`--model` is optional. Interactive and headless sessions use the selected
+agent's `default_model` when the caller omits it, so a non-Claude agent never
+receives the former session-wide `sonnet` fallback.
 
 Host workspaces live under:
 
