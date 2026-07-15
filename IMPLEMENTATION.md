@@ -201,8 +201,7 @@ uppercase suffix. Reservations cannot exceed limits.
 
 `AgentConfig` defines CLI agent invocation shape: binary, headless flags,
 read-only flags, write flags, JSON flags, model flag, optional default model,
-and prompt template. The bundled defaults pin Claude to `sonnet` and Codex to
-`gpt-5.6-terra`.
+and prompt template.
 
 ## Config File Loading
 

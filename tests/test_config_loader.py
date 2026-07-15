@@ -144,7 +144,6 @@ class TestLoadAgents:
         assert "claude" in agents
         assert "gemini" in agents
         assert "codex" in agents
-        assert agents["codex"].default_model == "gpt-5.6-terra"
         assert "opencode" in agents
 
     def test_raises_validation_error_for_invalid_agents(self, tmp_path: Path) -> None:

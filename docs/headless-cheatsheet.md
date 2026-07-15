@@ -13,9 +13,9 @@ the selected agent CLI; otherwise it uses that agent's configured
 
 | Agent | Model flag forwarded by Djinn | Notes |
 |-------|-------------------------------|-------|
-| `claude` | `--model <name>` | Bundled default: `sonnet`. |
+| `claude` | `--model <name>` | Example aliases depend on the installed Claude Code CLI. |
 | `gemini` | `-m <name>` | Use a model supported by the installed Gemini CLI. |
-| `codex` | `--model <name>` | Bundled default: `gpt-5.6-terra`; uses `codex exec` for headless runs. |
+| `codex` | `--model <name>` | Uses `codex exec` for headless runs. |
 | `opencode` | `-m <name>` | Uses `opencode run` for headless runs. |
 
 Check available models with the agent's own documentation or CLI help.
@@ -35,7 +35,7 @@ djinn run claude "Fix the bug in main.py" --write --model sonnet
 djinn run gemini "Refactor the auth flow" --write --model gemini-2.5-pro
 
 # Codex in headless mode
-djinn run codex "Review this change"
+djinn run codex "Review this change" --model gpt-5
 
 # OpenCode in read-only plan mode
 djinn run opencode "Plan a cleanup for this module" --model default
