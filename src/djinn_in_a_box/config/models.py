@@ -57,6 +57,9 @@ class AgentConfig(BaseModel):
     model_flag: str = "--model"
     """Flag for specifying the model (e.g., '--model', '-m')."""
 
+    default_model: Annotated[str, Field(min_length=1)] | None = None
+    """Model used when the invocation does not provide an explicit override."""
+
     prompt_template: str = '"$AGENT_PROMPT"'
     """Shell template for prompt injection. Uses env var expansion at runtime."""
 

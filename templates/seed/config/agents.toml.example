@@ -12,6 +12,7 @@
 # write_flags = ["--write"]
 # json_flags = ["--json"]
 # model_flag = "--model"
+# default_model = "example-model"
 #
 # Built-in defaults, shown as commented examples:
 #

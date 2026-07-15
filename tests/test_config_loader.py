@@ -30,6 +30,7 @@ read_only_flags = ["--readonly"]
 write_flags = ["--write"]
 json_flags = ["--json"]
 model_flag = "-m"
+default_model = "test-model"
 prompt_template = "$PROMPT"
 """
     )
@@ -129,6 +130,7 @@ class TestLoadAgents:
         assert "test-agent" in agents
         assert agents["test-agent"].binary == "test-cli"
         assert agents["test-agent"].description == "Test Agent"
+        assert agents["test-agent"].default_model == "test-model"
 
     def test_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should fall back to DEFAULT_AGENTS when no files exist."""

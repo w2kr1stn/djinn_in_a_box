@@ -270,7 +270,8 @@ djinn agents --verbose
 
 Define agents under `[agents.<name>]`. Supported fields are `binary`,
 `description`, `headless_flags`, `read_only_flags`, `write_flags`, `json_flags`,
-`model_flag`, and `prompt_template`.
+`model_flag`, `default_model`, and `prompt_template`. An explicit `--model`
+value overrides `default_model` for that invocation.
 
 ## Container Entry Points
 

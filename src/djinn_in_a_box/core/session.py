@@ -72,7 +72,7 @@ class SessionManager:
         *,
         workspace_dir: Path,
         agent: str = "claude",
-        model: str = "sonnet",
+        model: str | None = None,
         initial_prompt: str | None = None,
     ) -> SessionResult:
         agent_config = self._resolve_agent(agent)
@@ -125,7 +125,7 @@ class SessionManager:
         workspace_dir: Path,
         prompt: str,
         agent: str = "claude",
-        model: str = "sonnet",
+        model: str | None = None,
         timeout: int = 300,
     ) -> SessionResult:
         from djinn_in_a_box.commands.agent import build_agent_command
@@ -296,12 +296,15 @@ class SessionManager:
     def _build_interactive_command(
         self,
         agent_config: AgentConfig,
-        model: str,
+        model: str | None,
         initial_prompt: str | None,
     ) -> str:
         parts: list[str] = [shlex.quote(agent_config.binary)]
-        if model:
-            parts.extend([shlex.quote(agent_config.model_flag), shlex.quote(model)])
+        effective_model = model if model is not None else agent_config.default_model
+        if effective_model:
+            parts.extend(
+                [shlex.quote(agent_config.model_flag), shlex.quote(effective_model)]
+            )
         parts.extend(shlex.quote(f) for f in agent_config.write_flags)
         if initial_prompt is not None:
             parts.append(shlex.quote(initial_prompt))
@@ -310,12 +313,13 @@ class SessionManager:
     def _build_host_interactive_command(
         self,
         agent_config: AgentConfig,
-        model: str,
+        model: str | None,
         initial_prompt: str | None,
     ) -> list[str]:
         cmd: list[str] = [agent_config.binary]
-        if model:
-            cmd.extend([agent_config.model_flag, model])
+        effective_model = model if model is not None else agent_config.default_model
+        if effective_model:
+            cmd.extend([agent_config.model_flag, effective_model])
         cmd.extend(agent_config.write_flags)
         if initial_prompt is not None:
             cmd.append(initial_prompt)
@@ -324,11 +328,12 @@ class SessionManager:
     def _build_host_headless_command(
         self,
         agent_config: AgentConfig,
-        model: str,
+        model: str | None,
         prompt: str,
     ) -> list[str]:
         cmd: list[str] = [agent_config.binary, *agent_config.headless_flags]
-        if model:
-            cmd.extend([agent_config.model_flag, model])
+        effective_model = model if model is not None else agent_config.default_model
+        if effective_model:
+            cmd.extend([agent_config.model_flag, effective_model])
         cmd.append(prompt)
         return cmd

@@ -7,8 +7,9 @@ the session-oriented `djinn session --prompt` path.
 
 ## Model Handling
 
-Djinn does not validate model names. It forwards the value you pass with
-`--model` to the selected agent CLI:
+Djinn does not validate model names. It forwards an explicit `--model` value to
+the selected agent CLI; otherwise it uses that agent's configured
+`default_model` when present:
 
 | Agent | Model flag forwarded by Djinn | Notes |
 |-------|-------------------------------|-------|
@@ -119,7 +120,7 @@ still fail at invocation if its binary is missing.
 |------|-------------|
 | `--project <name>`, `-p <name>` | Session namespace under `~/.djinn/sessions/`. Defaults to `default`. |
 | `--agent <name>`, `-a <name>` | Agent to run. Defaults to `claude`. |
-| `--model <name>`, `-m <name>` | Model override. Defaults to `sonnet`. |
+| `--model <name>`, `-m <name>` | Model override. When omitted, the selected agent's `default_model` applies. |
 | `--prompt <text>` | Run headless. Omit this flag for interactive mode. |
 | `--timeout <sec>`, `-t <sec>` | Headless timeout. Defaults to `300`. |
 | `--create` | Create the session workspace if it does not exist. |

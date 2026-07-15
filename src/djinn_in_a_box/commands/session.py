@@ -24,9 +24,9 @@ def session(
         typer.Option("--agent", "-a", help="Agent to use (claude, gemini, codex, opencode)"),
     ] = "claude",
     model: Annotated[
-        str,
+        str | None,
         typer.Option("--model", "-m", help="Model override"),
-    ] = "sonnet",
+    ] = None,
     prompt: Annotated[
         str | None,
         typer.Option("--prompt", help="Prompt for headless mode (omit for interactive)"),
