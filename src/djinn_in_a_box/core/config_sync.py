@@ -18,11 +18,15 @@ from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.config_sync_adapters import (
     OWNERSHIP_MATRIX,
     AdapterReadResult,
+    NativeOnlyReadResult,
     RenderedFile,
     SettingsFragment,
     fragment_is_owned,
     is_safe_relative_path,
+    native_only_file_is_owned,
+    native_only_fragment_is_owned,
     path_is_owned,
+    read_native_only_workflow,
     read_native_workflow,
     render_native_workflow,
     validate_rendered_workflow,
@@ -173,7 +177,7 @@ def sync_config(
                         False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
                     )
             else:
-                preflight_manifest = _release_selected_source_records(
+                preflight_manifest = _release_manifest_records(
                     manifest_path, source, build.fingerprint, config_root
                 )
             result = publish_workflow_view(
@@ -299,14 +303,19 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
             snapshot_fingerprint = _fingerprint(snapshot_root)
             if before != after or before != snapshot_fingerprint:
                 raise _BuildError(DriftClass.SOURCE_CHANGED)
-            return _build_views(snapshot_root, source, before)
+            return _build_views(snapshot_root, source, before, project_root / "config")
     except _BuildError:
         raise
     except (OSError, RuntimeError) as error:
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC) from error
 
 
-def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str) -> _Build:
+def _build_views(
+    snapshot_root: Path,
+    source: ConfigSyncSource,
+    fingerprint: str,
+    config_root: Path,
+) -> _Build:
     read = read_native_workflow(snapshot_root, source)
     problems = [
         _problem_from_issue(issue.identifier, source, issue.relative_path)
@@ -314,9 +323,10 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
     ]
     source_files, source_fragments, source_problems = _source_view(snapshot_root, read)
     problems.extend(source_problems)
-    rendered_views: dict[
+    projection_views: dict[
         ConfigSyncSource, tuple[tuple[RenderedFile, ...], tuple[SettingsFragment, ...]]
     ] = {source: (source_files, source_fragments)}
+    delivery_views = dict(projection_views)
     for target in _TOOLS:
         if target == source:
             continue
@@ -329,12 +339,18 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
                     item.identifier, "Artifact is not portable.", item.target_tool, item.source_path
                 )
             )
-        rendered_views[target] = (rendered.files, rendered.settings_fragments)
-    for tool, (rendered_files, rendered_fragments) in rendered_views.items():
+        projection_views[target] = (rendered.files, rendered.settings_fragments)
+        native_only = read_native_only_workflow(config_root / target, target)
+        for issue in native_only.validation_issues:
+            problems.append(_problem_from_issue(issue.identifier, target, issue.relative_path))
+        delivery_views[target] = _with_native_only(
+            rendered.files, rendered.settings_fragments, native_only
+        )
+    for tool, (rendered_files, rendered_fragments) in delivery_views.items():
         for issue in validate_rendered_workflow(tool, rendered_files, rendered_fragments):
             problems.append(_problem_from_issue(issue.identifier, tool, issue.relative_path))
     views: dict[ConfigSyncSource, WorkflowView] = {}
-    for tool, (rendered_files, rendered_fragments) in rendered_views.items():
+    for tool, (rendered_files, rendered_fragments) in delivery_views.items():
         views[tool] = WorkflowView(
             source,
             tuple(
@@ -350,13 +366,13 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
         )
     published_files: list[PublishedFile] = []
     published_fragments: list[CarrierFragment] = []
-    for tool, view in views.items():
+    for tool, (rendered_files, rendered_fragments) in projection_views.items():
         prefix = PurePosixPath(tool)
         companion = OWNERSHIP_MATRIX[source].instruction_companion
         publish_files = (
-            view.files
+            rendered_files
             if tool != source
-            else tuple(item for item in view.files if item.relative_path == companion)
+            else tuple(item for item in rendered_files if item.relative_path == companion)
         )
         published_files.extend(
             PublishedFile(prefix / item.relative_path, item.content, item.executable)
@@ -364,7 +380,7 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
         )
         published_fragments.extend(
             CarrierFragment(prefix / item.carrier_path, item.key_path, item.value_json)
-            for item in view.fragments
+            for item in rendered_fragments
             if tool != source
         )
     return _Build(
@@ -378,6 +394,38 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
         ),
         views,
         tuple(_deduplicate_problems(problems)),
+    )
+
+
+def _with_native_only(
+    files: tuple[RenderedFile, ...],
+    fragments: tuple[SettingsFragment, ...],
+    native_only: NativeOnlyReadResult,
+) -> tuple[tuple[RenderedFile, ...], tuple[SettingsFragment, ...]]:
+    rendered_files = {item.relative_path: item for item in files}
+    rendered_fragments = {(item.carrier_path, item.key_path): item for item in fragments}
+    for artifact in native_only.artifacts:
+        item = RenderedFile(
+            artifact.source_path,
+            artifact.content,
+            artifact.identifier,
+            artifact.executable,
+        )
+        if item.relative_path in rendered_files:
+            raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
+        rendered_files[item.relative_path] = item
+    for item in native_only.settings_fragments:
+        key = item.carrier_path, item.key_path
+        if key in rendered_fragments:
+            raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
+        rendered_fragments[key] = item
+    return (
+        tuple(sorted(rendered_files.values(), key=lambda item: item.relative_path)),
+        tuple(
+            sorted(
+                rendered_fragments.values(), key=lambda item: (item.carrier_path, item.key_path)
+            )
+        ),
     )
 
 
@@ -517,17 +565,15 @@ def _migrate_legacy(
         config_root,
         _migration_stale_residue(desired, selected_source),
     )
-    companion = OWNERSHIP_MATRIX[selected_source].instruction_companion
-    prefix = PurePosixPath(selected_source)
     managed = tuple(
         item
         for item in items
-        if item.path.parts[0] != selected_source or item.path == prefix / companion
+        if not _release_canonical_manifest_item(item, selected_source)
     )
     return _encode_lean(manifest_source, managed)
 
 
-def _release_selected_source_records(
+def _release_manifest_records(
     manifest_path: Path,
     source: ConfigSyncSource,
     fingerprint: str,
@@ -536,16 +582,25 @@ def _release_selected_source_records(
     if not manifest_path.exists():
         return
     manifest_source, items = _lean_items(manifest_path.read_bytes())
-    if manifest_source == source:
-        return None
-    if _fingerprint(config_root / source) != fingerprint:
-        raise _BuildError(DriftClass.SOURCE_CHANGED)
-    companion = OWNERSHIP_MATRIX[source].instruction_companion
-    prefix = PurePosixPath(source)
     kept = tuple(
-        item for item in items if item.path.parts[0] != source or item.path == prefix / companion
+        item for item in items if not _release_canonical_manifest_item(item, source)
     )
+    if kept == items:
+        return None
+    if manifest_source != source and _fingerprint(config_root / source) != fingerprint:
+        raise _BuildError(DriftClass.SOURCE_CHANGED)
     return _encode_lean(manifest_source, kept)
+
+
+def _release_canonical_manifest_item(item: _ManifestItem, source: ConfigSyncSource) -> bool:
+    tool = cast(ConfigSyncSource, item.path.parts[0])
+    relative_path = PurePosixPath(*item.path.parts[1:])
+    if tool == source:
+        companion = OWNERSHIP_MATRIX[source].instruction_companion
+        return item.key_path is not None or relative_path != companion
+    if item.key_path is None:
+        return native_only_file_is_owned(tool, relative_path)
+    return native_only_fragment_is_owned(tool, relative_path, item.key_path)
 
 
 def _migration_stale_residue(
@@ -560,7 +615,9 @@ def _migration_stale_residue(
     }
 
     def is_stale(item: _ManifestItem) -> bool:
-        return item.path.parts[0] != selected_source and (item.path, item.key_path) not in wanted
+        return _release_canonical_manifest_item(item, selected_source) or (
+            item.path.parts[0] != selected_source and (item.path, item.key_path) not in wanted
+        )
 
     return is_stale
 

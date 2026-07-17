@@ -192,12 +192,19 @@ The source stays in its native project-local root:
 | Codex | `config/codex/AGENTS.md` | `CLAUDE.md` | `agents/*.toml` | `skills/command-*/**` |
 | OpenCode | `config/opencode/AGENTS.md` | `CLAUDE.md` | `agents/*.md` | `commands/*.md` |
 
-The closed managed surface also includes `skills/<name>/**`, `context/**`,
-`scripts/**`, the known startup/security/ready hook implementations, and only
-their narrow native registrations. The Claude-only `/codex-review` command is
-validated and retained in the Claude tree, but is never projected to Codex or
-OpenCode. Repository-local instructions, agents, skills, and commands remain
-outside this global feature and are never rewritten.
+The cross-tool projection surface also includes `skills/<name>/**`,
+`context/**`, and `scripts/**`. Hooks are native-only per tool: the known
+startup/security/ready implementations and their `SessionStart`, `PreToolUse`,
+and `Stop` registrations stay in that tool's own view. They are optional and
+author-owned, validated there when present, never projected to another tool,
+and never stale-removed. The Claude-only `/codex-review` command follows the
+same source-only rule. Repository-local instructions, agents, skills, and
+commands remain outside this global feature and are never rewritten.
+
+Runtime delivery is deliberately broader than cross-tool projection. The shared
+publisher receives each complete native view, including its present hooks,
+plugins, and registrations; the existing Claude host-path rewrite and
+Compose-Claude settings merge still apply.
 
 Everything outside that closed surface remains unmanaged: credentials, auth,
 history, caches, themes, UI policy, MCP configuration, arbitrary plugins,
@@ -213,8 +220,9 @@ The shared publisher uses one manifest schema in two locations:
 Each entry names either a file or a carrier-file key and records only its
 content hash and executable flag, plus the selected source for the manifest.
 Neighboring keys in shared JSON or TOML carriers stay operator-owned. A legacy
-installation is adopted safely during sync; it does not introduce another active
-manifest format.
+installation is adopted safely during sync; obsolete canonical hook entries are
+released without deleting their files or carrier keys. It does not introduce
+another active manifest format.
 
 `djinn config status` is read-only: it reports the selected source, sanitized
 locations, one drift class, and one remedy without printing workflow or settings

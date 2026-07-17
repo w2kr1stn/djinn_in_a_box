@@ -93,7 +93,8 @@ class AdapterRenderResult(NamedTuple):
     validation_issues: tuple[ValidationIssue, ...]
 
 
-class HookSpec(NamedTuple):
+class NativeOnlySpec(NamedTuple):
+    kind: ArtifactKind
     name: str
     script_path: PurePosixPath
     carrier_path: PurePosixPath | None = None
@@ -104,7 +105,11 @@ class ToolOwnership(NamedTuple):
     instruction_path: PurePosixPath
     instruction_companion: PurePosixPath
     agent_suffix: str
-    hooks: tuple[HookSpec, ...]
+    native_only: tuple[NativeOnlySpec, ...]
+
+    @property
+    def hooks(self) -> tuple[NativeOnlySpec, ...]:
+        return tuple(item for item in self.native_only if item.kind is ArtifactKind.HOOK)
 
 
 OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
@@ -113,16 +118,21 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
         _p("AGENTS.md"),
         ".md",
         (
-            HookSpec(
+            NativeOnlySpec(
+                ArtifactKind.HOOK,
                 "startup",
                 _p("scripts/session-start-status.py"),
                 _p("settings.json"),
                 "SessionStart",
             ),
-            HookSpec(
+            NativeOnlySpec(
+                ArtifactKind.HOOK,
                 "security", _p("security_reminder_hook.py"), _p("settings.json"), "PreToolUse"
             ),
-            HookSpec("ready", _p("ready_notify_hook.py"), _p("settings.json"), "Stop"),
+            NativeOnlySpec(
+                ArtifactKind.HOOK, "ready", _p("ready_notify_hook.py"), _p("settings.json"), "Stop"
+            ),
+            NativeOnlySpec(ArtifactKind.COMMAND, "codex-review", _p("commands/codex-review.md")),
         ),
     ),
     "codex": ToolOwnership(
@@ -130,11 +140,20 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
         _p("CLAUDE.md"),
         ".toml",
         (
-            HookSpec(
+            NativeOnlySpec(
+                ArtifactKind.HOOK,
                 "startup", _p("scripts/session-start-status.py"), _p("hooks.json"), "SessionStart"
             ),
-            HookSpec("security", _p("hooks/security_guard.py"), _p("hooks.json"), "PreToolUse"),
-            HookSpec("ready", _p("hooks/ready_notify.py"), _p("hooks.json"), "Stop"),
+            NativeOnlySpec(
+                ArtifactKind.HOOK,
+                "security",
+                _p("hooks/security_guard.py"),
+                _p("hooks.json"),
+                "PreToolUse",
+            ),
+            NativeOnlySpec(
+                ArtifactKind.HOOK, "ready", _p("hooks/ready_notify.py"), _p("hooks.json"), "Stop"
+            ),
         ),
     ),
     "opencode": ToolOwnership(
@@ -142,9 +161,9 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
         _p("CLAUDE.md"),
         ".md",
         (
-            HookSpec("startup", _p("plugins/session-start-status.js")),
-            HookSpec("security", _p("plugins/security-reminder.js")),
-            HookSpec("ready", _p("plugins/ready-notify.js")),
+            NativeOnlySpec(ArtifactKind.HOOK, "startup", _p("plugins/session-start-status.js")),
+            NativeOnlySpec(ArtifactKind.HOOK, "security", _p("plugins/security-reminder.js")),
+            NativeOnlySpec(ArtifactKind.HOOK, "ready", _p("plugins/ready-notify.js")),
         ),
     ),
 }
@@ -152,11 +171,20 @@ _PLUGIN_PATHS = frozenset(hook.script_path for hook in OWNERSHIP_MATRIX["opencod
 type _File = tuple[PurePosixPath, bytes, bool]
 
 
+class NativeOnlyReadResult(NamedTuple):
+    artifacts: tuple[WorkflowArtifact, ...]
+    settings_fragments: tuple[SettingsFragment, ...]
+    validation_issues: tuple[ValidationIssue, ...]
+
+
 def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResult:
     root, owned = root.resolve(), OWNERSHIP_MATRIX[tool]
     artifacts: list[WorkflowArtifact] = []
     unresolved: list[UnresolvedItem] = []
     issues: list[ValidationIssue] = []
+    native_only = read_native_only_workflow(root, tool)
+    artifacts.extend(native_only.artifacts)
+    issues.extend(native_only.validation_issues)
     instruction = _read(root, owned.instruction_path, issues)
     if instruction is None:
         issues.append(
@@ -188,52 +216,79 @@ def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResul
             )
     if tool != "codex":
         for item in _scan(root, _p("commands"), issues):
-            if len(item[0].parts) == 2 and item[0].suffix == ".md":
+            if (
+                len(item[0].parts) == 2
+                and item[0].suffix == ".md"
+                and not native_only_file_is_owned(tool, item[0])
+            ):
                 _append(_command(tool, item[0].stem, item), artifacts, unresolved, issues)
-    hook_paths = {hook.script_path for hook in owned.hooks}
     for prefix in (_p("context"), _p("scripts")):
         artifacts.extend(
             _artifact(tool, ArtifactKind.CONTEXT, prefix.name, item)
             for item in _scan(root, prefix, issues)
-            if item[0] not in hook_paths
+            if not native_only_file_is_owned(tool, item[0])
         )
-    carriers: dict[PurePosixPath, Mapping[str, object] | None] = {}
-    for hook in owned.hooks:
-        script = _read(root, hook.script_path, issues)
-        if script is not None and hook.script_path in _PLUGIN_PATHS and not _plugin(script[1]):
-            issues.append(
-                _issue(
-                    f"plugin-export:{hook.name}",
-                    "OpenCode plugin export marker is missing.",
-                    hook.script_path,
-                )
-            )
-        if hook.carrier_path is None:
-            if script is not None:
-                artifacts.append(_artifact(tool, ArtifactKind.HOOK, hook.name, script))
-            continue
-        carriers.setdefault(hook.carrier_path, _json(root, hook.carrier_path, issues))
-        value = _nested(carriers[hook.carrier_path], hook.event)
-        if script is None and value is None:
-            continue
-        if script is None or value is None:
-            issues.append(
-                _issue(
-                    f"hook-incomplete:{hook.name}",
-                    "Hook script and registration must coexist.",
-                    hook.script_path,
-                )
-            )
-            continue
-        artifact = _artifact(tool, ArtifactKind.HOOK, hook.name, script)
-        artifacts.append(artifact)
-        if value != _registration(tool, hook.name):
-            unresolved.append(_blocked(artifact))
     unresolved.extend(_blocked(item) for item in artifacts if item.nonportable_metadata)
     return AdapterReadResult(
         tool,
         tuple(sorted(artifacts, key=lambda item: item.source_path)),
         _unique(unresolved),
+        tuple(sorted(issues)),
+    )
+
+
+def read_native_only_workflow(root: Path, tool: ConfigSyncSource) -> NativeOnlyReadResult:
+    root = root.resolve()
+    artifacts: list[WorkflowArtifact] = []
+    fragments: list[SettingsFragment] = []
+    issues: list[ValidationIssue] = []
+    carriers: dict[PurePosixPath, Mapping[str, object] | None] = {}
+    for item in OWNERSHIP_MATRIX[tool].native_only:
+        if item.kind is ArtifactKind.COMMAND:
+            command = _read(root, item.script_path, issues)
+            if command is not None:
+                _append(_command(tool, item.name, command), artifacts, [], issues)
+            continue
+        script = _read(root, item.script_path, issues)
+        if script is not None and item.script_path in _PLUGIN_PATHS and not _plugin(script[1]):
+            issues.append(
+                _issue(
+                    f"plugin-export:{item.name}",
+                    "OpenCode plugin export marker is missing.",
+                    item.script_path,
+                )
+            )
+        if item.carrier_path is None:
+            if script is not None:
+                artifacts.append(_artifact(tool, item.kind, item.name, script, native=tool))
+            continue
+        carriers.setdefault(item.carrier_path, _json(root, item.carrier_path, issues))
+        value = _nested(carriers[item.carrier_path], item.event)
+        if script is None and value is None:
+            continue
+        if script is None or value is None:
+            issues.append(
+                _issue(
+                    f"hook-incomplete:{item.name}",
+                    "Hook script and registration must coexist.",
+                    item.script_path,
+                )
+            )
+            continue
+        artifact = _artifact(tool, item.kind, item.name, script, native=tool)
+        artifacts.append(artifact)
+        assert item.event is not None
+        fragments.append(
+            SettingsFragment(
+                item.carrier_path,
+                ("hooks", item.event),
+                _dump(value),
+                artifact.identifier,
+            )
+        )
+    return NativeOnlyReadResult(
+        tuple(sorted(artifacts, key=lambda item: item.source_path)),
+        tuple(sorted(fragments)),
         tuple(sorted(issues)),
     )
 
@@ -271,25 +326,22 @@ def render_native_workflow(
             unresolved += [] if rendered else [_blocked(artifact, target)]
         elif artifact.kind == ArtifactKind.CONTEXT:
             files.append(_rendered(artifact.source_path, artifact))
-        else:
-            hook = next(item for item in owned.hooks if item.name == artifact.name)
-            files.append(_rendered(hook.script_path, artifact))
-            if hook.carrier_path and hook.event:
-                fragments.append(
-                    SettingsFragment(
-                        hook.carrier_path,
-                        ("hooks", hook.event),
-                        _dump(_registration(target, hook.name)),
-                        artifact.identifier,
-                    )
-                )
     if target == "codex":
         fragments.append(
             SettingsFragment(
                 _p("config.toml"), ("project_doc_fallback_filenames",), b'["CLAUDE.md"]', "bridge"
             )
         )
-    files_tuple, fragments_tuple = tuple(sorted(files)), tuple(sorted(fragments))
+    files_tuple = tuple(
+        sorted(item for item in files if not native_only_file_is_owned(target, item.relative_path))
+    )
+    fragments_tuple = tuple(
+        sorted(
+            item
+            for item in fragments
+            if not native_only_fragment_is_owned(target, item.carrier_path, item.key_path)
+        )
+    )
     return AdapterRenderResult(
         source.tool,
         target,
@@ -367,21 +419,30 @@ def path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
         and (tool == "claude" or path.stem != "codex-review")
         or len(path.parts) >= 2
         and path.parts[0] in {"context", "scripts"}
-        or path in {hook.script_path for hook in owned.hooks}
+        or path in {item.script_path for item in owned.native_only}
     )
 
 
 def fragment_is_owned(tool: ConfigSyncSource, path: PurePosixPath, keys: tuple[str, ...]) -> bool:
-    hooks = {
-        (hook.carrier_path, ("hooks", hook.event))
-        for hook in OWNERSHIP_MATRIX[tool].hooks
-        if hook.carrier_path and hook.event
-    }
     return (
-        (path, keys) in hooks
+        native_only_fragment_is_owned(tool, path, keys)
         or tool == "codex"
         and (path, keys) == (_p("config.toml"), ("project_doc_fallback_filenames",))
     )
+
+
+def native_only_file_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
+    return path in {item.script_path for item in OWNERSHIP_MATRIX[tool].native_only}
+
+
+def native_only_fragment_is_owned(
+    tool: ConfigSyncSource, path: PurePosixPath, keys: tuple[str, ...]
+) -> bool:
+    return (path, keys) in {
+        (item.carrier_path, ("hooks", item.event))
+        for item in OWNERSHIP_MATRIX[tool].native_only
+        if item.carrier_path and item.event
+    }
 
 
 def _read(root: Path, path: PurePosixPath, issues: list[ValidationIssue]) -> _File | None:
@@ -487,7 +548,7 @@ def _command(
         and metadata.get("name") != expected
     ):
         return None, None, _issue(f"command-fields:{name}", "Command fields are invalid.", item[0])
-    native = name == "codex-review" and tool == "claude"
+    native = native_only_file_is_owned(tool, item[0])
     allowed = (
         _CLAUDE_REVIEW_FIELDS
         if native
@@ -509,7 +570,7 @@ def _command(
         body,
         metadata["description"],
         tuple(sorted(set(metadata) - allowed)),
-        "claude" if native else None,
+        tool if native else None,
     )
     return artifact, _blocked(artifact) if name == "codex-review" and not native else None, None
 
@@ -677,46 +738,6 @@ def _render_command(item: WorkflowArtifact, target: ConfigSyncSource) -> Rendere
         item,
         _markdown((("description", item.description),), item.body),
     )
-
-
-def _registration(tool: ConfigSyncSource, name: str) -> object:
-    if tool == "claude":
-        command = {
-            "startup": "uv run python3 ~/.claude/scripts/session-start-status.py",
-            "security": "uv run python3 ~/.claude_seed/security_reminder_hook.py",
-            "ready": "uv run python3 ~/.claude_seed/ready_notify_hook.py",
-        }[name]
-        return [
-            {
-                "matcher": "Edit|Write" if name == "security" else "",
-                "hooks": [{"type": "command", "command": command}],
-            }
-        ]
-    path = {
-        "startup": "scripts/session-start-status.py",
-        "security": "hooks/security_guard.py",
-        "ready": "hooks/ready_notify.py",
-    }[name]
-    hook: dict[str, str] = {
-        "type": "command",
-        "command": f"bash -lc 'uv run python \"${{CODEX_HOME:-$HOME/.codex}}/{path}\"'",
-    }
-    if name != "ready":
-        hook["statusMessage"] = (
-            "Checking Codex session status"
-            if name == "startup"
-            else "Applying Codex security guard"
-        )
-    return [
-        {
-            "matcher": {
-                "startup": "startup|resume",
-                "security": "Bash|Edit|Write|apply_patch",
-                "ready": "",
-            }[name],
-            "hooks": [hook],
-        }
-    ]
 
 
 def _artifact(

@@ -166,7 +166,7 @@ _TOML_ASSIGNMENT = re.compile(
 _TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _HEX = frozenset("0123456789abcdef")
 _TOOLS = frozenset({"claude", "codex", "opencode"})
-_HOOK_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] = {
+_NATIVE_ONLY_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] = {
     "claude": frozenset(
         {
             (PurePosixPath("settings.json"), ("hooks", "SessionStart")),
@@ -179,17 +179,24 @@ _HOOK_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] 
             (PurePosixPath("hooks.json"), ("hooks", "SessionStart")),
             (PurePosixPath("hooks.json"), ("hooks", "PreToolUse")),
             (PurePosixPath("hooks.json"), ("hooks", "Stop")),
-            (PurePosixPath("config.toml"), ("project_doc_fallback_filenames",)),
         }
     ),
     "opencode": frozenset(),
 }
-_HOOK_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
+_BRIDGE_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] = {
+    "claude": frozenset(),
+    "codex": frozenset(
+        {(PurePosixPath("config.toml"), ("project_doc_fallback_filenames",))}
+    ),
+    "opencode": frozenset(),
+}
+_NATIVE_ONLY_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
     "claude": frozenset(
         {
             PurePosixPath("scripts/session-start-status.py"),
             PurePosixPath("security_reminder_hook.py"),
             PurePosixPath("ready_notify_hook.py"),
+            PurePosixPath("commands/codex-review.md"),
         }
     ),
     "codex": frozenset(
@@ -1444,12 +1451,12 @@ def _path_is_owned(tool: str, path: PurePosixPath) -> bool:
         and (tool == "claude" or path.stem != "codex-review")
         or len(path.parts) >= 2
         and path.parts[0] in {"context", "scripts"}
-        or path in _HOOK_PATHS[tool]
+        or path in _NATIVE_ONLY_PATHS[tool]
     )
 
 
 def _fragment_is_owned(tool: str, path: PurePosixPath, key_path: tuple[str, ...]) -> bool:
-    return (path, key_path) in _HOOK_FRAGMENTS[tool]
+    return (path, key_path) in _NATIVE_ONLY_FRAGMENTS[tool] | _BRIDGE_FRAGMENTS[tool]
 
 
 def _opencode_owned(path: PurePosixPath) -> bool:

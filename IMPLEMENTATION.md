@@ -297,12 +297,16 @@ Only the selected tool's native instruction form is authoritative:
 | Skills            | `skills/<name>/**`                                  | `skills/<name>/**`                               | `skills/<name>/**`                   |
 | Commands          | `commands/*.md`                                     | `skills/command-<name>/**`                       | `commands/*.md`                      |
 | Support           | `context/**`, `scripts/**`                          | `context/**`, `scripts/**`                       | `context/**`, `scripts/**`           |
-| Known hooks       | three Python scripts plus `settings.json` fragments | three Python scripts plus `hooks.json` fragments | three named plugin files             |
+| Native-only hooks | three Python scripts plus `settings.json` fragments | three Python scripts plus `hooks.json` fragments | three named plugin files             |
 
-The known fragments are `SessionStart`, `PreToolUse`, and `Stop`; Codex also
-owns the `project_doc_fallback_filenames` bridge in `config.toml`. The
-Claude-only `/codex-review` command is validated and retained only in its native
-Claude tree.
+The known hook fragments are `SessionStart`, `PreToolUse`, and `Stop`; Codex
+also owns the `project_doc_fallback_filenames` bridge in `config.toml`. Hooks
+and their registrations are native-only, like the Claude-only `/codex-review`
+command: a present native item is validated for ownership, UTF-8, and containment
+(with the OpenCode export-marker check), but is never cross-tool projected or
+stale-removed. Missing native hooks are allowed. Legacy canonical records for
+target-view hooks are released on the next sync without deleting the file or
+carrier key.
 Repository-local instruction files, agents, skills, and commands are outside
 this global projection and are not rewritten.
 
@@ -315,11 +319,15 @@ is invalid rather than translated: workflow synchronization contains no
 provider-invocation path.
 
 `core/config_sync.py` snapshots the selected source, renders the other two
-views, audits the canonical tree, and invokes the publisher in canonical mode.
-It uses the publisher's content fingerprint both after snapshot creation and at
-the commit point. A source change before the first target mutation returns
-`source-changed` without a write; after that point the frozen generation
-finishes, with the manifest written last.
+cross-tool views, reads each tool's native-only artifacts for delivery, audits
+the canonical tree, and invokes the publisher in canonical mode. Canonical
+projection excludes hooks and hook registrations; runtime delivery retains them
+in the complete tool view, so the Claude host-path rewrite and Compose-Claude
+settings merge keep their existing inputs. It uses the publisher's content
+fingerprint both after snapshot creation and at the commit point. A source
+change before the first target mutation returns `source-changed` without a
+write; after that point the frozen generation finishes, with the manifest
+written last.
 
 `core/workflow_publisher.py` is stdlib-only and is both the shared module API
 and the standalone image CLI. It owns the five drift classes, content hashes,

@@ -45,6 +45,12 @@ Repository-local workflow files remain read-only, while credentials, auth,
 history, themes, UI policy, MCP, arbitrary plugins, and unlisted settings remain
 outside this ownership boundary.
 
+Known hooks are native-only per tool. Their scripts, OpenCode plugins, and hook
+registrations are optional author-owned artifacts: when present they are
+validated in their own view (OpenCode plugins also require the export marker),
+but they are never projected to another tool or stale-removed. Runtime delivery
+still receives the complete native view, including those hooks and registrations.
+
 `djinn config status` is safe for diagnostics and automation: it reports a
 sanitized source, drift class, artifact locations, and one remedy without
 printing workflow or settings bodies. It exits `0` only when the state is
