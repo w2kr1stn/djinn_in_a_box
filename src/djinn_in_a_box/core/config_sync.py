@@ -430,8 +430,10 @@ def _build_views(
             tuple(published_fragments),
             source_fingerprint=fingerprint,
             provisioning_placeholder_paths=tuple(
-                PurePosixPath(source) / path
-                for path in provisioning_placeholder_paths(source)
+                PurePosixPath(tool) / path
+                for tool, (rendered_files, _) in projection_views.items()
+                for path in provisioning_placeholder_paths(tool)
+                if any(item.relative_path == path for item in rendered_files)
             ),
         ),
         views,

@@ -216,6 +216,36 @@ def test_collision_and_invalid_artifacts_block_without_mutation(tmp_path: Path) 
     assert _tree(project / "config") == before
 
 
+@pytest.mark.parametrize("source", ("codex", "opencode"))
+def test_non_claude_source_adopts_declared_zero_byte_claude_companion(
+    tmp_path: Path, source: ConfigSyncSource
+) -> None:
+    project, config_path = _workspace(tmp_path, source=source)
+    companion = project / "config/claude/AGENTS.md"
+    companion.write_bytes(b"")
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success
+    assert companion.read_text() == "Shared instructions.\n"
+    assert audit_config_sync(project, config_path=config_path).clean
+
+
+def test_nonempty_claude_companion_blocks_non_claude_source_without_mutation(
+    tmp_path: Path,
+) -> None:
+    project, config_path = _workspace(tmp_path, source="codex")
+    companion = project / "config/claude/AGENTS.md"
+    companion.write_text("operator content\n")
+    before = _tree(project / "config")
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.COLLISION,)
+    assert _tree(project / "config") == before
+
+
 def test_snapshot_before_commit_blocks_without_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
