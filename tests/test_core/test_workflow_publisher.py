@@ -47,9 +47,14 @@ def _view(
     files: tuple[PublishedFile, ...] = (),
     fragments: tuple[CarrierFragment, ...] = (),
     target_tool: str | None = None,
+    provisioning_placeholder_paths: tuple[PurePosixPath, ...] = (),
 ) -> WorkflowView:
     return WorkflowView(
-        "claude", (_file("AGENTS.md", marker), *files), fragments, target_tool=target_tool
+        "claude",
+        (_file("AGENTS.md", marker), *files),
+        fragments,
+        target_tool=target_tool,
+        provisioning_placeholder_paths=provisioning_placeholder_paths,
     )
 
 
@@ -170,13 +175,27 @@ def test_zero_byte_claude_companion_adopts_but_nonempty_file_blocks(tmp_path: Pa
     canonical, target = _roots(tmp_path)
     _write(target / "AGENTS.md", b"")
 
-    adopted = _publish(canonical, target, _view(target_tool="claude"))
+    adopted = _publish(
+        canonical,
+        target,
+        _view(
+            target_tool="claude",
+            provisioning_placeholder_paths=(_p("AGENTS.md"),),
+        ),
+    )
 
     assert adopted.success
     assert (target / "AGENTS.md").read_bytes() == b"one\n"
     (target / RUNTIME_MANIFEST_NAME).unlink()
     (target / "AGENTS.md").write_bytes(b"operator content\n")
-    result = _publish(canonical, target, _view(target_tool="claude"))
+    result = _publish(
+        canonical,
+        target,
+        _view(
+            target_tool="claude",
+            provisioning_placeholder_paths=(_p("AGENTS.md"),),
+        ),
+    )
     assert result.drift_class is DriftClass.COLLISION
 
 
@@ -977,6 +996,27 @@ def test_opencode_cli_delivers_native_plugins_not_managed_by_canonical_manifest(
 
     assert drift.returncode == EXIT_CODES[DriftClass.TARGET_DRIFT]
     assert _tree(target) == before_drift
+
+
+def test_opencode_cli_rejects_untracked_non_native_seed_file(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    seed = tmp_path / "seed"
+    canonical.mkdir()
+    target.mkdir()
+    seed.mkdir()
+    instructions = b"OpenCode instructions\n"
+    _canonical_identity(canonical, files={"AGENTS.md": (instructions, False)})
+    _write(seed / "AGENTS.md", instructions)
+    _write(seed / "plugins/ready-notify.js", b"export const Plugin = () => ({});\n")
+    _write(seed / "commands/untracked.md", b"---\nname: untracked\n---\nUntracked\n")
+    _write(target / "personal.json", b'{"keep":true}\n')
+    before = _tree(target)
+
+    result = _run_cli(seed, canonical, target, "--profile", "opencode")
+
+    assert result.returncode == EXIT_CODES[DriftClass.SOURCE_CHANGED]
+    assert _tree(target) == before
 
 
 def test_opencode_cli_rejects_invalid_native_plugin_before_runtime_mutation(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     CanonicalDeliveryViewResult,
     DriftClass,
+    audit_config_sync,
 )
 from djinn_in_a_box.core.config_workflow import WorkflowDeliveryTarget, prepare_config_workflow
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
@@ -70,6 +71,21 @@ def test_host_runtime_publisher_syncs_selected_view_and_state_manifest(tmp_path:
     assert result.success
     assert (host_codex / "AGENTS.md").read_text() == "shared workflow\n"
     assert (host_codex / RUNTIME_MANIFEST_NAME).is_file()
+
+
+def test_preflight_adopts_only_the_declared_zero_byte_companion(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    companion = project / "config/claude/AGENTS.md"
+    companion.write_bytes(b"")
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+
+    audit = audit_config_sync(project, config_path=config_path)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert audit.drift_classes == (DriftClass.SOURCE_CHANGED,)
+    assert result.success
+    assert companion.read_text() == "shared workflow\n"
+    assert (target.destination_root / "AGENTS.md").read_text() == "shared workflow\n"
 
 
 def test_preflight_reports_one_class_and_remedy_without_workflow_body(tmp_path: Path) -> None:
@@ -218,6 +234,46 @@ def test_runtime_publish_rechecks_source_after_delivery_view_load(
     assert result.problems[0].identifier == DriftClass.SOURCE_CHANGED.value
     assert (destination / "AGENTS.md").read_bytes() == before_agents
     assert (destination / RUNTIME_MANIFEST_NAME).read_bytes() == before_manifest
+
+
+def test_runtime_publish_rechecks_native_only_input_after_delivery_view_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    plugin = project / "config/opencode/plugins/ready-notify.js"
+    plugin.parent.mkdir()
+    plugin.write_bytes(b"export const Plugin = () => ({});\n")
+    target = WorkflowDeliveryTarget("opencode", tmp_path / "host-opencode", provision=True)
+    assert prepare_config_workflow(project, (target,), config_path=config_path).success
+    before_plugin = (target.destination_root / "plugins/ready-notify.js").read_bytes()
+    before_manifest = (target.destination_root / RUNTIME_MANIFEST_NAME).read_bytes()
+    original = workflow_module.load_canonical_delivery_view
+
+    def edit_native_input_after_view_load(
+        project_root: Path,
+        tool: ConfigSyncSource,
+        *,
+        config_path: Path | None = None,
+        canonical_lease: CanonicalLockLease | None = None,
+    ) -> CanonicalDeliveryViewResult:
+        loaded = original(
+            project_root,
+            tool,
+            config_path=config_path,
+            canonical_lease=canonical_lease,
+        )
+        plugin.write_bytes(b"export const Plugin = () => ({ changed: true });\n")
+        return loaded
+
+    monkeypatch.setattr(
+        workflow_module, "load_canonical_delivery_view", edit_native_input_after_view_load
+    )
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    assert result.problems[0].identifier == DriftClass.SOURCE_CHANGED.value
+    assert (target.destination_root / "plugins/ready-notify.js").read_bytes() == before_plugin
+    assert (target.destination_root / RUNTIME_MANIFEST_NAME).read_bytes() == before_manifest
 
 
 def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) -> None:

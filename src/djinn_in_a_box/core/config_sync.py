@@ -25,7 +25,9 @@ from djinn_in_a_box.core.config_sync_adapters import (
     is_safe_relative_path,
     native_only_file_is_owned,
     native_only_fragment_is_owned,
+    native_only_input_paths,
     path_is_owned,
+    provisioning_placeholder_paths,
     read_native_only_workflow,
     read_native_workflow,
     render_native_workflow,
@@ -42,6 +44,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     WorkflowView,
     canonical_lock,
     decode_lean_manifest,
+    fingerprint_source_inputs,
     load_strict_json,
     publish_workflow_view,
     snapshot_file_view,
@@ -108,6 +111,7 @@ class CanonicalDeliveryViewResult:
     audit: ConfigSyncAudit
     view: WorkflowView | None = None
     revision: str | None = None
+    source_inputs: tuple[Path, ...] = ()
     retryable: bool = False
 
 
@@ -117,6 +121,7 @@ class _Build:
     fingerprint: str
     canonical: WorkflowView
     views: Mapping[ConfigSyncSource, WorkflowView]
+    source_inputs: Mapping[ConfigSyncSource, tuple[Path, ...]]
     problems: tuple[SyncProblem, ...]
 
 
@@ -248,8 +253,10 @@ def _load_canonical_delivery_view_locked(
         return CanonicalDeliveryViewResult(False, _invalid_audit(source, build.problems))
     view = build.views[tool]
     manifest = (project_root / "config" / MANIFEST_NAME).read_bytes()
-    revision = _digest(manifest + build.fingerprint.encode())
-    return CanonicalDeliveryViewResult(True, audit, view, revision)
+    revision = _digest(manifest + (view.source_fingerprint or "").encode())
+    return CanonicalDeliveryViewResult(
+        True, audit, view, revision, build.source_inputs[tool]
+    )
 
 
 def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAudit:
@@ -297,6 +304,19 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
         before = snapshot_file_view(source_root, source=source).source_fingerprint
         if before is None:
             raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
+        source_inputs: dict[ConfigSyncSource, tuple[Path, ...]] = {}
+        fingerprints: dict[ConfigSyncSource, str] = {}
+        for tool in _TOOLS:
+            paths = (
+                tuple(
+                    project_root / "config" / tool / path
+                    for path in native_only_input_paths(tool)
+                )
+                if tool != source
+                else ()
+            )
+            source_inputs[tool] = paths
+            fingerprints[tool] = fingerprint_source_inputs(source_root, paths)
         with tempfile.TemporaryDirectory(prefix="djinn-sync-") as temporary:
             snapshot_root = Path(temporary) / source
             shutil.copytree(source_root, snapshot_root)
@@ -304,7 +324,20 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
             snapshot_fingerprint = _fingerprint(snapshot_root)
             if before != after or before != snapshot_fingerprint:
                 raise _BuildError(DriftClass.SOURCE_CHANGED)
-            return _build_views(snapshot_root, source, before, project_root / "config")
+            build = _build_views(
+                snapshot_root,
+                source,
+                before,
+                project_root / "config",
+                fingerprints,
+                source_inputs,
+            )
+            if any(
+                fingerprint_source_inputs(source_root, paths) != fingerprints[tool]
+                for tool, paths in source_inputs.items()
+            ):
+                raise _BuildError(DriftClass.SOURCE_CHANGED)
+            return build
     except _BuildError:
         raise
     except (OSError, RuntimeError) as error:
@@ -316,6 +349,8 @@ def _build_views(
     source: ConfigSyncSource,
     fingerprint: str,
     config_root: Path,
+    source_fingerprints: Mapping[ConfigSyncSource, str],
+    source_inputs: Mapping[ConfigSyncSource, tuple[Path, ...]],
 ) -> _Build:
     read = read_native_workflow(snapshot_root, source)
     problems = [
@@ -362,8 +397,10 @@ def _build_views(
                 CarrierFragment(item.carrier_path, item.key_path, item.value_json)
                 for item in rendered_fragments
             ),
-            source_fingerprint=fingerprint,
+            source_fingerprint=source_fingerprints[tool],
             target_tool=tool,
+            native_only_paths=tuple(native_only_input_paths(tool)),
+            provisioning_placeholder_paths=tuple(provisioning_placeholder_paths(tool)),
         )
     published_files: list[PublishedFile] = []
     published_fragments: list[CarrierFragment] = []
@@ -392,8 +429,13 @@ def _build_views(
             tuple(published_files),
             tuple(published_fragments),
             source_fingerprint=fingerprint,
+            provisioning_placeholder_paths=tuple(
+                PurePosixPath(source) / path
+                for path in provisioning_placeholder_paths(source)
+            ),
         ),
         views,
+        source_inputs,
         tuple(_deduplicate_problems(problems)),
     )
 
@@ -505,12 +547,21 @@ def _compare_manifest(
     recorded_fragments = {
         (item.path, item.key_path): item for item in current_items if item.key_path is not None
     }
+    provisioning_placeholders = frozenset(desired.provisioning_placeholder_paths)
     drifts: list[DriftItem] = []
     for path in sorted(set(wanted_files) | set(recorded_files)):
         wanted = wanted_files.get(path)
         recorded = recorded_files.get(path)
         actual = _file_item_at(config_root / path, path)
-        drifts.extend(_item_drift(wanted, recorded, actual, path))
+        drifts.extend(
+            _item_drift(
+                wanted,
+                recorded,
+                actual,
+                path,
+                provisioning_placeholder=path in provisioning_placeholders,
+            )
+        )
     for key in sorted(set(wanted_fragments) | set(recorded_fragments)):
         wanted = wanted_fragments.get(key)
         recorded = recorded_fragments.get(key)
@@ -528,6 +579,8 @@ def _item_drift(
     recorded: _ManifestItem | None,
     actual: _ManifestItem | None,
     path: PurePosixPath,
+    *,
+    provisioning_placeholder: bool = False,
 ) -> list[DriftItem]:
     if wanted is None:
         if actual is None or actual == recorded:
@@ -535,6 +588,8 @@ def _item_drift(
         return [_drift(DriftClass.TARGET_DRIFT, path)]
     if recorded is None:
         if actual is None or actual == wanted:
+            return [_drift(DriftClass.SOURCE_CHANGED, path)]
+        if provisioning_placeholder and actual == _ManifestItem(path, _digest(b""), False):
             return [_drift(DriftClass.SOURCE_CHANGED, path)]
         return [_drift(DriftClass.COLLISION, path)]
     if actual is None:
@@ -623,7 +678,7 @@ def _migration_stale_residue(
     }
 
     def is_stale(item: _ManifestItem) -> bool:
-        return _release_canonical_manifest_item(item, selected_source) or (
+        return _is_native_only_canonical_item(item) or (
             item.path.parts[0] != selected_source and (item.path, item.key_path) not in wanted
         )
 

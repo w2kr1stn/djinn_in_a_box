@@ -62,6 +62,17 @@ class WorkflowView:
     fragments: tuple[CarrierFragment, ...] = ()
     source_fingerprint: str | None = None
     target_tool: str | None = None
+    native_only_paths: tuple[PurePosixPath, ...] = ()
+    provisioning_placeholder_paths: tuple[PurePosixPath, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NativeOnlySpec:
+    kind: str
+    name: str
+    script_path: PurePosixPath
+    carrier_path: PurePosixPath | None = None
+    event: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,22 +177,67 @@ _TOML_ASSIGNMENT = re.compile(
 _TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _HEX = frozenset("0123456789abcdef")
 _TOOLS = frozenset({"claude", "codex", "opencode"})
+NATIVE_ONLY_SPEC_MATRIX: Mapping[str, tuple[NativeOnlySpec, ...]] = {
+    "claude": (
+        NativeOnlySpec(
+            "hook",
+            "startup",
+            PurePosixPath("scripts/session-start-status.py"),
+            PurePosixPath("settings.json"),
+            "SessionStart",
+        ),
+        NativeOnlySpec(
+            "hook",
+            "security",
+            PurePosixPath("security_reminder_hook.py"),
+            PurePosixPath("settings.json"),
+            "PreToolUse",
+        ),
+        NativeOnlySpec(
+            "hook",
+            "ready",
+            PurePosixPath("ready_notify_hook.py"),
+            PurePosixPath("settings.json"),
+            "Stop",
+        ),
+        NativeOnlySpec("command", "codex-review", PurePosixPath("commands/codex-review.md")),
+    ),
+    "codex": (
+        NativeOnlySpec(
+            "hook",
+            "startup",
+            PurePosixPath("scripts/session-start-status.py"),
+            PurePosixPath("hooks.json"),
+            "SessionStart",
+        ),
+        NativeOnlySpec(
+            "hook",
+            "security",
+            PurePosixPath("hooks/security_guard.py"),
+            PurePosixPath("hooks.json"),
+            "PreToolUse",
+        ),
+        NativeOnlySpec(
+            "hook",
+            "ready",
+            PurePosixPath("hooks/ready_notify.py"),
+            PurePosixPath("hooks.json"),
+            "Stop",
+        ),
+    ),
+    "opencode": (
+        NativeOnlySpec("hook", "startup", PurePosixPath("plugins/session-start-status.js")),
+        NativeOnlySpec("hook", "security", PurePosixPath("plugins/security-reminder.js")),
+        NativeOnlySpec("hook", "ready", PurePosixPath("plugins/ready-notify.js")),
+    ),
+}
 _NATIVE_ONLY_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] = {
-    "claude": frozenset(
-        {
-            (PurePosixPath("settings.json"), ("hooks", "SessionStart")),
-            (PurePosixPath("settings.json"), ("hooks", "PreToolUse")),
-            (PurePosixPath("settings.json"), ("hooks", "Stop")),
-        }
-    ),
-    "codex": frozenset(
-        {
-            (PurePosixPath("hooks.json"), ("hooks", "SessionStart")),
-            (PurePosixPath("hooks.json"), ("hooks", "PreToolUse")),
-            (PurePosixPath("hooks.json"), ("hooks", "Stop")),
-        }
-    ),
-    "opencode": frozenset(),
+    tool: frozenset(
+        (item.carrier_path, ("hooks", item.event))
+        for item in specs
+        if item.carrier_path is not None and item.event is not None
+    )
+    for tool, specs in NATIVE_ONLY_SPEC_MATRIX.items()
 }
 _BRIDGE_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] = {
     "claude": frozenset(),
@@ -191,28 +247,8 @@ _BRIDGE_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]
     "opencode": frozenset(),
 }
 _NATIVE_ONLY_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
-    "claude": frozenset(
-        {
-            PurePosixPath("scripts/session-start-status.py"),
-            PurePosixPath("security_reminder_hook.py"),
-            PurePosixPath("ready_notify_hook.py"),
-            PurePosixPath("commands/codex-review.md"),
-        }
-    ),
-    "codex": frozenset(
-        {
-            PurePosixPath("scripts/session-start-status.py"),
-            PurePosixPath("hooks/security_guard.py"),
-            PurePosixPath("hooks/ready_notify.py"),
-        }
-    ),
-    "opencode": frozenset(
-        {
-            PurePosixPath("plugins/session-start-status.js"),
-            PurePosixPath("plugins/security-reminder.js"),
-            PurePosixPath("plugins/ready-notify.js"),
-        }
-    ),
+    tool: frozenset(item.script_path for item in specs)
+    for tool, specs in NATIVE_ONLY_SPEC_MATRIX.items()
 }
 
 
@@ -237,6 +273,7 @@ def snapshot_file_view(
     ignored_paths: Collection[PurePosixPath] = (),
     profile: str | None = None,
     target_tool: str | None = None,
+    native_only_paths: Collection[PurePosixPath] = (),
 ) -> WorkflowView:
     try:
         files, fingerprint = _read_file_tree(view_root, ignored_paths, profile)
@@ -249,6 +286,7 @@ def snapshot_file_view(
         tuple(files),
         source_fingerprint=fingerprint,
         target_tool=target_tool,
+        native_only_paths=tuple(native_only_paths),
     )
 
 
@@ -260,6 +298,7 @@ def publish_workflow_view(
     *,
     canonical_lease: CanonicalLockLease | None = None,
     source_root: Path | None = None,
+    source_inputs: Collection[Path] = (),
     ignored_source_paths: Collection[PurePosixPath] = (),
     source_profile: str | None = None,
     preflight_manifest: bytes | None = None,
@@ -281,6 +320,7 @@ def publish_workflow_view(
                 canonical_target,
                 canonical_lease,
                 source_root,
+                source_inputs,
                 ignored_source_paths,
                 source_profile,
                 preflight_manifest,
@@ -294,6 +334,7 @@ def publish_workflow_view(
                 canonical_target,
                 lease,
                 source_root,
+                source_inputs,
                 ignored_source_paths,
                 source_profile,
                 preflight_manifest,
@@ -315,6 +356,7 @@ def _publish_with_lease(
     canonical_target: bool,
     lease: CanonicalLockLease,
     source_root: Path | None,
+    source_inputs: Collection[Path],
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
     preflight_manifest: bytes | None,
@@ -326,6 +368,7 @@ def _publish_with_lease(
             target_root,
             manifest_relative,
             source_root,
+            source_inputs,
             ignored_source_paths,
             source_profile,
             preflight_manifest,
@@ -338,6 +381,7 @@ def _publish_with_lease(
             target_root,
             manifest_relative,
             source_root,
+            source_inputs,
             ignored_source_paths,
             source_profile,
             preflight_manifest,
@@ -351,6 +395,7 @@ def _publish_locked(
     target_root: Path,
     manifest_relative: PurePosixPath,
     source_root: Path | None,
+    source_inputs: Collection[Path],
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
     preflight_manifest: bytes | None,
@@ -395,7 +440,12 @@ def _publish_locked(
             legacy_residue = (target_root / legacy_relative).exists()
     expected_fingerprint = view.source_fingerprint
     if source_root is not None:
-        current_fingerprint = _fingerprint_tree(source_root, ignored_source_paths, source_profile)
+        current_fingerprint = fingerprint_source_inputs(
+            source_root,
+            source_inputs,
+            ignored_paths=ignored_source_paths,
+            profile=source_profile,
+        )
         if expected_fingerprint is None:
             expected_fingerprint = current_fingerprint
         elif current_fingerprint != expected_fingerprint:
@@ -408,6 +458,7 @@ def _publish_locked(
             manifest_snapshot,
             canonical_target=canonical_target,
             target_tool=target_tool,
+            provisioning_placeholder_paths=view.provisioning_placeholder_paths,
         )
     except PublishError:
         if legacy_residue:
@@ -419,6 +470,7 @@ def _publish_locked(
                 prior,
                 legacy_relative,
                 source_root=source_root,
+                source_inputs=source_inputs,
                 ignored_source_paths=ignored_source_paths,
                 source_profile=source_profile,
                 expected_fingerprint=expected_fingerprint,
@@ -432,6 +484,7 @@ def _publish_locked(
         prior,
         legacy_relative,
         source_root=source_root,
+        source_inputs=source_inputs,
         ignored_source_paths=ignored_source_paths,
         source_profile=source_profile,
         expected_fingerprint=expected_fingerprint,
@@ -518,8 +571,9 @@ def _preflight(
     prior: _Manifest | None,
     manifest_snapshot: _Snapshot | None,
     *,
-    canonical_target: bool,
-    target_tool: str | None,
+    canonical_target: bool = False,
+    target_tool: str | None = None,
+    provisioning_placeholder_paths: Collection[PurePosixPath] = (),
 ) -> _Preflight:
     prior_files: Mapping[PurePosixPath, _FileState] = prior.files if prior else {}
     prior_fragments: Mapping[tuple[PurePosixPath, tuple[str, ...]], _FragmentState] = (
@@ -539,8 +593,7 @@ def _preflight(
                 current,
                 wanted,
                 previous,
-                canonical_target=canonical_target,
-                target_tool=target_tool,
+                provisioning_placeholder_paths=provisioning_placeholder_paths,
             )
             if classification is not None:
                 classes.append(classification)
@@ -579,13 +632,12 @@ def _file_update_class(
     wanted: _FileState,
     previous: _FileState | None,
     *,
-    canonical_target: bool,
-    target_tool: str | None,
+    provisioning_placeholder_paths: Collection[PurePosixPath],
 ) -> DriftClass | None:
     if previous is None:
         if current is None or current.state == wanted:
             return None
-        if _zero_byte_claude_companion(path, current, canonical_target, target_tool):
+        if path in provisioning_placeholder_paths and _zero_byte_file(current):
             return None
         return DriftClass.COLLISION
     if current is None:
@@ -601,22 +653,8 @@ def _file_removal_class(current: _Snapshot | None, previous: _FileState) -> Drif
     return DriftClass.TARGET_DRIFT
 
 
-def _zero_byte_claude_companion(
-    path: PurePosixPath,
-    current: _Snapshot | None,
-    canonical_target: bool,
-    target_tool: str | None,
-) -> bool:
-    return (
-        current is not None
-        and (
-            path == PurePosixPath("claude/AGENTS.md")
-            if canonical_target
-            else target_tool == "claude" and path == PurePosixPath("AGENTS.md")
-        )
-        and current.content == b""
-        and not current.executable
-    )
+def _zero_byte_file(current: _Snapshot | None) -> bool:
+    return current is not None and current.content == b"" and not current.executable
 
 
 def _carrier_classes(
@@ -657,6 +695,7 @@ def _commit(
     legacy_relative: PurePosixPath | None,
     *,
     source_root: Path | None,
+    source_inputs: Collection[Path],
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
     expected_fingerprint: str | None,
@@ -673,7 +712,12 @@ def _commit(
         _before_target_commit()
         if source_root is not None and (
             expected_fingerprint is None
-            or _fingerprint_tree(source_root, ignored_source_paths, source_profile)
+            or fingerprint_source_inputs(
+                source_root,
+                source_inputs,
+                ignored_paths=ignored_source_paths,
+                profile=source_profile,
+            )
             != expected_fingerprint
         ):
             raise PublishError(DriftClass.SOURCE_CHANGED)
@@ -1379,6 +1423,42 @@ def _fingerprint_tree(
     return fingerprint
 
 
+def fingerprint_source_inputs(
+    source_root: Path,
+    source_inputs: Collection[Path] = (),
+    *,
+    ignored_paths: Collection[PurePosixPath] = (),
+    profile: str | None = None,
+) -> str:
+    """Fingerprint the source view and every separately-read native input."""
+    if not source_inputs:
+        return _fingerprint_tree(source_root, ignored_paths, profile)
+    digest = hashlib.sha256()
+    digest.update(b"source-root\0")
+    digest.update(_fingerprint_tree(source_root, ignored_paths, profile).encode())
+    for path in sorted({item.absolute() for item in source_inputs}, key=str):
+        digest.update(str(path).encode())
+        digest.update(b"\0")
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+            continue
+        except OSError as error:
+            raise PublishError(DriftClass.SOURCE_CHANGED) from error
+        if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+            raise PublishError(DriftClass.SOURCE_CHANGED)
+        try:
+            digest.update(b"file\0")
+            digest.update(b"1" if info.st_mode & stat.S_IXUSR else b"0")
+            digest.update(b"\0")
+            digest.update(_digest(path.read_bytes()).encode())
+            digest.update(b"\0")
+        except OSError as error:
+            raise PublishError(DriftClass.SOURCE_CHANGED) from error
+    return digest.hexdigest()
+
+
 def _fingerprint_files(files: Sequence[PublishedFile]) -> str:
     digest = hashlib.sha256()
     for item in files:
@@ -1544,7 +1624,7 @@ def _verify_seed_against_canonical_manifest(
     actual = {
         item.relative_path: _FileState(_digest(item.content), item.executable)
         for item in view.files
-        if item.relative_path in expected
+        if item.relative_path not in view.native_only_paths
     }
     if view.source != manifest.source or actual != expected:
         raise PublishError(DriftClass.SOURCE_CHANGED)
@@ -1583,6 +1663,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ignored_paths=ignored_paths,
                     profile=arguments.profile,
                     target_tool=arguments.profile,
+                    native_only_paths=(
+                        _NATIVE_ONLY_PATHS[arguments.profile]
+                        if arguments.profile is not None
+                        else ()
+                    ),
                 )
                 _verify_seed_against_canonical_manifest(view, manifest, arguments.profile)
                 result = publish_workflow_view(

@@ -507,6 +507,19 @@ def test_legacy_migration_releases_edited_native_hook_records_without_deleting_t
     assert audit_config_sync(project, config_path=config_path).clean
 
 
+def test_nonselected_native_carrier_duplicate_key_blocks_without_mutation(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    carrier = project / "config/codex/hooks.json"
+    carrier.write_bytes(b'{"hooks":{"Stop":[]},"hooks":{"Stop":[]}}')
+    before = _tree(project / "config")
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(project / "config") == before
+
+
 def test_legacy_migration_retry_accepts_missing_stale_file_after_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -542,6 +555,24 @@ def test_legacy_migration_retry_accepts_missing_stale_file_after_crash(
     assert not stale.exists()
     assert sync_config(project, config_path=config_path).success
     assert audit_config_sync(project, config_path=config_path).clean
+
+
+def test_legacy_migration_rejects_missing_selected_source_record(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    agent = project / "config/claude/agents/reviewer.md"
+    agent.parent.mkdir()
+    agent.write_text("---\nname: reviewer\ndescription: Review\n---\n\nReview.\n")
+    legacy = _legacy_manifest(project)
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_bytes(json.dumps(legacy, sort_keys=True).encode())
+    agent.unlink()
+    before_manifest = manifest_path.read_bytes()
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert manifest_path.read_bytes() == before_manifest
 
 
 def test_legacy_migration_source_change_keeps_legacy_manifest(

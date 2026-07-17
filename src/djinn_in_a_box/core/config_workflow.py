@@ -193,6 +193,7 @@ def prepare_config_workflow(
                     target.destination_root / RUNTIME_MANIFEST_NAME,
                     canonical_lease=lease,
                     source_root=canonical_root / loaded.audit.configured_source,
+                    source_inputs=loaded.source_inputs,
                 )
         except OSError:
             return _failure("invalid-or-semantic")
@@ -243,6 +244,8 @@ def _host_claude_view(
         tuple(fragments),
         view.source_fingerprint,
         view.target_tool,
+        view.native_only_paths,
+        view.provisioning_placeholder_paths,
     )
 
 

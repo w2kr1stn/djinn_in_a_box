@@ -14,6 +14,11 @@ from typing import NamedTuple, cast
 import tomli_w
 
 from djinn_in_a_box.config.models import ConfigSyncSource
+from djinn_in_a_box.core.workflow_publisher import (
+    NATIVE_ONLY_SPEC_MATRIX,
+    ManifestError,
+    load_strict_json,
+)
 
 _p = PurePosixPath
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -106,10 +111,20 @@ class ToolOwnership(NamedTuple):
     instruction_companion: PurePosixPath
     agent_suffix: str
     native_only: tuple[NativeOnlySpec, ...]
+    provisioning_placeholders: tuple[PurePosixPath, ...] = ()
 
     @property
     def hooks(self) -> tuple[NativeOnlySpec, ...]:
         return tuple(item for item in self.native_only if item.kind is ArtifactKind.HOOK)
+
+
+def _native_specs(tool: ConfigSyncSource) -> tuple[NativeOnlySpec, ...]:
+    return tuple(
+        NativeOnlySpec(
+            ArtifactKind(item.kind), item.name, item.script_path, item.carrier_path, item.event
+        )
+        for item in NATIVE_ONLY_SPEC_MATRIX[tool]
+    )
 
 
 OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
@@ -117,54 +132,20 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
         _p("CLAUDE.md"),
         _p("AGENTS.md"),
         ".md",
-        (
-            NativeOnlySpec(
-                ArtifactKind.HOOK,
-                "startup",
-                _p("scripts/session-start-status.py"),
-                _p("settings.json"),
-                "SessionStart",
-            ),
-            NativeOnlySpec(
-                ArtifactKind.HOOK,
-                "security", _p("security_reminder_hook.py"), _p("settings.json"), "PreToolUse"
-            ),
-            NativeOnlySpec(
-                ArtifactKind.HOOK, "ready", _p("ready_notify_hook.py"), _p("settings.json"), "Stop"
-            ),
-            NativeOnlySpec(ArtifactKind.COMMAND, "codex-review", _p("commands/codex-review.md")),
-        ),
+        _native_specs("claude"),
+        (_p("AGENTS.md"),),
     ),
     "codex": ToolOwnership(
         _p("AGENTS.md"),
         _p("CLAUDE.md"),
         ".toml",
-        (
-            NativeOnlySpec(
-                ArtifactKind.HOOK,
-                "startup", _p("scripts/session-start-status.py"), _p("hooks.json"), "SessionStart"
-            ),
-            NativeOnlySpec(
-                ArtifactKind.HOOK,
-                "security",
-                _p("hooks/security_guard.py"),
-                _p("hooks.json"),
-                "PreToolUse",
-            ),
-            NativeOnlySpec(
-                ArtifactKind.HOOK, "ready", _p("hooks/ready_notify.py"), _p("hooks.json"), "Stop"
-            ),
-        ),
+        _native_specs("codex"),
     ),
     "opencode": ToolOwnership(
         _p("AGENTS.md"),
         _p("CLAUDE.md"),
         ".md",
-        (
-            NativeOnlySpec(ArtifactKind.HOOK, "startup", _p("plugins/session-start-status.js")),
-            NativeOnlySpec(ArtifactKind.HOOK, "security", _p("plugins/security-reminder.js")),
-            NativeOnlySpec(ArtifactKind.HOOK, "ready", _p("plugins/ready-notify.js")),
-        ),
+        _native_specs("opencode"),
     ),
 }
 _PLUGIN_PATHS = frozenset(hook.script_path for hook in OWNERSHIP_MATRIX["opencode"].hooks)
@@ -392,8 +373,8 @@ def validate_rendered_workflow(
             )
         seen.add(key)
         try:
-            json.loads(item.value_json)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            load_strict_json(item.value_json)
+        except ManifestError:
             issues.append(
                 _issue(f"invalid-fragment:{item.artifact_id}", "Settings fragment is invalid JSON.")
             )
@@ -437,7 +418,24 @@ def fragment_is_owned(tool: ConfigSyncSource, path: PurePosixPath, keys: tuple[s
 
 
 def native_only_file_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
-    return path in {item.script_path for item in OWNERSHIP_MATRIX[tool].native_only}
+    return path in {
+        item.script_path for item in OWNERSHIP_MATRIX[tool].native_only
+    }
+
+
+def native_only_input_paths(tool: ConfigSyncSource) -> frozenset[PurePosixPath]:
+    """Return every canonical path whose native bytes can enter a runtime view."""
+    return frozenset(
+        path
+        for item in OWNERSHIP_MATRIX[tool].native_only
+        for path in (item.script_path, item.carrier_path)
+        if path is not None
+    )
+
+
+def provisioning_placeholder_paths(tool: ConfigSyncSource) -> frozenset[PurePosixPath]:
+    """Return mount-source placeholders declared by the ownership matrix."""
+    return frozenset(OWNERSHIP_MATRIX[tool].provisioning_placeholders)
 
 
 def native_only_fragment_is_owned(
@@ -660,8 +658,8 @@ def _json(
     if item is None:
         return None
     try:
-        return _mapping(json.loads(item[1]))
-    except (json.JSONDecodeError, ValueError):
+        return _mapping(load_strict_json(item[1]))
+    except (ManifestError, ValueError):
         issues.append(_issue(f"invalid-json:{path}", "Settings carrier is invalid JSON.", path))
         return None
 
@@ -679,10 +677,10 @@ def _file_issues(tool: ConfigSyncSource, item: RenderedFile) -> tuple[Validation
         )
     try:
         if item.relative_path.suffix == ".json":
-            json.loads(text)
+            load_strict_json(item.content)
         if item.relative_path.suffix == ".toml":
             tomllib.loads(text)
-    except (json.JSONDecodeError, tomllib.TOMLDecodeError):
+    except (ManifestError, tomllib.TOMLDecodeError):
         return (
             _issue(
                 f"invalid-data:{item.artifact_id}",
