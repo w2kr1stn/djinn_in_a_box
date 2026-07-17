@@ -122,13 +122,18 @@ def prepare_config_workflow(
     config_path: Path | None = None,
     config_snapshot: AppConfig | None = None,
     require_compose_host_env: bool = False,
+    container_image_compatibility: WorkflowImageCompatibility | None = None,
 ) -> WorkflowPreparationResult:
     try:
         config = config_snapshot if config_snapshot is not None else load_config(config_path)
     except (OSError, TypeError, ValueError):
         return _failure("invalid-or-semantic")
     if require_compose_host_env:
-        image_compatibility = workflow_image_compatible()
+        image_compatibility = (
+            container_image_compatibility
+            if container_image_compatibility is not None
+            else workflow_image_compatible()
+        )
         if image_compatibility is not WorkflowImageCompatibility.COMPATIBLE:
             if image_compatibility is WorkflowImageCompatibility.UNKNOWN:
                 problem = WorkflowPreparationProblem(

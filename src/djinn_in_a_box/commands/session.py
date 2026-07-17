@@ -78,13 +78,14 @@ def session(
         error(str(e))
         raise typer.Exit(1) from None
 
-    if agent == "opencode" and target.container_mode:
-        image_compatibility = mgr.workflow_image_compatible(target)
-        if image_compatibility is WorkflowImageCompatibility.UNKNOWN:
+    container_image_compatibility: WorkflowImageCompatibility | None = None
+    if target.container_mode:
+        container_image_compatibility = mgr.workflow_image_compatible(target)
+        if container_image_compatibility is WorkflowImageCompatibility.UNKNOWN:
             error("Docker daemon/container not reachable.")
             warning("Retry.")
             raise typer.Exit(1)
-        if image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
+        if container_image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
             error("Workflow image is incompatible.")
             warning("Rebuild/recreate required.")
             raise typer.Exit(1)
@@ -114,6 +115,7 @@ def session(
             delivery_targets,
             config_snapshot=config,
             require_compose_host_env=target.container_mode,
+            container_image_compatibility=container_image_compatibility,
         )
         if not workflow.success:
             problem = workflow.problems[0]

@@ -450,8 +450,10 @@ def test_legacy_migration_source_change_keeps_legacy_manifest(
     before_manifest = manifest_path.read_bytes()
     original = sync_module._migrate_legacy  # pyright: ignore[reportPrivateUsage]
 
-    def migrate_then_edit(config_root: Path, legacy: Mapping[str, object]) -> bytes:
-        preflight = original(config_root, legacy)
+    def migrate_then_edit(
+        config_root: Path, legacy: Mapping[str, object], selected_source: ConfigSyncSource
+    ) -> bytes:
+        preflight = original(config_root, legacy, selected_source)
         (project / "config/claude/CLAUDE.md").write_text("operator edit\n")
         return preflight
 
@@ -461,6 +463,40 @@ def test_legacy_migration_source_change_keeps_legacy_manifest(
     assert result.success is False
     assert result.audit.drift_classes == (DriftClass.SOURCE_CHANGED,)
     assert manifest_path.read_bytes() == before_manifest
+
+
+def test_legacy_migration_switch_releases_the_new_source_records(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    claude_agent = project / "config/claude/agents/reviewer.md"
+    claude_agent.parent.mkdir()
+    claude_agent.write_text("---\nname: reviewer\ndescription: Review\n---\n\nReview.\n")
+    assert sync_config(project, config_path=config_path).success
+    codex_agent = project / "config/codex/agents/reviewer.toml"
+    expected_agent = codex_agent.read_bytes()
+    legacy = _legacy_manifest(project)
+    managed = _objects(legacy["managed"])
+    codex = _objects(managed["codex"])
+    files = _objects(codex["files"])
+    files["agents/reviewer.toml"] = _hash(codex_agent)
+    codex["files"] = files
+    managed["codex"] = codex
+    legacy["managed"] = managed
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(legacy, sort_keys=True))
+    save_config(
+        AppConfig(
+            code_dir=tmp_path / "code",
+            config_root=tmp_path / "runtime",
+            config_sync=ConfigSyncConfig(source="codex"),
+        ),
+        config_path,
+    )
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success
+    assert codex_agent.read_bytes() == expected_agent
+    assert audit_config_sync(project, config_path=config_path).clean
 
 
 def test_legacy_semantic_record_still_nonportable_is_not_migrated(tmp_path: Path) -> None:
@@ -514,6 +550,45 @@ def test_malformed_legacy_manifest_fails_closed(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(project / "config") == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("schema_version", 999), ("adapter_revision", 999), ("source_hash", "invalid")],
+)
+def test_legacy_manifest_metadata_is_validated_before_migration(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    legacy = _legacy_manifest(project)
+    legacy[field] = value
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(legacy, sort_keys=True))
+    before = _tree(project / "config")
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(project / "config") == before
+
+
+def test_missing_managed_canonical_file_is_target_drift_without_reconstruction(
+    tmp_path: Path,
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    managed = project / "config/codex/AGENTS.md"
+    managed.unlink()
+    before = _tree(project / "config")
+
+    audit = audit_config_sync(project, config_path=config_path)
+    result = sync_config(project, config_path=config_path)
+
+    assert audit.drift_classes == (DriftClass.TARGET_DRIFT,)
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.TARGET_DRIFT,)
     assert _tree(project / "config") == before
 
 

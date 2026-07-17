@@ -170,8 +170,8 @@ _HOOK_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
     "claude": frozenset(
         {
             PurePosixPath("scripts/session-start-status.py"),
-            PurePosixPath("scripts/security_reminder_hook.py"),
-            PurePosixPath("scripts/ready_notify_hook.py"),
+            PurePosixPath("security_reminder_hook.py"),
+            PurePosixPath("ready_notify_hook.py"),
         }
     ),
     "codex": frozenset(
@@ -364,7 +364,14 @@ def _publish_locked(
         )
         if legacy is not None and prior is None:
             prior = legacy
-    preflight = _preflight(target_root, desired, prior, manifest_snapshot)
+    preflight = _preflight(
+        target_root,
+        desired,
+        prior,
+        manifest_snapshot,
+        canonical_target=canonical_target,
+        target_tool=target_tool,
+    )
     expected_fingerprint = view.source_fingerprint
     if source_root is not None:
         current_fingerprint = _fingerprint_tree(source_root, ignored_source_paths, source_profile)
@@ -461,6 +468,9 @@ def _preflight(
     desired: _Desired,
     prior: _Manifest | None,
     manifest_snapshot: _Snapshot | None,
+    *,
+    canonical_target: bool,
+    target_tool: str | None,
 ) -> _Preflight:
     prior_files: Mapping[PurePosixPath, _FileState] = prior.files if prior else {}
     prior_fragments: Mapping[tuple[PurePosixPath, tuple[str, ...]], _FragmentState] = (
@@ -475,7 +485,14 @@ def _preflight(
         wanted = desired.manifest.files.get(path)
         previous = prior_files.get(path)
         if wanted is not None:
-            classification = _file_update_class(path, current, wanted, previous)
+            classification = _file_update_class(
+                path,
+                current,
+                wanted,
+                previous,
+                canonical_target=canonical_target,
+                target_tool=target_tool,
+            )
             if classification is not None:
                 classes.append(classification)
         elif previous is not None:
@@ -512,14 +529,19 @@ def _file_update_class(
     current: _Snapshot | None,
     wanted: _FileState,
     previous: _FileState | None,
+    *,
+    canonical_target: bool,
+    target_tool: str | None,
 ) -> DriftClass | None:
     if previous is None:
         if current is None or current.state == wanted:
             return None
-        if _zero_byte_instruction_companion(path, current):
+        if _zero_byte_claude_companion(path, current, canonical_target, target_tool):
             return None
         return DriftClass.COLLISION
-    if current is None or current.state in {previous, wanted}:
+    if current is None:
+        return DriftClass.TARGET_DRIFT
+    if current.state in {previous, wanted}:
         return None
     return DriftClass.TARGET_DRIFT
 
@@ -530,11 +552,19 @@ def _file_removal_class(current: _Snapshot | None, previous: _FileState) -> Drif
     return DriftClass.TARGET_DRIFT
 
 
-def _zero_byte_instruction_companion(path: PurePosixPath, current: _Snapshot | None) -> bool:
+def _zero_byte_claude_companion(
+    path: PurePosixPath,
+    current: _Snapshot | None,
+    canonical_target: bool,
+    target_tool: str | None,
+) -> bool:
     return (
         current is not None
-        and path.name == "AGENTS.md"
-        and len(path.parts) <= 2
+        and (
+            path == PurePosixPath("claude/AGENTS.md")
+            if canonical_target
+            else target_tool == "claude" and path == PurePosixPath("AGENTS.md")
+        )
         and current.content == b""
         and not current.executable
     )
@@ -558,7 +588,7 @@ def _carrier_classes(
         if prior is None:
             if found and _value_digest(value) != wanted:
                 classes.append(DriftClass.COLLISION)
-        elif found and _value_digest(value) not in {prior.content_hash, wanted}:
+        elif not found or _value_digest(value) not in {prior.content_hash, wanted}:
             classes.append(DriftClass.TARGET_DRIFT)
     for key, state in previous.items():
         if key in desired:
@@ -1349,7 +1379,7 @@ def _after_legacy_delivery_verified() -> None:
     return None
 
 
-def _canonical_source(canonical_root: Path) -> str:
+def _canonical_manifest(canonical_root: Path) -> _Manifest:
     manifest, _snapshot = _load_manifest(
         canonical_root,
         PurePosixPath(CANONICAL_MANIFEST_NAME),
@@ -1358,7 +1388,24 @@ def _canonical_source(canonical_root: Path) -> str:
     )
     if manifest is None:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
-    return manifest.source
+    return manifest
+
+def _verify_seed_against_canonical_manifest(
+    view: WorkflowView, manifest: _Manifest, profile: str | None
+) -> None:
+    if profile != "opencode":
+        return
+    expected = {
+        PurePosixPath(*path.parts[1:]): state
+        for path, state in manifest.files.items()
+        if len(path.parts) > 1 and path.parts[0] == profile
+    }
+    actual = {
+        item.relative_path: _FileState(_digest(item.content), item.executable)
+        for item in view.files
+    }
+    if view.source != manifest.source or actual != expected:
+        raise PublishError(DriftClass.SOURCE_CHANGED)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -1387,14 +1434,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not all(_safe_relative(item) for item in ignored_paths):
                 raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
             with canonical_lock(canonical_root, exclusive=canonical_target) as lease:
-                source = _canonical_source(canonical_root)
+                manifest = _canonical_manifest(canonical_root)
                 view = snapshot_file_view(
                     Path(arguments.view),
-                    source=source,
+                    source=manifest.source,
                     ignored_paths=ignored_paths,
                     profile=arguments.profile,
                     target_tool=arguments.profile,
                 )
+                _verify_seed_against_canonical_manifest(view, manifest, arguments.profile)
                 result = publish_workflow_view(
                     view,
                     canonical_root,

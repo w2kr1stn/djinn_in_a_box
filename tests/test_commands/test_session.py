@@ -261,7 +261,10 @@ class TestSessionCommand:
         instance.preflight_check.assert_not_called()
         instance.run_interactive.assert_not_called()
 
-    def test_old_running_image_stops_before_workflow_or_workspace(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("agent", ("claude", "codex", "opencode"))
+    def test_old_running_image_stops_before_workflow_or_workspace(
+        self, tmp_path: Path, agent: str
+    ) -> None:
         target = SessionTarget(container_id="container-123")
         with (
             patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
@@ -275,13 +278,14 @@ class TestSessionCommand:
             )
             result = runner.invoke(
                 app,
-                ["session", "--project", "new-project", "--agent", "opencode", "--create"],
+                ["session", "--project", "new-project", "--agent", agent, "--create"],
             )
 
         assert result.exit_code == 1
         assert "Rebuild/recreate required." in result.output
         assert not (tmp_path / ".djinn/sessions/new-project").exists()
         workflow.assert_not_called()
+        instance.workflow_image_compatible.assert_called_once_with(target)
         instance.refresh_opencode_workflow.assert_not_called()
         instance.preflight_check.assert_not_called()
 

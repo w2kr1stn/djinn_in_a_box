@@ -157,7 +157,7 @@ def sync_config(
                         False, _audit_for(source, DriftClass.SOURCE_CHANGED), retryable=True
                     )
                 try:
-                    preflight_manifest = _migrate_legacy(config_root, legacy)
+                    preflight_manifest = _migrate_legacy(config_root, legacy, source)
                 except ValueError:
                     return ConfigSyncResult(
                         False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
@@ -473,7 +473,7 @@ def _item_drift(
             return [_drift(DriftClass.SOURCE_CHANGED, path)]
         return [_drift(DriftClass.COLLISION, path)]
     if actual is None:
-        return [_drift(DriftClass.SOURCE_CHANGED, path)]
+        return [_drift(DriftClass.TARGET_DRIFT, path)]
     if actual != recorded and actual != wanted:
         return [_drift(DriftClass.TARGET_DRIFT, path)]
     if wanted != recorded or actual != wanted:
@@ -490,14 +490,18 @@ def _legacy_manifest(path: Path) -> dict[str, object] | None:
     return data if "schema_version" in data else None
 
 
-def _migrate_legacy(config_root: Path, legacy: Mapping[str, object]) -> bytes:
-    source, items = _legacy_items(legacy, config_root)
-    companion = OWNERSHIP_MATRIX[source].instruction_companion
-    prefix = PurePosixPath(source)
+def _migrate_legacy(
+    config_root: Path, legacy: Mapping[str, object], selected_source: ConfigSyncSource
+) -> bytes:
+    manifest_source, items = _legacy_items(legacy, config_root)
+    companion = OWNERSHIP_MATRIX[selected_source].instruction_companion
+    prefix = PurePosixPath(selected_source)
     managed = tuple(
-        item for item in items if item.path.parts[0] != source or item.path == prefix / companion
+        item
+        for item in items
+        if item.path.parts[0] != selected_source or item.path == prefix / companion
     )
-    return _encode_lean(source, managed)
+    return _encode_lean(manifest_source, managed)
 
 
 def _release_selected_source_records(
@@ -537,6 +541,10 @@ def _legacy_items(
     managed_raw = data.get("managed")
     if set(data) != required or active_source not in _TOOLS:
         raise ValueError
+    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+        raise ValueError
+    _legacy_adapter_revision(data["adapter_revision"])
+    _valid_hash(data["source_hash"])
     source: ConfigSyncSource = active_source
     items: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem] = {}
     _legacy_file_map(data["source_files"], PurePosixPath(source), config_root, items)
@@ -568,6 +576,7 @@ def _legacy_items(
             "fragments",
         }:
             raise ValueError
+        _legacy_adapter_revision(semantic_record["adapter_revision"])
         if (
             semantic_record.get("source_tool") != source
             or semantic_record.get("target_tool") not in _TOOLS
@@ -828,6 +837,12 @@ def _valid_hash(value: object) -> str:
     if not isinstance(value, str) or len(value) != 64:
         raise ValueError
     int(value, 16)
+    return value
+
+
+def _legacy_adapter_revision(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= 3:
+        raise ValueError
     return value
 
 

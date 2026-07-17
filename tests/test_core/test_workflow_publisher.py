@@ -166,17 +166,65 @@ def test_unmanaged_collision_and_managed_edit_fail_closed(tmp_path: Path) -> Non
     assert _tree(target) == before_edit
 
 
-def test_zero_byte_instruction_companion_adopts_but_nonempty_file_blocks(tmp_path: Path) -> None:
+def test_zero_byte_claude_companion_adopts_but_nonempty_file_blocks(tmp_path: Path) -> None:
     canonical, target = _roots(tmp_path)
     _write(target / "AGENTS.md", b"")
 
-    adopted = _publish(canonical, target, _view())
+    adopted = _publish(canonical, target, _view(target_tool="claude"))
 
     assert adopted.success
     assert (target / "AGENTS.md").read_bytes() == b"one\n"
     (target / RUNTIME_MANIFEST_NAME).unlink()
     (target / "AGENTS.md").write_bytes(b"operator content\n")
-    assert _publish(canonical, target, _view()).drift_class is DriftClass.COLLISION
+    result = _publish(canonical, target, _view(target_tool="claude"))
+    assert result.drift_class is DriftClass.COLLISION
+
+
+@pytest.mark.parametrize("target_tool", ("codex", "opencode"))
+def test_zero_byte_native_agents_file_is_a_collision(
+    tmp_path: Path, target_tool: str
+) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"")
+    before = _tree(target)
+
+    result = _publish(canonical, target, _view(target_tool=target_tool))
+
+    assert result.drift_class is DriftClass.COLLISION
+    assert _tree(target) == before
+
+
+def test_claude_root_hook_paths_round_trip_and_adopt_legacy_writer_state(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    security = b"security\n"
+    ready = b"ready\n"
+    view = _view(
+        files=(
+            _file("security_reminder_hook.py", security),
+            _file("ready_notify_hook.py", ready),
+        ),
+        target_tool="claude",
+    )
+
+    assert _publish(canonical, target, view).success
+    assert _publish(canonical, target, view).success
+    (target / RUNTIME_MANIFEST_NAME).unlink()
+    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
+    legacy.write_bytes(
+        _legacy_manifest(
+            {
+                "AGENTS.md": (b"one\n", False),
+                "security_reminder_hook.py": (security, False),
+                "ready_notify_hook.py": (ready, False),
+            }
+        )
+    )
+
+    adopted = _publish(canonical, target, view)
+
+    assert adopted.success
+    assert (target / RUNTIME_MANIFEST_NAME).is_file()
+    assert not legacy.exists()
 
 
 def test_runtime_legacy_manifest_adoption_covers_files_and_fragments(tmp_path: Path) -> None:
@@ -381,6 +429,35 @@ def test_stale_file_and_owned_json_key_are_removed_without_touching_neighbor(
     assert not (target / "agents/obsolete.md").exists()
     assert updated["hooks"] == {"Stop": ["new"]}
     assert updated["operator"] == {"keep": True}
+
+
+def test_missing_managed_file_blocks_without_reconstruction(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(files=(_file("agents/reviewer.md", b"review\n"),))
+    assert _publish(canonical, target, view).success
+    managed = target / "agents/reviewer.md"
+    managed.unlink()
+    before = _tree(target)
+
+    result = _publish(canonical, target, view)
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert _tree(target) == before
+
+
+def test_missing_managed_carrier_key_blocks_without_reconstruction(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(fragments=(_fragment("settings.json", ("hooks", "Stop"), ["ready"]),))
+    assert _publish(canonical, target, view).success
+    carrier = json.loads((target / "settings.json").read_text())
+    del carrier["hooks"]["Stop"]
+    (target / "settings.json").write_text(json.dumps(carrier))
+    before = _tree(target)
+
+    result = _publish(canonical, target, view)
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert _tree(target) == before
 
 
 def test_json_neighbors_are_preserved_semantically(tmp_path: Path) -> None:
@@ -669,8 +746,21 @@ def test_canonical_target_requires_exclusive_mode_and_inherits_held_lease(
     assert (canonical / CANONICAL_MANIFEST_NAME).is_file()
 
 
-def _canonical_identity(root: Path, source: str = "opencode") -> None:
-    (root / CANONICAL_MANIFEST_NAME).write_text(json.dumps({"source": source, "items": []}))
+def _canonical_identity(
+    root: Path,
+    source: str = "opencode",
+    *,
+    files: Mapping[str, tuple[bytes, bool]] | None = None,
+) -> None:
+    items = [
+        {
+            "path": f"opencode/{path}",
+            "content_hash": workflow_publisher._digest(content),
+            "executable": executable,
+        }
+        for path, (content, executable) in sorted((files or {}).items())
+    ]
+    (root / CANONICAL_MANIFEST_NAME).write_text(json.dumps({"source": source, "items": items}))
 
 
 def _run_cli(
@@ -748,9 +838,10 @@ def test_opencode_cli_profile_rejects_foreign_seed_files(tmp_path: Path, foreign
     canonical.mkdir()
     target.mkdir()
     view.mkdir()
-    _canonical_identity(canonical)
-    _write(view / "AGENTS.md", b"OpenCode instructions\n")
-    _write(view / "agents/reviewer.md", b"---\nname: reviewer\n---\nReview\n")
+    instructions = b"OpenCode instructions\n"
+    agent = b"---\nname: reviewer\n---\nReview\n"
+    _write(view / "AGENTS.md", instructions)
+    _write(view / "agents/reviewer.md", agent)
     plugins = {
         "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
         "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
@@ -758,6 +849,14 @@ def test_opencode_cli_profile_rejects_foreign_seed_files(tmp_path: Path, foreign
     }
     for path, content in plugins.items():
         _write(view / path, content)
+    _canonical_identity(
+        canonical,
+        files={
+            "AGENTS.md": (instructions, False),
+            "agents/reviewer.md": (agent, False),
+            **{path: (content, False) for path, content in plugins.items()},
+        },
+    )
     _write(view / foreign_path, b"foreign\n")
     _write(target / "personal.json", b'{"keep":true}\n')
     before = _tree(target)
@@ -765,4 +864,23 @@ def test_opencode_cli_profile_rejects_foreign_seed_files(tmp_path: Path, foreign
     result = _run_cli(view, canonical, target, "--profile", "opencode")
 
     assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert _tree(target) == before
+
+
+def test_opencode_cli_blocks_seed_content_that_differs_from_canonical_manifest(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    view = tmp_path / "view"
+    canonical.mkdir()
+    target.mkdir()
+    view.mkdir()
+    _canonical_identity(canonical, files={"AGENTS.md": (b"canonical\n", False)})
+    _write(view / "AGENTS.md", b"manipulated seed\n")
+    before = _tree(target)
+
+    result = _run_cli(view, canonical, target, "--profile", "opencode")
+
+    assert result.returncode == EXIT_CODES[DriftClass.SOURCE_CHANGED]
     assert _tree(target) == before

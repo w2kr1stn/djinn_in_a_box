@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -315,13 +316,26 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     mcp_config.write_text("{}", encoding="utf-8")
     opencode_seed = tmp_path / ".opencode" / "seed"
     opencode_seed.mkdir(parents=True)
-    (opencode_seed / "AGENTS.md").write_text("OpenCode instructions.\n", encoding="utf-8")
+    instructions = b"OpenCode instructions.\n"
+    (opencode_seed / "AGENTS.md").write_bytes(instructions)
     legacy_opencode_settings = b'{"personal":true}\n'
     (opencode_seed / ".opencode.json").write_bytes(legacy_opencode_settings)
     canonical = tmp_path / "canonical"
     canonical.mkdir()
     (canonical / ".djinn-config-sync.json").write_text(
-        '{"source":"opencode","items":[]}', encoding="utf-8"
+        json.dumps(
+            {
+                "source": "opencode",
+                "items": [
+                    {
+                        "path": "opencode/AGENTS.md",
+                        "content_hash": hashlib.sha256(instructions).hexdigest(),
+                        "executable": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
 
     env = {

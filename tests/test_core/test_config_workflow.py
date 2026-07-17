@@ -88,6 +88,19 @@ def test_preflight_reports_one_class_and_remedy_without_workflow_body(tmp_path: 
     assert sentinel not in repr(result)
 
 
+def test_preflight_does_not_repair_a_missing_managed_canonical_file(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    managed = project / "config/codex/AGENTS.md"
+    managed.unlink()
+
+    result = prepare_config_workflow(project, config_path=config_path)
+
+    assert not result.success
+    assert result.problems[0].identifier == DriftClass.TARGET_DRIFT.value
+    assert not managed.exists()
+
+
 def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publisher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +160,25 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     assert not result.success
     assert result.problems[0].remedy == "Rebuild/recreate required."
     assert sentinel not in repr(result)
+    assert not (runtime / "codex").exists()
+
+
+def test_compose_uses_the_running_container_image_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, runtime = _workspace(tmp_path)
+    monkeypatch.setattr(workflow_module, "workflow_image_compatible", _audit_must_not_run)
+
+    result = prepare_config_workflow(
+        project,
+        (WorkflowDeliveryTarget("codex", runtime / "codex", provision=True),),
+        config_path=config_path,
+        require_compose_host_env=True,
+        container_image_compatibility=WorkflowImageCompatibility.INCOMPATIBLE,
+    )
+
+    assert not result.success
+    assert result.problems[0].remedy == "Rebuild/recreate required."
     assert not (runtime / "codex").exists()
 
 
