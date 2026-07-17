@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import stat
 import tempfile
 import tomllib
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -152,20 +150,21 @@ def sync_config(
                 return ConfigSyncResult(False, _invalid_audit(source, build.problems))
             manifest_path = config_root / MANIFEST_NAME
             legacy = _legacy_manifest(manifest_path)
+            preflight_manifest: bytes | None
             if legacy is not None:
                 if _fingerprint(project_root / "config" / source) != build.fingerprint:
                     return ConfigSyncResult(
                         False, _audit_for(source, DriftClass.SOURCE_CHANGED), retryable=True
                     )
                 try:
-                    _migrate_legacy(config_root, legacy)
+                    preflight_manifest = _migrate_legacy(config_root, legacy)
                 except ValueError:
                     return ConfigSyncResult(
                         False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
                     )
             else:
-                _release_selected_source_records(
-                    manifest_path, source, build.fingerprint, config_root, build.canonical
+                preflight_manifest = _release_selected_source_records(
+                    manifest_path, source, build.fingerprint, config_root
                 )
             result = publish_workflow_view(
                 build.canonical,
@@ -174,8 +173,13 @@ def sync_config(
                 manifest_path,
                 canonical_lease=lease,
                 source_root=config_root / source,
+                preflight_manifest=preflight_manifest,
             )
-            audit = _audit_locked(project_root, source)
+            audit = (
+                _audit_for(source, DriftClass.SOURCE_CHANGED)
+                if result.drift_class is DriftClass.SOURCE_CHANGED
+                else _audit_locked(project_root, source)
+            )
             return ConfigSyncResult(
                 result.success,
                 audit,
@@ -326,6 +330,7 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
                 for item in rendered_fragments
             ),
             source_fingerprint=fingerprint,
+            target_tool=tool,
         )
     published_files: list[PublishedFile] = []
     published_fragments: list[CarrierFragment] = []
@@ -485,14 +490,14 @@ def _legacy_manifest(path: Path) -> dict[str, object] | None:
     return data if "schema_version" in data else None
 
 
-def _migrate_legacy(config_root: Path, legacy: Mapping[str, object]) -> None:
+def _migrate_legacy(config_root: Path, legacy: Mapping[str, object]) -> bytes:
     source, items = _legacy_items(legacy, config_root)
     companion = OWNERSHIP_MATRIX[source].instruction_companion
     prefix = PurePosixPath(source)
     managed = tuple(
         item for item in items if item.path.parts[0] != source or item.path == prefix / companion
     )
-    _atomic_write(config_root / MANIFEST_NAME, _encode_lean(source, managed))
+    return _encode_lean(source, managed)
 
 
 def _release_selected_source_records(
@@ -500,13 +505,12 @@ def _release_selected_source_records(
     source: ConfigSyncSource,
     fingerprint: str,
     config_root: Path,
-    desired: WorkflowView,
-) -> None:
+) -> bytes | None:
     if not manifest_path.exists():
         return
     manifest_source, items = _lean_items(manifest_path.read_bytes())
     if manifest_source == source:
-        return
+        return None
     if _fingerprint(config_root / source) != fingerprint:
         raise _BuildError(DriftClass.SOURCE_CHANGED)
     companion = OWNERSHIP_MATRIX[source].instruction_companion
@@ -514,22 +518,7 @@ def _release_selected_source_records(
     kept = tuple(
         item for item in items if item.path.parts[0] != source or item.path == prefix / companion
     )
-    known = {(item.path, item.key_path) for item in kept}
-    adopted: list[_ManifestItem] = list(kept)
-    for file in desired.files:
-        if file.relative_path.parts[0] != manifest_source:
-            continue
-        actual = _file_item_at(config_root / file.relative_path, file.relative_path)
-        if actual is not None and (actual.path, None) not in known:
-            adopted.append(actual)
-    for fragment in desired.fragments:
-        if fragment.carrier_path.parts[0] != manifest_source:
-            continue
-        key = (fragment.carrier_path, fragment.key_path)
-        actual, issue = _carrier_item_at(config_root / fragment.carrier_path, *key)
-        if not issue and actual is not None and key not in known:
-            adopted.append(actual)
-    _atomic_write(manifest_path, _encode_lean(manifest_source, tuple(adopted)))
+    return _encode_lean(manifest_source, kept)
 
 
 def _legacy_items(
@@ -735,11 +724,24 @@ def _lean_items(raw: bytes) -> tuple[ConfigSyncSource, tuple[_ManifestItem, ...]
                 raise ValueError
         if not is_safe_relative_path(path):
             raise ValueError
+        tool, relative = _manifest_target_path(path)
+        if key_path is None:
+            if not path_is_owned(tool, relative):
+                raise ValueError
+        elif not fragment_is_owned(tool, relative, key_path):
+            raise ValueError
         record = _ManifestItem(
             path, _valid_hash(item.get("content_hash")), _bool(item.get("executable")), key_path
         )
         _add_item(items, record)
     return source, tuple(sorted(items.values(), key=lambda item: (item.path, item.key_path or ())))
+
+
+def _manifest_target_path(path: PurePosixPath) -> tuple[ConfigSyncSource, PurePosixPath]:
+    if len(path.parts) < 2 or path.parts[0] not in _TOOLS:
+        raise ValueError
+    tool = path.parts[0]
+    return tool, PurePosixPath(*path.parts[1:])
 
 
 def _encode_lean(source: ConfigSyncSource, items: tuple[_ManifestItem, ...]) -> bytes:
@@ -859,20 +861,6 @@ def _add_item(
     if key in items and items[key] != item:
         raise ValueError
     items[key] = item
-
-
-def _atomic_write(path: Path, content: bytes) -> None:
-    descriptor, temporary = tempfile.mkstemp(prefix=".djinn-migrate-", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        with suppress(FileNotFoundError):
-            os.unlink(temporary)
-        raise
 
 
 def _problem_from_issue(

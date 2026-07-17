@@ -232,7 +232,13 @@ def _host_claude_view(
             elif fragment.value_json != replacement[1]:
                 return None
         fragments.append(fragment)
-    return WorkflowView(view.source, view.files, tuple(fragments), view.source_fingerprint)
+    return WorkflowView(
+        view.source,
+        view.files,
+        tuple(fragments),
+        view.source_fingerprint,
+        view.target_tool,
+    )
 
 
 def _auto_repairable(audit: ConfigSyncAudit) -> bool:

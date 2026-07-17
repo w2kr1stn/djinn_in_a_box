@@ -5,7 +5,7 @@ import json
 import multiprocessing
 import re
 import stat
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from multiprocessing.synchronize import Event as ProcessEvent
@@ -342,6 +342,77 @@ def test_legacy_unowned_file_is_rejected_without_deleting_operator_file(tmp_path
     assert operator_file.read_bytes() == b"operator-owned\n"
 
 
+@pytest.mark.parametrize("foreign_kind", ("file", "fragment"))
+def test_lean_manifest_rejects_unowned_items_without_mutation(
+    tmp_path: Path, foreign_kind: str
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    config_root = project / "config"
+    manifest_path = config_root / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    if foreign_kind == "file":
+        operator_file = config_root / "codex/operator-private.txt"
+        operator_file.write_bytes(b"operator-owned\n")
+        manifest["items"].append(
+            {
+                "path": "codex/operator-private.txt",
+                "content_hash": hashlib.sha256(operator_file.read_bytes()).hexdigest(),
+                "executable": False,
+            }
+        )
+    else:
+        carrier = config_root / "claude/settings.json"
+        carrier.write_bytes(b'{"operator":{"keep":true}}\n')
+        manifest["items"].append(
+            {
+                "path": "claude/settings.json",
+                "key_path": ["operator", "keep"],
+                "content_hash": hashlib.sha256(b"true").hexdigest(),
+                "executable": False,
+            }
+        )
+    manifest_path.write_text(json.dumps(manifest))
+    before = _tree(config_root)
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(config_root) == before
+
+
+def test_legacy_unowned_carrier_key_is_rejected_without_mutation(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    config_root = project / "config"
+    carrier = config_root / "claude/settings.json"
+    carrier.write_bytes(b'{"operator":{"keep":true}}\n')
+    legacy = _legacy_manifest(project)
+    managed = _objects(legacy["managed"])
+    claude = _objects(managed["claude"])
+    fragments = cast(list[object], claude["fragments"])
+    fragments.append(
+        {
+            "carrier_path": "settings.json",
+            "key_path": ["operator", "keep"],
+            "value_hash": hashlib.sha256(b"true").hexdigest(),
+        }
+    )
+    claude["fragments"] = fragments
+    managed["claude"] = claude
+    legacy["managed"] = managed
+    manifest_path = config_root / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(legacy, sort_keys=True))
+    before = _tree(config_root)
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(config_root) == before
+
+
 def test_legacy_manifest_migrates_atomically_and_removes_stale_item(tmp_path: Path) -> None:
     project, config_path = _workspace(tmp_path)
     assert sync_config(project, config_path=config_path).success
@@ -367,6 +438,29 @@ def test_legacy_manifest_migrates_atomically_and_removes_stale_item(tmp_path: Pa
     assert result.success
     assert not stale.exists()
     assert set(json.loads(manifest_path.read_text())) == {"source", "items"}
+
+
+def test_legacy_migration_source_change_keeps_legacy_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(_legacy_manifest(project), sort_keys=True))
+    before_manifest = manifest_path.read_bytes()
+    original = sync_module._migrate_legacy  # pyright: ignore[reportPrivateUsage]
+
+    def migrate_then_edit(config_root: Path, legacy: Mapping[str, object]) -> bytes:
+        preflight = original(config_root, legacy)
+        (project / "config/claude/CLAUDE.md").write_text("operator edit\n")
+        return preflight
+
+    monkeypatch.setattr(sync_module, "_migrate_legacy", migrate_then_edit)
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.SOURCE_CHANGED,)
+    assert manifest_path.read_bytes() == before_manifest
 
 
 def test_legacy_semantic_record_still_nonportable_is_not_migrated(tmp_path: Path) -> None:
@@ -428,6 +522,7 @@ def test_switch_is_allowed_only_without_edited_managed_targets(tmp_path: Path) -
     assert sync_config(project, config_path=config_path).success
     source = project / "config/codex/AGENTS.md"
     source.write_text("Codex source.\n")
+    (project / "config/claude/CLAUDE.md").write_text("Codex source.\n")
     save_config(
         AppConfig(
             code_dir=tmp_path / "code",
@@ -453,6 +548,64 @@ def test_switch_is_allowed_only_without_edited_managed_targets(tmp_path: Path) -
 
     assert blocked.success is False
     assert DriftClass.TARGET_DRIFT in blocked.audit.drift_classes
+
+
+def test_source_switch_target_drift_keeps_manifest_byte_identical(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    (project / "config/codex/AGENTS.md").write_text("Codex source.\n")
+    (project / "config/claude/CLAUDE.md").write_text("Codex source.\n")
+    (project / "config/opencode/AGENTS.md").write_text("operator edit\n")
+    save_config(
+        AppConfig(
+            code_dir=tmp_path / "code",
+            config_root=tmp_path / "runtime",
+            config_sync=ConfigSyncConfig(source="codex"),
+        ),
+        config_path,
+    )
+    manifest_path = project / "config" / MANIFEST_NAME
+    before_manifest = manifest_path.read_bytes()
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.TARGET_DRIFT,)
+    assert manifest_path.read_bytes() == before_manifest
+
+
+def test_source_switch_rejects_untracked_old_source_content(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    reviewer = project / "config/claude/agents/reviewer.md"
+    reviewer.parent.mkdir()
+    reviewer.write_text("---\nname: reviewer\ndescription: Review\n---\n\nOriginal review.\n")
+    assert sync_config(project, config_path=config_path).success
+    before_reviewer = reviewer.read_bytes()
+    (project / "config/codex/AGENTS.md").write_text("Codex source.\n")
+    codex_reviewer = project / "config/codex/agents/reviewer.toml"
+    codex_reviewer.parent.mkdir(exist_ok=True)
+    codex_reviewer.write_text(
+        'name = "reviewer"\ndescription = "Review"\n'
+        'developer_instructions = "Replacement review."\n'
+    )
+    (project / "config/claude/CLAUDE.md").write_text("Codex source.\n")
+    save_config(
+        AppConfig(
+            code_dir=tmp_path / "code",
+            config_root=tmp_path / "runtime",
+            config_sync=ConfigSyncConfig(source="codex"),
+        ),
+        config_path,
+    )
+    manifest_path = project / "config" / MANIFEST_NAME
+    before_manifest = manifest_path.read_bytes()
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.COLLISION,)
+    assert reviewer.read_bytes() == before_reviewer
+    assert manifest_path.read_bytes() == before_manifest
 
 
 def test_canonical_delivery_view_returns_publisher_view(tmp_path: Path) -> None:

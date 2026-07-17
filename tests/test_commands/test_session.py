@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.core.config_workflow import (
+    WorkflowDeliveryTarget,
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
@@ -152,8 +153,44 @@ class TestSessionCommand:
         workflow.assert_called_once()
         assert workflow.call_args.args == (Path("/project"), ())
         assert workflow.call_args.kwargs["config_snapshot"] is config
+        assert workflow.call_args.kwargs["require_compose_host_env"] is True
         assert events == ["prepare", "refresh", "preflight", "run"]
         instance.resolve_target.assert_called_once_with()
+
+    def test_container_claude_uses_compose_delivery_mode(self, tmp_path: Path) -> None:
+        workspace = tmp_path / ".djinn" / "sessions" / "testproj"
+        workspace.mkdir(parents=True)
+        target = SessionTarget(container_id="container-123")
+        with (
+            patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
+            patch("djinn_in_a_box.commands.session.prepare_config_workflow") as workflow,
+        ):
+            workflow.return_value = WorkflowPreparationResult(True)
+            instance = mock_mgr.return_value
+            instance.resolve_target.return_value = target
+            instance.run_headless.return_value = SessionResult(0)
+
+            result = runner.invoke(
+                app,
+                [
+                    "session",
+                    "--project",
+                    "testproj",
+                    "--agent",
+                    "claude",
+                    "--prompt",
+                    "hello",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert workflow.call_args.args == (
+            Path("/project"),
+            (WorkflowDeliveryTarget("claude", Path("/runtime/claude")),),
+        )
+        assert workflow.call_args.kwargs["require_compose_host_env"] is True
+        instance.refresh_opencode_workflow.assert_not_called()
 
     def test_blocked_workflow_stops_before_workspace_creation_and_agent(
         self, tmp_path: Path

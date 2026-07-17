@@ -61,6 +61,7 @@ class WorkflowView:
     files: tuple[PublishedFile, ...]
     fragments: tuple[CarrierFragment, ...] = ()
     source_fingerprint: str | None = None
+    target_tool: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +147,48 @@ _TOML_ASSIGNMENT = re.compile(
 )
 _TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _HEX = frozenset("0123456789abcdef")
+_TOOLS = frozenset({"claude", "codex", "opencode"})
+_HOOK_FRAGMENTS: Mapping[str, frozenset[tuple[PurePosixPath, tuple[str, ...]]]] = {
+    "claude": frozenset(
+        {
+            (PurePosixPath("settings.json"), ("hooks", "SessionStart")),
+            (PurePosixPath("settings.json"), ("hooks", "PreToolUse")),
+            (PurePosixPath("settings.json"), ("hooks", "Stop")),
+        }
+    ),
+    "codex": frozenset(
+        {
+            (PurePosixPath("hooks.json"), ("hooks", "SessionStart")),
+            (PurePosixPath("hooks.json"), ("hooks", "PreToolUse")),
+            (PurePosixPath("hooks.json"), ("hooks", "Stop")),
+            (PurePosixPath("config.toml"), ("project_doc_fallback_filenames",)),
+        }
+    ),
+    "opencode": frozenset(),
+}
+_HOOK_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
+    "claude": frozenset(
+        {
+            PurePosixPath("scripts/session-start-status.py"),
+            PurePosixPath("scripts/security_reminder_hook.py"),
+            PurePosixPath("scripts/ready_notify_hook.py"),
+        }
+    ),
+    "codex": frozenset(
+        {
+            PurePosixPath("scripts/session-start-status.py"),
+            PurePosixPath("hooks/security_guard.py"),
+            PurePosixPath("hooks/ready_notify.py"),
+        }
+    ),
+    "opencode": frozenset(
+        {
+            PurePosixPath("plugins/session-start-status.js"),
+            PurePosixPath("plugins/security-reminder.js"),
+            PurePosixPath("plugins/ready-notify.js"),
+        }
+    ),
+}
 
 
 @contextmanager
@@ -168,6 +211,7 @@ def snapshot_file_view(
     source: str,
     ignored_paths: Collection[PurePosixPath] = (),
     profile: str | None = None,
+    target_tool: str | None = None,
 ) -> WorkflowView:
     try:
         files, fingerprint = _read_file_tree(view_root, ignored_paths, profile)
@@ -175,7 +219,12 @@ def snapshot_file_view(
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     if not files:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
-    return WorkflowView(source, tuple(files), source_fingerprint=fingerprint)
+    return WorkflowView(
+        source,
+        tuple(files),
+        source_fingerprint=fingerprint,
+        target_tool=target_tool,
+    )
 
 
 def publish_workflow_view(
@@ -188,14 +237,13 @@ def publish_workflow_view(
     source_root: Path | None = None,
     ignored_source_paths: Collection[PurePosixPath] = (),
     source_profile: str | None = None,
+    preflight_manifest: bytes | None = None,
 ) -> PublishResult:
     try:
         desired = _validate_view(view)
         manifest_relative = _manifest_relative(target_root, manifest_path)
         canonical_target = _same_directory(canonical_root, target_root)
-        expected_manifest = (
-            CANONICAL_MANIFEST_NAME if canonical_target else RUNTIME_MANIFEST_NAME
-        )
+        expected_manifest = CANONICAL_MANIFEST_NAME if canonical_target else RUNTIME_MANIFEST_NAME
         if manifest_relative != PurePosixPath(expected_manifest):
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         if canonical_lease is not None:
@@ -210,6 +258,7 @@ def publish_workflow_view(
                 source_root,
                 ignored_source_paths,
                 source_profile,
+                preflight_manifest,
             )
         with canonical_lock(canonical_root, exclusive=canonical_target) as lease:
             return _publish_with_lease(
@@ -222,6 +271,7 @@ def publish_workflow_view(
                 source_root,
                 ignored_source_paths,
                 source_profile,
+                preflight_manifest,
             )
     except PublishError as error:
         return PublishResult(error.drift_class)
@@ -242,6 +292,7 @@ def _publish_with_lease(
     source_root: Path | None,
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
+    preflight_manifest: bytes | None,
 ) -> PublishResult:
     if canonical_target:
         return _publish_locked(
@@ -252,6 +303,7 @@ def _publish_with_lease(
             source_root,
             ignored_source_paths,
             source_profile,
+            preflight_manifest,
             canonical_target=True,
         )
     with _target_lock(target_root):
@@ -263,6 +315,7 @@ def _publish_with_lease(
             source_root,
             ignored_source_paths,
             source_profile,
+            preflight_manifest,
             canonical_target=False,
         )
 
@@ -275,22 +328,46 @@ def _publish_locked(
     source_root: Path | None,
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
+    preflight_manifest: bytes | None,
     *,
     canonical_target: bool,
 ) -> PublishResult:
-    prior, manifest_snapshot = _load_manifest(target_root, manifest_relative)
+    target_tool = None if canonical_target else _target_tool(view)
+    if preflight_manifest is None:
+        prior, manifest_snapshot = _load_manifest(
+            target_root,
+            manifest_relative,
+            canonical_target=canonical_target,
+            target_tool=target_tool,
+        )
+    else:
+        if not canonical_target:
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        manifest_snapshot = _read_snapshot(target_root / manifest_relative)
+        if manifest_snapshot is None:
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        try:
+            prior = _decode_manifest(
+                preflight_manifest,
+                canonical_target=True,
+                target_tool=None,
+            )
+        except _ManifestError as error:
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     legacy_relative: PurePosixPath | None = None
     if not canonical_target:
         legacy_relative = PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME)
-        legacy = _load_legacy_delivery_manifest(target_root, legacy_relative)
+        legacy = _load_legacy_delivery_manifest(
+            target_root,
+            legacy_relative,
+            target_tool=target_tool,
+        )
         if legacy is not None and prior is None:
             prior = legacy
     preflight = _preflight(target_root, desired, prior, manifest_snapshot)
     expected_fingerprint = view.source_fingerprint
     if source_root is not None:
-        current_fingerprint = _fingerprint_tree(
-            source_root, ignored_source_paths, source_profile
-        )
+        current_fingerprint = _fingerprint_tree(source_root, ignored_source_paths, source_profile)
         if expected_fingerprint is None:
             expected_fingerprint = current_fingerprint
         elif current_fingerprint != expected_fingerprint:
@@ -329,15 +406,14 @@ def _validate_lease(
 
 
 def _validate_view(view: WorkflowView) -> _Desired:
-    if not view.source:
+    if view.source not in _TOOLS or (
+        view.target_tool is not None and view.target_tool not in _TOOLS
+    ):
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     files: dict[PurePosixPath, PublishedFile] = {}
     fragments: dict[tuple[PurePosixPath, tuple[str, ...]], CarrierFragment] = {}
     for item in view.files:
-        if (
-            not _safe_relative(item.relative_path)
-            or item.relative_path in files
-        ):
+        if not _safe_relative(item.relative_path) or item.relative_path in files:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         files[item.relative_path] = item
     for fragment in view.fragments:
@@ -355,8 +431,7 @@ def _validate_view(view: WorkflowView) -> _Desired:
         _fragment_value(fragment)
         fragments[key] = fragment
     file_states = {
-        path: _FileState(_digest(item.content), item.executable)
-        for path, item in files.items()
+        path: _FileState(_digest(item.content), item.executable) for path, item in files.items()
     }
     fragment_states = {
         key: _FragmentState(
@@ -419,9 +494,7 @@ def _preflight(
         prior_for_path = _fragment_states_for(path, prior_fragments)
         raw = current.content if current is not None else None
         try:
-            classes.extend(
-                _carrier_classes(path, raw, desired_for_path, prior_for_path)
-            )
+            classes.extend(_carrier_classes(path, raw, desired_for_path, prior_for_path))
             carrier_outputs[path] = _merge_carrier(path, raw, desired_for_path, prior_for_path)
         except _CarrierError:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
@@ -457,9 +530,7 @@ def _file_removal_class(current: _Snapshot | None, previous: _FileState) -> Drif
     return DriftClass.TARGET_DRIFT
 
 
-def _zero_byte_instruction_companion(
-    path: PurePosixPath, current: _Snapshot | None
-) -> bool:
+def _zero_byte_instruction_companion(path: PurePosixPath, current: _Snapshot | None) -> bool:
     return (
         current is not None
         and path.name == "AGENTS.md"
@@ -619,11 +690,7 @@ def _splice_toml(raw: bytes, key: str, value: str | None) -> bytes:
         len(lines),
     )
     assignment_index = next(
-        (
-            index
-            for index, line in enumerate(lines[:header_index])
-            if _toml_line_key(line) == key
-        ),
+        (index for index, line in enumerate(lines[:header_index]) if _toml_line_key(line) == key),
         None,
     )
     assignment = f"{_toml_key(key)} = {value}\n".encode() if value is not None else None
@@ -726,9 +793,7 @@ def _fragment_value(fragment: CarrierFragment) -> object:
     return value
 
 
-def _nested_get(
-    data: Mapping[str, object], keys: tuple[str, ...]
-) -> tuple[bool, object, bool]:
+def _nested_get(data: Mapping[str, object], keys: tuple[str, ...]) -> tuple[bool, object, bool]:
     current = data
     for key in keys[:-1]:
         child = current.get(key)
@@ -799,13 +864,24 @@ def _fragment_states_for(
 
 
 def _load_manifest(
-    target_root: Path, manifest_relative: PurePosixPath
+    target_root: Path,
+    manifest_relative: PurePosixPath,
+    *,
+    canonical_target: bool,
+    target_tool: str | None,
 ) -> tuple[_Manifest | None, _Snapshot | None]:
     snapshot = _read_snapshot(target_root / manifest_relative)
     if snapshot is None:
         return None, None
     try:
-        return _decode_manifest(snapshot.content), snapshot
+        return (
+            _decode_manifest(
+                snapshot.content,
+                canonical_target=canonical_target,
+                target_tool=target_tool,
+            ),
+            snapshot,
+        )
     except _ManifestError as error:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
 
@@ -815,9 +891,14 @@ def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
     try:
         with _target_lock(target_root):
             legacy = target_root / LEGACY_DELIVERY_MANIFEST_NAME
-            if _load_legacy_delivery_manifest(
-                target_root, PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME)
-            ) is None:
+            if (
+                _load_legacy_delivery_manifest(
+                    target_root,
+                    PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME),
+                    target_tool="claude",
+                )
+                is None
+            ):
                 return PublishResult(DriftClass.CLEAN)
             _after_legacy_delivery_verified()
             legacy.unlink()
@@ -830,18 +911,22 @@ def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
 
 
 def _load_legacy_delivery_manifest(
-    target_root: Path, relative_path: PurePosixPath
+    target_root: Path, relative_path: PurePosixPath, *, target_tool: str | None = None
 ) -> _Manifest | None:
     snapshot = _read_snapshot(target_root / relative_path)
     if snapshot is None:
         return None
     try:
-        return _decode_legacy_delivery_manifest(target_root, snapshot.content)
+        return _decode_legacy_delivery_manifest(
+            target_root, snapshot.content, target_tool=target_tool
+        )
     except (_CarrierError, _ManifestError):
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
 
 
-def _decode_legacy_delivery_manifest(target_root: Path, raw: bytes) -> _Manifest:
+def _decode_legacy_delivery_manifest(
+    target_root: Path, raw: bytes, *, target_tool: str | None = None
+) -> _Manifest:
     try:
         parsed: object = json.loads(raw, object_pairs_hook=_strict_object)
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
@@ -851,7 +936,8 @@ def _decode_legacy_delivery_manifest(target_root: Path, raw: bytes) -> _Manifest
         raise _ManifestError
     if type(root["schema_version"]) is not int or root["schema_version"] != 1:
         raise _ManifestError
-    if root["tool"] not in {"claude", "codex", "opencode"}:
+    tool = root["tool"]
+    if not isinstance(tool, str) or tool not in _TOOLS or target_tool not in {None, tool}:
         raise _ManifestError
     file_values = _object(root["files"])
     files: dict[PurePosixPath, _FileState] = {}
@@ -868,6 +954,7 @@ def _decode_legacy_delivery_manifest(target_root: Path, raw: bytes) -> _Manifest
             or not _valid_hash(content_hash)
             or not isinstance(executable, bool)
             or path in files
+            or not _path_is_owned(tool, path)
         ):
             raise _ManifestError
         current = _read_snapshot(target_root / path)
@@ -902,7 +989,11 @@ def _decode_legacy_delivery_manifest(target_root: Path, raw: bytes) -> _Manifest
         ):
             raise _ManifestError
         keys = tuple(cast(list[str], cast(list[object], keys_value)))
-        if carrier.suffix == ".toml" and len(keys) != 1:
+        if (
+            carrier.suffix == ".toml"
+            and len(keys) != 1
+            or not _fragment_is_owned(tool, carrier, keys)
+        ):
             raise _ManifestError
         key = (carrier, keys)
         if key in fragments or carrier in files:
@@ -934,7 +1025,12 @@ def _legacy_value_digest(value: object) -> str:
     return _digest(encoded.encode())
 
 
-def _decode_manifest(raw: bytes) -> _Manifest:
+def _decode_manifest(
+    raw: bytes,
+    *,
+    canonical_target: bool,
+    target_tool: str | None,
+) -> _Manifest:
     try:
         parsed: object = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
@@ -944,7 +1040,7 @@ def _decode_manifest(raw: bytes) -> _Manifest:
         raise _ManifestError
     source = root["source"]
     values = root["items"]
-    if not isinstance(source, str) or not source or not isinstance(values, list):
+    if not isinstance(source, str) or source not in _TOOLS or not isinstance(values, list):
         raise _ManifestError
     manifest_items = cast(list[object], values)
     files: dict[PurePosixPath, _FileState] = {}
@@ -965,7 +1061,11 @@ def _decode_manifest(raw: bytes) -> _Manifest:
         if path_value != path.as_posix() or not _safe_relative(path):
             raise _ManifestError
         if "key_path" not in item:
-            if set(item) != {"path", "content_hash", "executable"} or path in files:
+            if (
+                set(item) != {"path", "content_hash", "executable"}
+                or path in files
+                or not _manifest_file_is_owned(path, canonical_target, target_tool)
+            ):
                 raise _ManifestError
             files[path] = _FileState(content_hash, executable)
             continue
@@ -981,6 +1081,8 @@ def _decode_manifest(raw: bytes) -> _Manifest:
         ):
             raise _ManifestError
         key_path = tuple(cast(list[str], cast(list[object], key_values)))
+        if not _manifest_fragment_is_owned(path, key_path, canonical_target, target_tool):
+            raise _ManifestError
         key = (path, key_path)
         if key in fragments:
             raise _ManifestError
@@ -1091,7 +1193,7 @@ def _read_file_tree(
         if relative in ignored_paths:
             continue
         if profile == "opencode" and not _opencode_owned(relative):
-            continue
+            raise OSError("OpenCode view contains an unowned path")
         info = path.stat()
         files.append(PublishedFile(relative, path.read_bytes(), bool(info.st_mode & stat.S_IXUSR)))
     return files, _fingerprint_files(files)
@@ -1137,32 +1239,69 @@ def _same_directory(first: Path, second: Path) -> bool:
 
 
 def _safe_relative(path: PurePosixPath) -> bool:
-    return not path.is_absolute() and bool(path.parts) and all(
-        part not in {"", ".", ".."} for part in path.parts
+    return (
+        not path.is_absolute()
+        and bool(path.parts)
+        and all(part not in {"", ".", ".."} for part in path.parts)
     )
 
 
-def _opencode_owned(path: PurePosixPath) -> bool:
+def _target_tool(view: WorkflowView) -> str:
+    target_tool = view.target_tool or view.source
+    if target_tool not in _TOOLS:
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
+    return target_tool
+
+
+def _manifest_file_is_owned(
+    path: PurePosixPath, canonical_target: bool, target_tool: str | None
+) -> bool:
+    if canonical_target:
+        if len(path.parts) < 2 or path.parts[0] not in _TOOLS:
+            return False
+        return _path_is_owned(path.parts[0], PurePosixPath(*path.parts[1:]))
+    return target_tool is not None and _path_is_owned(target_tool, path)
+
+
+def _manifest_fragment_is_owned(
+    path: PurePosixPath,
+    key_path: tuple[str, ...],
+    canonical_target: bool,
+    target_tool: str | None,
+) -> bool:
+    if canonical_target:
+        if len(path.parts) < 2 or path.parts[0] not in _TOOLS:
+            return False
+        return _fragment_is_owned(path.parts[0], PurePosixPath(*path.parts[1:]), key_path)
+    return target_tool is not None and _fragment_is_owned(target_tool, path, key_path)
+
+
+def _path_is_owned(tool: str, path: PurePosixPath) -> bool:
     value = path.as_posix()
-    return (
+    return _safe_relative(path) and (
         value in {"AGENTS.md", "CLAUDE.md"}
         or len(path.parts) == 2
         and path.parts[0] == "agents"
-        and path.suffix == ".md"
+        and path.suffix == (".toml" if tool == "codex" else ".md")
         or len(path.parts) >= 3
         and path.parts[0] == "skills"
-        or len(path.parts) == 2
+        or tool != "codex"
+        and len(path.parts) == 2
         and path.parts[0] == "commands"
         and path.suffix == ".md"
+        and (tool == "claude" or path.stem != "codex-review")
         or len(path.parts) >= 2
         and path.parts[0] in {"context", "scripts"}
-        or value
-        in {
-            "plugins/session-start-status.js",
-            "plugins/security-reminder.js",
-            "plugins/ready-notify.js",
-        }
+        or path in _HOOK_PATHS[tool]
     )
+
+
+def _fragment_is_owned(tool: str, path: PurePosixPath, key_path: tuple[str, ...]) -> bool:
+    return (path, key_path) in _HOOK_FRAGMENTS[tool]
+
+
+def _opencode_owned(path: PurePosixPath) -> bool:
+    return _path_is_owned("opencode", path)
 
 
 def _digest(content: bytes) -> str:
@@ -1211,7 +1350,12 @@ def _after_legacy_delivery_verified() -> None:
 
 
 def _canonical_source(canonical_root: Path) -> str:
-    manifest, _snapshot = _load_manifest(canonical_root, PurePosixPath(CANONICAL_MANIFEST_NAME))
+    manifest, _snapshot = _load_manifest(
+        canonical_root,
+        PurePosixPath(CANONICAL_MANIFEST_NAME),
+        canonical_target=True,
+        target_tool=None,
+    )
     if manifest is None:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     return manifest.source
@@ -1249,6 +1393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source=source,
                     ignored_paths=ignored_paths,
                     profile=arguments.profile,
+                    target_tool=arguments.profile,
                 )
                 result = publish_workflow_view(
                     view,

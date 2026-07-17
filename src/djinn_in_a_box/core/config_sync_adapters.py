@@ -364,6 +364,7 @@ def path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
         and len(path.parts) == 2
         and path.parts[0] == "commands"
         and path.suffix == ".md"
+        and (tool == "claude" or path.stem != "codex-review")
         or len(path.parts) >= 2
         and path.parts[0] in {"context", "scripts"}
         or path in {hook.script_path for hook in owned.hooks}

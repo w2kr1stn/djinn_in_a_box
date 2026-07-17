@@ -110,7 +110,10 @@ def session(
                 WorkflowDeliveryTarget(selected_agent, host_roots[selected_agent], provision=True),
             )
         workflow = prepare_config_workflow(
-            get_project_root(), delivery_targets, config_snapshot=config
+            get_project_root(),
+            delivery_targets,
+            config_snapshot=config,
+            require_compose_host_env=target.container_mode,
         )
         if not workflow.success:
             problem = workflow.problems[0]

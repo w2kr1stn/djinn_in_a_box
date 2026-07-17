@@ -295,7 +295,7 @@ def test_invalid_opencode_plugin_blocks_without_mutating_target_or_manifest(
     assert not (project / "config" / MANIFEST_NAME).exists()
 
 
-def test_claude_source_only_command_survives_a_round_trip_without_projection(
+def test_claude_source_only_command_survives_a_blocked_source_switch_without_projection(
     tmp_path: Path,
 ) -> None:
     project, config_path = _workspace(tmp_path, "claude")
@@ -315,7 +315,10 @@ def test_claude_source_only_command_survives_a_round_trip_without_projection(
         config_path,
     )
 
-    assert sync_config(project, config_path=config_path).success
+    blocked = sync_config(project, config_path=config_path)
+
+    assert blocked.success is False
+    assert blocked.audit.drift_classes == (DriftClass.COLLISION,)
     assert (claude_root / "commands/codex-review.md").read_bytes() == command
     assert not (project / "config/opencode/commands/codex-review.md").exists()
 

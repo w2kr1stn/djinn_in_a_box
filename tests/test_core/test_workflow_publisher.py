@@ -46,8 +46,11 @@ def _view(
     *,
     files: tuple[PublishedFile, ...] = (),
     fragments: tuple[CarrierFragment, ...] = (),
+    target_tool: str | None = None,
 ) -> WorkflowView:
-    return WorkflowView("claude", (_file("AGENTS.md", marker), *files), fragments)
+    return WorkflowView(
+        "claude", (_file("AGENTS.md", marker), *files), fragments, target_tool=target_tool
+    )
 
 
 def _roots(tmp_path: Path) -> tuple[Path, Path]:
@@ -70,12 +73,15 @@ def _write(path: Path, content: bytes, *, executable: bool = False) -> None:
 
 
 def _legacy_manifest(
-    files: dict[str, tuple[bytes, bool]], fragments: list[Mapping[str, object]] | None = None
+    files: dict[str, tuple[bytes, bool]],
+    fragments: list[Mapping[str, object]] | None = None,
+    *,
+    tool: str = "claude",
 ) -> bytes:
     return json.dumps(
         {
             "schema_version": 1,
-            "tool": "opencode",
+            "tool": tool,
             "files": {
                 path: {
                     "content_hash": workflow_publisher._digest(content),  # pyright: ignore[reportPrivateUsage]
@@ -247,6 +253,81 @@ def test_runtime_legacy_manifest_malformed_or_edited_fails_closed(
     assert _tree(target) == before
 
 
+@pytest.mark.parametrize("foreign_kind", ("file", "fragment"))
+def test_runtime_state_rejects_unowned_manifest_items_without_mutation(
+    tmp_path: Path, foreign_kind: str
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view()).success
+    manifest_path = target / RUNTIME_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    if foreign_kind == "file":
+        operator_file = target / "operator-private.txt"
+        operator_file.write_bytes(b"operator-owned\n")
+        manifest["items"].append(
+            {
+                "path": "operator-private.txt",
+                "content_hash": workflow_publisher._digest(operator_file.read_bytes()),  # pyright: ignore[reportPrivateUsage]
+                "executable": False,
+            }
+        )
+    else:
+        carrier = target / "settings.json"
+        carrier.write_bytes(b'{"operator":{"keep":true}}\n')
+        manifest["items"].append(
+            {
+                "path": "settings.json",
+                "key_path": ["operator", "keep"],
+                "content_hash": workflow_publisher._value_digest(True),  # pyright: ignore[reportPrivateUsage]
+                "executable": False,
+            }
+        )
+    manifest_path.write_text(json.dumps(manifest))
+    before = _tree(target)
+
+    result = _publish(canonical, target, _view())
+
+    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert _tree(target) == before
+
+
+@pytest.mark.parametrize("foreign_kind", ("file", "fragment"))
+def test_runtime_legacy_rejects_unowned_manifest_items_without_mutation(
+    tmp_path: Path, foreign_kind: str
+) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"one\n")
+    if foreign_kind == "file":
+        operator_file = target / "operator-private.txt"
+        operator_file.write_bytes(b"operator-owned\n")
+        legacy = _legacy_manifest(
+            {
+                "AGENTS.md": (b"one\n", False),
+                "operator-private.txt": (operator_file.read_bytes(), False),
+            }
+        )
+    else:
+        carrier = target / "settings.json"
+        carrier.write_bytes(b'{"operator":{"keep":true}}\n')
+        legacy = _legacy_manifest(
+            {"AGENTS.md": (b"one\n", False)},
+            [
+                {
+                    "carrier_path": "settings.json",
+                    "key_path": ["operator", "keep"],
+                    "value_hash": workflow_publisher._legacy_value_digest(True),  # pyright: ignore[reportPrivateUsage]
+                }
+            ],
+        )
+    (target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME).write_bytes(legacy)
+    before = _tree(target)
+
+    result = _publish(canonical, target, _view())
+
+    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert _tree(target) == before
+
+
 def test_compose_retirement_retries_after_verify_before_remove_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -279,8 +360,8 @@ def test_stale_file_and_owned_json_key_are_removed_without_touching_neighbor(
     first = _view(
         files=(_file("agents/obsolete.md", b"obsolete\n"),),
         fragments=(
-            _fragment("settings.json", ("hooks", "owned"), ["old"]),
-            _fragment("settings.json", ("hooks", "retired"), ["remove"]),
+            _fragment("settings.json", ("hooks", "Stop"), ["old"]),
+            _fragment("settings.json", ("hooks", "PreToolUse"), ["remove"]),
         ),
     )
     assert _publish(canonical, target, first).success
@@ -291,14 +372,14 @@ def test_stale_file_and_owned_json_key_are_removed_without_touching_neighbor(
     result = _publish(
         canonical,
         target,
-        _view(fragments=(_fragment("settings.json", ("hooks", "owned"), ["new"]),)),
+        _view(fragments=(_fragment("settings.json", ("hooks", "Stop"), ["new"]),)),
     )
     updated = json.loads((target / "settings.json").read_text())
 
     assert result.success
     assert result.removed_paths == (_p("agents/obsolete.md"),)
     assert not (target / "agents/obsolete.md").exists()
-    assert updated["hooks"] == {"owned": ["new"]}
+    assert updated["hooks"] == {"Stop": ["new"]}
     assert updated["operator"] == {"keep": True}
 
 
@@ -328,27 +409,33 @@ def test_toml_splice_keeps_neighbors_byte_identical_and_inserts_before_tables(
         b"# operator comment\n"
         b'title = "Djinn"\n'
         b"release = 2026-07-17\n"
-        b"inline = { enabled = true, labels = [\"private\"] }\n"
+        b'inline = { enabled = true, labels = ["private"] }\n'
         b"\n[tool.operator]\n"
-        b"comment = \"keep every byte\"\n"
+        b'comment = "keep every byte"\n'
     )
     _write(target / "config.toml", original)
-    first = _view(fragments=(_fragment("config.toml", ("fallback",), ["CLAUDE.md"]),))
+    first = _view(
+        fragments=(_fragment("config.toml", ("project_doc_fallback_filenames",), ["CLAUDE.md"]),),
+        target_tool="codex",
+    )
 
     assert _publish(canonical, target, first).success
     inserted = (target / "config.toml").read_bytes()
-    assignment = b'fallback = ["CLAUDE.md"]\n'
+    assignment = b'project_doc_fallback_filenames = ["CLAUDE.md"]\n'
     parsed = tomllib.loads(inserted.decode())
 
-    assert parsed["fallback"] == ["CLAUDE.md"]
+    assert parsed["project_doc_fallback_filenames"] == ["CLAUDE.md"]
     assert inserted.replace(assignment, b"") == original
     assert inserted.index(assignment) < inserted.index(b"[tool.operator]")
-    second = _view(fragments=(_fragment("config.toml", ("fallback",), ["AGENTS.md"]),))
+    second = _view(
+        fragments=(_fragment("config.toml", ("project_doc_fallback_filenames",), ["AGENTS.md"]),),
+        target_tool="codex",
+    )
     assert _publish(canonical, target, second).success
     replaced = (target / "config.toml").read_bytes()
 
-    assert tomllib.loads(replaced.decode())["fallback"] == ["AGENTS.md"]
-    assert replaced.replace(b'fallback = ["AGENTS.md"]\n', b"") == original
+    assert tomllib.loads(replaced.decode())["project_doc_fallback_filenames"] == ["AGENTS.md"]
+    assert replaced.replace(b'project_doc_fallback_filenames = ["AGENTS.md"]\n', b"") == original
 
 
 def test_executable_mode_is_published_and_mode_only_drift_blocks(tmp_path: Path) -> None:
@@ -432,17 +519,17 @@ def test_recovery_accepts_old_or_new_residue_and_manifest_is_last(
 ) -> None:
     canonical, target = _roots(tmp_path)
     first = _view(
-        files=(_file("obsolete.md", b"old\n"),),
+        files=(_file("agents/obsolete.md", b"old\n"),),
         fragments=(
-            _fragment("settings.json", ("hooks", "owned"), ["old"]),
-            _fragment("settings.json", ("hooks", "retired"), ["remove"]),
+            _fragment("settings.json", ("hooks", "Stop"), ["old"]),
+            _fragment("settings.json", ("hooks", "PreToolUse"), ["remove"]),
         ),
     )
     assert _publish(canonical, target, first).success
     manifest_before = (target / RUNTIME_MANIFEST_NAME).read_bytes()
     second = _view(
         b"two\n",
-        fragments=(_fragment("settings.json", ("hooks", "owned"), ["new"]),),
+        fragments=(_fragment("settings.json", ("hooks", "Stop"), ["new"]),),
     )
 
     def abort_after_second_mutation(count: int) -> None:
@@ -455,14 +542,14 @@ def test_recovery_accepts_old_or_new_residue_and_manifest_is_last(
     monkeypatch.setattr(workflow_publisher, "_after_target_mutation", _no_target_mutation)
 
     assert (target / "AGENTS.md").read_bytes() == b"two\n"
-    assert json.loads((target / "settings.json").read_text())["hooks"] == {"owned": ["new"]}
-    assert (target / "obsolete.md").exists()
+    assert json.loads((target / "settings.json").read_text())["hooks"] == {"Stop": ["new"]}
+    assert (target / "agents/obsolete.md").exists()
     assert (target / RUNTIME_MANIFEST_NAME).read_bytes() == manifest_before
     recovered = _publish(canonical, target, second)
 
     assert recovered.success
-    assert not (target / "obsolete.md").exists()
-    assert json.loads((target / "settings.json").read_text())["hooks"] == {"owned": ["new"]}
+    assert not (target / "agents/obsolete.md").exists()
+    assert json.loads((target / "settings.json").read_text())["hooks"] == {"Stop": ["new"]}
 
 
 def test_source_edit_between_crash_and_retry_blocks_without_more_mutation(
@@ -653,7 +740,8 @@ def test_standalone_file_only_publish_exit_codes_fragment_refusal_and_missing_ca
     assert sentinel not in collision.stderr
 
 
-def test_opencode_cli_profile_filters_foreign_files_and_keeps_neighbors(tmp_path: Path) -> None:
+@pytest.mark.parametrize("foreign_path", ("operator-private.txt", "commands/codex-review.md"))
+def test_opencode_cli_profile_rejects_foreign_seed_files(tmp_path: Path, foreign_path: str) -> None:
     canonical = tmp_path / "canonical"
     target = tmp_path / "target"
     view = tmp_path / "view"
@@ -670,19 +758,11 @@ def test_opencode_cli_profile_filters_foreign_files_and_keeps_neighbors(tmp_path
     }
     for path, content in plugins.items():
         _write(view / path, content)
-    _write(view / "operator-private.txt", b"foreign\n")
+    _write(view / foreign_path, b"foreign\n")
     _write(target / "personal.json", b'{"keep":true}\n')
+    before = _tree(target)
 
     result = _run_cli(view, canonical, target, "--profile", "opencode")
 
-    assert result.returncode == 0
-    assert not (target / "operator-private.txt").exists()
-    assert (target / "personal.json").read_bytes() == b'{"keep":true}\n'
-    for path, content in plugins.items():
-        assert (target / path).read_bytes() == content
-    manifest = json.loads((target / RUNTIME_MANIFEST_NAME).read_text())
-    assert {item["path"] for item in manifest["items"]} == {
-        "AGENTS.md",
-        "agents/reviewer.md",
-        *plugins,
-    }
+    assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert _tree(target) == before
