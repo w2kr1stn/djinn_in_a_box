@@ -934,3 +934,65 @@ def test_opencode_cli_blocks_seed_content_that_differs_from_canonical_manifest(
 
     assert result.returncode == EXIT_CODES[DriftClass.SOURCE_CHANGED]
     assert _tree(target) == before
+
+
+def test_opencode_cli_delivers_native_plugins_not_managed_by_canonical_manifest(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    seed = tmp_path / "seed"
+    canonical.mkdir()
+    target.mkdir()
+    seed.mkdir()
+    instructions = b"OpenCode instructions\n"
+    plugins = {
+        "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
+        "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
+        "plugins/ready-notify.js": b"export const Plugin = () => ({});\n",
+    }
+    _canonical_identity(canonical, files={"AGENTS.md": (instructions, False)})
+    _write(seed / "AGENTS.md", instructions)
+    for path, content in plugins.items():
+        _write(seed / path, content)
+
+    first = _run_cli(seed, canonical, target, "--profile", "opencode")
+    after_first = _tree(target)
+    second = _run_cli(seed, canonical, target, "--profile", "opencode")
+    state = json.loads((target / RUNTIME_MANIFEST_NAME).read_text())
+
+    assert first.returncode == EXIT_CODES[DriftClass.CLEAN]
+    assert second.returncode == EXIT_CODES[DriftClass.CLEAN]
+    assert _tree(target) == after_first
+    assert {
+        item["path"] for item in state["items"]
+    } >= {PurePosixPath(path).as_posix() for path in plugins}
+    for path, content in plugins.items():
+        assert (target / path).read_bytes() == content
+
+    tracked_plugin = target / "plugins/ready-notify.js"
+    tracked_plugin.write_bytes(b"export const Plugin = () => ({ edited: true });\n")
+    before_drift = _tree(target)
+    drift = _run_cli(seed, canonical, target, "--profile", "opencode")
+
+    assert drift.returncode == EXIT_CODES[DriftClass.TARGET_DRIFT]
+    assert _tree(target) == before_drift
+
+
+def test_opencode_cli_rejects_invalid_native_plugin_before_runtime_mutation(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    seed = tmp_path / "seed"
+    canonical.mkdir()
+    target.mkdir()
+    seed.mkdir()
+    _canonical_identity(canonical, files={"AGENTS.md": (b"OpenCode instructions\n", False)})
+    _write(seed / "AGENTS.md", b"OpenCode instructions\n")
+    _write(seed / "plugins/ready-notify.js", b"const plugin = () => ({});\n")
+    _write(target / "personal.json", b'{"keep":true}\n')
+    before = _tree(target)
+
+    result = _run_cli(seed, canonical, target, "--profile", "opencode")
+
+    assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert _tree(target) == before

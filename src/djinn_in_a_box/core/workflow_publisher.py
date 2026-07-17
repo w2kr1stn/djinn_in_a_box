@@ -1354,7 +1354,15 @@ def _read_file_tree(
         if profile == "opencode" and not _opencode_owned(relative):
             raise OSError("OpenCode view contains an unowned path")
         info = path.stat()
-        files.append(PublishedFile(relative, path.read_bytes(), bool(info.st_mode & stat.S_IXUSR)))
+        content = path.read_bytes()
+        if profile == "opencode" and relative in _NATIVE_ONLY_PATHS["opencode"]:
+            try:
+                valid_plugin = "export" in content.decode()
+            except UnicodeDecodeError as error:
+                raise OSError("OpenCode plugin is not UTF-8") from error
+            if not valid_plugin:
+                raise OSError("OpenCode plugin export marker is missing")
+        files.append(PublishedFile(relative, content, bool(info.st_mode & stat.S_IXUSR)))
     return files, _fingerprint_files(files)
 
 
@@ -1536,6 +1544,7 @@ def _verify_seed_against_canonical_manifest(
     actual = {
         item.relative_path: _FileState(_digest(item.content), item.executable)
         for item in view.files
+        if item.relative_path in expected
     }
     if view.source != manifest.source or actual != expected:
         raise PublishError(DriftClass.SOURCE_CHANGED)

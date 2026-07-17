@@ -306,42 +306,47 @@ def render_native_workflow(
         if artifact.native_only_for is not None:
             continue
         if artifact.kind == ArtifactKind.INSTRUCTIONS:
-            files += [
-                _rendered(owned.instruction_path, artifact),
-                _rendered(owned.instruction_companion, artifact),
-            ]
+            for path in (owned.instruction_path, owned.instruction_companion):
+                _append_portable_file(
+                    files, unresolved, _rendered(path, artifact), artifact, target
+                )
         elif artifact.kind == ArtifactKind.AGENT:
             rendered = _render_agent(artifact, target)
-            files += [rendered] if rendered else []
-            unresolved += [] if rendered else [_blocked(artifact, target)]
+            if rendered is None:
+                unresolved.append(_blocked(artifact, target))
+            else:
+                _append_portable_file(files, unresolved, rendered, artifact, target)
         elif artifact.kind == ArtifactKind.SKILL:
-            files.append(
+            _append_portable_file(
+                files,
+                unresolved,
                 _rendered(
                     _p("skills") / artifact.name / _p(*artifact.source_path.parts[2:]), artifact
-                )
+                ),
+                artifact,
+                target,
             )
         elif artifact.kind == ArtifactKind.COMMAND:
             rendered = _render_command(artifact, target)
-            files += [rendered] if rendered else []
-            unresolved += [] if rendered else [_blocked(artifact, target)]
+            if rendered is None:
+                unresolved.append(_blocked(artifact, target))
+            else:
+                _append_portable_file(files, unresolved, rendered, artifact, target)
         elif artifact.kind == ArtifactKind.CONTEXT:
-            files.append(_rendered(artifact.source_path, artifact))
+            _append_portable_file(
+                files, unresolved, _rendered(artifact.source_path, artifact), artifact, target
+            )
     if target == "codex":
-        fragments.append(
+        _append_portable_fragment(
+            fragments,
+            unresolved,
             SettingsFragment(
                 _p("config.toml"), ("project_doc_fallback_filenames",), b'["CLAUDE.md"]', "bridge"
-            )
+            ),
+            target,
         )
-    files_tuple = tuple(
-        sorted(item for item in files if not native_only_file_is_owned(target, item.relative_path))
-    )
-    fragments_tuple = tuple(
-        sorted(
-            item
-            for item in fragments
-            if not native_only_fragment_is_owned(target, item.carrier_path, item.key_path)
-        )
-    )
+    files_tuple = tuple(sorted(files))
+    fragments_tuple = tuple(sorted(fragments))
     return AdapterRenderResult(
         source.tool,
         target,
@@ -443,6 +448,41 @@ def native_only_fragment_is_owned(
         for item in OWNERSHIP_MATRIX[tool].native_only
         if item.carrier_path and item.event
     }
+
+
+def _append_portable_file(
+    files: list[RenderedFile],
+    unresolved: list[UnresolvedItem],
+    rendered: RenderedFile,
+    artifact: WorkflowArtifact,
+    target: ConfigSyncSource,
+) -> None:
+    if native_only_file_is_owned(target, rendered.relative_path):
+        unresolved.append(_blocked(artifact, target))
+        return
+    files.append(rendered)
+
+
+def _append_portable_fragment(
+    fragments: list[SettingsFragment],
+    unresolved: list[UnresolvedItem],
+    rendered: SettingsFragment,
+    target: ConfigSyncSource,
+) -> None:
+    if native_only_fragment_is_owned(target, rendered.carrier_path, rendered.key_path):
+        from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY
+
+        unresolved.append(
+            UnresolvedItem(
+                rendered.artifact_id,
+                CANONICAL_REMEDY,
+                rendered.carrier_path,
+                rendered.value_json,
+                target,
+            )
+        )
+        return
+    fragments.append(rendered)
 
 
 def _read(root: Path, path: PurePosixPath, issues: list[ValidationIssue]) -> _File | None:

@@ -333,6 +333,9 @@ written last.
 and the standalone image CLI. It owns the five drift classes, content hashes,
 executable modes, atomic replacement, stale managed-item removal, carrier-key
 merges, recovery after an interrupted publication, and canonical/runtime locking.
+A runtime manifest records the complete delivered native view, including
+native-only hooks and OpenCode plugins; the canonical manifest deliberately
+does not manage those native artifacts.
 A canonical publication holds one exclusive canonical lock. A runtime
 publication holds a shared canonical lock plus an exclusive target lock; an
 already-held canonical lease is inherited rather than reacquired.

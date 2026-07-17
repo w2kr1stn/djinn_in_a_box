@@ -25,7 +25,11 @@ from djinn_in_a_box.core.config_sync import (
     load_canonical_delivery_view,
     sync_config,
 )
-from djinn_in_a_box.core.workflow_publisher import CanonicalLockLease, canonical_lock
+from djinn_in_a_box.core.workflow_publisher import (
+    CanonicalLockLease,
+    canonical_lock,
+    decode_lean_manifest,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _REMOVED_ENGINE_TOKENS = (
@@ -438,6 +442,69 @@ def test_legacy_manifest_migrates_atomically_and_removes_stale_item(tmp_path: Pa
     assert result.success
     assert not stale.exists()
     assert set(json.loads(manifest_path.read_text())) == {"source", "items"}
+
+
+def test_legacy_migration_releases_edited_native_hook_records_without_deleting_them(
+    tmp_path: Path,
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    codex_root = project / "config" / "codex"
+    hook = codex_root / "hooks/security_guard.py"
+    hook.parent.mkdir()
+    hook.write_bytes(b"#!/usr/bin/env python3\nprint('operator native edit')\n")
+    registration = [
+        {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "python hooks/security_guard.py"}],
+        }
+    ]
+    hooks_path = codex_root / "hooks.json"
+    hooks_path.write_bytes(
+        json.dumps({"hooks": {"PreToolUse": registration}}, sort_keys=True).encode()
+    )
+    legacy = _legacy_manifest(project)
+    managed = _objects(legacy["managed"])
+    codex = _objects(managed["codex"])
+    native_only = _objects(codex["native_only"])
+    native_only["hooks/security_guard.py"] = {
+        "hash": hashlib.sha256(b"#!/usr/bin/env python3\nprint('legacy')\n").hexdigest(),
+        "executable": False,
+    }
+    codex["native_only"] = native_only
+    fragments = cast(list[object], codex["fragments"])
+    fragments.append(
+        {
+            "carrier_path": "hooks.json",
+            "key_path": ["hooks", "PreToolUse"],
+            "value_hash": hashlib.sha256(
+                json.dumps(registration, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+    )
+    codex["fragments"] = fragments
+    managed["codex"] = codex
+    legacy["managed"] = managed
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(legacy, sort_keys=True))
+    before_hook = hook.read_bytes()
+    before_hooks = hooks_path.read_bytes()
+
+    result = sync_config(project, config_path=config_path)
+    strict = decode_lean_manifest(
+        manifest_path.read_bytes(), canonical_target=True, target_tool=None
+    )
+
+    assert result.success
+    assert hook.read_bytes() == before_hook
+    assert hooks_path.read_bytes() == before_hooks
+    assert PurePosixPath("codex/hooks/security_guard.py") not in {
+        item.path for item in strict.items
+    }
+    assert (
+        PurePosixPath("codex/hooks.json"),
+        ("hooks", "PreToolUse"),
+    ) not in {(item.path, item.key_path) for item in strict.items if item.key_path is not None}
+    assert audit_config_sync(project, config_path=config_path).clean
 
 
 def test_legacy_migration_retry_accepts_missing_stale_file_after_crash(

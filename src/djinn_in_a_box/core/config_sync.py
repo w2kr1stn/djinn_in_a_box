@@ -272,6 +272,7 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
                 legacy,
                 project_root / "config",
                 _migration_stale_residue(build.canonical, source),
+                _is_native_only_canonical_item,
             )
         except ValueError:
             return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
@@ -564,6 +565,7 @@ def _migrate_legacy(
         legacy,
         config_root,
         _migration_stale_residue(desired, selected_source),
+        _is_native_only_canonical_item,
     )
     managed = tuple(
         item
@@ -598,6 +600,12 @@ def _release_canonical_manifest_item(item: _ManifestItem, source: ConfigSyncSour
     if tool == source:
         companion = OWNERSHIP_MATRIX[source].instruction_companion
         return item.key_path is not None or relative_path != companion
+    return _is_native_only_canonical_item(item)
+
+
+def _is_native_only_canonical_item(item: _ManifestItem) -> bool:
+    tool = cast(ConfigSyncSource, item.path.parts[0])
+    relative_path = PurePosixPath(*item.path.parts[1:])
     if item.key_path is None:
         return native_only_file_is_owned(tool, relative_path)
     return native_only_fragment_is_owned(tool, relative_path, item.key_path)
@@ -626,6 +634,7 @@ def _legacy_items(
     data: Mapping[str, object],
     config_root: Path,
     allow_missing: Callable[[_ManifestItem], bool] | None = None,
+    skip_verification: Callable[[_ManifestItem], bool] | None = None,
 ) -> tuple[ConfigSyncSource, tuple[_ManifestItem, ...]]:
     required = {
         "schema_version",
@@ -646,7 +655,14 @@ def _legacy_items(
     _valid_hash(data["source_hash"])
     source: ConfigSyncSource = active_source
     items: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem] = {}
-    _legacy_file_map(data["source_files"], PurePosixPath(source), config_root, items, allow_missing)
+    _legacy_file_map(
+        data["source_files"],
+        PurePosixPath(source),
+        config_root,
+        items,
+        allow_missing,
+        skip_verification,
+    )
     managed = _object_mapping(managed_raw)
     if set(managed) != set(_TOOLS):
         raise ValueError
@@ -656,9 +672,15 @@ def _legacy_items(
         if set(values) != {"files", "native_only", "fragments"}:
             raise ValueError
         prefix = PurePosixPath(tool)
-        _legacy_file_map(values["files"], prefix, config_root, items, allow_missing)
-        _legacy_file_map(values["native_only"], prefix, config_root, items, allow_missing)
-        _legacy_fragments(values["fragments"], prefix, config_root, items, allow_missing)
+        _legacy_file_map(
+            values["files"], prefix, config_root, items, allow_missing, skip_verification
+        )
+        _legacy_file_map(
+            values["native_only"], prefix, config_root, items, allow_missing, skip_verification
+        )
+        _legacy_fragments(
+            values["fragments"], prefix, config_root, items, allow_missing, skip_verification
+        )
     semantic = data["semantic"]
     if not isinstance(semantic, list):
         raise ValueError
@@ -779,6 +801,7 @@ def _legacy_file_map(
     config_root: Path,
     result: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem],
     allow_missing: Callable[[_ManifestItem], bool] | None,
+    skip_verification: Callable[[_ManifestItem], bool] | None,
 ) -> None:
     for raw_path, raw_state in _object_mapping(raw).items():
         relative = PurePosixPath(raw_path)
@@ -794,6 +817,9 @@ def _legacy_file_map(
         item = _ManifestItem(
             prefix / relative, _valid_hash(state["hash"]), _bool(state["executable"])
         )
+        if skip_verification is not None and skip_verification(item):
+            _add_item(result, item)
+            continue
         actual = _file_item_at(config_root / item.path, item.path)
         missing_stale_residue = (
             actual is None
@@ -812,6 +838,7 @@ def _legacy_fragments(
     config_root: Path,
     result: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem],
     allow_missing: Callable[[_ManifestItem], bool] | None,
+    skip_verification: Callable[[_ManifestItem], bool] | None,
 ) -> None:
     if not isinstance(raw, list):
         raise ValueError
@@ -833,6 +860,9 @@ def _legacy_fragments(
         ):
             raise ValueError
         item = _ManifestItem(prefix / path, _valid_hash(data["value_hash"]), False, keys)
+        if skip_verification is not None and skip_verification(item):
+            _add_item(result, item)
+            continue
         actual, issue = _carrier_item_at(config_root / item.path, item.path, keys)
         if issue or (
             actual != item

@@ -25,7 +25,7 @@ from djinn_in_a_box.core.config_sync_adapters import (
     read_native_workflow,
     render_native_workflow,
 )
-from djinn_in_a_box.core.workflow_publisher import decode_lean_manifest
+from djinn_in_a_box.core.workflow_publisher import RUNTIME_MANIFEST_NAME, decode_lean_manifest
 
 
 def _workspace(tmp_path: Path, source: ConfigSyncSource) -> tuple[Path, Path]:
@@ -327,6 +327,28 @@ def test_nonportable_artifact_uses_the_canonical_remedy_without_mutation(tmp_pat
     assert _tree(project / "config") == before
 
 
+def test_projection_to_native_only_target_path_blocks_without_silent_drop(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path, "opencode")
+    source_root = project / "config" / "opencode"
+    _write(source_root, "AGENTS.md", "Instructions.\n")
+    _write(source_root, "scripts/session-start-status.py", "#!/usr/bin/env python3\n")
+    before = _tree(project / "config")
+    rendered = render_native_workflow(read_native_workflow(source_root, "opencode"), "claude")
+
+    result = sync_config(project, config_path=config_path)
+
+    blocked = [
+        item
+        for item in rendered.unresolved
+        if item.target_tool == "claude"
+        and item.source_path == PurePosixPath("scripts/session-start-status.py")
+    ]
+    assert blocked and blocked[0].reason == CANONICAL_REMEDY
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(project / "config") == before
+
+
 @pytest.mark.parametrize("content", [b"const plugin = async () => ({});\n", b"\xff"])
 def test_invalid_opencode_plugin_blocks_without_mutating_target_or_manifest(
     tmp_path: Path, content: bytes
@@ -406,6 +428,55 @@ def test_real_claude_python_hooks_are_not_projected_and_native_plugin_is_preserv
     assert {
         item.relative_path: item.content for item in opencode_view.view.files
     }[PurePosixPath("plugins/ready-notify.js")] == plugin_bytes
+
+
+def test_opencode_runtime_publisher_delivers_native_plugins_after_claude_sync(
+    tmp_path: Path,
+) -> None:
+    project, config_path = _workspace(tmp_path, "claude")
+    claude_root = project / "config" / "claude"
+    opencode_root = project / "config" / "opencode"
+    _full_source(claude_root, "claude")
+    for hook in OWNERSHIP_MATRIX["claude"].hooks:
+        _write(
+            claude_root,
+            hook.script_path.as_posix(),
+            f"#!/usr/bin/env python3\nprint({hook.name!r})\n",
+        )
+    plugins = {
+        "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
+        "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
+        "plugins/ready-notify.js": b"export const Plugin = () => ({});\n",
+    }
+    for path, content in plugins.items():
+        _write(opencode_root, path, content)
+    assert sync_config(project, config_path=config_path).success
+    runtime_root = tmp_path / "runtime-opencode"
+    runtime_root.mkdir()
+    args = [
+        "--view",
+        str(opencode_root),
+        "--canonical-root",
+        str(project / "config"),
+        "--target",
+        str(runtime_root),
+        "--manifest",
+        str(runtime_root / RUNTIME_MANIFEST_NAME),
+        "--profile",
+        "opencode",
+    ]
+
+    first = publisher_module.main(args)
+    after_first = _tree(runtime_root)
+    second = publisher_module.main(args)
+    state = json.loads((runtime_root / RUNTIME_MANIFEST_NAME).read_text())
+
+    assert first == 0
+    assert second == 0
+    assert _tree(runtime_root) == after_first
+    assert {item["path"] for item in state["items"]} >= set(plugins)
+    for path, content in plugins.items():
+        assert (runtime_root / path).read_bytes() == content
 
 
 def test_sync_releases_legacy_target_hook_records_without_removing_native_artifacts(
