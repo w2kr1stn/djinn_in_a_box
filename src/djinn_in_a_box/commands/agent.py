@@ -31,7 +31,12 @@ from djinn_in_a_box.core.console import (
     warning,
 )
 from djinn_in_a_box.core.decorators import handle_config_errors
-from djinn_in_a_box.core.docker import DockerMode, get_config_root, resolve_docker_mode
+from djinn_in_a_box.core.docker import (
+    DockerMode,
+    get_config_root,
+    resolve_docker_mode,
+    workflow_image_compatible,
+)
 from djinn_in_a_box.core.paths import get_project_root
 
 
@@ -166,26 +171,26 @@ def run(
         raise typer.Exit(1) from None
 
     checked_config = None
-    if agent in {"claude", "codex", "opencode"}:
-        delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
-        config = load_config()
-        checked_config = config
-        if agent in {"claude", "codex"}:
-            selected_agent = cast(ConfigSyncSource, agent)
-            delivery_targets = (
-                WorkflowDeliveryTarget(selected_agent, get_config_root(config) / selected_agent),
-            )
-        workflow = prepare_config_workflow(
-            get_project_root(),
-            delivery_targets,
-            config_snapshot=config,
-            require_compose_host_env=True,
+    delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
+    config = load_config()
+    checked_config = config
+    if agent in {"claude", "codex"}:
+        selected_agent = cast(ConfigSyncSource, agent)
+        delivery_targets = (
+            WorkflowDeliveryTarget(selected_agent, get_config_root(config) / selected_agent),
         )
-        if not workflow.success:
-            problem = workflow.problems[0]
-            error(problem.message)
-            warning(problem.remedy)
-            raise typer.Exit(1)
+    workflow = prepare_config_workflow(
+        get_project_root(),
+        delivery_targets,
+        config_snapshot=config,
+        require_compose_host_env=True,
+        container_image_compatibility=workflow_image_compatible(),
+    )
+    if not workflow.success:
+        problem = workflow.problems[0]
+        error(problem.message)
+        warning(problem.remedy)
+        raise typer.Exit(1)
 
     try:
         result = run_headless_agent(

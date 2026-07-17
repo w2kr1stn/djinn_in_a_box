@@ -90,9 +90,9 @@ def session(
             warning("Rebuild/recreate required.")
             raise typer.Exit(1)
 
+    config = load_config()
+    delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
     if agent in {"claude", "codex", "opencode"}:
-        config = load_config()
-        delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
         selected_agent = cast(ConfigSyncSource, agent)
         if target.container_mode:
             if agent in {"claude", "codex"}:
@@ -110,23 +110,23 @@ def session(
             delivery_targets = (
                 WorkflowDeliveryTarget(selected_agent, host_roots[selected_agent], provision=True),
             )
-        workflow = prepare_config_workflow(
-            get_project_root(),
-            delivery_targets,
-            config_snapshot=config,
-            require_compose_host_env=target.container_mode,
-            container_image_compatibility=container_image_compatibility,
-        )
-        if not workflow.success:
-            problem = workflow.problems[0]
-            error(problem.message)
-            warning(problem.remedy)
+    workflow = prepare_config_workflow(
+        get_project_root(),
+        delivery_targets,
+        config_snapshot=config,
+        require_compose_host_env=target.container_mode,
+        container_image_compatibility=container_image_compatibility,
+    )
+    if not workflow.success:
+        problem = workflow.problems[0]
+        error(problem.message)
+        warning(problem.remedy)
+        raise typer.Exit(1)
+    if target.container_mode and agent == "opencode":
+        refreshed = mgr.refresh_opencode_workflow(target)
+        if not refreshed.success:
+            error(refreshed.stderr or "OpenCode workflow refresh failed")
             raise typer.Exit(1)
-        if target.container_mode and agent == "opencode":
-            refreshed = mgr.refresh_opencode_workflow(target)
-            if not refreshed.success:
-                error(refreshed.stderr or "OpenCode workflow refresh failed")
-                raise typer.Exit(1)
 
     sessions_root = sessions_base.resolve()
     resolved_workspace = workspace.resolve()

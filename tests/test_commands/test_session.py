@@ -229,6 +229,39 @@ class TestSessionCommand:
         instance.preflight_check.assert_not_called()
         instance.run_interactive.assert_not_called()
 
+    def test_blocked_gemini_workflow_stops_before_workspace_creation_and_agent(
+        self, tmp_path: Path
+    ) -> None:
+        target = SessionTarget(container_id="container-123")
+        blocked = WorkflowPreparationResult(
+            False,
+            (WorkflowPreparationProblem("blocked", "Workflow blocked.", "Resolve drift."),),
+        )
+        with (
+            patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
+            patch(
+                "djinn_in_a_box.commands.session.prepare_config_workflow",
+                return_value=blocked,
+            ) as workflow,
+        ):
+            instance = mock_mgr.return_value
+            instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.COMPATIBLE
+
+            result = runner.invoke(
+                app,
+                ["session", "--project", "new-project", "--agent", "gemini", "--create"],
+            )
+
+        assert result.exit_code == 1
+        workflow.assert_called_once()
+        assert workflow.call_args.args == (Path("/project"), ())
+        instance.workflow_image_compatible.assert_called_once_with(target)
+        assert not (tmp_path / ".djinn/sessions/new-project").exists()
+        instance.preflight_check.assert_not_called()
+        instance.run_interactive.assert_not_called()
+
     def test_failed_container_opencode_refresh_stops_before_workspace_creation(
         self, tmp_path: Path
     ) -> None:

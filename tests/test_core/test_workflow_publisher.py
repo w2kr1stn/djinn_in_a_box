@@ -282,6 +282,30 @@ def test_runtime_legacy_adoption_is_retry_safe_after_state_write_crash(
     assert not legacy.exists()
 
 
+def test_runtime_adoption_retry_removes_legacy_before_reporting_new_state_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"one\n")
+    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
+    legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"one\n", False)}))
+
+    monkeypatch.setattr(
+        workflow_publisher,
+        "_after_runtime_manifest_write",
+        lambda: (_ for _ in ()).throw(RuntimeError("injected adoption crash")),
+    )
+    with pytest.raises(RuntimeError, match="injected adoption crash"):
+        _publish(canonical, target, _view())
+    monkeypatch.setattr(workflow_publisher, "_after_runtime_manifest_write", lambda: None)
+    (target / "AGENTS.md").write_bytes(b"operator edit\n")
+
+    retried = _publish(canonical, target, _view())
+
+    assert retried.drift_class is DriftClass.TARGET_DRIFT
+    assert not legacy.exists()
+
+
 @pytest.mark.parametrize("payload", [b"not-json", b'{"schema_version":1}'])
 def test_runtime_legacy_manifest_malformed_or_edited_fails_closed(
     tmp_path: Path, payload: bytes

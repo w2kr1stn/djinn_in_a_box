@@ -357,13 +357,19 @@ def _publish_locked(
     legacy_relative: PurePosixPath | None = None
     if not canonical_target:
         legacy_relative = PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME)
-        legacy = _load_legacy_delivery_manifest(
-            target_root,
-            legacy_relative,
-            target_tool=target_tool,
-        )
-        if legacy is not None and prior is None:
-            prior = legacy
+        if prior is None:
+            legacy = _load_legacy_delivery_manifest(
+                target_root,
+                legacy_relative,
+                target_tool=target_tool,
+            )
+            if legacy is not None:
+                prior = legacy
+        else:
+            legacy = target_root / legacy_relative
+            if legacy.exists():
+                legacy.unlink()
+                _fsync_directory(target_root)
     preflight = _preflight(
         target_root,
         desired,

@@ -540,6 +540,41 @@ def test_legacy_semantic_record_made_portable_migrates(tmp_path: Path) -> None:
     assert set(json.loads(manifest.read_text())) == {"source", "items"}
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fingerprint", "not-a-fingerprint"),
+        ("artifact_id", "unknown:reviewer:agents/reviewer.md"),
+        ("source_path", "../agents/reviewer.md"),
+        ("target_tool", "claude"),
+        ("target_tool", "gemini"),
+    ],
+)
+def test_legacy_semantic_record_fields_are_validated_before_migration(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    output = project / "config/codex/agents/reviewer.toml"
+    output.parent.mkdir(exist_ok=True)
+    output.write_text(
+        'name = "reviewer"\ndescription = "Review"\ndeveloper_instructions = "Review."\n'
+    )
+    record = _semantic_record(output)
+    record[field] = value
+    legacy = _legacy_manifest(project, semantic=[record])
+    _add_legacy_semantic_output(legacy, output)
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(legacy, sort_keys=True))
+    before = _tree(project / "config")
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success is False
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert _tree(project / "config") == before
+
+
 def test_malformed_legacy_manifest_fails_closed(tmp_path: Path) -> None:
     project, config_path = _workspace(tmp_path)
     manifest = project / "config" / MANIFEST_NAME
@@ -694,6 +729,34 @@ def test_canonical_delivery_view_returns_publisher_view(tmp_path: Path) -> None:
         PurePosixPath("AGENTS.md"),
         PurePosixPath("CLAUDE.md"),
     }
+
+
+def test_canonical_delivery_view_blocks_nonportable_source_added_after_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    agent = project / "config/claude/agents/reviewer.md"
+    agent.parent.mkdir()
+    agent.write_text("---\nname: reviewer\ndescription: Review\n---\n\nReview.\n")
+    assert sync_config(project, config_path=config_path).success
+    original_audit = sync_module._audit_locked  # pyright: ignore[reportPrivateUsage]
+
+    def audit_then_make_source_nonportable(
+        project_root: Path, source: ConfigSyncSource
+    ) -> sync_module.ConfigSyncAudit:
+        audit = original_audit(project_root, source)
+        agent.write_text(
+            "---\nname: reviewer\ndescription: Review\nmodel: native\n---\n\nReview.\n"
+        )
+        return audit
+
+    monkeypatch.setattr(sync_module, "_audit_locked", audit_then_make_source_nonportable)
+
+    loaded = load_canonical_delivery_view(project, "codex", config_path=config_path)
+
+    assert loaded.success is False
+    assert loaded.view is None
+    assert loaded.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
 
 
 def _add_legacy_semantic_output(legacy: dict[str, object], output: Path) -> None:

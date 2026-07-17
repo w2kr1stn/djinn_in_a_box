@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import stat
 import tempfile
@@ -45,6 +46,10 @@ CANONICAL_REMEDY = (
     "or make the source form portable."
 )
 _TOOLS: tuple[ConfigSyncSource, ...] = ("claude", "codex", "opencode")
+_LEGACY_ARTIFACT_KINDS = frozenset(
+    {"instructions", "agent", "skill", "command", "context", "hook"}
+)
+_LEGACY_ARTIFACT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +235,8 @@ def _load_canonical_delivery_view_locked(
     if not audit.clean:
         return CanonicalDeliveryViewResult(False, audit)
     build = _snapshot_build(project_root, source)
+    if build.problems:
+        return CanonicalDeliveryViewResult(False, _invalid_audit(source, build.problems))
     view = build.views[tool]
     manifest = (project_root / "config" / MANIFEST_NAME).read_bytes()
     revision = _digest(manifest + build.fingerprint.encode())
@@ -577,15 +584,41 @@ def _legacy_items(
         }:
             raise ValueError
         _legacy_adapter_revision(semantic_record["adapter_revision"])
+        _valid_hash(semantic_record["fingerprint"])
+        source_path = _legacy_semantic_source_path(semantic_record["source_path"])
+        _legacy_semantic_artifact_id(semantic_record["artifact_id"], source_path)
         if (
             semantic_record.get("source_tool") != source
             or semantic_record.get("target_tool") not in _TOOLS
+            or semantic_record.get("target_tool") == source
         ):
             raise ValueError
         target = cast(ConfigSyncSource, semantic_record["target_tool"])
         _verify_legacy_semantic_outputs(semantic_record["files"], target, items)
         _verify_legacy_semantic_fragments(semantic_record["fragments"], target, items)
     return source, tuple(sorted(items.values(), key=lambda item: (item.path, item.key_path or ())))
+
+
+def _legacy_semantic_source_path(value: object) -> PurePosixPath:
+    if not isinstance(value, str):
+        raise ValueError
+    path = PurePosixPath(value)
+    if value != path.as_posix() or not is_safe_relative_path(path):
+        raise ValueError
+    return path
+
+
+def _legacy_semantic_artifact_id(value: object, source_path: PurePosixPath) -> None:
+    if not isinstance(value, str):
+        raise ValueError
+    parts = value.split(":", 2)
+    if len(parts) != 3:
+        raise ValueError
+    kind, name, path_value = parts
+    if kind not in _LEGACY_ARTIFACT_KINDS or _LEGACY_ARTIFACT_NAME.fullmatch(name) is None:
+        raise ValueError
+    if _legacy_semantic_source_path(path_value) != source_path:
+        raise ValueError
 
 
 def _verify_legacy_semantic_outputs(

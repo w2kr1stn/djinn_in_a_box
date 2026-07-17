@@ -17,7 +17,7 @@ from djinn_in_a_box.core.config_workflow import (
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
-from djinn_in_a_box.core.docker import DockerMode, RunResult
+from djinn_in_a_box.core.docker import DockerMode, RunResult, WorkflowImageCompatibility
 
 
 @pytest.fixture
@@ -142,6 +142,10 @@ class TestRunCommand:
                 "djinn_in_a_box.commands.agent.get_config_root",
                 return_value=Path("/runtime"),
             ),
+            patch(
+                "djinn_in_a_box.commands.agent.workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ) as mock_image_compatibility,
         ):
             config = object()
             mock_config.return_value = config
@@ -151,6 +155,7 @@ class TestRunCommand:
                 "workflow": mock_workflow,
                 "config": config,
                 "load_config": mock_config,
+                "image_compatibility": mock_image_compatibility,
             }
 
     def test_run_validates_agent_name(
@@ -162,6 +167,15 @@ class TestRunCommand:
         unknown = UnknownAgentError("invalid", ("claude", "gemini"))
         with (
             patch("djinn_in_a_box.commands.agent.run_headless_agent", side_effect=unknown),
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=object()),
+            patch(
+                "djinn_in_a_box.commands.agent.workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(
+                "djinn_in_a_box.commands.agent.prepare_config_workflow",
+                return_value=WorkflowPreparationResult(True),
+            ),
             pytest.raises(typer.Exit) as exc_info,
         ):
             run(agent="invalid", prompt="test prompt")
@@ -216,6 +230,7 @@ class TestRunCommand:
             (),
             config_snapshot=run_mocks["config"],
             require_compose_host_env=True,
+            container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
         )
         run_mocks["run"].assert_called_once()
 
@@ -237,6 +252,30 @@ class TestRunCommand:
             run(agent="opencode", prompt="test prompt")
 
         assert exc_info.value.exit_code == 1
+        run_mocks["run"].assert_not_called()
+
+    def test_blocked_gemini_workflow_never_starts_runner_and_checks_image(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["workflow"].return_value = WorkflowPreparationResult(
+            False,
+            (WorkflowPreparationProblem("blocked", "Workflow is blocked.", "Resolve drift."),),
+        )
+
+        with pytest.raises(typer.Exit) as exc_info:
+            run(agent="gemini", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+        run_mocks["workflow"].assert_called_once_with(
+            Path("/project"),
+            (),
+            config_snapshot=run_mocks["config"],
+            require_compose_host_env=True,
+            container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+        )
+        run_mocks["image_compatibility"].assert_called_once_with()
         run_mocks["run"].assert_not_called()
 
     def test_run_with_write_flag(self, run_mocks: dict[str, Any]) -> None:
