@@ -318,6 +318,11 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     (opencode_seed / "AGENTS.md").write_text("OpenCode instructions.\n", encoding="utf-8")
     legacy_opencode_settings = b'{"personal":true}\n'
     (opencode_seed / ".opencode.json").write_bytes(legacy_opencode_settings)
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    (canonical / ".djinn-config-sync.json").write_text(
+        '{"source":"opencode","items":[]}', encoding="utf-8"
+    )
 
     env = {
         **os.environ,
@@ -325,7 +330,13 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
         "OUTPUT_LIB": str(ROOT / "scripts" / "output-lib.sh"),
         "SEED_LIB": str(ROOT / "scripts" / "seed-lib.sh"),
         "MCP_REGISTER": str(ROOT / "scripts" / "mcp-register.sh"),
-        "OPENCODE_WORKFLOW_DELIVERY": str(ROOT / "scripts" / "opencode-workflow-delivery.py"),
+        "SETTINGS_COPY_HELPER": str(ROOT / "scripts" / "settings-copy.py"),
+        "WORKFLOW_PUBLISHER": str(
+            ROOT / "src" / "djinn_in_a_box" / "core" / "workflow_publisher.py"
+        ),
+        "DJINN_CANONICAL_ROOT": str(canonical),
+        "OPENCODE_WORKFLOW_VIEW": str(opencode_seed),
+        "OPENCODE_RUNTIME_ROOT": str(tmp_path / "runtime-opencode"),
         "MCP_SERVERS_CONFIG": str(mcp_config),
         "NO_COLOR": "1",
         "ENABLE_FIREWALL": "false",

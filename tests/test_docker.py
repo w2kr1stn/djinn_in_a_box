@@ -34,6 +34,7 @@ from djinn_in_a_box.core.docker import (
     is_sync_archive,
     restore_sync_path,
     restore_volume,
+    workflow_image_compatible,
 )
 
 
@@ -69,6 +70,28 @@ class TestEnsureNetwork:
         mock_run.return_value = MagicMock(returncode=1)
         result = ensure_network()
         assert result is False
+
+
+class TestWorkflowImageCompatibility:
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_accepts_publisher_label(self, run: MagicMock) -> None:
+        run.return_value = MagicMock(returncode=0, stdout="1\n")
+
+        assert workflow_image_compatible()
+        assert run.call_args.args[0] == [
+            "docker",
+            "image",
+            "inspect",
+            "djinn-in-a-box:latest",
+            "--format",
+            '{{ index .Config.Labels "djinn.workflow.publisher" }}',
+        ]
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_rejects_unlabelled_image_content_free(self, run: MagicMock) -> None:
+        run.return_value = MagicMock(returncode=0, stdout="")
+
+        assert not workflow_image_compatible()
 
 
 class TestGetComposeFiles:

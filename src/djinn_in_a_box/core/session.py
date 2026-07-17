@@ -13,7 +13,9 @@ from pathlib import Path
 
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY
 from djinn_in_a_box.core.docker import _decode_timeout_output  # pyright: ignore[reportPrivateUsage]
+from djinn_in_a_box.core.workflow_publisher import DriftClass
 
 log = logging.getLogger(__name__)
 
@@ -25,89 +27,13 @@ _CONTAINER_SESSIONS_BASE = "/home/dev/sessions"
 _HOST_SESSIONS_BASE = Path.home() / ".djinn" / "sessions"
 _DJINN_CONTAINER_NAME = "djinn"
 _EXEC_TIMEOUT = 10.0
-_OPENCODE_DELIVERY_PREFIX = "opencode workflow delivery failed: "
-_OPENCODE_DELIVERY_CODES = frozenset(
-    {
-        "destination-parent-race",
-        "destination-parent-unsafe",
-        "destination-path-unsafe",
-        "destination-race",
-        "destination-root-race",
-        "destination-root-unsafe",
-        "invalid-data",
-        "managed-file-drift",
-        "manifest-malformed",
-        "manifest-race",
-        "publication-failed",
-        "quarantine-preserved",
-        "source-agents-missing",
-        "source-directory-symlink",
-        "source-directory-type-unsafe",
-        "source-file-race",
-        "source-file-symlink-unsafe",
-        "source-file-type-unsafe",
-        "source-parent-race",
-        "source-root-race",
-        "source-subtree-race",
-        "source-traversal-race",
-        "stage-changed",
-        "stage-create-failed",
-        "stale-file-drift",
-        "unmanaged-file-collision",
-    }
-)
-
-
-def _opencode_refresh_error(stderr: str) -> str:
-    value = stderr.strip()
-    code = next(
-        (
-            candidate
-            for candidate in _OPENCODE_DELIVERY_CODES
-            if value == f"{_OPENCODE_DELIVERY_PREFIX}{candidate}"
-        ),
-        None,
-    )
-    if code is None:
-        return "OpenCode workflow refresh failed"
-    if code == "unmanaged-file-collision":
-        remedy = "Move the conflicting unmanaged OpenCode runtime file, then retry."
-    elif code == "managed-file-drift":
-        remedy = "Restore or move the modified managed OpenCode runtime file, then retry."
-    elif code == "stale-file-drift":
-        remedy = "Restore or remove the modified stale OpenCode runtime file, then retry."
-    elif code == "manifest-malformed":
-        remedy = "Repair or remove the OpenCode delivery manifest, then retry."
-    elif code == "source-agents-missing":
-        remedy = "Restore the canonical OpenCode AGENTS.md file, then retry."
-    elif code == "quarantine-preserved":
-        remedy = (
-            "Inspect and preserve the .djinn-opencode-stage-* quarantine data; reconcile it "
-            "before deleting anything or retrying."
-        )
-    elif code == "stage-create-failed":
-        remedy = "Repair OpenCode workflow stage-directory access, then retry."
-    elif code in _OPENCODE_RETRY_CODES:
-        remedy = "Retry after concurrent OpenCode workflow changes settle."
-    else:
-        remedy = "Check the OpenCode workflow paths and ownership, then retry."
-    return f"OpenCode workflow refresh failed: {code}. Remedy: {remedy}"
-
-
-_OPENCODE_RETRY_CODES = frozenset(
-    {
-        "destination-race",
-        "destination-root-race",
-        "manifest-race",
-        "publication-failed",
-        "source-file-race",
-        "source-parent-race",
-        "source-root-race",
-        "source-subtree-race",
-        "source-traversal-race",
-        "stage-changed",
-    }
-)
+_PUBLISHER_REMEDIES: dict[DriftClass, str] = {
+    DriftClass.SOURCE_CHANGED: "Run `djinn config sync`, then retry.",
+    DriftClass.TARGET_DRIFT: "Restore or move the modified managed workflow item, then retry.",
+    DriftClass.COLLISION: "Move or remove the conflicting unmanaged workflow item, then retry.",
+    DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
+    DriftClass.CLEAN: "",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,19 +103,28 @@ class SessionManager:
         raise RuntimeError(msg)
 
     def refresh_opencode_workflow(self, target: SessionTarget) -> SessionResult:
-        """Refresh the running container's OpenCode runtime from its delivered seed."""
         if target.container_id is None:
             return SessionResult(returncode=1, stderr="OpenCode container refresh unavailable")
+        if not self.workflow_image_compatible(target):
+            return SessionResult(returncode=1, stderr="Rebuild/recreate required.")
         command = [
             "docker",
             "exec",
             target.container_id,
             "python3",
-            "/home/dev/opencode-workflow-delivery.py",
-            "--source",
+            "/home/dev/workflow-publisher.py",
+            "--view",
             "/home/dev/.opencode/seed",
-            "--destination",
+            "--canonical-root",
+            "/home/dev/.djinn-canonical",
+            "--target",
             "/home/dev/.config/opencode",
+            "--manifest",
+            "/home/dev/.config/opencode/.djinn-workflow-state.json",
+            "--ignore",
+            ".opencode.json",
+            "--profile",
+            "opencode",
         ]
         try:
             result = subprocess.run(
@@ -206,9 +141,41 @@ class SessionManager:
         if result.returncode != 0:
             return SessionResult(
                 returncode=result.returncode,
-                stderr=_opencode_refresh_error(result.stderr),
+                stderr=_publisher_refresh_error(result.stderr),
             )
         return SessionResult(returncode=0)
+
+    def workflow_image_compatible(self, target: SessionTarget) -> bool:
+        if target.container_id is None:
+            return False
+        try:
+            container = subprocess.run(
+                ["docker", "inspect", target.container_id, "--format", "{{.Image}}"],
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                check=False,
+            )
+            if container.returncode != 0 or not container.stdout.strip():
+                return False
+            image = container.stdout.strip()
+            inspected = subprocess.run(
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    image,
+                    "--format",
+                    "{{ index .Config.Labels \"djinn.workflow.publisher\" }}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                check=False,
+            )
+        except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+            return False
+        return inspected.returncode == 0 and inspected.stdout.strip() == "1"
 
     def run_interactive(
         self,
@@ -483,3 +450,16 @@ class SessionManager:
             cmd.extend([agent_config.model_flag, effective_model])
         cmd.append(prompt)
         return cmd
+
+
+def _publisher_refresh_error(stderr: str) -> str:
+    value = stderr.strip()
+    for drift in DriftClass:
+        if drift is DriftClass.CLEAN:
+            continue
+        if value == f"workflow publisher: {drift.value}":
+            return (
+                f"OpenCode workflow refresh failed: {drift.value}. "
+                f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
+            )
+    return "OpenCode workflow refresh failed"

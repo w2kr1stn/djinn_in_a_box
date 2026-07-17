@@ -358,7 +358,7 @@ def test_switch_is_allowed_only_without_edited_managed_targets(tmp_path: Path) -
     assert DriftClass.TARGET_DRIFT in blocked.audit.drift_classes
 
 
-def test_canonical_delivery_view_stays_compatible_with_config_delivery(tmp_path: Path) -> None:
+def test_canonical_delivery_view_returns_publisher_view(tmp_path: Path) -> None:
     project, config_path = _workspace(tmp_path)
     assert sync_config(project, config_path=config_path).success
 

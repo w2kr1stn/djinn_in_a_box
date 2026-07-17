@@ -222,6 +222,28 @@ class TestSessionCommand:
         instance.preflight_check.assert_not_called()
         instance.run_interactive.assert_not_called()
 
+    def test_old_running_image_stops_before_workflow_or_workspace(self, tmp_path: Path) -> None:
+        target = SessionTarget(container_id="container-123")
+        with (
+            patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
+            patch("djinn_in_a_box.commands.session.prepare_config_workflow") as workflow,
+        ):
+            instance = mock_mgr.return_value
+            instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = False
+            result = runner.invoke(
+                app,
+                ["session", "--project", "new-project", "--agent", "opencode", "--create"],
+            )
+
+        assert result.exit_code == 1
+        assert "Rebuild/recreate required." in result.output
+        assert not (tmp_path / ".djinn/sessions/new-project").exists()
+        workflow.assert_not_called()
+        instance.refresh_opencode_workflow.assert_not_called()
+        instance.preflight_check.assert_not_called()
+
     def test_host_opencode_delivers_only_selected_root(self, tmp_path: Path) -> None:
         workspace = tmp_path / ".djinn" / "sessions" / "testproj"
         workspace.mkdir(parents=True)

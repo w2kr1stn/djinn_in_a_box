@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from collections.abc import Mapping
 from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
@@ -24,6 +25,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     WorkflowView,
     canonical_lock,
     publish_workflow_view,
+    retire_legacy_delivery_manifest,
     snapshot_file_view,
 )
 
@@ -65,6 +67,25 @@ def _write(path: Path, content: bytes, *, executable: bool = False) -> None:
     path.write_bytes(content)
     if executable:
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _legacy_manifest(
+    files: dict[str, tuple[bytes, bool]], fragments: list[Mapping[str, object]] | None = None
+) -> bytes:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "tool": "opencode",
+            "files": {
+                path: {
+                    "content_hash": workflow_publisher._digest(content),  # pyright: ignore[reportPrivateUsage]
+                    "executable": executable,
+                }
+                for path, (content, executable) in files.items()
+            },
+            "fragments": [] if fragments is None else fragments,
+        }
+    ).encode()
 
 
 def _no_target_mutation(_count: int) -> None:
@@ -137,6 +158,118 @@ def test_unmanaged_collision_and_managed_edit_fail_closed(tmp_path: Path) -> Non
 
     assert drift.drift_class is DriftClass.TARGET_DRIFT
     assert _tree(target) == before_edit
+
+
+def test_zero_byte_instruction_companion_adopts_but_nonempty_file_blocks(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"")
+
+    adopted = _publish(canonical, target, _view())
+
+    assert adopted.success
+    assert (target / "AGENTS.md").read_bytes() == b"one\n"
+    (target / RUNTIME_MANIFEST_NAME).unlink()
+    (target / "AGENTS.md").write_bytes(b"operator content\n")
+    assert _publish(canonical, target, _view()).drift_class is DriftClass.COLLISION
+
+
+def test_runtime_legacy_manifest_adoption_covers_files_and_fragments(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"one\n")
+    _write(target / "settings.json", b'{"hooks":{"Stop":["ready"]},"operator":true}\n')
+    value = ["ready"]
+    fragment = {
+        "carrier_path": "settings.json",
+        "key_path": ["hooks", "Stop"],
+        "value_hash": workflow_publisher._legacy_value_digest(value),  # pyright: ignore[reportPrivateUsage]
+    }
+    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
+    legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"one\n", False)}, [fragment]))
+
+    result = _publish(
+        canonical,
+        target,
+        _view(fragments=(_fragment("settings.json", ("hooks", "Stop"), value),)),
+    )
+
+    assert result.success
+    assert not legacy.exists()
+    assert (target / RUNTIME_MANIFEST_NAME).is_file()
+    assert json.loads((target / "settings.json").read_text())["operator"] is True
+
+
+def test_runtime_legacy_adoption_is_retry_safe_after_state_write_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"one\n")
+    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
+    legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"one\n", False)}))
+
+    def abort_after_state_write() -> None:
+        raise RuntimeError("injected adoption crash")
+
+    monkeypatch.setattr(
+        workflow_publisher,
+        "_after_runtime_manifest_write",
+        abort_after_state_write,
+    )
+    with pytest.raises(RuntimeError, match="injected adoption crash"):
+        _publish(canonical, target, _view())
+    monkeypatch.setattr(
+        workflow_publisher,
+        "_after_runtime_manifest_write",
+        lambda: None,
+    )
+
+    assert (target / RUNTIME_MANIFEST_NAME).is_file()
+    assert legacy.is_file()
+    assert _publish(canonical, target, _view()).success
+    assert not legacy.exists()
+
+
+@pytest.mark.parametrize("payload", [b"not-json", b'{"schema_version":1}'])
+def test_runtime_legacy_manifest_malformed_or_edited_fails_closed(
+    tmp_path: Path, payload: bytes
+) -> None:
+    canonical, target = _roots(tmp_path)
+    _write(target / "AGENTS.md", b"one\n")
+    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
+    if payload == b"not-json":
+        legacy.write_bytes(payload)
+    else:
+        legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"recorded\n", False)}))
+    before = _tree(target)
+
+    result = _publish(canonical, target, _view())
+
+    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert _tree(target) == before
+
+
+def test_compose_retirement_retries_after_verify_before_remove_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "claude"
+    root.mkdir()
+    legacy = root / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
+    legacy.write_bytes(_legacy_manifest({}))
+
+    def abort_before_remove() -> None:
+        raise RuntimeError("injected retirement crash")
+
+    monkeypatch.setattr(
+        workflow_publisher,
+        "_after_legacy_delivery_verified",
+        abort_before_remove,
+    )
+    with pytest.raises(RuntimeError, match="injected retirement crash"):
+        retire_legacy_delivery_manifest(root)
+    monkeypatch.setattr(workflow_publisher, "_after_legacy_delivery_verified", lambda: None)
+
+    assert legacy.exists()
+    assert retire_legacy_delivery_manifest(root).success
+    assert not legacy.exists()
 
 
 def test_stale_file_and_owned_json_key_are_removed_without_touching_neighbor(
@@ -518,3 +651,38 @@ def test_standalone_file_only_publish_exit_codes_fragment_refusal_and_missing_ca
     sentinel = "operator edit"
     assert sentinel not in drift.stderr
     assert sentinel not in collision.stderr
+
+
+def test_opencode_cli_profile_filters_foreign_files_and_keeps_neighbors(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    view = tmp_path / "view"
+    canonical.mkdir()
+    target.mkdir()
+    view.mkdir()
+    _canonical_identity(canonical)
+    _write(view / "AGENTS.md", b"OpenCode instructions\n")
+    _write(view / "agents/reviewer.md", b"---\nname: reviewer\n---\nReview\n")
+    plugins = {
+        "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
+        "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
+        "plugins/ready-notify.js": b"export const Plugin = () => ({});\n",
+    }
+    for path, content in plugins.items():
+        _write(view / path, content)
+    _write(view / "operator-private.txt", b"foreign\n")
+    _write(target / "personal.json", b'{"keep":true}\n')
+
+    result = _run_cli(view, canonical, target, "--profile", "opencode")
+
+    assert result.returncode == 0
+    assert not (target / "operator-private.txt").exists()
+    assert (target / "personal.json").read_bytes() == b'{"keep":true}\n'
+    for path, content in plugins.items():
+        assert (target / path).read_bytes() == content
+    manifest = json.loads((target / RUNTIME_MANIFEST_NAME).read_text())
+    assert {item["path"] for item in manifest["items"]} == {
+        "AGENTS.md",
+        "agents/reviewer.md",
+        *plugins,
+    }

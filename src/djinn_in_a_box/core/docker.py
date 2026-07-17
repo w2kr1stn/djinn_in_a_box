@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.paths import get_project_root
+from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 
 DJINN_NETWORK: str = "djinn-network"
 """Docker network name for Djinn containers."""
@@ -28,6 +29,8 @@ _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
     "dev-auth": "djinn-auth",
 }
+_WORKFLOW_IMAGE = "djinn-in-a-box:latest"
+_WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 
 
 class DockerMode(Enum):
@@ -542,6 +545,26 @@ def get_config_root(config: AppConfig | None = None) -> Path:
     return Path.home() / ".djinn" / "config"
 
 
+def workflow_image_compatible(image: str = _WORKFLOW_IMAGE) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{ index .Config.Labels \"djinn.workflow.publisher\" }}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError, OSError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
 def ensure_host_env(config: AppConfig | None = None) -> None:
     """Idempotently create the unconditional host bind-mount sources.
 
@@ -561,6 +584,13 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
         # 0700: credential stores hold secrets (OAuth tokens, age identities).
         # Applies on creation only, matching the ~/.ssh precedent below.
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    claude_root = get_project_root() / "config" / "claude"
+    companion = claude_root / "AGENTS.md"
+    if not workflow_root_is_uninitialized(claude_root) and not (
+        companion.exists() or companion.is_symlink()
+    ):
+        companion.touch(exist_ok=False)
 
     djinn_dir = Path.home() / ".djinn"
     for sub in ("sessions", "backups"):

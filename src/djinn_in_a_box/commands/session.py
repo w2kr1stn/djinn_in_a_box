@@ -78,6 +78,11 @@ def session(
         error(str(e))
         raise typer.Exit(1) from None
 
+    if agent == "opencode" and target.container_mode and not mgr.workflow_image_compatible(target):
+        error("Workflow image is incompatible.")
+        warning("Rebuild/recreate required.")
+        raise typer.Exit(1)
+
     if agent in {"claude", "codex", "opencode"}:
         config = load_config()
         delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()

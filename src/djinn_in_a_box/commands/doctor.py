@@ -366,13 +366,6 @@ def _doctor_fix(config: AppConfig) -> bool:
     failed = False
 
     try:
-        ensure_host_env(config)
-        console.print("Fixed: host environment")
-    except OSError as e:
-        failed = True
-        console.print(f"Could not fix: host environment (check host paths are writable: {e})")
-
-    try:
         project_root = get_project_root()
     except FileNotFoundError as e:
         failed = True
@@ -396,6 +389,13 @@ def _doctor_fix(config: AppConfig) -> bool:
             console.print(
                 f"Could not fix: seed configuration (check project config paths are writable: {e})"
             )
+
+    try:
+        ensure_host_env(config)
+        console.print("Fixed: host environment")
+    except OSError as e:
+        failed = True
+        console.print(f"Could not fix: host environment (check host paths are writable: {e})")
 
     try:
         network_ok = ensure_network()
@@ -519,25 +519,4 @@ def preflight(config: AppConfig, *, provision_host: bool = True) -> None:
     except OSError as e:
         error(f"Failed to provision host directories: {e}")
         warning("Check that your home and config-root paths are writable, then retry.")
-        raise typer.Exit(1) from e
-
-    # Outside the try: a missing repo marker is an install problem whose own
-    # FileNotFoundError message must surface as-is (not a writability remedy).
-    project_root = get_project_root()
-    try:
-        seed_config(project_root, source=config.config_sync.source)
-    except SeedingError as e:
-        error(str(e))
-        warning("Follow the remedy above, then retry.")
-        raise typer.Exit(1) from e
-    except PermissionError as e:
-        error(f"Failed to seed default configuration: {e}")
-        warning(
-            f'Fix ownership with `sudo chown -R "$(id -u):$(id -g)" '
-            f"{project_root / 'config'}`, then retry."
-        )
-        raise typer.Exit(1) from e
-    except OSError as e:
-        error(f"Failed to seed default configuration: {e}")
-        warning("Check that the project config paths are writable, then retry.")
         raise typer.Exit(1) from e

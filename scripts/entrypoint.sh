@@ -98,30 +98,32 @@ sync_seed "gemini"   "$HOME/.gemini_seed"   "$HOME/.gemini"          "$HOME/.gem
 
 # OpenCode workflow files come from the canonical seed; personal settings live
 # beside that seed on the persistent parent mount and never flow back into it.
-OPENCODE_RUNTIME_SETTINGS="$HOME/.config/opencode/.opencode.json"
+OPENCODE_RUNTIME_ROOT="${OPENCODE_RUNTIME_ROOT:-$HOME/.config/opencode}"
+OPENCODE_RUNTIME_SETTINGS="$OPENCODE_RUNTIME_ROOT/.opencode.json"
 OPENCODE_PERSISTENT_SETTINGS="$HOME/.opencode/.opencode.json"
 OPENCODE_LEGACY_SETTINGS="$HOME/.opencode/seed/.opencode.json"
-OPENCODE_DELIVERY_HELPER="${OPENCODE_WORKFLOW_DELIVERY:-/home/dev/opencode-workflow-delivery.py}"
+SETTINGS_COPY_HELPER="${SETTINGS_COPY_HELPER:-/home/dev/settings-copy.py}"
 if [[ -e "$OPENCODE_PERSISTENT_SETTINGS" || -L "$OPENCODE_PERSISTENT_SETTINGS" ]]; then
-    python3 "$OPENCODE_DELIVERY_HELPER" \
+    python3 "$SETTINGS_COPY_HELPER" \
         --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
 elif [[ -e "$OPENCODE_LEGACY_SETTINGS" || -L "$OPENCODE_LEGACY_SETTINGS" ]]; then
-    python3 "$OPENCODE_DELIVERY_HELPER" \
+    python3 "$SETTINGS_COPY_HELPER" \
         --copy-settings "$OPENCODE_LEGACY_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" >&2
-    python3 "$OPENCODE_DELIVERY_HELPER" \
+    python3 "$SETTINGS_COPY_HELPER" \
         --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
 fi
 
 ui_info "[workflow-delivery] opencode:"
-if [[ -n "${OPENCODE_WORKFLOW_DELIVERY:-}" ]]; then
-    python3 "$OPENCODE_WORKFLOW_DELIVERY" \
-        --source "$HOME/.opencode/seed" \
-        --destination "$HOME/.config/opencode" >&2
-else
-    python3 /home/dev/opencode-workflow-delivery.py \
-        --source /home/dev/.opencode/seed \
-        --destination /home/dev/.config/opencode >&2
-fi
+WORKFLOW_PUBLISHER="${WORKFLOW_PUBLISHER:-/home/dev/workflow-publisher.py}"
+CANONICAL_CONFIG_ROOT="${DJINN_CANONICAL_ROOT:-/home/dev/.djinn-canonical}"
+OPENCODE_WORKFLOW_VIEW="${OPENCODE_WORKFLOW_VIEW:-/home/dev/.opencode/seed}"
+python3 "$WORKFLOW_PUBLISHER" \
+    --view "$OPENCODE_WORKFLOW_VIEW" \
+    --canonical-root "$CANONICAL_CONFIG_ROOT" \
+    --target "$OPENCODE_RUNTIME_ROOT" \
+    --manifest "$OPENCODE_RUNTIME_ROOT/.djinn-workflow-state.json" \
+    --ignore .opencode.json \
+    --profile opencode >&2
 
 # =============================================================================
 # MCP Server Registration (all CLI tools, from canonical config)
@@ -219,7 +221,7 @@ reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.
 # → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
 reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"
 reverse_sync_file "$HOME/.gemini/settings.json"          "$HOME/.gemini_seed/settings.json"
-if ! python3 "$OPENCODE_DELIVERY_HELPER" \
+if ! python3 "$SETTINGS_COPY_HELPER" \
     --copy-settings "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
     --missing-ok >&2; then
     ui_warn "could not persist OpenCode personal settings"

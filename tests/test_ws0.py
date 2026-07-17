@@ -240,6 +240,38 @@ class TestEnsureHostEnv:
 
         assert "existing" in gitconfig.read_text()  # never clobbered
 
+    def test_initialized_claude_root_gets_empty_companion_mount_source(
+        self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = mock_home / "project"
+        claude_root = project / "config" / "claude"
+        claude_root.mkdir(parents=True)
+        (claude_root / "CLAUDE.md").write_text("seed\n")
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: project)
+        config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
+
+        ensure_host_env(config)
+
+        companion = claude_root / "AGENTS.md"
+        assert companion.is_file()
+        assert companion.read_bytes() == b""
+        companion.write_text("projected\n")
+        ensure_host_env(config)
+        assert companion.read_text() == "projected\n"
+
+    def test_uninitialized_claude_root_never_gets_companion(
+        self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = mock_home / "project"
+        claude_root = project / "config" / "claude"
+        claude_root.mkdir(parents=True)
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: project)
+        config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
+
+        ensure_host_env(config)
+
+        assert not (claude_root / "AGENTS.md").exists()
+
 
 class TestDoctor:
     """doctor diagnostics + preflight."""
@@ -296,9 +328,9 @@ class TestDoctor:
         monkeypatch.setattr(doctor_mod, "docker_daemon_ok", lambda: True)
         assert doctor_mod.preflight(mock_app_config) is None
         mock_ensure.assert_called_once_with(mock_app_config)  # provisioning ran
-        mock_seed.assert_called_once()  # first-run seeding ran (hermetic: mocked)
+        mock_seed.assert_not_called()
 
-    def test_preflight_exits_on_seeding_error(
+    def test_preflight_never_seeds_even_when_seed_would_fail(
         self, monkeypatch: pytest.MonkeyPatch, mock_app_config: AppConfig
     ) -> None:
         monkeypatch.setattr(doctor_mod, "ensure_host_env", MagicMock())
@@ -307,10 +339,9 @@ class TestDoctor:
         monkeypatch.setattr(
             doctor_mod, "seed_config", MagicMock(side_effect=SeedingError("sudo rm -rf /x"))
         )
-        with pytest.raises(typer.Exit):
-            doctor_mod.preflight(mock_app_config)
+        assert doctor_mod.preflight(mock_app_config) is None
 
-    def test_preflight_exits_on_seeding_oserror(
+    def test_preflight_never_seeds_even_when_seed_would_raise_oserror(
         self, monkeypatch: pytest.MonkeyPatch, mock_app_config: AppConfig
     ) -> None:
         monkeypatch.setattr(doctor_mod, "ensure_host_env", MagicMock())
@@ -319,8 +350,7 @@ class TestDoctor:
         monkeypatch.setattr(
             doctor_mod, "seed_config", MagicMock(side_effect=PermissionError("denied"))
         )
-        with pytest.raises(typer.Exit):
-            doctor_mod.preflight(mock_app_config)
+        assert doctor_mod.preflight(mock_app_config) is None
 
     def test_doctor_command_exits_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         failing = [doctor_mod.Check("X", doctor_mod.Status.FAIL, "broken", "fix it")]

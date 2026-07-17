@@ -199,16 +199,6 @@ def init_config(
         raise typer.Exit(1) from e
     success(f"Configuration written to {CONFIG_FILE}")
 
-    # Provision host bind-mount sources so the first compose run finds them
-    # (config-root credential subdirs, ~/.djinn/{sessions,backups}, ~/.ssh, ~/.gitconfig).
-    try:
-        ensure_host_env(config)
-    except OSError as e:
-        error(f"Failed to provision host directories: {e}")
-        warning("Check that your home and config-root paths are writable, then retry.")
-        raise typer.Exit(1) from e
-    success(f"Host directories provisioned under {config.config_root}")
-
     # Outside the try: a missing repo marker is an install problem, not a
     # writability problem — its own FileNotFoundError message must surface as-is.
     project_root = get_project_root()
@@ -231,6 +221,14 @@ def init_config(
         raise typer.Exit(1) from e
     if created:
         success(f"Seeded {len(created)} default config file(s)")
+
+    try:
+        ensure_host_env(config)
+    except OSError as e:
+        error(f"Failed to provision host directories: {e}")
+        warning("Check that your home and config-root paths are writable, then retry.")
+        raise typer.Exit(1) from e
+    success(f"Host directories provisioned under {config.config_root}")
 
     rule("Next steps")
     console.print("  [muted]1.[/muted] djinn build    [muted]# Build the Docker image[/muted]")

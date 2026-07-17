@@ -16,7 +16,6 @@ from typing import cast
 
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import ConfigSyncSource
-from djinn_in_a_box.core.config_delivery import DeliveryView
 from djinn_in_a_box.core.config_sync_adapters import (
     OWNERSHIP_MATRIX,
     AdapterReadResult,
@@ -29,6 +28,7 @@ from djinn_in_a_box.core.config_sync_adapters import (
 )
 from djinn_in_a_box.core.workflow_publisher import (
     CANONICAL_MANIFEST_NAME,
+    CanonicalLockLease,
     CarrierFragment,
     DriftClass,
     PublishedFile,
@@ -93,7 +93,7 @@ class ConfigSyncResult:
 class CanonicalDeliveryViewResult:
     success: bool
     audit: ConfigSyncAudit
-    view: DeliveryView | None = None
+    view: WorkflowView | None = None
     revision: str | None = None
     retryable: bool = False
 
@@ -103,7 +103,7 @@ class _Build:
     source: ConfigSyncSource
     fingerprint: str
     canonical: WorkflowView
-    views: Mapping[ConfigSyncSource, DeliveryView]
+    views: Mapping[ConfigSyncSource, WorkflowView]
     problems: tuple[SyncProblem, ...]
 
 
@@ -194,19 +194,15 @@ def load_canonical_delivery_view(
     tool: ConfigSyncSource,
     *,
     config_path: Path | None = None,
+    canonical_lease: CanonicalLockLease | None = None,
 ) -> CanonicalDeliveryViewResult:
     source = load_config(config_path).config_sync.source
     config_root = project_root / "config"
     try:
+        if canonical_lease is not None:
+            return _load_canonical_delivery_view_locked(project_root, tool, source)
         with canonical_lock(config_root, exclusive=False):
-            audit = _audit_locked(project_root, source)
-            if not audit.clean:
-                return CanonicalDeliveryViewResult(False, audit)
-            build = _snapshot_build(project_root, source)
-            view = build.views[tool]
-            manifest = (config_root / MANIFEST_NAME).read_bytes()
-            revision = _digest(manifest + build.fingerprint.encode())
-            return CanonicalDeliveryViewResult(True, audit, view, revision)
+            return _load_canonical_delivery_view_locked(project_root, tool, source)
     except _BuildError as error:
         return CanonicalDeliveryViewResult(
             False,
@@ -217,6 +213,19 @@ def load_canonical_delivery_view(
         return CanonicalDeliveryViewResult(
             False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
         )
+
+
+def _load_canonical_delivery_view_locked(
+    project_root: Path, tool: ConfigSyncSource, source: ConfigSyncSource
+) -> CanonicalDeliveryViewResult:
+    audit = _audit_locked(project_root, source)
+    if not audit.clean:
+        return CanonicalDeliveryViewResult(False, audit)
+    build = _snapshot_build(project_root, source)
+    view = build.views[tool]
+    manifest = (project_root / "config" / MANIFEST_NAME).read_bytes()
+    revision = _digest(manifest + build.fingerprint.encode())
+    return CanonicalDeliveryViewResult(True, audit, view, revision)
 
 
 def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAudit:
@@ -281,8 +290,10 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
     ]
     source_files, source_fragments, source_problems = _source_view(snapshot_root, read)
     problems.extend(source_problems)
-    views: dict[ConfigSyncSource, DeliveryView] = {
-        source: DeliveryView(source, source_files, source_fragments)
+    rendered_views: dict[
+        ConfigSyncSource, tuple[tuple[RenderedFile, ...], tuple[SettingsFragment, ...]]
+    ] = {
+        source: (source_files, source_fragments)
     }
     for target in _TOOLS:
         if target == source:
@@ -296,12 +307,26 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
                     item.identifier, "Artifact is not portable.", item.target_tool, item.source_path
                 )
             )
-        views[target] = DeliveryView(target, rendered.files, rendered.settings_fragments)
-    for tool, view in views.items():
-        for issue in validate_rendered_workflow(tool, view.files, view.settings_fragments):
+        rendered_views[target] = (rendered.files, rendered.settings_fragments)
+    for tool, (rendered_files, rendered_fragments) in rendered_views.items():
+        for issue in validate_rendered_workflow(tool, rendered_files, rendered_fragments):
             problems.append(_problem_from_issue(issue.identifier, tool, issue.relative_path))
-    files: list[PublishedFile] = []
-    fragments: list[CarrierFragment] = []
+    views: dict[ConfigSyncSource, WorkflowView] = {}
+    for tool, (rendered_files, rendered_fragments) in rendered_views.items():
+        views[tool] = WorkflowView(
+            source,
+            tuple(
+                PublishedFile(item.relative_path, item.content, item.executable)
+                for item in rendered_files
+            ),
+            tuple(
+                CarrierFragment(item.carrier_path, item.key_path, item.value_json)
+                for item in rendered_fragments
+            ),
+            source_fingerprint=fingerprint,
+        )
+    published_files: list[PublishedFile] = []
+    published_fragments: list[CarrierFragment] = []
     for tool, view in views.items():
         prefix = PurePosixPath(tool)
         companion = OWNERSHIP_MATRIX[source].instruction_companion
@@ -310,19 +335,24 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
             if tool != source
             else tuple(item for item in view.files if item.relative_path == companion)
         )
-        files.extend(
+        published_files.extend(
             PublishedFile(prefix / item.relative_path, item.content, item.executable)
             for item in publish_files
         )
-        fragments.extend(
+        published_fragments.extend(
             CarrierFragment(prefix / item.carrier_path, item.key_path, item.value_json)
-            for item in view.settings_fragments
+            for item in view.fragments
             if tool != source
         )
     return _Build(
         source,
         fingerprint,
-        WorkflowView(source, tuple(files), tuple(fragments), source_fingerprint=fingerprint),
+        WorkflowView(
+            source,
+            tuple(published_files),
+            tuple(published_fragments),
+            source_fingerprint=fingerprint,
+        ),
         views,
         tuple(_deduplicate_problems(problems)),
     )

@@ -132,13 +132,16 @@ class TestResolveTarget:
 
 
 class TestRefreshOpenCodeWorkflow:
-    def test_uses_exact_container_delivery_command_and_target(
+    def test_uses_publisher_with_exact_container_arguments(
         self, session_mgr: SessionManager
     ) -> None:
         completed = MagicMock(returncode=0, stdout="ignored", stderr="ignored")
         target = SessionTarget(container_id="stable-container-id")
 
-        with patch(_SUBPROCESS_RUN, return_value=completed) as run:
+        with (
+            patch.object(session_mgr, "workflow_image_compatible", return_value=True),
+            patch(_SUBPROCESS_RUN, return_value=completed) as run,
+        ):
             result = session_mgr.refresh_opencode_workflow(target)
 
         assert result.success is True
@@ -148,11 +151,19 @@ class TestRefreshOpenCodeWorkflow:
                 "exec",
                 "stable-container-id",
                 "python3",
-                "/home/dev/opencode-workflow-delivery.py",
-                "--source",
+                "/home/dev/workflow-publisher.py",
+                "--view",
                 "/home/dev/.opencode/seed",
-                "--destination",
+                "--canonical-root",
+                "/home/dev/.djinn-canonical",
+                "--target",
                 "/home/dev/.config/opencode",
+                "--manifest",
+                "/home/dev/.config/opencode/.djinn-workflow-state.json",
+                "--ignore",
+                ".opencode.json",
+                "--profile",
+                "opencode",
             ],
             capture_output=True,
             text=True,
@@ -164,7 +175,10 @@ class TestRefreshOpenCodeWorkflow:
         sentinel = "PRIVATE-CONTAINER-OUTPUT"
         failed = MagicMock(returncode=9, stdout=sentinel, stderr=sentinel)
 
-        with patch(_SUBPROCESS_RUN, return_value=failed):
+        with (
+            patch.object(session_mgr, "workflow_image_compatible", return_value=True),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
             result = session_mgr.refresh_opencode_workflow(
                 SessionTarget(container_id="container-id")
             )
@@ -173,78 +187,49 @@ class TestRefreshOpenCodeWorkflow:
         assert result.stderr == "OpenCode workflow refresh failed"
         assert sentinel not in repr(result)
 
-    def test_known_managed_drift_code_has_safe_actionable_remedy(
-        self, session_mgr: SessionManager
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("source-changed", "Run `djinn config sync`"),
+            ("target-drift", "modified managed workflow item"),
+            ("collision", "conflicting unmanaged workflow item"),
+            ("invalid-or-semantic", "Author or edit the artifact natively"),
+        ],
+    )
+    def test_publisher_classes_have_one_content_free_remedy(
+        self, session_mgr: SessionManager, code: str, expected: str
     ) -> None:
         failed = MagicMock(
-            returncode=1,
+            returncode=13,
             stdout="",
-            stderr="opencode workflow delivery failed: managed-file-drift\n",
+            stderr=f"workflow publisher: {code}\n",
         )
 
-        with patch(_SUBPROCESS_RUN, return_value=failed):
+        with (
+            patch.object(session_mgr, "workflow_image_compatible", return_value=True),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
             result = session_mgr.refresh_opencode_workflow(
                 SessionTarget(container_id="container-id")
             )
 
-        assert result.returncode == 1
-        assert "managed-file-drift" in result.stderr
-        assert "modified managed OpenCode runtime file" in result.stderr
+        assert code in result.stderr
+        assert expected in result.stderr
 
-    def test_emitted_stage_creation_failure_has_retry_remedy(
+    def test_running_old_container_blocks_before_exec_even_if_tag_is_new(
         self, session_mgr: SessionManager
     ) -> None:
-        failed = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="opencode workflow delivery failed: stage-create-failed\n",
-        )
+        container = MagicMock(returncode=0, stdout="sha256:old-image\n", stderr="")
+        image = MagicMock(returncode=0, stdout="0\n", stderr="")
 
-        with patch(_SUBPROCESS_RUN, return_value=failed):
+        with patch(_SUBPROCESS_RUN, side_effect=(container, image)) as run:
             result = session_mgr.refresh_opencode_workflow(
                 SessionTarget(container_id="container-id")
             )
 
-        assert result.returncode == 1
-        assert "stage-create-failed" in result.stderr
-        assert "Repair OpenCode workflow stage-directory access" in result.stderr
-
-    def test_quarantine_preservation_has_recovery_before_retry_remedy(
-        self, session_mgr: SessionManager
-    ) -> None:
-        failed = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="opencode workflow delivery failed: quarantine-preserved\n",
-        )
-
-        with patch(_SUBPROCESS_RUN, return_value=failed):
-            result = session_mgr.refresh_opencode_workflow(
-                SessionTarget(container_id="container-id")
-            )
-
-        assert result.returncode == 1
-        assert "quarantine-preserved" in result.stderr
-        assert ".djinn-opencode-stage-*" in result.stderr
-        assert "before deleting anything or retrying" in result.stderr
-
-    def test_known_code_with_extra_output_is_not_forwarded(
-        self, session_mgr: SessionManager
-    ) -> None:
-        sentinel = "PRIVATE-CONTAINER-OUTPUT"
-        failed = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr=(f"opencode workflow delivery failed: managed-file-drift\n{sentinel}\n"),
-        )
-
-        with patch(_SUBPROCESS_RUN, return_value=failed):
-            result = session_mgr.refresh_opencode_workflow(
-                SessionTarget(container_id="container-id")
-            )
-
-        assert result.stderr == "OpenCode workflow refresh failed"
-        assert sentinel not in repr(result)
+        assert result.stderr == "Rebuild/recreate required."
+        assert run.call_count == 2
+        assert run.call_args_list[1].args[0][3] == "sha256:old-image"
 
     def test_host_target_does_not_execute_refresh(self, session_mgr: SessionManager) -> None:
         with patch(_SUBPROCESS_RUN) as run:

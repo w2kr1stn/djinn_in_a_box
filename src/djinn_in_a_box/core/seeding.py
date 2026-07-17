@@ -66,7 +66,7 @@ def seed_config(
         raise SeedingError(msg)
 
     claude_root = project_root / "config" / "claude"
-    seed_claude_baseline = source == "claude" and _root_is_uninitialized(claude_root)
+    seed_claude_baseline = source == "claude" and workflow_root_is_uninitialized(claude_root)
 
     created = _ensure_workflow_roots(project_root)
     entries = (*CLAUDE_BASELINE_SEEDS, *SHARED_SEEDS) if seed_claude_baseline else SHARED_SEEDS
@@ -108,7 +108,7 @@ def pristine_workflow_seed_digest(project_root: Path, relative_path: Path) -> st
     return hashlib.sha256(source.read_bytes()).hexdigest()
 
 
-def _root_is_uninitialized(path: Path) -> bool:
+def workflow_root_is_uninitialized(path: Path) -> bool:
     if path.is_symlink():
         return False
     if not path.exists():
@@ -116,8 +116,6 @@ def _root_is_uninitialized(path: Path) -> bool:
     if not path.is_dir():
         return True
     return next(path.iterdir(), None) is None
-
-
 def _ensure_workflow_roots(project_root: Path) -> list[Path]:
     targets = tuple(project_root / "config" / name for name in WORKFLOW_ROOT_NAMES)
     for target in targets:
