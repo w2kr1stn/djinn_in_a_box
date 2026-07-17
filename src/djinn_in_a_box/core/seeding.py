@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from djinn_in_a_box.config.models import ConfigSyncSource
 
 SeedKind = Literal["file", "directory"]
 
@@ -22,7 +25,9 @@ class SeedEntry:
     kind: SeedKind
 
 
-SEED_MANIFEST: tuple[SeedEntry, ...] = (
+WORKFLOW_ROOT_NAMES: tuple[ConfigSyncSource, ...] = ("claude", "codex", "opencode")
+
+CLAUDE_BASELINE_SEEDS: tuple[SeedEntry, ...] = (
     SeedEntry(Path("config/claude/CLAUDE.md"), Path("config/claude/CLAUDE.md"), "file"),
     SeedEntry(Path("config/claude/settings.json"), Path("config/claude/settings.json"), "file"),
     SeedEntry(Path("config/claude/skills"), Path("config/claude/skills"), "directory"),
@@ -30,8 +35,10 @@ SEED_MANIFEST: tuple[SeedEntry, ...] = (
     SeedEntry(Path("config/claude/agents"), Path("config/claude/agents"), "directory"),
     SeedEntry(Path("config/claude/context"), Path("config/claude/context"), "directory"),
     SeedEntry(Path("config/claude/scripts"), Path("config/claude/scripts"), "directory"),
+)
+
+SHARED_SEEDS: tuple[SeedEntry, ...] = (
     SeedEntry(Path("config/gemini"), Path("config/gemini"), "directory"),
-    SeedEntry(Path("config/opencode"), Path("config/opencode"), "directory"),
     SeedEntry(Path("config/mcp-servers.json"), Path("config/mcp-servers.json"), "file"),
     SeedEntry(
         Path("config/agents.toml.example"),
@@ -42,8 +49,14 @@ SEED_MANIFEST: tuple[SeedEntry, ...] = (
     SeedEntry(Path("packages.txt"), Path("packages.txt"), "file"),
 )
 
+SEED_MANIFEST: tuple[SeedEntry, ...] = CLAUDE_BASELINE_SEEDS + SHARED_SEEDS
 
-def seed_config(project_root: Path) -> list[Path]:
+
+def seed_config(
+    project_root: Path,
+    *,
+    source: ConfigSyncSource = "claude",
+) -> list[Path]:
     seed_root = project_root / "templates" / "seed"
     if not seed_root.is_dir():
         msg = (
@@ -52,13 +65,17 @@ def seed_config(project_root: Path) -> list[Path]:
         )
         raise SeedingError(msg)
 
-    created: list[Path] = []
-    for entry in SEED_MANIFEST:
-        source = seed_root / entry.source
+    claude_root = project_root / "config" / "claude"
+    seed_claude_baseline = source == "claude" and _root_is_uninitialized(claude_root)
+
+    created = _ensure_workflow_roots(project_root)
+    entries = (*CLAUDE_BASELINE_SEEDS, *SHARED_SEEDS) if seed_claude_baseline else SHARED_SEEDS
+    for entry in entries:
+        seed_source = seed_root / entry.source
         target = project_root / entry.target
-        if not _source_exists(source, entry.kind):
+        if not _source_exists(seed_source, entry.kind):
             msg = (
-                f"Installation is missing seed source {source}. "
+                f"Installation is missing seed source {seed_source}. "
                 "Reinstall djinn_in_a_box or clone the repository again, then rerun."
             )
             raise SeedingError(msg)
@@ -70,9 +87,60 @@ def seed_config(project_root: Path) -> list[Path]:
                 continue
             _repair_wrong_type(target)
 
-        _copy_seed(source, target, entry.kind)
+        _copy_seed(seed_source, target, entry.kind)
         created.append(target)
 
+    return created
+
+
+def pristine_workflow_seed_digest(project_root: Path, relative_path: Path) -> str | None:
+    """Return the shipped digest for a known pristine workflow seed file."""
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return None
+    if not relative_path.parts or relative_path.parts[0] not in WORKFLOW_ROOT_NAMES:
+        return None
+    if relative_path.name == ".gitkeep":
+        return None
+
+    source = project_root / "templates" / "seed" / "config" / relative_path
+    if not source.is_file():
+        return None
+    return hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def _root_is_uninitialized(path: Path) -> bool:
+    if path.is_symlink():
+        return False
+    if not path.exists():
+        return True
+    if not path.is_dir():
+        return True
+    return next(path.iterdir(), None) is None
+
+
+def _ensure_workflow_roots(project_root: Path) -> list[Path]:
+    targets = tuple(project_root / "config" / name for name in WORKFLOW_ROOT_NAMES)
+    for target in targets:
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            msg = (
+                f"Workflow config root {target} must be a real directory. "
+                "Move or remove the conflicting path, then rerun."
+            )
+            raise SeedingError(msg)
+
+    created: list[Path] = []
+    for target in targets:
+        if target.is_dir():
+            continue
+        try:
+            target.mkdir(parents=True)
+        except OSError as e:
+            msg = (
+                f"Cannot create workflow config root {target}: {e}. "
+                f"Check that {target.parent} is writable, then rerun."
+            )
+            raise SeedingError(msg) from e
+        created.append(target)
     return created
 
 

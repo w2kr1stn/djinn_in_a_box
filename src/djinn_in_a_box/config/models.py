@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -141,6 +141,18 @@ class ShellConfig(BaseModel):
         return path
 
 
+ConfigSyncSource = Literal["claude", "codex", "opencode"]
+
+
+class ConfigSyncConfig(BaseModel):
+    """Agent workflow synchronization configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: ConfigSyncSource = "claude"
+    """Native workflow tree used as the single source of truth."""
+
+
 class AppConfig(BaseModel):
     """Main application configuration for Djinn in a Box.
 
@@ -165,6 +177,9 @@ class AppConfig(BaseModel):
 
     shell: ShellConfig = Field(default_factory=ShellConfig)
     """Shell mounting configuration."""
+
+    config_sync: ConfigSyncConfig = Field(default_factory=ConfigSyncConfig)
+    """Agent workflow synchronization configuration."""
 
     @field_validator("timezone", mode="after")
     @classmethod

@@ -388,9 +388,12 @@ def compose_run(
                 returncode=result.returncode,
             )
 
-        # Headless mode: capture output with optional timeout
+        # Headless mode: capture output with optional timeout. stdin must be
+        # closed explicitly: agent CLIs such as `codex exec` block waiting for
+        # stdin when they inherit an open terminal descriptor.
         result = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             cwd=project_root,

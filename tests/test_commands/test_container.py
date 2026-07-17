@@ -14,6 +14,10 @@ from rich.console import Console
 from djinn_in_a_box.commands import container
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowPreparationProblem,
+    WorkflowPreparationResult,
+)
 from djinn_in_a_box.core.docker import DockerMode, RunResult
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.theme import DJINN_THEME
@@ -78,16 +82,27 @@ class TestStartCommand:
         with (
             patch("djinn_in_a_box.commands.container.load_config") as mock_load,
             patch("djinn_in_a_box.commands.container.preflight"),
-            patch("djinn_in_a_box.commands.container.ensure_network", return_value=True),
+            patch(
+                "djinn_in_a_box.commands.container.ensure_network", return_value=True
+            ) as mock_network,
             patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.banner") as mock_banner,
+            patch(
+                "djinn_in_a_box.commands.container.prepare_config_workflow",
+                return_value=WorkflowPreparationResult(True),
+            ) as mock_workflow,
+            patch(
+                "djinn_in_a_box.commands.container.get_project_root",
+                return_value=Path("/project"),
+            ),
             patch("djinn_in_a_box.core.console.err_console", test_err_console),
         ):
             mock_config = MagicMock()
             mock_config.code_dir = Path("/projects")
+            mock_config.config_root = Path("/runtime")
             mock_config.shell.skip_mounts = False
             mock_load.return_value = mock_config
             mock_run.return_value = RunResult(returncode=0)
@@ -97,8 +112,43 @@ class TestStartCommand:
                 "cleanup": mock_cleanup,
                 "config": mock_config,
                 "banner": mock_banner,
+                "workflow": mock_workflow,
+                "network": mock_network,
                 "err_output": err_output,
             }
+
+    def test_start_prepares_both_runtime_views_before_network(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        with pytest.raises(typer.Exit):
+            container.start()
+
+        project_root, targets = start_mocks["workflow"].call_args.args
+        assert project_root == Path("/project")
+        assert [(target.tool, target.destination_root) for target in targets] == [
+            ("claude", Path("/runtime/claude")),
+            ("codex", Path("/runtime/codex")),
+        ]
+        assert start_mocks["workflow"].call_args.kwargs == {
+            "config_snapshot": start_mocks["config"],
+            "require_compose_host_env": True,
+        }
+        start_mocks["network"].assert_called_once_with()
+
+    def test_blocked_workflow_stops_before_network_and_compose(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["workflow"].return_value = WorkflowPreparationResult(
+            False,
+            (WorkflowPreparationProblem("blocked", "Workflow blocked.", "Resolve drift."),),
+        )
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        start_mocks["network"].assert_not_called()
+        start_mocks["run"].assert_not_called()
 
     def test_start_with_docker_flag(self, start_mocks: dict[str, Any]) -> None:
         with pytest.raises(typer.Exit):
@@ -871,9 +921,7 @@ class TestResourceTable:
         assert "djinn-uv-cache" in result
         assert "djinn-opencode-data" in result
 
-    def test_print_resource_table_sync_paths(
-        self, capture_container_stdout: io.StringIO
-    ) -> None:
+    def test_print_resource_table_sync_paths(self, capture_container_stdout: io.StringIO) -> None:
         """_print_resource_table also renders sync paths with custom header."""
         entries = {
             "credentials": ["/home/user/.djinn/sync/claude"],

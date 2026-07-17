@@ -97,6 +97,15 @@ class TestLoadConfig:
         assert isinstance(config, AppConfig)
         assert config.timezone == "UTC"
         assert config.resources.cpu_limit == 4
+        assert config.config_sync.source == "claude"
+
+    def test_loads_selected_config_sync_source(self, valid_config_toml: Path) -> None:
+        with valid_config_toml.open("a", encoding="utf-8") as config_file:
+            config_file.write('\n[config_sync]\nsource = "opencode"\n')
+
+        config = load_config(valid_config_toml)
+
+        assert config.config_sync.source == "opencode"
 
     def test_raises_validation_error_for_invalid_values(self, tmp_path: Path) -> None:
         """Should raise ConfigValidationError for invalid field values."""
@@ -145,6 +154,7 @@ class TestLoadAgents:
         assert "gemini" in agents
         assert "codex" in agents
         assert "opencode" in agents
+        assert agents["codex"].read_only_flags == ["--sandbox", "read-only"]
 
     def test_raises_validation_error_for_invalid_agents(self, tmp_path: Path) -> None:
         """Should raise ConfigValidationError for invalid agent data."""
@@ -174,6 +184,8 @@ class TestSaveConfig:
         assert output_path.exists()
         content = output_path.read_text()
         assert "[general]" in content
+        assert "[config_sync]" in content
+        assert 'source = "claude"' in content
         assert "UTC" in content
 
     def test_creates_parent_directories(self, tmp_path: Path, sample_code_dir: Path) -> None:

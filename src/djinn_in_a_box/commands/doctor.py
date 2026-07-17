@@ -21,6 +21,7 @@ from rich.table import Table
 from rich.text import Text
 
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
@@ -137,6 +138,42 @@ def _missing_seed_targets(project_root: Path) -> list[str]:
     return missing
 
 
+def _config_workflow_check(config: AppConfig | None) -> Check:
+    if config is None:
+        return Check(
+            "Config workflow",
+            Status.WARN,
+            "not checked without valid configuration",
+            "Fix the Configuration check, then run `djinn config status`.",
+        )
+    try:
+        project_root = get_project_root()
+        audit = audit_workflow_config(project_root)
+    except (
+        ConfigNotFoundError,
+        ConfigValidationError,
+        FileNotFoundError,
+        OSError,
+        ValueError,
+    ) as exc:
+        return Check(
+            "Config workflow",
+            Status.WARN,
+            f"audit unavailable ({type(exc).__name__})",
+            "Run from the Djinn repo, then run `djinn config status`.",
+        )
+    source = audit.configured_source
+    if audit.clean:
+        return Check("Config workflow", Status.PASS, f"source={source}; clean")
+    drift = ",".join(item.kind.value for item in audit.drifts) or "validation-problem"
+    return Check(
+        "Config workflow",
+        Status.WARN,
+        f"source={source}; drift={drift}",
+        "Run `djinn config status`, then `djinn config sync` when ready.",
+    )
+
+
 # -----------------------------------------------------------------------------
 # Check assembly
 # -----------------------------------------------------------------------------
@@ -212,6 +249,8 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
                 "Run `djinn init` to create the configuration.",
             )
         )
+
+    checks.append(_config_workflow_check(config))
 
     if config is not None:
         code_ok = config.code_dir.is_dir()
@@ -306,9 +345,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
                 "missing: " + ", ".join(missing_seed_targets)
                 if missing_seed_targets
                 else "all seed targets present",
-                "run `djinn init` (or `djinn doctor --fix`)."
-                if missing_seed_targets
-                else "",
+                "run `djinn init` (or `djinn doctor --fix`)." if missing_seed_targets else "",
             )
         )
 
@@ -342,7 +379,7 @@ def _doctor_fix(config: AppConfig) -> bool:
         console.print(f"Could not fix: seed configuration (run from the Djinn repo: {e})")
     else:
         try:
-            seed_config(project_root)
+            seed_config(project_root, source=config.config_sync.source)
             console.print("Fixed: seed configuration")
         except SeedingError as e:
             failed = True
@@ -357,8 +394,7 @@ def _doctor_fix(config: AppConfig) -> bool:
         except OSError as e:
             failed = True
             console.print(
-                f"Could not fix: seed configuration "
-                f"(check project config paths are writable: {e})"
+                f"Could not fix: seed configuration (check project config paths are writable: {e})"
             )
 
     try:
@@ -457,7 +493,7 @@ def doctor(
         raise typer.Exit(1)
 
 
-def preflight(config: AppConfig) -> None:
+def preflight(config: AppConfig, *, provision_host: bool = True) -> None:
     """Fast critical preflight before build/start/auth.
 
     Verifies Docker is usable first (cheap read-only probes), then provisions the
@@ -474,6 +510,9 @@ def preflight(config: AppConfig) -> None:
         warning("Start it (e.g. `sudo systemctl start docker`), then retry. Run `djinn doctor`.")
         raise typer.Exit(1)
 
+    if not provision_host:
+        return
+
     # Docker is usable → now provision the (side-effecting) host bind-mount sources.
     try:
         ensure_host_env(config)
@@ -486,7 +525,7 @@ def preflight(config: AppConfig) -> None:
     # FileNotFoundError message must surface as-is (not a writability remedy).
     project_root = get_project_root()
     try:
-        seed_config(project_root)
+        seed_config(project_root, source=config.config_sync.source)
     except SeedingError as e:
         error(str(e))
         warning("Follow the remedy above, then retry.")

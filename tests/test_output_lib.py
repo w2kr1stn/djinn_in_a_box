@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -312,6 +313,11 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
 
     mcp_config = tmp_path / "mcp-servers.json"
     mcp_config.write_text("{}", encoding="utf-8")
+    opencode_seed = tmp_path / ".opencode" / "seed"
+    opencode_seed.mkdir(parents=True)
+    (opencode_seed / "AGENTS.md").write_text("OpenCode instructions.\n", encoding="utf-8")
+    legacy_opencode_settings = b'{"personal":true}\n'
+    (opencode_seed / ".opencode.json").write_bytes(legacy_opencode_settings)
 
     env = {
         **os.environ,
@@ -319,6 +325,7 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
         "OUTPUT_LIB": str(ROOT / "scripts" / "output-lib.sh"),
         "SEED_LIB": str(ROOT / "scripts" / "seed-lib.sh"),
         "MCP_REGISTER": str(ROOT / "scripts" / "mcp-register.sh"),
+        "OPENCODE_WORKFLOW_DELIVERY": str(ROOT / "scripts" / "opencode-workflow-delivery.py"),
         "MCP_SERVERS_CONFIG": str(mcp_config),
         "NO_COLOR": "1",
         "ENABLE_FIREWALL": "false",
@@ -344,6 +351,9 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert "[warn] Docker Access: Disabled" in result.stderr
     assert "[info] Enable with: djinn start --docker" in result.stderr
     assert "[warn] MCP Gateway:  Not connected" in result.stderr
+    persistent_settings = tmp_path / ".opencode" / ".opencode.json"
+    assert json.loads(persistent_settings.read_bytes())["personal"] is True
+    assert (opencode_seed / ".opencode.json").read_bytes() == legacy_opencode_settings
 
 
 def test_firewall_startup_uses_plain_ascii_markers(tmp_path: Path) -> None:

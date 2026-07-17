@@ -1,5 +1,8 @@
 """Tests for the djinn CLI entry point."""
 
+import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -239,6 +242,8 @@ class TestConfigShowCommand:
         unwrapped = "".join(combined.split())
         assert "projects" in unwrapped
         assert "UTC" in unwrapped
+        assert "ConfigSync" in unwrapped
+        assert "claude" in unwrapped
 
     def test_config_show_json_output(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         projects_dir = tmp_path / "projects"
@@ -260,6 +265,7 @@ class TestConfigShowCommand:
         data = json.loads(result.stdout)
         assert "code_dir" in data
         assert "timezone" in data
+        assert data["config_sync"] == {"source": "claude"}
 
     def test_config_show_missing_config_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -297,6 +303,52 @@ class TestConfigSetCommand:
         assert result.exit_code == 0
         updated = load_config_file(config_file)
         assert updated.resources.cpu_limit == 2
+
+    def test_config_set_round_trips_source_under_exclusive_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.toml"
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _write_test_config(config_file, projects_dir)
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+        project_root = tmp_path / "project"
+        config_dir = project_root / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
+        lock_calls: list[tuple[Path, bool]] = []
+
+        @contextmanager
+        def record_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
+            lock_calls.append((path, exclusive))
+            yield
+
+        monkeypatch.setattr("djinn_in_a_box.commands.config.config_directory_lock", record_lock)
+
+        result = runner.invoke(app, ["config", "set", "config_sync.source", "codex"])
+
+        assert result.exit_code == 0, result.output
+        assert load_config_file(config_file).config_sync.source == "codex"
+        assert lock_calls == [(config_dir, True)]
+
+    def test_config_set_rejects_unknown_source_without_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.toml"
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _write_test_config(config_file, projects_dir)
+        original = config_file.read_bytes()
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+        project_root = tmp_path / "project"
+        (project_root / "config").mkdir(parents=True)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
+
+        result = runner.invoke(app, ["config", "set", "config_sync.source", "gemini"])
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        assert config_file.read_bytes() == original
 
     def test_config_set_code_dir_requires_existing_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -493,6 +545,41 @@ class TestConfigEditCommand:
 
         assert result.exit_code == 0, result.output
         assert "# edited" in config_file.read_text()
+
+    def test_config_edit_holds_exclusive_config_directory_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.toml"
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _write_test_config(config_file, projects_dir)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.CONFIG_FILE", config_file)
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+        project_root = tmp_path / "project"
+        config_dir = project_root / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
+        events: list[str] = []
+
+        @contextmanager
+        def record_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
+            assert path == config_dir
+            assert exclusive is True
+            events.append("lock")
+            yield
+            events.append("unlock")
+
+        def run_editor(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            events.append("editor")
+            return subprocess.CompletedProcess([], 0)
+
+        monkeypatch.setattr("djinn_in_a_box.commands.config.config_directory_lock", record_lock)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.subprocess.run", run_editor)
+
+        result = runner.invoke(app, ["config", "edit"])
+
+        assert result.exit_code == 0, result.output
+        assert events == ["lock", "editor", "unlock"]
 
     def test_config_edit_warns_when_editor_deletes_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

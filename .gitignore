@@ -46,3 +46,6 @@ logs/
 
 # Docker
 .docker/
+
+# Local migration backups (pre-OSS snapshots, never commit)
+/.migration-backup/

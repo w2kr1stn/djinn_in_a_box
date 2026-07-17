@@ -9,6 +9,7 @@ diagnostic + preflight.
 from __future__ import annotations
 
 import ast
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -77,6 +78,7 @@ class TestComposeEnvBridge:
         mock_run.return_value = MagicMock(returncode=0)
         compose_run(mock_app_config, ContainerOptions(), interactive=True)
         self._assert_guarded(self._env_of(mock_run), mock_app_config)
+        assert "stdin" not in mock_run.call_args.kwargs
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -86,6 +88,8 @@ class TestComposeEnvBridge:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
         self._assert_guarded(self._env_of(mock_run), mock_app_config)
+        # Headless agent CLIs (codex exec) hang on an inherited open terminal stdin.
+        assert mock_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")

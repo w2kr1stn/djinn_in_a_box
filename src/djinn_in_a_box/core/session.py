@@ -13,7 +13,7 @@ from pathlib import Path
 
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
-from djinn_in_a_box.core.docker import _decode_timeout_output
+from djinn_in_a_box.core.docker import _decode_timeout_output  # pyright: ignore[reportPrivateUsage]
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +25,100 @@ _CONTAINER_SESSIONS_BASE = "/home/dev/sessions"
 _HOST_SESSIONS_BASE = Path.home() / ".djinn" / "sessions"
 _DJINN_CONTAINER_NAME = "djinn"
 _EXEC_TIMEOUT = 10.0
+_OPENCODE_DELIVERY_PREFIX = "opencode workflow delivery failed: "
+_OPENCODE_DELIVERY_CODES = frozenset(
+    {
+        "destination-parent-race",
+        "destination-parent-unsafe",
+        "destination-path-unsafe",
+        "destination-race",
+        "destination-root-race",
+        "destination-root-unsafe",
+        "invalid-data",
+        "managed-file-drift",
+        "manifest-malformed",
+        "manifest-race",
+        "publication-failed",
+        "quarantine-preserved",
+        "source-agents-missing",
+        "source-directory-symlink",
+        "source-directory-type-unsafe",
+        "source-file-race",
+        "source-file-symlink-unsafe",
+        "source-file-type-unsafe",
+        "source-parent-race",
+        "source-root-race",
+        "source-subtree-race",
+        "source-traversal-race",
+        "stage-changed",
+        "stage-create-failed",
+        "stale-file-drift",
+        "unmanaged-file-collision",
+    }
+)
+
+
+def _opencode_refresh_error(stderr: str) -> str:
+    value = stderr.strip()
+    code = next(
+        (
+            candidate
+            for candidate in _OPENCODE_DELIVERY_CODES
+            if value == f"{_OPENCODE_DELIVERY_PREFIX}{candidate}"
+        ),
+        None,
+    )
+    if code is None:
+        return "OpenCode workflow refresh failed"
+    if code == "unmanaged-file-collision":
+        remedy = "Move the conflicting unmanaged OpenCode runtime file, then retry."
+    elif code == "managed-file-drift":
+        remedy = "Restore or move the modified managed OpenCode runtime file, then retry."
+    elif code == "stale-file-drift":
+        remedy = "Restore or remove the modified stale OpenCode runtime file, then retry."
+    elif code == "manifest-malformed":
+        remedy = "Repair or remove the OpenCode delivery manifest, then retry."
+    elif code == "source-agents-missing":
+        remedy = "Restore the canonical OpenCode AGENTS.md file, then retry."
+    elif code == "quarantine-preserved":
+        remedy = (
+            "Inspect and preserve the .djinn-opencode-stage-* quarantine data; reconcile it "
+            "before deleting anything or retrying."
+        )
+    elif code == "stage-create-failed":
+        remedy = "Repair OpenCode workflow stage-directory access, then retry."
+    elif code in _OPENCODE_RETRY_CODES:
+        remedy = "Retry after concurrent OpenCode workflow changes settle."
+    else:
+        remedy = "Check the OpenCode workflow paths and ownership, then retry."
+    return f"OpenCode workflow refresh failed: {code}. Remedy: {remedy}"
+
+
+_OPENCODE_RETRY_CODES = frozenset(
+    {
+        "destination-race",
+        "destination-root-race",
+        "manifest-race",
+        "publication-failed",
+        "source-file-race",
+        "source-parent-race",
+        "source-root-race",
+        "source-subtree-race",
+        "source-traversal-race",
+        "stage-changed",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTarget:
+    """Stable execution target shared by session preflight and launch."""
+
+    container_id: str | None = None
+
+    @property
+    def container_mode(self) -> bool:
+        return self.container_id is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +151,64 @@ class SessionManager:
 
     @property
     def container_mode(self) -> bool:
-        return self._find_container() is not None
+        return self.resolve_target().container_mode
 
-    def preflight_check(self) -> None:
-        if self._find_container() is not None:
-            return
-        if shutil.which("claude") is not None:
-            return
-        msg = "No running Djinn container found and no agent CLI available on PATH"
+    def resolve_target(self) -> SessionTarget:
+        """Resolve container versus host mode once for reuse by a caller."""
+        return SessionTarget(container_id=self._find_container())
+
+    def preflight_check(
+        self,
+        agent: str = "claude",
+        *,
+        target: SessionTarget | None = None,
+    ) -> SessionTarget:
+        resolved_target = target if target is not None else self.resolve_target()
+        if resolved_target.container_mode:
+            return resolved_target
+
+        agent_config = self._resolve_agent(agent)
+        if shutil.which(agent_config.binary) is not None:
+            return resolved_target
+        msg = (
+            "No running Djinn container found and selected agent CLI "
+            f"'{agent_config.binary}' is not available on PATH"
+        )
         raise RuntimeError(msg)
+
+    def refresh_opencode_workflow(self, target: SessionTarget) -> SessionResult:
+        """Refresh the running container's OpenCode runtime from its delivered seed."""
+        if target.container_id is None:
+            return SessionResult(returncode=1, stderr="OpenCode container refresh unavailable")
+        command = [
+            "docker",
+            "exec",
+            target.container_id,
+            "python3",
+            "/home/dev/opencode-workflow-delivery.py",
+            "--source",
+            "/home/dev/.opencode/seed",
+            "--destination",
+            "/home/dev/.config/opencode",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return SessionResult(returncode=124, stderr="OpenCode workflow refresh timed out")
+        except (FileNotFoundError, PermissionError, OSError):
+            return SessionResult(returncode=1, stderr="OpenCode workflow refresh failed")
+        if result.returncode != 0:
+            return SessionResult(
+                returncode=result.returncode,
+                stderr=_opencode_refresh_error(result.stderr),
+            )
+        return SessionResult(returncode=0)
 
     def run_interactive(
         self,
@@ -74,9 +217,11 @@ class SessionManager:
         agent: str = "claude",
         model: str | None = None,
         initial_prompt: str | None = None,
+        target: SessionTarget | None = None,
     ) -> SessionResult:
         agent_config = self._resolve_agent(agent)
-        container_id = self._find_container()
+        resolved_target = target if target is not None else self.resolve_target()
+        container_id = resolved_target.container_id
 
         if container_id is not None:
             cwd = self._resolve_container_workdir(workspace_dir)
@@ -113,7 +258,8 @@ class SessionManager:
             )
         except FileNotFoundError:
             return SessionResult(
-                returncode=127, stderr=f"Agent binary not found: {agent_config.binary}",
+                returncode=127,
+                stderr=f"Agent binary not found: {agent_config.binary}",
             )
         except PermissionError as e:
             return SessionResult(returncode=126, stderr=f"Permission denied: {e}")
@@ -127,11 +273,13 @@ class SessionManager:
         agent: str = "claude",
         model: str | None = None,
         timeout: int = 300,
+        target: SessionTarget | None = None,
     ) -> SessionResult:
         from djinn_in_a_box.commands.agent import build_agent_command
 
         agent_config = self._resolve_agent(agent)
-        container_id = self._find_container()
+        resolved_target = target if target is not None else self.resolve_target()
+        container_id = resolved_target.container_id
 
         if container_id is not None:
             cwd = self._resolve_container_workdir(workspace_dir)
@@ -302,9 +450,7 @@ class SessionManager:
         parts: list[str] = [shlex.quote(agent_config.binary)]
         effective_model = model if model is not None else agent_config.default_model
         if effective_model:
-            parts.extend(
-                [shlex.quote(agent_config.model_flag), shlex.quote(effective_model)]
-            )
+            parts.extend([shlex.quote(agent_config.model_flag), shlex.quote(effective_model)])
         parts.extend(shlex.quote(f) for f in agent_config.write_flags)
         if initial_prompt is not None:
             parts.append(shlex.quote(initial_prompt))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -15,7 +16,24 @@ from rich.table import Table
 from rich.text import Text
 
 from djinn_in_a_box.config.loader import load_config, save_config
-from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
+from djinn_in_a_box.config.models import (
+    AppConfig,
+    ConfigSyncConfig,
+    ResourceLimits,
+    ShellConfig,
+)
+from djinn_in_a_box.core.config_lock import config_directory_lock
+from djinn_in_a_box.core.config_sync import (
+    ConfigSyncAudit,
+    DriftClass,
+)
+from djinn_in_a_box.core.config_sync import (
+    audit_config_sync as audit_workflow_config,
+)
+from djinn_in_a_box.core.config_sync import (
+    sync_config as synchronize_workflow_config,
+)
+from djinn_in_a_box.core.config_sync_agent import SemanticFailure
 from djinn_in_a_box.core.console import console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import ensure_host_env
@@ -34,6 +52,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "resources.memory_reservation",
     "shell.skip_mounts",
     "shell.omp_theme_path",
+    "config_sync.source",
 )
 
 
@@ -194,7 +213,7 @@ def init_config(
     # writability problem — its own FileNotFoundError message must surface as-is.
     project_root = get_project_root()
     try:
-        created = seed_config(project_root)
+        created = seed_config(project_root, source=config.config_sync.source)
     except SeedingError as e:
         error(str(e))
         warning("Follow the remedy above, then retry.")
@@ -254,6 +273,7 @@ def _build_config(
     config_root: Path | None = None,
     resources: ResourceLimits | None = None,
     shell: ShellConfig | None = None,
+    config_sync: ConfigSyncConfig | None = None,
 ) -> AppConfig:
     return AppConfig(
         code_dir=config.code_dir if code_dir is None else code_dir,
@@ -261,6 +281,7 @@ def _build_config(
         config_root=config.config_root if config_root is None else config_root,
         resources=config.resources if resources is None else resources,
         shell=config.shell if shell is None else shell,
+        config_sync=config.config_sync if config_sync is None else config_sync,
     )
 
 
@@ -325,11 +346,12 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
         normalized = value.strip().lower()
         shell = ShellConfig(
             skip_mounts=config.shell.skip_mounts,
-            omp_theme_path=None
-            if normalized in {"", "none", "null"}
-            else Path(value).expanduser(),
+            omp_theme_path=None if normalized in {"", "none", "null"} else Path(value).expanduser(),
         )
         return _build_config(config, shell=shell)
+    if key == "config_sync.source":
+        config_sync = ConfigSyncConfig.model_validate({"source": value})
+        return _build_config(config, config_sync=config_sync)
 
     error(f"Unknown configuration key: {key}")
     error(f"Allowed keys: {_allowed_keys_message()}")
@@ -355,6 +377,8 @@ def _format_config_value(config: AppConfig, key: str) -> str:
         return str(config.shell.skip_mounts)
     if key == "shell.omp_theme_path":
         return str(config.shell.omp_theme_path)
+    if key == "config_sync.source":
+        return config.config_sync.source
 
     msg = f"Unknown configuration key: {key}"
     raise ValueError(msg)
@@ -366,6 +390,16 @@ def config_set(
     value: Annotated[str, typer.Argument(help="New value.")],
 ) -> None:
     """Set one supported configuration value."""
+    if key == "config_sync.source":
+        config_dir = get_project_root() / "config"
+        with config_directory_lock(config_dir, exclusive=True):
+            _set_and_save_config_value(key, value)
+        return
+
+    _set_and_save_config_value(key, value)
+
+
+def _set_and_save_config_value(key: str, value: str) -> None:
     config = load_config()
 
     try:
@@ -386,6 +420,12 @@ def config_set(
 
 def config_edit() -> None:
     """Open the configuration file in $EDITOR and validate it afterward."""
+    config_dir = get_project_root() / "config"
+    with config_directory_lock(config_dir, exclusive=True):
+        _edit_config_file()
+
+
+def _edit_config_file() -> None:
     editor = os.environ.get("EDITOR", "vi")
     try:
         command = shlex.split(editor)
@@ -469,6 +509,12 @@ def config_show(
         if config.shell.omp_theme_path:
             shell_rows.append(("omp_theme_path", config.shell.omp_theme_path))
         _print_config_table("Shell", shell_rows, path_labels={"omp_theme_path"})
+        console.print()
+
+        _print_config_table(
+            "Config Sync",
+            [("source", config.config_sync.source)],
+        )
 
 
 def config_path() -> None:
@@ -486,3 +532,154 @@ def config_path() -> None:
     # Raw path for scripting — no Rich path-highlighting (breaks $(...) consumers
     # when color output is forced).
     console.print(str(CONFIG_FILE), highlight=False)
+
+
+_SAFE_STATUS_LABEL = re.compile(r"[^A-Za-z0-9._/:-]")
+_DRIFT_REMEDIES: dict[DriftClass, str] = {
+    DriftClass.SOURCE_ONLY: "Run `djinn config sync`.",
+    DriftClass.MANAGED_TARGET: "Run `djinn config sync` to restore managed outputs.",
+    DriftClass.UNMANAGED_COLLISION: "Move the indicated unmanaged file, then run sync.",
+    DriftClass.INVALID_VIEW: "Fix the indicated native workflow artifact, then retry.",
+    DriftClass.SOURCE_SWITCH: "Validate the selected source, then run sync before editing it.",
+    DriftClass.SEMANTIC_REQUIRED: "Run `djinn config sync` to perform explicit adaptation.",
+    DriftClass.MANIFEST_INVALID: "Restore a valid schema-v1 sync manifest, then retry.",
+    DriftClass.SOURCE_CHANGED: "Retry after the source stops changing.",
+}
+_SEMANTIC_FAILURE_MESSAGES: dict[str, SemanticFailure] = {
+    f"Semantic adaptation required ({failure.value}).": failure for failure in SemanticFailure
+}
+_SEMANTIC_FAILURE_REMEDIES: dict[SemanticFailure, str] = {
+    SemanticFailure.INVALID_REQUEST: ("Fix the reported workflow artifact contract, then retry."),
+    SemanticFailure.DEADLINE_EXCEEDED: (
+        "Check the selected source CLI and network, then retry when it is responsive."
+    ),
+    SemanticFailure.EXECUTION_FAILED: (
+        "Check Docker, the selected source CLI, and its authentication, then retry."
+    ),
+    SemanticFailure.TIMED_OUT: (
+        "Check the selected source CLI and network, then retry; semantic adaptation timed out."
+    ),
+    SemanticFailure.MALFORMED_RESPONSE: (
+        "Check the selected source CLI's JSON-output compatibility, then retry."
+    ),
+    SemanticFailure.RESPONSE_MISMATCH: (
+        "Retry after workflow changes settle; if this repeats, check source CLI compatibility."
+    ),
+    SemanticFailure.UNRESOLVED: (
+        "Make the reported source artifact portable or supported, then retry."
+    ),
+    SemanticFailure.INVALID_OUTPUT: (
+        "Fix the reported source artifact or source CLI compatibility, then retry."
+    ),
+}
+_PROBLEM_REMEDIES: dict[str, str] = {
+    "quarantine-preserved": (
+        "Inspect and preserve the .djinn-*-stage-* quarantine data; reconcile it before "
+        "deleting anything or retrying."
+    ),
+    "stage-create-failed": "Repair config stage-directory access, then retry.",
+}
+
+
+def _status_label(value: object) -> str:
+    return _SAFE_STATUS_LABEL.sub("?", str(value))[:160]
+
+
+def _status_location(tool: object | None, path: object | None) -> str:
+    parts = [_status_label(item) for item in (tool, path) if item is not None]
+    return ":".join(parts) if parts else "global"
+
+
+def _semantic_failures(audit: ConfigSyncAudit) -> tuple[SemanticFailure, ...]:
+    """Recognize only service-owned semantic failure messages."""
+    return tuple(
+        sorted(
+            {
+                failure
+                for problem in audit.problems
+                if (failure := _SEMANTIC_FAILURE_MESSAGES.get(problem.message)) is not None
+            },
+            key=lambda failure: failure.value,
+        )
+    )
+
+
+def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
+    rule("Agent Workflow Configuration")
+    console.print(f"Source: {_status_label(audit.configured_source)}")
+    active = audit.manifest_source if audit.manifest_source is not None else "not-initialized"
+    console.print(f"Manifest source: {_status_label(active)}")
+    console.print(f"State: {'clean' if audit.clean else 'action-required'}")
+
+    for drift in audit.drifts:
+        console.print(
+            f"Drift: {_status_label(drift.kind.value)} "
+            f"({_status_location(drift.tool, drift.relative_path)})"
+        )
+    for problem in audit.problems:
+        console.print(
+            f"Problem: {_status_label(problem.identifier)} "
+            f"({_status_location(problem.tool, problem.relative_path)})"
+        )
+
+    semantic_failures = _semantic_failures(audit)
+    for failure in semantic_failures:
+        console.print(f"Semantic failure: {failure.value}")
+
+    special_problem_remedies = {
+        remedy
+        for problem in audit.problems
+        if (remedy := _PROBLEM_REMEDIES.get(problem.identifier)) is not None
+    }
+    quarantine_preserved = any(
+        problem.identifier == "quarantine-preserved" for problem in audit.problems
+    )
+    remedies = {
+        _DRIFT_REMEDIES.get(drift.kind, "Inspect `djinn config status`, then retry.")
+        for drift in audit.drifts
+        if not (drift.kind is DriftClass.SEMANTIC_REQUIRED and semantic_failures)
+        and not (quarantine_preserved and drift.kind is DriftClass.SOURCE_CHANGED)
+    }
+    remedies.update(_SEMANTIC_FAILURE_REMEDIES[failure] for failure in semantic_failures)
+    remedies.update(special_problem_remedies)
+    if audit.problems and not remedies:
+        remedies.add("Fix the indicated native workflow artifact, then retry.")
+    for remedy in sorted(remedies):
+        console.print(f"Remedy: {remedy}")
+
+
+@handle_config_errors
+def config_status() -> None:
+    """Inspect workflow source, drift, and validation without modifying files."""
+    audit = audit_workflow_config(get_project_root())
+    _print_workflow_audit(audit)
+
+
+@handle_config_errors
+def config_sync() -> None:
+    """Explicitly synchronize managed workflow views.
+
+    Semantic gaps may start the selected source CLI in read-only mode.
+    """
+    selected_source = load_config().config_sync.source
+    info(
+        "If needed, semantic adaptation sends each unresolved workflow artifact to the "
+        f"selected {selected_source} provider. Its CLI inherits Djinn's normal "
+        "read-only-agent mounts and network access (120s per item, 300s total); "
+        "workflow bodies and provider output are not printed."
+    )
+    try:
+        result = synchronize_workflow_config(get_project_root(), allow_agent=True)
+    except (OSError, TypeError, ValueError) as exc:
+        error(f"Configuration synchronization could not start ({type(exc).__name__}).")
+        warning("Run `djinn config status`, correct the reported problem, and retry.")
+        raise typer.Exit(1) from exc
+
+    _print_workflow_audit(result.audit)
+    if not result.success:
+        error("Configuration synchronization is blocked.")
+        raise typer.Exit(1)
+    success(
+        "Configuration synchronized "
+        f"({len(result.changed_paths)} changed, {len(result.removed_paths)} removed)."
+    )

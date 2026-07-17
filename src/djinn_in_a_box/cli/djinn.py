@@ -14,6 +14,8 @@ from djinn_in_a_box.commands.config import (
     config_path,
     config_set,
     config_show,
+    config_status,
+    config_sync,
     init_config,
 )
 from djinn_in_a_box.commands.container import (
@@ -80,6 +82,8 @@ config_app.command("show")(config_show)
 config_app.command("path")(config_path)
 config_app.command("set")(config_set)
 config_app.command("edit")(config_edit)
+config_app.command("status")(config_status)
+config_app.command("sync")(config_sync)
 app.add_typer(config_app, name="config")
 
 app.command()(build)

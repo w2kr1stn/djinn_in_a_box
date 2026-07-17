@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 
-from djinn_in_a_box.core.console import console, err_console, error
+from djinn_in_a_box.config.loader import load_config
+from djinn_in_a_box.config.models import ConfigSyncSource
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowDeliveryTarget,
+    prepare_config_workflow,
+)
+from djinn_in_a_box.core.console import console, err_console, error, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
+from djinn_in_a_box.core.docker import get_config_root
+from djinn_in_a_box.core.paths import get_project_root
 from djinn_in_a_box.core.session import SessionManager
 
 
@@ -65,9 +73,44 @@ def session(
 
     try:
         mgr = SessionManager(project)
+        target = mgr.resolve_target()
     except ValueError as e:
         error(str(e))
         raise typer.Exit(1) from None
+
+    if agent in {"claude", "codex", "opencode"}:
+        config = load_config()
+        delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
+        selected_agent = cast(ConfigSyncSource, agent)
+        if target.container_mode:
+            if agent in {"claude", "codex"}:
+                delivery_targets = (
+                    WorkflowDeliveryTarget(
+                        selected_agent, get_config_root(config) / selected_agent
+                    ),
+                )
+        else:
+            host_roots = {
+                "claude": Path.home() / ".claude",
+                "codex": Path.home() / ".codex",
+                "opencode": Path.home() / ".config" / "opencode",
+            }
+            delivery_targets = (
+                WorkflowDeliveryTarget(selected_agent, host_roots[selected_agent], provision=True),
+            )
+        workflow = prepare_config_workflow(
+            get_project_root(), delivery_targets, config_snapshot=config
+        )
+        if not workflow.success:
+            problem = workflow.problems[0]
+            error(problem.message)
+            warning(problem.remedy)
+            raise typer.Exit(1)
+        if target.container_mode and agent == "opencode":
+            refreshed = mgr.refresh_opencode_workflow(target)
+            if not refreshed.success:
+                error(refreshed.stderr or "OpenCode workflow refresh failed")
+                raise typer.Exit(1)
 
     sessions_root = sessions_base.resolve()
     resolved_workspace = workspace.resolve()
@@ -95,7 +138,7 @@ def session(
         raise typer.Exit(1)
 
     try:
-        mgr.preflight_check()
+        mgr.preflight_check(agent=agent, target=target)
     except RuntimeError as e:
         error(str(e))
         raise typer.Exit(1) from None
@@ -109,6 +152,7 @@ def session(
                 agent=agent,
                 model=model,
                 timeout=timeout,
+                target=target,
             )
             if result.stdout:
                 console.print(result.stdout, end="")
@@ -123,6 +167,7 @@ def session(
                 workspace_dir=workspace,
                 agent=agent,
                 model=model,
+                target=target,
             )
             if result.stderr:
                 err_console.print(result.stderr, end="")

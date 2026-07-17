@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies (base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg openssh-client git zsh jq build-essential iptables sudo unzip locales \
+    ca-certificates curl gnupg openssh-client git zsh jq python3 build-essential iptables sudo unzip locales \
     libpulse0 pulseaudio-utils alsa-utils libasound2-plugins sox \
     && rm -rf /var/lib/apt/lists/*
 
@@ -110,9 +110,12 @@ RUN eval "$(fnm env --shell bash)" && \
 
 RUN uv tool install ruff
 
+# Non-interactive processes do not source fnm's shell initialization.
+ENV PATH="/home/${USERNAME}/.local/share/fnm/aliases/default/bin:$PATH"
+
 # Shell config (.zshrc)
 RUN cat > ~/.zshrc << 'EOF'
-export PATH="$HOME/.cache/djinn-tools/bin:$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
+export PATH="$HOME/.cache/djinn-tools/bin:$HOME/.local/bin:$HOME/.local/share/fnm/aliases/default/bin:$HOME/.local/share/fnm:$PATH"
 export LD_LIBRARY_PATH="$HOME/.cache/djinn-tools/lib:${LD_LIBRARY_PATH:-}"
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
@@ -149,6 +152,7 @@ RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true \
     && date +%s > ~/.build-timestamp
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
+COPY --chown=dev:dev scripts/opencode-workflow-delivery.py /home/dev/opencode-workflow-delivery.py
 COPY --chown=dev:dev scripts/output-lib.sh /home/dev/output-lib.sh
 COPY --chown=dev:dev scripts/seed-lib.sh /home/dev/seed-lib.sh
 COPY --chown=dev:dev scripts/mcp-register.sh /home/dev/mcp-register.sh

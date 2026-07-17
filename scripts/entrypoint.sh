@@ -95,7 +95,33 @@ ui_info "[seed-sync] claude:"
 claude_settings_merge "$HOME/.claude_seed" "$HOME/.claude/settings.json" >&2
 
 sync_seed "gemini"   "$HOME/.gemini_seed"   "$HOME/.gemini"          "$HOME/.gemini/settings.json" >&2
-sync_seed "opencode" "$HOME/.opencode/seed" "$HOME/.config/opencode" "$HOME/.config/opencode/.opencode.json" >&2
+
+# OpenCode workflow files come from the canonical seed; personal settings live
+# beside that seed on the persistent parent mount and never flow back into it.
+OPENCODE_RUNTIME_SETTINGS="$HOME/.config/opencode/.opencode.json"
+OPENCODE_PERSISTENT_SETTINGS="$HOME/.opencode/.opencode.json"
+OPENCODE_LEGACY_SETTINGS="$HOME/.opencode/seed/.opencode.json"
+OPENCODE_DELIVERY_HELPER="${OPENCODE_WORKFLOW_DELIVERY:-/home/dev/opencode-workflow-delivery.py}"
+if [[ -e "$OPENCODE_PERSISTENT_SETTINGS" || -L "$OPENCODE_PERSISTENT_SETTINGS" ]]; then
+    python3 "$OPENCODE_DELIVERY_HELPER" \
+        --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
+elif [[ -e "$OPENCODE_LEGACY_SETTINGS" || -L "$OPENCODE_LEGACY_SETTINGS" ]]; then
+    python3 "$OPENCODE_DELIVERY_HELPER" \
+        --copy-settings "$OPENCODE_LEGACY_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" >&2
+    python3 "$OPENCODE_DELIVERY_HELPER" \
+        --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
+fi
+
+ui_info "[workflow-delivery] opencode:"
+if [[ -n "${OPENCODE_WORKFLOW_DELIVERY:-}" ]]; then
+    python3 "$OPENCODE_WORKFLOW_DELIVERY" \
+        --source "$HOME/.opencode/seed" \
+        --destination "$HOME/.config/opencode" >&2
+else
+    python3 /home/dev/opencode-workflow-delivery.py \
+        --source /home/dev/.opencode/seed \
+        --destination /home/dev/.config/opencode >&2
+fi
 
 # =============================================================================
 # MCP Server Registration (all CLI tools, from canonical config)
@@ -191,8 +217,12 @@ set -e
 # Persist claude.json state into volume for next container start
 reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.json"
 # → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
-reverse_sync_file "$HOME/.claude/settings.json"          "$HOME/.claude_seed/settings.local.json"
+reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"
 reverse_sync_file "$HOME/.gemini/settings.json"          "$HOME/.gemini_seed/settings.json"
-reverse_sync_file "$HOME/.config/opencode/.opencode.json" "$HOME/.opencode/seed/.opencode.json"
+if ! python3 "$OPENCODE_DELIVERY_HELPER" \
+    --copy-settings "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
+    --missing-ok >&2; then
+    ui_warn "could not persist OpenCode personal settings"
+fi
 
 exit $EXIT_CODE

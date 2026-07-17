@@ -22,6 +22,42 @@ Check available models with the agent's own documentation or CLI help.
 
 ---
 
+## Global Workflow Source and Audit
+
+The agent selected for a headless run is independent of the deployment's global
+workflow source. Configure that native source separately:
+
+```bash
+djinn config set config_sync.source claude   # or codex / opencode
+djinn config sync
+djinn config status
+```
+
+For a source change, keep the order **switch → sync → edit**. `status` is always
+read-only; `sync` is the explicit writer. On first sync, missing outputs are
+created, exact expected outputs and known pristine seed files can be adopted,
+while other unowned content at managed paths is reported as a collision.
+
+The setting is deployment-wide; the shared demo is one deployment, not a
+per-tenant source selector. It covers only Djinn's global instructions, agents,
+skills, commands, support files, and known startup/security/ready behavior.
+Repository-local workflow files remain read-only, while credentials, auth,
+history, themes, UI policy, MCP, arbitrary plugins, and unlisted settings remain
+outside this ownership boundary.
+
+`djinn config status` is safe for diagnostics and automation: it reports
+sanitized source, drift, artifact locations, and remedies without printing any
+instruction, prompt, skill, command, hook, settings, or provider-output body.
+
+Normal `run`/`session` bootstrap repairs deterministic source-only projection
+drift, but never starts a provider. Explicit sync may send one unresolved
+artifact at a time to the selected source provider in read-only mode, with its
+normal authentication/network access, 120 seconds per artifact and 300 seconds
+total. Djinn never substitutes another provider and never prints workflow or
+provider-response bodies.
+
+---
+
 ## CLI Usage (`djinn run`)
 
 ```bash
@@ -108,9 +144,11 @@ djinn session --project my-project --prompt "Run a deeper analysis" --timeout 90
 
 When a running `djinn` container exists, session commands run through
 `docker exec` inside that container. If no container is running, session
-preflight permits host execution only when `claude` is on `PATH`. That preflight
-does not validate the selected agent's host binary, so choosing another agent can
-still fail at invocation if its binary is missing.
+preflight checks the selected agent's configured binary on host `PATH`. Claude,
+Codex, and OpenCode host fallback also receives that selected agent's canonical
+workflow.
+For a running-container OpenCode session, Djinn refreshes the live OpenCode
+runtime from its delivered seed before invocation.
 
 ---
 
