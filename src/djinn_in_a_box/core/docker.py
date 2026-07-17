@@ -31,6 +31,7 @@ _SERVICE_CONTAINER_NAMES: dict[str, str] = {
 }
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
+_WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 
 
 class DockerMode(Enum):
@@ -39,6 +40,12 @@ class DockerMode(Enum):
     NONE = "none"
     PROXY = "proxy"
     DIRECT = "direct"
+
+
+class WorkflowImageCompatibility(Enum):
+    COMPATIBLE = "compatible"
+    INCOMPATIBLE = "incompatible"
+    UNKNOWN = "unknown"
 
 
 def resolve_docker_mode(docker: bool, docker_direct: bool) -> DockerMode:
@@ -545,7 +552,9 @@ def get_config_root(config: AppConfig | None = None) -> Path:
     return Path.home() / ".djinn" / "config"
 
 
-def workflow_image_compatible(image: str = _WORKFLOW_IMAGE) -> bool:
+def workflow_image_compatible(
+    image: str = _WORKFLOW_IMAGE,
+) -> WorkflowImageCompatibility:
     try:
         result = subprocess.run(
             [
@@ -558,11 +567,18 @@ def workflow_image_compatible(image: str = _WORKFLOW_IMAGE) -> bool:
             ],
             capture_output=True,
             text=True,
+            timeout=_WORKFLOW_IMAGE_INSPECT_TIMEOUT,
             check=False,
         )
-    except (FileNotFoundError, PermissionError, OSError):
-        return False
-    return result.returncode == 0 and result.stdout.strip() == "1"
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return WorkflowImageCompatibility.UNKNOWN
+    if result.returncode != 0:
+        return WorkflowImageCompatibility.UNKNOWN
+    return (
+        WorkflowImageCompatibility.COMPATIBLE
+        if result.stdout.strip() == "1"
+        else WorkflowImageCompatibility.INCOMPATIBLE
+    )
 
 
 def ensure_host_env(config: AppConfig | None = None) -> None:

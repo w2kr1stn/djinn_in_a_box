@@ -1,6 +1,7 @@
 """Tests for djinn_in_a_box.core.docker module."""
 
 import os
+import subprocess
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,7 @@ from djinn_in_a_box.config.models import AppConfig, ShellConfig
 from djinn_in_a_box.core.docker import (
     ContainerOptions,
     DockerMode,
+    WorkflowImageCompatibility,
     backup_sync_path,
     backup_volume,
     build_compose_env,
@@ -77,7 +79,7 @@ class TestWorkflowImageCompatibility:
     def test_accepts_publisher_label(self, run: MagicMock) -> None:
         run.return_value = MagicMock(returncode=0, stdout="1\n")
 
-        assert workflow_image_compatible()
+        assert workflow_image_compatible() is WorkflowImageCompatibility.COMPATIBLE
         assert run.call_args.args[0] == [
             "docker",
             "image",
@@ -91,7 +93,20 @@ class TestWorkflowImageCompatibility:
     def test_rejects_unlabelled_image_content_free(self, run: MagicMock) -> None:
         run.return_value = MagicMock(returncode=0, stdout="")
 
-        assert not workflow_image_compatible()
+        assert workflow_image_compatible() is WorkflowImageCompatibility.INCOMPATIBLE
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_inspect_failure_is_unknown(self, run: MagicMock) -> None:
+        run.return_value = MagicMock(returncode=1, stdout="")
+
+        assert workflow_image_compatible() is WorkflowImageCompatibility.UNKNOWN
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_inspect_timeout_is_unknown_and_bounded(self, run: MagicMock) -> None:
+        run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=10)
+
+        assert workflow_image_compatible() is WorkflowImageCompatibility.UNKNOWN
+        assert run.call_args.kwargs["timeout"] == 10.0
 
 
 class TestGetComposeFiles:

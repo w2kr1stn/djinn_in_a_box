@@ -596,7 +596,7 @@ def config_sync() -> None:
         raise typer.Exit(1) from exc
 
     _print_workflow_audit(result.audit)
-    if not result.success:
+    if not result.success or not result.audit.clean:
         error("Configuration synchronization is blocked.")
         raise typer.Exit(1)
     success(

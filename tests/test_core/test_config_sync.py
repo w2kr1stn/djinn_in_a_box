@@ -5,8 +5,9 @@ import json
 import multiprocessing
 import re
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -24,7 +25,7 @@ from djinn_in_a_box.core.config_sync import (
     load_canonical_delivery_view,
     sync_config,
 )
-from djinn_in_a_box.core.workflow_publisher import canonical_lock
+from djinn_in_a_box.core.workflow_publisher import CanonicalLockLease, canonical_lock
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _REMOVED_ENGINE_TOKENS = (
@@ -280,6 +281,65 @@ def test_status_audit_uses_shared_canonical_lock(tmp_path: Path) -> None:
 
     assert holder.exitcode == 0
     assert DriftClass.SOURCE_CHANGED in audit.drift_classes
+
+
+def test_sync_uses_config_source_read_under_canonical_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    (project / "config/claude/CLAUDE.md").unlink()
+    (project / "config/codex/AGENTS.md").write_text("Codex source.\n")
+    original_lock = sync_module.canonical_lock
+    source_switched = False
+
+    @contextmanager
+    def switch_source_after_lock(root: Path, *, exclusive: bool) -> Iterator[CanonicalLockLease]:
+        nonlocal source_switched
+        with original_lock(root, exclusive=exclusive) as lease:
+            if not source_switched:
+                source_switched = True
+                save_config(
+                    AppConfig(
+                        code_dir=tmp_path / "code",
+                        config_root=tmp_path / "runtime",
+                        config_sync=ConfigSyncConfig(source="codex"),
+                    ),
+                    config_path,
+                )
+            yield lease
+
+    monkeypatch.setattr(sync_module, "canonical_lock", switch_source_after_lock)
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success
+    assert result.audit.clean
+    assert result.audit.configured_source == "codex"
+    assert (project / "config/claude/CLAUDE.md").read_text() == "Codex source.\n"
+
+
+def test_legacy_unowned_file_is_rejected_without_deleting_operator_file(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    operator_file = project / "config/codex/operator-private.txt"
+    operator_file.write_bytes(b"operator-owned\n")
+    legacy = _legacy_manifest(project)
+    managed = _objects(legacy["managed"])
+    codex = _objects(managed["codex"])
+    files = _objects(codex["files"])
+    files["operator-private.txt"] = _hash(operator_file)
+    codex["files"] = files
+    managed["codex"] = codex
+    legacy["managed"] = managed
+    manifest = project / "config" / MANIFEST_NAME
+    manifest.write_text(json.dumps(legacy, sort_keys=True))
+    before_manifest = manifest.read_bytes()
+
+    result = sync_config(project, config_path=config_path)
+
+    assert not result.success
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+    assert manifest.read_bytes() == before_manifest
+    assert operator_file.read_bytes() == b"operator-owned\n"
 
 
 def test_legacy_manifest_migrates_atomically_and_removes_stale_item(tmp_path: Path) -> None:

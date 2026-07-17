@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import doctor as doctor_module
-from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     ConfigSyncAudit,
@@ -106,6 +106,43 @@ def test_config_sync_reports_canonical_nonportable_remedy(
     assert result.output.count("Remedy:") == 1
     assert CANONICAL_REMEDY in " ".join(result.output.split())
     assert _SENTINEL not in result.output
+
+
+def test_config_status_missing_canonical_root_is_content_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = AppConfig(
+        code_dir=tmp_path,
+        config_root=tmp_path / "runtime",
+        config_sync=ConfigSyncConfig(source="claude"),
+    )
+
+    def load_test_config(_path: Path | None = None) -> AppConfig:
+        return config
+
+    monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: tmp_path)
+    monkeypatch.setattr("djinn_in_a_box.core.config_sync.load_config", load_test_config)
+
+    result = runner.invoke(app, ["config", "status"])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "invalid-or-semantic" in result.output
+    assert CANONICAL_REMEDY in " ".join(result.output.split())
+
+
+def test_config_sync_requires_a_clean_reaudit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = MagicMock(return_value=ConfigSyncResult(True, _audit(DriftClass.SOURCE_CHANGED)))
+    monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: tmp_path)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.synchronize_workflow_config", service)
+
+    result = runner.invoke(app, ["config", "sync"])
+
+    assert result.exit_code == 1
+    assert "Configuration synchronization is blocked." in result.output
+    assert "Configuration synchronized" not in result.output
 
 
 def test_doctor_audits_once_without_sync_or_provider(

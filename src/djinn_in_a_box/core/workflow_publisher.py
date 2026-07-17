@@ -126,7 +126,7 @@ class _Preflight:
     manifest_snapshot: _Snapshot | None
 
 
-class _PublishError(RuntimeError):
+class PublishError(RuntimeError):
     def __init__(self, drift_class: DriftClass) -> None:
         super().__init__(drift_class)
         self.drift_class = drift_class
@@ -172,9 +172,9 @@ def snapshot_file_view(
     try:
         files, fingerprint = _read_file_tree(view_root, ignored_paths, profile)
     except OSError as error:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     if not files:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     return WorkflowView(source, tuple(files), source_fingerprint=fingerprint)
 
 
@@ -197,7 +197,7 @@ def publish_workflow_view(
             CANONICAL_MANIFEST_NAME if canonical_target else RUNTIME_MANIFEST_NAME
         )
         if manifest_relative != PurePosixPath(expected_manifest):
-            raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         if canonical_lease is not None:
             _validate_lease(canonical_lease, canonical_root, canonical_target)
             return _publish_with_lease(
@@ -223,7 +223,7 @@ def publish_workflow_view(
                 ignored_source_paths,
                 source_profile,
             )
-    except _PublishError as error:
+    except PublishError as error:
         return PublishResult(error.drift_class)
     except (OSError, UnicodeError, ValueError):
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC)
@@ -294,14 +294,14 @@ def _publish_locked(
         if expected_fingerprint is None:
             expected_fingerprint = current_fingerprint
         elif current_fingerprint != expected_fingerprint:
-            raise _PublishError(DriftClass.SOURCE_CHANGED)
+            raise PublishError(DriftClass.SOURCE_CHANGED)
     fingerprint_mismatch = (
         source_root is not None
         and _fingerprint_tree(source_root, ignored_source_paths, source_profile)
         != expected_fingerprint
     )
     if fingerprint_mismatch:
-        raise _PublishError(DriftClass.SOURCE_CHANGED)
+        raise PublishError(DriftClass.SOURCE_CHANGED)
     return _commit(target_root, manifest_relative, desired, preflight, prior, legacy_relative)
 
 
@@ -323,14 +323,14 @@ def _validate_lease(
     lease: CanonicalLockLease, canonical_root: Path, canonical_target: bool
 ) -> None:
     if not _same_directory(lease.root, canonical_root):
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     if canonical_target and not lease.exclusive:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
 
 
 def _validate_view(view: WorkflowView) -> _Desired:
     if not view.source:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     files: dict[PurePosixPath, PublishedFile] = {}
     fragments: dict[tuple[PurePosixPath, tuple[str, ...]], CarrierFragment] = {}
     for item in view.files:
@@ -338,7 +338,7 @@ def _validate_view(view: WorkflowView) -> _Desired:
             not _safe_relative(item.relative_path)
             or item.relative_path in files
         ):
-            raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         files[item.relative_path] = item
     for fragment in view.fragments:
         key = (fragment.carrier_path, fragment.key_path)
@@ -351,7 +351,7 @@ def _validate_view(view: WorkflowView) -> _Desired:
             or fragment.carrier_path in files
             or (fragment.carrier_path.suffix == ".toml" and len(fragment.key_path) != 1)
         ):
-            raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         _fragment_value(fragment)
         fragments[key] = fragment
     file_states = {
@@ -374,10 +374,10 @@ def _manifest_relative(target_root: Path, manifest_path: Path) -> PurePosixPath:
     try:
         relative = candidate.absolute().relative_to(target_root.absolute())
     except ValueError as error:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     result = PurePosixPath(relative.as_posix())
     if not _safe_relative(result):
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     return result
 
 
@@ -414,7 +414,7 @@ def _preflight(
         _check_parent_paths(target_root, path)
         current = _read_snapshot(target_root / path)
         if current is not None and path.suffix not in {".json", ".toml"}:
-            raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         desired_for_path = _fragments_for(path, desired.fragments)
         prior_for_path = _fragment_states_for(path, prior_fragments)
         raw = current.content if current is not None else None
@@ -424,13 +424,13 @@ def _preflight(
             )
             carrier_outputs[path] = _merge_carrier(path, raw, desired_for_path, prior_for_path)
         except _CarrierError:
-            raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
 
     if manifest_snapshot is not None and prior is None:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     failure = _worst_class(classes)
     if failure is not None:
-        raise _PublishError(failure)
+        raise PublishError(failure)
     return _Preflight(files, carrier_outputs, manifest_snapshot)
 
 
@@ -722,7 +722,7 @@ def _fragment_value(fragment: CarrierFragment) -> object:
         value: object = json.loads(fragment.value_json)
         json.dumps(value, allow_nan=False)
     except (json.JSONDecodeError, TypeError, ValueError, UnicodeDecodeError) as error:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     return value
 
 
@@ -807,7 +807,7 @@ def _load_manifest(
     try:
         return _decode_manifest(snapshot.content), snapshot
     except _ManifestError as error:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
 
 
 def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
@@ -823,7 +823,7 @@ def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
             legacy.unlink()
             _fsync_directory(target_root)
             return PublishResult(DriftClass.CLEAN)
-    except _PublishError as error:
+    except PublishError as error:
         return PublishResult(error.drift_class)
     except OSError:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC)
@@ -838,7 +838,7 @@ def _load_legacy_delivery_manifest(
     try:
         return _decode_legacy_delivery_manifest(target_root, snapshot.content)
     except (_CarrierError, _ManifestError):
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
 
 
 def _decode_legacy_delivery_manifest(target_root: Path, raw: bytes) -> _Manifest:
@@ -1031,7 +1031,7 @@ def _check_parent_paths(root: Path, path: PurePosixPath) -> None:
     for part in path.parts[:-1]:
         current = current / part
         if current.exists() and not current.is_dir():
-            raise _PublishError(DriftClass.COLLISION)
+            raise PublishError(DriftClass.COLLISION)
 
 
 def _read_snapshot(path: Path) -> _Snapshot | None:
@@ -1040,11 +1040,11 @@ def _read_snapshot(path: Path) -> _Snapshot | None:
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(result.st_mode):
-        raise _PublishError(DriftClass.COLLISION)
+        raise PublishError(DriftClass.COLLISION)
     try:
         return _Snapshot(path.read_bytes(), bool(result.st_mode & stat.S_IXUSR))
     except OSError as error:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
 
 
 def _atomic_replace(path: Path, content: bytes, executable: bool) -> None:
@@ -1105,7 +1105,7 @@ def _fingerprint_tree(
     try:
         files, fingerprint = _read_file_tree(root, ignored_paths, profile)
     except OSError as error:
-        raise _PublishError(DriftClass.SOURCE_CHANGED) from error
+        raise PublishError(DriftClass.SOURCE_CHANGED) from error
     del files
     return fingerprint
 
@@ -1126,7 +1126,7 @@ def _open_directory(path: Path) -> int:
     try:
         return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as error:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
 
 
 def _same_directory(first: Path, second: Path) -> bool:
@@ -1213,7 +1213,7 @@ def _after_legacy_delivery_verified() -> None:
 def _canonical_source(canonical_root: Path) -> str:
     manifest, _snapshot = _load_manifest(canonical_root, PurePosixPath(CANONICAL_MANIFEST_NAME))
     if manifest is None:
-        raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     return manifest.source
 
 
@@ -1241,7 +1241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             canonical_target = _same_directory(canonical_root, target_root)
             ignored_paths = tuple(PurePosixPath(item) for item in arguments.ignore)
             if not all(_safe_relative(item) for item in ignored_paths):
-                raise _PublishError(DriftClass.INVALID_OR_SEMANTIC)
+                raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
             with canonical_lock(canonical_root, exclusive=canonical_target) as lease:
                 source = _canonical_source(canonical_root)
                 view = snapshot_file_view(
@@ -1260,7 +1260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ignored_source_paths=ignored_paths,
                     source_profile=arguments.profile,
                 )
-        except _PublishError as error:
+        except PublishError as error:
             result = PublishResult(error.drift_class)
     if not result.success:
         print(f"workflow publisher: {result.drift_class.value}", file=sys.stderr)

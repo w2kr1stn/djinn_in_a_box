@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
 
 _SESSION_MODULE = "djinn_in_a_box.core.session"
@@ -139,7 +140,11 @@ class TestRefreshOpenCodeWorkflow:
         target = SessionTarget(container_id="stable-container-id")
 
         with (
-            patch.object(session_mgr, "workflow_image_compatible", return_value=True),
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
             patch(_SUBPROCESS_RUN, return_value=completed) as run,
         ):
             result = session_mgr.refresh_opencode_workflow(target)
@@ -176,7 +181,11 @@ class TestRefreshOpenCodeWorkflow:
         failed = MagicMock(returncode=9, stdout=sentinel, stderr=sentinel)
 
         with (
-            patch.object(session_mgr, "workflow_image_compatible", return_value=True),
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
             patch(_SUBPROCESS_RUN, return_value=failed),
         ):
             result = session_mgr.refresh_opencode_workflow(
@@ -206,7 +215,11 @@ class TestRefreshOpenCodeWorkflow:
         )
 
         with (
-            patch.object(session_mgr, "workflow_image_compatible", return_value=True),
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
             patch(_SUBPROCESS_RUN, return_value=failed),
         ):
             result = session_mgr.refresh_opencode_workflow(
@@ -230,6 +243,77 @@ class TestRefreshOpenCodeWorkflow:
         assert result.stderr == "Rebuild/recreate required."
         assert run.call_count == 2
         assert run.call_args_list[1].args[0][3] == "sha256:old-image"
+
+    def test_unreachable_container_blocks_refresh_without_rebuild_remedy(
+        self, session_mgr: SessionManager
+    ) -> None:
+        inspect_failure = MagicMock(returncode=1, stdout="", stderr="daemon unavailable")
+
+        with patch(_SUBPROCESS_RUN, return_value=inspect_failure) as run:
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == "Docker daemon/container not reachable — retry."
+        assert "Rebuild/recreate required" not in result.stderr
+        run.assert_called_once()
+
+    def test_inspect_timeout_is_unknown(self, session_mgr: SessionManager) -> None:
+        with patch(
+            _SUBPROCESS_RUN, side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)
+        ):
+            compatibility = session_mgr.workflow_image_compatible(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert compatibility is WorkflowImageCompatibility.UNKNOWN
+
+    @pytest.mark.parametrize(
+        ("label", "expected"),
+        [
+            ("", WorkflowImageCompatibility.INCOMPATIBLE),
+            ("1\n", WorkflowImageCompatibility.COMPATIBLE),
+        ],
+    )
+    def test_container_image_label_distinguishes_compatibility(
+        self,
+        session_mgr: SessionManager,
+        label: str,
+        expected: WorkflowImageCompatibility,
+    ) -> None:
+        container = MagicMock(returncode=0, stdout="sha256:image\n", stderr="")
+        image = MagicMock(returncode=0, stdout=label, stderr="")
+
+        with patch(_SUBPROCESS_RUN, side_effect=(container, image)):
+            compatibility = session_mgr.workflow_image_compatible(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert compatibility is expected
+
+    def test_publisher_refresh_maps_last_publisher_line_after_noise(
+        self, session_mgr: SessionManager
+    ) -> None:
+        failed = MagicMock(
+            returncode=13,
+            stdout="",
+            stderr="daemon note\nworkflow publisher: target-drift\ntrailing diagnostic\n",
+        )
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert "target-drift" in result.stderr
+        assert "modified managed workflow item" in result.stderr
 
     def test_host_target_does_not_execute_refresh(self, session_mgr: SessionManager) -> None:
         with patch(_SUBPROCESS_RUN) as run:

@@ -14,7 +14,12 @@ from djinn_in_a_box.core.config_sync import (
     load_canonical_delivery_view,
     sync_config,
 )
-from djinn_in_a_box.core.docker import ensure_host_env, get_config_root, workflow_image_compatible
+from djinn_in_a_box.core.docker import (
+    WorkflowImageCompatibility,
+    ensure_host_env,
+    get_config_root,
+    workflow_image_compatible,
+)
 from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
@@ -123,16 +128,23 @@ def prepare_config_workflow(
     except (OSError, TypeError, ValueError):
         return _failure("invalid-or-semantic")
     if require_compose_host_env:
-        if not workflow_image_compatible():
+        image_compatibility = workflow_image_compatible()
+        if image_compatibility is not WorkflowImageCompatibility.COMPATIBLE:
+            if image_compatibility is WorkflowImageCompatibility.UNKNOWN:
+                problem = WorkflowPreparationProblem(
+                    "image-unreachable",
+                    "Docker daemon/container not reachable.",
+                    "Retry.",
+                )
+            else:
+                problem = WorkflowPreparationProblem(
+                    "image-incompatible",
+                    "Workflow image is incompatible.",
+                    "Rebuild/recreate required.",
+                )
             return WorkflowPreparationResult(
                 False,
-                (
-                    WorkflowPreparationProblem(
-                        "image-incompatible",
-                        "Workflow image is incompatible.",
-                        "Rebuild/recreate required.",
-                    ),
-                ),
+                (problem,),
             )
         try:
             ensure_host_env(config)
@@ -175,6 +187,7 @@ def prepare_config_workflow(
                     target.destination_root,
                     target.destination_root / RUNTIME_MANIFEST_NAME,
                     canonical_lease=lease,
+                    source_root=canonical_root / loaded.audit.configured_source,
                 )
         except OSError:
             return _failure("invalid-or-semantic")
@@ -223,8 +236,10 @@ def _host_claude_view(
 
 
 def _auto_repairable(audit: ConfigSyncAudit) -> bool:
-    return bool(audit.drifts) and not audit.problems and all(
-        item.kind is DriftClass.SOURCE_CHANGED for item in audit.drifts
+    return (
+        bool(audit.drifts)
+        and not audit.problems
+        and all(item.kind is DriftClass.SOURCE_CHANGED for item in audit.drifts)
     )
 
 

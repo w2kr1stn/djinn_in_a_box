@@ -16,7 +16,7 @@ from djinn_in_a_box.core.config_workflow import (
 )
 from djinn_in_a_box.core.console import console, err_console, error, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
-from djinn_in_a_box.core.docker import get_config_root
+from djinn_in_a_box.core.docker import WorkflowImageCompatibility, get_config_root
 from djinn_in_a_box.core.paths import get_project_root
 from djinn_in_a_box.core.session import SessionManager
 
@@ -78,10 +78,16 @@ def session(
         error(str(e))
         raise typer.Exit(1) from None
 
-    if agent == "opencode" and target.container_mode and not mgr.workflow_image_compatible(target):
-        error("Workflow image is incompatible.")
-        warning("Rebuild/recreate required.")
-        raise typer.Exit(1)
+    if agent == "opencode" and target.container_mode:
+        image_compatibility = mgr.workflow_image_compatible(target)
+        if image_compatibility is WorkflowImageCompatibility.UNKNOWN:
+            error("Docker daemon/container not reachable.")
+            warning("Retry.")
+            raise typer.Exit(1)
+        if image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
+            error("Workflow image is incompatible.")
+            warning("Rebuild/recreate required.")
+            raise typer.Exit(1)
 
     if agent in {"claude", "codex", "opencode"}:
         config = load_config()

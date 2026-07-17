@@ -320,6 +320,25 @@ def test_claude_source_only_command_survives_a_round_trip_without_projection(
     assert not (project / "config/opencode/commands/codex-review.md").exists()
 
 
+def test_portable_runtime_named_skill_projects_like_other_skills(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path, "claude")
+    source = project / "config/claude"
+    _write(source, "CLAUDE.md", "Instructions.\n")
+    skill = _write(
+        source,
+        "skills/convergence-loop/SKILL.md",
+        "---\nname: convergence-loop\ndescription: Converge\n---\n\nReview fully.\n",
+    )
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success
+    for tool in ("codex", "opencode"):
+        assert (project / "config" / tool / "skills/convergence-loop/SKILL.md").read_bytes() == (
+            skill.read_bytes()
+        )
+
+
 def _invalid_markdown_agent(root: Path) -> None:
     _write(root, "agents/reviewer.md", "---\nname: reviewer\n---\n\nMissing description.\n")
 

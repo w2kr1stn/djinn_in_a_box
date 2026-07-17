@@ -14,6 +14,7 @@ from djinn_in_a_box.core.config_workflow import (
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
+from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.session import SessionResult, SessionTarget
 
 runner = CliRunner()
@@ -116,6 +117,7 @@ class TestSessionCommand:
                 "djinn_in_a_box.commands.session.prepare_config_workflow", side_effect=prepare
             ) as workflow,
         ):
+
             def _refresh(_target: object) -> SessionResult:
                 events.append("refresh")
                 return SessionResult(0)
@@ -231,7 +233,9 @@ class TestSessionCommand:
         ):
             instance = mock_mgr.return_value
             instance.resolve_target.return_value = target
-            instance.workflow_image_compatible.return_value = False
+            instance.workflow_image_compatible.return_value = (
+                WorkflowImageCompatibility.INCOMPATIBLE
+            )
             result = runner.invoke(
                 app,
                 ["session", "--project", "new-project", "--agent", "opencode", "--create"],
@@ -239,6 +243,31 @@ class TestSessionCommand:
 
         assert result.exit_code == 1
         assert "Rebuild/recreate required." in result.output
+        assert not (tmp_path / ".djinn/sessions/new-project").exists()
+        workflow.assert_not_called()
+        instance.refresh_opencode_workflow.assert_not_called()
+        instance.preflight_check.assert_not_called()
+
+    def test_unreachable_running_image_stops_before_workflow_or_workspace(
+        self, tmp_path: Path
+    ) -> None:
+        target = SessionTarget(container_id="container-123")
+        with (
+            patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
+            patch("djinn_in_a_box.commands.session.prepare_config_workflow") as workflow,
+        ):
+            instance = mock_mgr.return_value
+            instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.UNKNOWN
+            result = runner.invoke(
+                app,
+                ["session", "--project", "new-project", "--agent", "opencode", "--create"],
+            )
+
+        assert result.exit_code == 1
+        assert "Docker daemon/container not reachable" in result.output
+        assert "Rebuild/recreate required." not in result.output
         assert not (tmp_path / ".djinn/sessions/new-project").exists()
         workflow.assert_not_called()
         instance.refresh_opencode_workflow.assert_not_called()

@@ -14,7 +14,10 @@ from pathlib import Path
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY
-from djinn_in_a_box.core.docker import _decode_timeout_output  # pyright: ignore[reportPrivateUsage]
+from djinn_in_a_box.core.docker import (
+    WorkflowImageCompatibility,
+    _decode_timeout_output,  # pyright: ignore[reportPrivateUsage]
+)
 from djinn_in_a_box.core.workflow_publisher import DriftClass
 
 log = logging.getLogger(__name__)
@@ -105,7 +108,12 @@ class SessionManager:
     def refresh_opencode_workflow(self, target: SessionTarget) -> SessionResult:
         if target.container_id is None:
             return SessionResult(returncode=1, stderr="OpenCode container refresh unavailable")
-        if not self.workflow_image_compatible(target):
+        image_compatibility = self.workflow_image_compatible(target)
+        if image_compatibility is WorkflowImageCompatibility.UNKNOWN:
+            return SessionResult(
+                returncode=1, stderr="Docker daemon/container not reachable — retry."
+            )
+        if image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
             return SessionResult(returncode=1, stderr="Rebuild/recreate required.")
         command = [
             "docker",
@@ -145,9 +153,9 @@ class SessionManager:
             )
         return SessionResult(returncode=0)
 
-    def workflow_image_compatible(self, target: SessionTarget) -> bool:
+    def workflow_image_compatible(self, target: SessionTarget) -> WorkflowImageCompatibility:
         if target.container_id is None:
-            return False
+            return WorkflowImageCompatibility.UNKNOWN
         try:
             container = subprocess.run(
                 ["docker", "inspect", target.container_id, "--format", "{{.Image}}"],
@@ -157,7 +165,7 @@ class SessionManager:
                 check=False,
             )
             if container.returncode != 0 or not container.stdout.strip():
-                return False
+                return WorkflowImageCompatibility.UNKNOWN
             image = container.stdout.strip()
             inspected = subprocess.run(
                 [
@@ -166,7 +174,7 @@ class SessionManager:
                     "inspect",
                     image,
                     "--format",
-                    "{{ index .Config.Labels \"djinn.workflow.publisher\" }}",
+                    '{{ index .Config.Labels "djinn.workflow.publisher" }}',
                 ],
                 capture_output=True,
                 text=True,
@@ -174,8 +182,14 @@ class SessionManager:
                 check=False,
             )
         except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
-            return False
-        return inspected.returncode == 0 and inspected.stdout.strip() == "1"
+            return WorkflowImageCompatibility.UNKNOWN
+        if inspected.returncode != 0:
+            return WorkflowImageCompatibility.UNKNOWN
+        return (
+            WorkflowImageCompatibility.COMPATIBLE
+            if inspected.stdout.strip() == "1"
+            else WorkflowImageCompatibility.INCOMPATIBLE
+        )
 
     def run_interactive(
         self,
@@ -453,13 +467,14 @@ class SessionManager:
 
 
 def _publisher_refresh_error(stderr: str) -> str:
-    value = stderr.strip()
-    for drift in DriftClass:
-        if drift is DriftClass.CLEAN:
-            continue
-        if value == f"workflow publisher: {drift.value}":
-            return (
-                f"OpenCode workflow refresh failed: {drift.value}. "
-                f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
-            )
+    for line in reversed(stderr.splitlines()):
+        value = line.strip()
+        for drift in DriftClass:
+            if drift is DriftClass.CLEAN:
+                continue
+            if value == f"workflow publisher: {drift.value}":
+                return (
+                    f"OpenCode workflow refresh failed: {drift.value}. "
+                    f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
+                )
     return "OpenCode workflow refresh failed"

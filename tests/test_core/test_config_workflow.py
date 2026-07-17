@@ -9,10 +9,16 @@ import pytest
 import djinn_in_a_box.core.config_workflow as workflow_module
 from djinn_in_a_box.config.loader import save_config
 from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig, ConfigSyncSource
-from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY, DriftClass
+from djinn_in_a_box.core.config_sync import (
+    CANONICAL_REMEDY,
+    CanonicalDeliveryViewResult,
+    DriftClass,
+)
 from djinn_in_a_box.core.config_workflow import WorkflowDeliveryTarget, prepare_config_workflow
+from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
+    CanonicalLockLease,
     CarrierFragment,
     WorkflowView,
 )
@@ -91,7 +97,11 @@ def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publishe
     claude_root.mkdir(parents=True)
     codex_root.mkdir(parents=True)
     (claude_root / ".djinn-workflow-delivery.json").write_bytes(_legacy_manifest())
-    monkeypatch.setattr(workflow_module, "workflow_image_compatible", lambda: True)
+    monkeypatch.setattr(
+        workflow_module,
+        "workflow_image_compatible",
+        lambda: WorkflowImageCompatibility.COMPATIBLE,
+    )
     monkeypatch.setattr(workflow_module, "ensure_host_env", _ensure_host_env)
 
     result = prepare_config_workflow(
@@ -116,7 +126,11 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     project, config_path, runtime = _workspace(tmp_path)
     sentinel = "PRIVATE-WORKFLOW-BODY"
     (project / "config/claude/CLAUDE.md").write_text(sentinel)
-    monkeypatch.setattr(workflow_module, "workflow_image_compatible", lambda: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "workflow_image_compatible",
+        lambda: WorkflowImageCompatibility.INCOMPATIBLE,
+    )
     monkeypatch.setattr(
         workflow_module,
         "audit_config_sync",
@@ -134,6 +148,44 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     assert result.problems[0].remedy == "Rebuild/recreate required."
     assert sentinel not in repr(result)
     assert not (runtime / "codex").exists()
+
+
+def test_runtime_publish_rechecks_source_after_delivery_view_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    assert prepare_config_workflow(project, (target,), config_path=config_path).success
+    destination = target.destination_root
+    before_agents = (destination / "AGENTS.md").read_bytes()
+    before_manifest = (destination / RUNTIME_MANIFEST_NAME).read_bytes()
+    original = workflow_module.load_canonical_delivery_view
+
+    def edit_source_after_view_load(
+        project_root: Path,
+        tool: ConfigSyncSource,
+        *,
+        config_path: Path | None = None,
+        canonical_lease: CanonicalLockLease | None = None,
+    ) -> CanonicalDeliveryViewResult:
+        loaded = original(
+            project_root,
+            tool,
+            config_path=config_path,
+            canonical_lease=canonical_lease,
+        )
+        (project / "config/claude/CLAUDE.md").write_text("operator edit\n")
+        return loaded
+
+    monkeypatch.setattr(
+        workflow_module, "load_canonical_delivery_view", edit_source_after_view_load
+    )
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    assert result.problems[0].identifier == DriftClass.SOURCE_CHANGED.value
+    assert (destination / "AGENTS.md").read_bytes() == before_agents
+    assert (destination / RUNTIME_MANIFEST_NAME).read_bytes() == before_manifest
 
 
 def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) -> None:

@@ -20,16 +20,6 @@ _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _AGENT_FIELDS = frozenset({"name", "description", "developer_instructions"})
 _CLAUDE_REVIEW_FIELDS = frozenset({"description", "argument-hint", "allowed-tools"})
-_RUNTIME_SKILLS = frozenset(
-    {
-        "convergence-loop",
-        "claude-md-management",
-        "agents-md-management",
-        "update-claude-md",
-        "update-agents-md",
-        "session-bootstrap",
-    }
-)
 
 
 class ArtifactKind(StrEnum):
@@ -260,9 +250,7 @@ def render_native_workflow(
     for artifact in source.artifacts:
         if artifact.native_only_for is not None:
             continue
-        if artifact.kind == ArtifactKind.SKILL and artifact.name in _RUNTIME_SKILLS:
-            unresolved.append(_blocked(artifact, target))
-        elif artifact.kind == ArtifactKind.INSTRUCTIONS:
+        if artifact.kind == ArtifactKind.INSTRUCTIONS:
             files += [
                 _rendered(owned.instruction_path, artifact),
                 _rendered(owned.instruction_companion, artifact),

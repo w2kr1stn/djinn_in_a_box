@@ -21,7 +21,9 @@ from djinn_in_a_box.core.config_sync_adapters import (
     AdapterReadResult,
     RenderedFile,
     SettingsFragment,
+    fragment_is_owned,
     is_safe_relative_path,
+    path_is_owned,
     read_native_workflow,
     render_native_workflow,
     validate_rendered_workflow,
@@ -32,6 +34,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     CarrierFragment,
     DriftClass,
     PublishedFile,
+    PublishError,
     WorkflowView,
     canonical_lock,
     publish_workflow_view,
@@ -130,7 +133,7 @@ def audit_config_sync(
     try:
         with canonical_lock(config_root, exclusive=False):
             return _audit_locked(project_root, source)
-    except OSError:
+    except (OSError, PublishError):
         return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
 
 
@@ -143,6 +146,7 @@ def sync_config(
     config_root = project_root / "config"
     try:
         with canonical_lock(config_root, exclusive=True) as lease:
+            source = load_config(config_path).config_sync.source
             build = _snapshot_build(project_root, source)
             if build.problems:
                 return ConfigSyncResult(False, _invalid_audit(source, build.problems))
@@ -185,7 +189,7 @@ def sync_config(
             _audit_for(source, error.drift),
             retryable=error.drift is DriftClass.SOURCE_CHANGED,
         )
-    except (OSError, ValueError):
+    except (OSError, PublishError, ValueError):
         return ConfigSyncResult(False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC))
 
 
@@ -209,7 +213,7 @@ def load_canonical_delivery_view(
             _audit_for(source, error.drift),
             retryable=error.drift is DriftClass.SOURCE_CHANGED,
         )
-    except (KeyError, OSError):
+    except (KeyError, OSError, PublishError):
         return CanonicalDeliveryViewResult(
             False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
         )
@@ -292,9 +296,7 @@ def _build_views(snapshot_root: Path, source: ConfigSyncSource, fingerprint: str
     problems.extend(source_problems)
     rendered_views: dict[
         ConfigSyncSource, tuple[tuple[RenderedFile, ...], tuple[SettingsFragment, ...]]
-    ] = {
-        source: (source_files, source_fragments)
-    }
+    ] = {source: (source_files, source_fragments)}
     for target in _TOOLS:
         if target == source:
             continue
@@ -600,7 +602,7 @@ def _verify_legacy_semantic_outputs(
         if set(data) != {"path", "hash", "executable"} or not isinstance(data["path"], str):
             raise ValueError
         path = PurePosixPath(data["path"])
-        if not is_safe_relative_path(path):
+        if not is_safe_relative_path(path) or not path_is_owned(target, path):
             raise ValueError
         expected = _ManifestItem(
             PurePosixPath(target) / path,
@@ -627,7 +629,11 @@ def _verify_legacy_semantic_fragments(
         if not isinstance(carrier, str) or not isinstance(keys, list):
             raise ValueError
         key_path = tuple(cast(str, key) for key in cast(list[object], keys))
-        if not key_path or any(not key for key in key_path):
+        if (
+            not key_path
+            or any(not key for key in key_path)
+            or not fragment_is_owned(target, PurePosixPath(carrier), key_path)
+        ):
             raise ValueError
         expected = _ManifestItem(
             PurePosixPath(target) / PurePosixPath(carrier),
@@ -648,7 +654,13 @@ def _legacy_file_map(
     for raw_path, raw_state in _object_mapping(raw).items():
         relative = PurePosixPath(raw_path)
         state = _object_mapping(raw_state)
-        if not is_safe_relative_path(relative) or set(state) != {"hash", "executable"}:
+        tool = prefix.parts[0] if len(prefix.parts) == 1 else ""
+        if (
+            tool not in _TOOLS
+            or not is_safe_relative_path(relative)
+            or not path_is_owned(tool, relative)
+            or set(state) != {"hash", "executable"}
+        ):
             raise ValueError
         item = _ManifestItem(
             prefix / relative, _valid_hash(state["hash"]), _bool(state["executable"])
@@ -674,7 +686,14 @@ def _legacy_fragments(
             raise ValueError
         path = PurePosixPath(data["carrier_path"])
         keys = tuple(cast(str, key) for key in cast(list[object], data["key_path"]))
-        if not is_safe_relative_path(path) or not keys or any(not key for key in keys):
+        tool = prefix.parts[0] if len(prefix.parts) == 1 else ""
+        if (
+            tool not in _TOOLS
+            or not is_safe_relative_path(path)
+            or not keys
+            or any(not key for key in keys)
+            or not fragment_is_owned(tool, path, keys)
+        ):
             raise ValueError
         item = _ManifestItem(prefix / path, _valid_hash(data["value_hash"]), False, keys)
         actual, issue = _carrier_item_at(config_root / item.path, item.path, keys)

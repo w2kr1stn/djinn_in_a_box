@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tempfile
 from collections.abc import Sequence
 from contextlib import suppress
@@ -48,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     source, destination = arguments.copy_settings
     if copy_settings(source, destination, missing_ok=arguments.missing_ok):
         return 0
-    print("settings copy failed", file=os.sys.stderr)
+    print("settings copy failed", file=sys.stderr)
     return 1
 
 
