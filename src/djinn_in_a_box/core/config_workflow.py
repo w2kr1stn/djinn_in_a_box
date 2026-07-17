@@ -220,7 +220,7 @@ def prepare_config_workflow(
         if _deterministic_auto_syncable(audit):
             if not _config_matches(config_path, config):
                 return _config_changed_failure()
-            synced = sync_config(project_root, config_path=config_path, allow_agent=False)
+            synced = sync_config(project_root, config_path=config_path)
             if not synced.success or not synced.audit.clean:
                 return _audit_failure(synced.audit)
             audit = synced.audit
@@ -345,7 +345,7 @@ def _deterministic_auto_syncable(audit: ConfigSyncAudit) -> bool:
     return (
         bool(audit.drifts)
         and not audit.problems
-        and all(item.kind is DriftClass.SOURCE_ONLY for item in audit.drifts)
+        and all(item.kind is DriftClass.SOURCE_CHANGED for item in audit.drifts)
     )
 
 
@@ -368,7 +368,7 @@ def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
         (
             item
             for item in audit.drift_classes
-            if item not in {DriftClass.CLEAN, DriftClass.SOURCE_ONLY}
+            if item not in {DriftClass.CLEAN, DriftClass.SOURCE_CHANGED}
         ),
         DriftClass.CLEAN,
     )

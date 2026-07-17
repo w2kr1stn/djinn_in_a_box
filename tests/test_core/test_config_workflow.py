@@ -81,7 +81,9 @@ def _workspace(tmp_path: Path, *, source: ConfigSyncSource = "claude") -> tuple[
 
 
 @pytest.fixture(autouse=True)
-def _no_repository_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_repository_seed(  # pyright: ignore[reportUnusedFunction]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(workflow_module, "seed_config", _returns(list[Path]()))
 
 
@@ -416,7 +418,7 @@ def test_managed_target_drift_blocks_without_implicit_repair(tmp_path: Path) -> 
     result = prepare_config_workflow(project, (target,), config_path=config_path)
 
     assert result.success is False
-    assert result.problems[0].identifier == DriftClass.MANAGED_TARGET.value
+    assert result.problems[0].identifier == DriftClass.TARGET_DRIFT.value
     assert drifted.read_text() == "operator drift\n"
 
 
@@ -443,7 +445,7 @@ def test_semantic_gap_blocks_without_agent_or_delivery(
     result = prepare_config_workflow(project, (target,), config_path=config_path)
 
     assert result.success is False
-    assert result.problems[0].identifier == DriftClass.SEMANTIC_REQUIRED.value
+    assert result.problems[0].identifier == DriftClass.INVALID_OR_SEMANTIC.value
     assert delivery_called is False
 
 
@@ -509,7 +511,7 @@ def test_canonical_sync_problem_survives_implicit_bootstrap_without_private_data
     pre_sync = ConfigSyncAudit(
         "claude",
         None,
-        (DriftItem(DriftClass.SOURCE_ONLY, "Synchronization manifest is missing."),),
+        (DriftItem(DriftClass.SOURCE_CHANGED, "Synchronization manifest is missing."),),
     )
     failed = ConfigSyncAudit(
         "claude",
