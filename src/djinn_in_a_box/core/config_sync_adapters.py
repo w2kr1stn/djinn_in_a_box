@@ -1,24 +1,36 @@
+"""Closed native workflow adapters used by canonical config synchronization."""
+
 from __future__ import annotations
 
-import ast
 import json
-import os
 import re
 import stat
 import tomllib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import NamedTuple, cast
 
 import tomli_w
-import tree_sitter_javascript
-from tree_sitter import Language, Node, Parser
 
 from djinn_in_a_box.config.models import ConfigSyncSource
 
-ADAPTER_REVISION = 3
+ADAPTER_REVISION = 4
+_p = PurePosixPath
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_AGENT_FIELDS = frozenset({"name", "description", "developer_instructions"})
+_CLAUDE_REVIEW_FIELDS = frozenset({"description", "argument-hint", "allowed-tools"})
+_RUNTIME_SKILLS = frozenset(
+    {
+        "convergence-loop",
+        "claude-md-management",
+        "agents-md-management",
+        "update-claude-md",
+        "update-agents-md",
+        "session-bootstrap",
+    }
+)
 
 
 class ArtifactKind(StrEnum):
@@ -30,15 +42,13 @@ class ArtifactKind(StrEnum):
     HOOK = "hook"
 
 
-@dataclass(frozen=True)
-class WorkflowArtifact:
+class WorkflowArtifact(NamedTuple):
     kind: ArtifactKind
     name: str
     source_tool: ConfigSyncSource
     source_path: PurePosixPath
     content: bytes
     body: bytes | None = None
-    metadata: bytes | None = None
     description: str = ""
     nonportable_metadata: tuple[str, ...] = ()
     executable: bool = False
@@ -49,62 +59,43 @@ class WorkflowArtifact:
         return f"{self.kind}:{self.name}:{self.source_path.as_posix()}"
 
 
-@dataclass(frozen=True)
-class RenderedFile:
+class RenderedFile(NamedTuple):
     relative_path: PurePosixPath
     content: bytes
     artifact_id: str
     executable: bool = False
 
 
-@dataclass(frozen=True)
-class SettingsFragment:
+class SettingsFragment(NamedTuple):
     carrier_path: PurePosixPath
     key_path: tuple[str, ...]
     value_json: bytes
     artifact_id: str
 
 
-@dataclass(frozen=True)
-class UnresolvedItem:
+class UnresolvedItem(NamedTuple):
     identifier: str
     reason: str
     source_path: PurePosixPath
     source_bytes: bytes
-    metadata: bytes | None = None
     target_tool: ConfigSyncSource | None = None
     executable: bool = False
 
 
-@dataclass(frozen=True)
-class AllowedSettingsFragment:
-    carrier_path: PurePosixPath
-    key_path: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ArtifactOutputContract:
-    file_paths: tuple[PurePosixPath, ...]
-    settings_fragments: tuple[AllowedSettingsFragment, ...]
-
-
-@dataclass(frozen=True)
-class ValidationIssue:
+class ValidationIssue(NamedTuple):
     identifier: str
     message: str
     relative_path: PurePosixPath | None = None
 
 
-@dataclass(frozen=True)
-class AdapterReadResult:
+class AdapterReadResult(NamedTuple):
     tool: ConfigSyncSource
     artifacts: tuple[WorkflowArtifact, ...]
     unresolved: tuple[UnresolvedItem, ...]
     validation_issues: tuple[ValidationIssue, ...]
 
 
-@dataclass(frozen=True)
-class AdapterRenderResult:
+class AdapterRenderResult(NamedTuple):
     source_tool: ConfigSyncSource
     target_tool: ConfigSyncSource
     files: tuple[RenderedFile, ...]
@@ -113,23 +104,21 @@ class AdapterRenderResult:
     validation_issues: tuple[ValidationIssue, ...]
 
 
-@dataclass(frozen=True)
-class HookSpec:
+class HookSpec(NamedTuple):
     name: str
     script_path: PurePosixPath
     carrier_path: PurePosixPath | None = None
     event: str | None = None
 
 
-@dataclass(frozen=True)
-class ToolOwnership:
+class ToolOwnership(NamedTuple):
     instruction_path: PurePosixPath
     instruction_companion: PurePosixPath
     agent_suffix: str
     hooks: tuple[HookSpec, ...]
+    source_only_paths: tuple[PurePosixPath, ...] = ()
 
 
-_p = PurePosixPath
 OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
     "claude": ToolOwnership(
         _p("CLAUDE.md"),
@@ -147,6 +136,7 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
             ),
             HookSpec("ready", _p("ready_notify_hook.py"), _p("settings.json"), "Stop"),
         ),
+        (_p("commands/codex-review.md"),),
     ),
     "codex": ToolOwnership(
         _p("AGENTS.md"),
@@ -171,342 +161,201 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
         ),
     ),
 }
-
-_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_MARKDOWN_AGENT_KEYS = frozenset({"name", "description"})
-_MARKDOWN_COMMAND_KEYS = frozenset({"description"})
-_CODEX_AGENT_PORTABLE_KEYS = frozenset({"name", "description", "developer_instructions"})
-_CODEX_AGENT_KEYS = _CODEX_AGENT_PORTABLE_KEYS | frozenset(
-    {"model", "model_reasoning_effort", "sandbox_mode"}
-)
-_CLAUDE_NATIVE_COMMAND_KEYS = frozenset({"description", "argument-hint", "allowed-tools"})
-_RUNTIME_SKILL_VARIANTS: tuple[Mapping[ConfigSyncSource, str], ...] = (
-    {
-        "claude": "convergence-loop",
-        "codex": "convergence-loop",
-        "opencode": "convergence-loop",
-    },
-    {
-        "claude": "claude-md-management",
-        "codex": "agents-md-management",
-        "opencode": "agents-md-management",
-    },
-    {
-        "claude": "update-claude-md",
-        "codex": "update-agents-md",
-        "opencode": "update-agents-md",
-    },
-    {
-        "claude": "session-bootstrap",
-        "codex": "session-bootstrap",
-        "opencode": "session-bootstrap",
-    },
-)
-_NATIVE_COMMANDS: Mapping[str, ConfigSyncSource] = {"codex-review": "claude"}
-_PATH_MARKERS: Mapping[ConfigSyncSource, tuple[bytes, ...]] = {
-    "claude": (b"~/.claude/", b"$HOME/.claude/", b"~/.claude_seed/"),
-    "codex": (b"~/.codex/", b"$HOME/.codex/", b"${CODEX_HOME"),
-    "opencode": (b"~/.config/opencode/", b"$HOME/.config/opencode/"),
-}
-_JAVASCRIPT_LANGUAGE = Language(tree_sitter_javascript.language())
-_OPENCODE_HOOK_PROPERTY_LITERALS: Mapping[PurePosixPath, frozenset[bytes]] = {
-    _p("plugins/session-start-status.js"): frozenset({b"event", b'"event"', b"'event'"}),
-    _p("plugins/security-reminder.js"): frozenset(
-        {b'"tool.execute.before"', b"'tool.execute.before'"}
-    ),
-    _p("plugins/ready-notify.js"): frozenset({b"event", b'"event"', b"'event'"}),
-}
+_PLUGIN_PATHS = frozenset(hook.script_path for hook in OWNERSHIP_MATRIX["opencode"].hooks)
+type _File = tuple[PurePosixPath, bytes, bool]
 
 
 def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResult:
-    root = root.resolve()
-    owned = OWNERSHIP_MATRIX[tool]
+    root, owned = root.resolve(), OWNERSHIP_MATRIX[tool]
     artifacts: list[WorkflowArtifact] = []
     unresolved: list[UnresolvedItem] = []
     issues: list[ValidationIssue] = []
-
-    instructions = _read_file(root, owned.instruction_path, issues)
-    if instructions is None:
+    instruction = _read(root, owned.instruction_path, issues)
+    if instruction is None:
         issues.append(
             _issue(
                 "instructions:missing", "Missing native root instructions.", owned.instruction_path
             )
         )
     else:
-        try:
-            instructions.content.decode()
-        except UnicodeDecodeError:
-            issues.append(
-                _issue(
-                    "instructions:utf8",
-                    "Root instructions must be UTF-8.",
-                    instructions.relative_path,
-                )
-            )
-        artifacts.append(_artifact(tool, ArtifactKind.INSTRUCTIONS, "global", instructions))
-
-    for item in _files_below(root, _p("agents"), issues):
-        if len(item.relative_path.parts) == 2 and item.relative_path.suffix == owned.agent_suffix:
-            artifact = _read_agent(tool, item, issues)
+        artifacts.append(_artifact(tool, ArtifactKind.INSTRUCTIONS, "global", instruction))
+    for item in _scan(root, _p("agents"), issues):
+        if len(item[0].parts) == 2 and item[0].suffix == owned.agent_suffix:
+            artifact, issue = _agent(tool, item)
             if artifact is not None:
                 artifacts.append(artifact)
-
-    skill_groups: dict[str, list[_ReadFile]] = {}
-    for item in _files_below(root, _p("skills"), issues):
-        if len(item.relative_path.parts) >= 3:
-            skill_groups.setdefault(item.relative_path.parts[1], []).append(item)
-    for name, items in sorted(skill_groups.items()):
+            if issue is not None:
+                issues.append(issue)
+    skills = _scan(root, _p("skills"), issues)
+    for name, items in _group_skills(skills).items():
         if tool == "codex" and name.startswith("command-"):
-            command = _read_codex_command(tool, name, items, issues)
-            if command is not None:
-                artifacts.append(command)
-                if len(items) > 1:
-                    unresolved.append(
-                        _unresolved(command, "Command support assets need adaptation.")
-                    )
-            continue
-        if not _valid_skill_name(name):
-            issues.append(
-                _issue(f"skill-name:{name}", "Skill name is unsafe.", _p("skills") / name)
-            )
-            continue
-        expected_entrypoint = _p("skills") / name / "SKILL.md"
-        entrypoint = next(
-            (item for item in items if item.relative_path == expected_entrypoint), None
-        )
-        if entrypoint is None:
+            command = _command(tool, name.removeprefix("command-"), _entrypoint(items))
+            _append(command, artifacts, unresolved, issues)
+        elif _valid_skill(name, _entrypoint(items)):
+            artifacts.extend(_artifact(tool, ArtifactKind.SKILL, name, item) for item in items)
+        else:
             issues.append(
                 _issue(
-                    f"skill-entrypoint:{name}", "Skill is missing SKILL.md.", _p("skills") / name
+                    f"skill-entrypoint:{name}", "Skill entrypoint is invalid.", _p("skills") / name
                 )
             )
-            continue
-        if not _valid_skill_content(entrypoint.content, name):
-            issues.append(
-                _issue(
-                    f"skill-fields:{name}",
-                    "Skill frontmatter, description, or body is invalid.",
-                    entrypoint.relative_path,
-                )
-            )
-            continue
-        expected_variant = _runtime_skill_target_name(name, tool)
-        if expected_variant is not None and expected_variant != name:
-            issues.append(
-                _issue(
-                    f"skill-variant:{name}",
-                    f"Runtime-specific skill must use the native name {expected_variant}.",
-                    entrypoint.relative_path,
-                )
-            )
-            continue
-        artifacts.extend(_artifact(tool, ArtifactKind.SKILL, name, item) for item in items)
-
     if tool != "codex":
-        for item in _files_below(root, _p("commands"), issues):
-            if len(item.relative_path.parts) == 2 and item.relative_path.suffix == ".md":
-                command = _read_markdown_command(tool, item, issues)
-                if command is not None:
-                    artifacts.append(command)
-
-    excluded_hooks = {hook.script_path for hook in owned.hooks}
+        for item in _scan(root, _p("commands"), issues):
+            if len(item[0].parts) == 2 and item[0].suffix == ".md":
+                _append(_command(tool, item[0].stem, item), artifacts, unresolved, issues)
+    hook_paths = {hook.script_path for hook in owned.hooks}
     for prefix in (_p("context"), _p("scripts")):
-        for item in _files_below(root, prefix, issues):
-            if item.relative_path not in excluded_hooks:
-                artifacts.append(_artifact(tool, ArtifactKind.CONTEXT, prefix.name, item))
-
-    _read_hooks(root, tool, owned, artifacts, unresolved, issues)
-    for artifact in artifacts:
-        if artifact.nonportable_metadata:
-            unresolved.append(
-                _unresolved(
-                    artifact,
-                    f"Nonportable metadata: {', '.join(artifact.nonportable_metadata)}.",
-                    metadata=artifact.metadata,
+        artifacts.extend(
+            _artifact(tool, ArtifactKind.CONTEXT, prefix.name, item)
+            for item in _scan(root, prefix, issues)
+            if item[0] not in hook_paths
+        )
+    carriers: dict[PurePosixPath, Mapping[str, object] | None] = {}
+    for hook in owned.hooks:
+        script = _read(root, hook.script_path, issues)
+        if script is not None and hook.script_path in _PLUGIN_PATHS and not _plugin(script[1]):
+            issues.append(
+                _issue(
+                    f"plugin-export:{hook.name}",
+                    "OpenCode plugin export marker is missing.",
+                    hook.script_path,
                 )
             )
-        if (
-            artifact.native_only_for is not None
-            and artifact.source_tool != artifact.native_only_for
-        ):
-            unresolved.append(
-                _unresolved(
-                    artifact,
-                    f"Surface is native to {artifact.native_only_for}, not {artifact.source_tool}.",
-                    metadata=artifact.metadata,
+        if hook.carrier_path is None:
+            if script is not None:
+                artifacts.append(_artifact(tool, ArtifactKind.HOOK, hook.name, script))
+            continue
+        carriers.setdefault(hook.carrier_path, _json(root, hook.carrier_path, issues))
+        value = _nested(carriers[hook.carrier_path], hook.event)
+        if script is None and value is None:
+            continue
+        if script is None or value is None:
+            issues.append(
+                _issue(
+                    f"hook-incomplete:{hook.name}",
+                    "Hook script and registration must coexist.",
+                    hook.script_path,
                 )
             )
+            continue
+        artifact = _artifact(tool, ArtifactKind.HOOK, hook.name, script)
+        artifacts.append(artifact)
+        if value != _registration(tool, hook.name):
+            unresolved.append(_blocked(artifact))
+    unresolved.extend(_blocked(item) for item in artifacts if item.nonportable_metadata)
     return AdapterReadResult(
         tool,
-        tuple(sorted(artifacts, key=lambda item: (item.kind, item.name, item.source_path))),
-        tuple(sorted(unresolved, key=_unresolved_key)),
-        tuple(sorted(issues, key=_issue_key)),
+        tuple(sorted(artifacts, key=lambda item: item.source_path)),
+        _unique(unresolved),
+        tuple(sorted(issues)),
     )
 
 
 def render_native_workflow(
-    source: AdapterReadResult, target_tool: ConfigSyncSource
+    source: AdapterReadResult, target: ConfigSyncSource
 ) -> AdapterRenderResult:
-    if source.tool == target_tool:
+    if source.tool == target:
         raise ValueError("Source and target tools must differ.")
-    target = OWNERSHIP_MATRIX[target_tool]
+    owned = OWNERSHIP_MATRIX[target]
     files: list[RenderedFile] = []
     fragments: list[SettingsFragment] = []
-    unresolved = [_retarget(item, target_tool) for item in source.unresolved]
-
+    unresolved = [_retarget(item, target) for item in source.unresolved]
     for artifact in source.artifacts:
         if artifact.native_only_for is not None:
             continue
-        target_skill_name = (
-            _runtime_skill_target_name(artifact.name, target_tool)
-            if artifact.kind is ArtifactKind.SKILL
-            else None
-        )
-        if target_skill_name is not None:
-            unresolved.append(
-                _unresolved(
-                    artifact,
-                    f"Runtime-specific skill variant needs adaptation as {target_skill_name}.",
-                    target_tool,
-                )
-            )
-            continue
-        if artifact.kind is not ArtifactKind.HOOK and any(
-            marker in artifact.content for marker in _PATH_MARKERS[source.tool]
-        ):
-            unresolved.append(
-                _unresolved(artifact, "Source-native paths need adaptation.", target_tool)
-            )
-
-        if artifact.kind is ArtifactKind.INSTRUCTIONS:
-            files.extend(
-                (
-                    _rendered(target.instruction_path, artifact),
-                    _rendered(target.instruction_companion, artifact),
-                )
-            )
-        elif artifact.kind is ArtifactKind.AGENT:
-            rendered = _render_agent(artifact, target_tool)
-            if rendered is None:
-                unresolved.append(
-                    _unresolved(artifact, "Agent syntax needs adaptation.", target_tool)
-                )
-            else:
-                files.append(rendered)
-        elif artifact.kind is ArtifactKind.SKILL:
+        if artifact.kind == ArtifactKind.SKILL and artifact.name in _RUNTIME_SKILLS:
+            unresolved.append(_blocked(artifact, target))
+        elif artifact.kind == ArtifactKind.INSTRUCTIONS:
+            files += [
+                _rendered(owned.instruction_path, artifact),
+                _rendered(owned.instruction_companion, artifact),
+            ]
+        elif artifact.kind == ArtifactKind.AGENT:
+            rendered = _render_agent(artifact, target)
+            files += [rendered] if rendered else []
+            unresolved += [] if rendered else [_blocked(artifact, target)]
+        elif artifact.kind == ArtifactKind.SKILL:
             files.append(
                 _rendered(
                     _p("skills") / artifact.name / _p(*artifact.source_path.parts[2:]), artifact
                 )
             )
-        elif artifact.kind is ArtifactKind.COMMAND:
-            rendered = _render_command(artifact, target_tool)
-            if rendered is None:
-                unresolved.append(
-                    _unresolved(artifact, "Command syntax needs adaptation.", target_tool)
-                )
-            else:
-                files.append(rendered)
-        elif artifact.kind is ArtifactKind.CONTEXT:
+        elif artifact.kind == ArtifactKind.COMMAND:
+            rendered = _render_command(artifact, target)
+            files += [rendered] if rendered else []
+            unresolved += [] if rendered else [_blocked(artifact, target)]
+        elif artifact.kind == ArtifactKind.CONTEXT:
             files.append(_rendered(artifact.source_path, artifact))
-        elif artifact.kind is ArtifactKind.HOOK:
-            hook_file, hook_fragment, hook_gap = _render_hook(artifact, target_tool)
-            if hook_file is not None:
-                files.append(hook_file)
-            if hook_fragment is not None:
-                fragments.append(hook_fragment)
-            if hook_gap is not None:
-                unresolved.append(hook_gap)
-
-    if target_tool == "codex":
+        else:
+            hook = next(item for item in owned.hooks if item.name == artifact.name)
+            files.append(_rendered(hook.script_path, artifact))
+            if hook.carrier_path and hook.event:
+                fragments.append(
+                    SettingsFragment(
+                        hook.carrier_path,
+                        ("hooks", hook.event),
+                        _dump(_registration(target, hook.name)),
+                        artifact.identifier,
+                    )
+                )
+    if target == "codex":
         fragments.append(
             SettingsFragment(
                 _p("config.toml"), ("project_doc_fallback_filenames",), b'["CLAUDE.md"]', "bridge"
             )
         )
-    rendered_files = tuple(sorted(files, key=lambda item: item.relative_path))
-    rendered_fragments = tuple(
-        sorted(fragments, key=lambda item: (item.carrier_path, item.key_path))
-    )
+    files_tuple, fragments_tuple = tuple(sorted(files)), tuple(sorted(fragments))
     return AdapterRenderResult(
         source.tool,
-        target_tool,
-        rendered_files,
-        rendered_fragments,
-        tuple(sorted(_deduplicate(unresolved), key=_unresolved_key)),
-        validate_rendered_workflow(target_tool, rendered_files, rendered_fragments),
+        target,
+        files_tuple,
+        fragments_tuple,
+        _unique(unresolved),
+        validate_rendered_workflow(target, files_tuple, fragments_tuple),
     )
 
 
 def validate_rendered_workflow(
-    tool: ConfigSyncSource,
-    files: Iterable[RenderedFile],
-    settings_fragments: Iterable[SettingsFragment],
+    tool: ConfigSyncSource, files: Iterable[RenderedFile], fragments: Iterable[SettingsFragment]
 ) -> tuple[ValidationIssue, ...]:
-    owned = OWNERSHIP_MATRIX[tool]
+    files, fragments = tuple(files), tuple(fragments)
     issues: list[ValidationIssue] = []
     paths: set[PurePosixPath] = set()
     for item in files:
-        if not is_safe_relative_path(item.relative_path):
+        path = item.relative_path
+        if not is_safe_relative_path(path) or not path_is_owned(tool, path):
             issues.append(
-                _issue(
-                    f"unsafe-path:{item.artifact_id}",
-                    "Rendered path is unsafe.",
-                    item.relative_path,
-                )
+                _issue(f"unowned-path:{item.artifact_id}", "Rendered path is not owned.", path)
             )
-        if item.relative_path in paths:
-            issues.append(
-                _issue(
-                    f"duplicate-path:{item.relative_path}",
-                    "Rendered path is duplicated.",
-                    item.relative_path,
-                )
-            )
-        paths.add(item.relative_path)
-        if not path_is_owned(tool, item.relative_path):
-            issues.append(
-                _issue(
-                    f"unowned-path:{item.artifact_id}",
-                    "Rendered path is not owned.",
-                    item.relative_path,
-                )
-            )
-        _validate_native_file(tool, item, issues)
-    for path in (owned.instruction_path, owned.instruction_companion):
+        if path in paths:
+            issues.append(_issue(f"duplicate-path:{path}", "Rendered path is duplicated.", path))
+        paths.add(path)
+        issues.extend(_file_issues(tool, item))
+    for path in (
+        OWNERSHIP_MATRIX[tool].instruction_path,
+        OWNERSHIP_MATRIX[tool].instruction_companion,
+    ):
         if path not in paths:
             issues.append(
                 _issue(
                     f"instructions:missing:{path}", "Rendered instruction form is missing.", path
                 )
             )
-
     seen: set[tuple[PurePosixPath, tuple[str, ...]]] = set()
-    for fragment in settings_fragments:
-        key = (fragment.carrier_path, fragment.key_path)
-        if key in seen:
+    for item in fragments:
+        key = item.carrier_path, item.key_path
+        if key in seen or not fragment_is_owned(tool, *key):
             issues.append(
-                _issue(
-                    f"duplicate-fragment:{fragment.artifact_id}", "Settings fragment is duplicated."
-                )
+                _issue(f"invalid-fragment:{item.artifact_id}", "Settings fragment is not owned.")
             )
         seen.add(key)
-        if not fragment_is_owned(tool, *key):
-            issues.append(
-                _issue(
-                    f"unowned-fragment:{fragment.artifact_id}", "Settings fragment is not owned."
-                )
-            )
         try:
-            json.loads(fragment.value_json)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            json.loads(item.value_json)
+        except (UnicodeDecodeError, json.JSONDecodeError):
             issues.append(
-                _issue(
-                    f"invalid-fragment:{fragment.artifact_id}", "Settings fragment is invalid JSON."
-                )
+                _issue(f"invalid-fragment:{item.artifact_id}", "Settings fragment is invalid JSON.")
             )
-    return tuple(sorted(issues, key=_issue_key))
+    return tuple(sorted(issues))
 
 
 def is_safe_relative_path(path: PurePosixPath) -> bool:
@@ -517,588 +366,350 @@ def is_safe_relative_path(path: PurePosixPath) -> bool:
     )
 
 
-@dataclass(frozen=True)
-class _ReadFile:
-    relative_path: PurePosixPath
-    content: bytes
-    executable: bool
+def path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
+    owned = OWNERSHIP_MATRIX[tool]
+    return is_safe_relative_path(path) and (
+        path in {owned.instruction_path, owned.instruction_companion}
+        or len(path.parts) == 2
+        and path.parts[0] == "agents"
+        and path.suffix == owned.agent_suffix
+        or len(path.parts) >= 3
+        and path.parts[0] == "skills"
+        or tool != "codex"
+        and len(path.parts) == 2
+        and path.parts[0] == "commands"
+        and path.suffix == ".md"
+        or len(path.parts) >= 2
+        and path.parts[0] in {"context", "scripts"}
+        or path in {hook.script_path for hook in owned.hooks}
+    )
 
 
-def _read_file(root: Path, path: PurePosixPath, issues: list[ValidationIssue]) -> _ReadFile | None:
-    if not is_safe_relative_path(path):
-        issues.append(_issue(f"unsafe-path:{path}", "Allowlisted path is unsafe.", path))
-        return None
+def native_only_path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
+    return path in OWNERSHIP_MATRIX[tool].source_only_paths
+
+
+def fragment_is_owned(tool: ConfigSyncSource, path: PurePosixPath, keys: tuple[str, ...]) -> bool:
+    hooks = {
+        (hook.carrier_path, ("hooks", hook.event))
+        for hook in OWNERSHIP_MATRIX[tool].hooks
+        if hook.carrier_path and hook.event
+    }
+    return (
+        (path, keys) in hooks
+        or tool == "codex"
+        and (path, keys) == (_p("config.toml"), ("project_doc_fallback_filenames",))
+    )
+
+
+def _read(root: Path, path: PurePosixPath, issues: list[ValidationIssue]) -> _File | None:
     candidate = root.joinpath(*path.parts)
     if not candidate.exists() and not candidate.is_symlink():
         return None
     try:
         resolved = candidate.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError) as error:
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise OSError
+        content = resolved.read_bytes()
+        content.decode()
+        return path, content, bool(resolved.stat().st_mode & stat.S_IXUSR)
+    except UnicodeDecodeError:
+        issues.append(_issue(f"invalid-utf8:{path}", "Workflow files must be UTF-8.", path))
+    except (OSError, RuntimeError):
         issues.append(
-            _issue(f"unreadable-path:{path}", f"Path cannot resolve: {type(error).__name__}.", path)
+            _issue(f"external-path:{path}", "Path is unreadable or escapes its root.", path)
         )
-        return None
-    if not resolved.is_relative_to(root):
-        issues.append(_issue(f"external-symlink:{path}", "Path resolves outside its root.", path))
-        return None
-    if not resolved.is_file():
-        return None
-    try:
-        return _ReadFile(path, resolved.read_bytes(), bool(resolved.stat().st_mode & stat.S_IXUSR))
-    except OSError as error:
-        issues.append(
-            _issue(f"unreadable-file:{path}", f"File cannot be read: {type(error).__name__}.", path)
-        )
-        return None
+    return None
 
 
-def _files_below(
-    root: Path, prefix: PurePosixPath, issues: list[ValidationIssue]
-) -> tuple[_ReadFile, ...]:
+def _scan(root: Path, prefix: PurePosixPath, issues: list[ValidationIssue]) -> tuple[_File, ...]:
     directory = root.joinpath(*prefix.parts)
     if not directory.exists() and not directory.is_symlink():
         return ()
     try:
-        resolved = directory.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError):
-        issues.append(
-            _issue(f"unreadable-tree:{prefix}", "Allowlisted tree cannot resolve.", prefix)
-        )
+        if not directory.resolve(strict=True).is_relative_to(root):
+            raise OSError
+        paths = sorted(path for path in directory.rglob("*") if not path.is_dir())
+    except (OSError, RuntimeError):
+        issues.append(_issue(f"invalid-tree:{prefix}", "Allowlisted tree is invalid.", prefix))
         return ()
-    if not resolved.is_relative_to(root):
-        issues.append(
-            _issue(f"external-symlink:{prefix}", "Tree resolves outside its root.", prefix)
-        )
-        return ()
-    if not resolved.is_dir():
-        return ()
-
-    paths: list[Path] = []
-    for current, directory_names, file_names in os.walk(directory, followlinks=False):
-        current_path = Path(current)
-        kept: list[str] = []
-        for name in sorted(directory_names):
-            child = current_path / name
-            relative = _p(child.relative_to(root).as_posix())
-            if child.is_symlink():
-                try:
-                    target = child.resolve(strict=True)
-                except (FileNotFoundError, OSError, RuntimeError):
-                    issues.append(
-                        _issue(
-                            f"unreadable-tree:{relative}",
-                            "Symlinked directory cannot resolve.",
-                            relative,
-                        )
-                    )
-                else:
-                    message = (
-                        "Symlinked directory escapes its root."
-                        if not target.is_relative_to(root)
-                        else "Directory aliases and cycles are unsupported."
-                    )
-                    issues.append(_issue(f"symlink-directory:{relative}", message, relative))
-            else:
-                kept.append(name)
-        directory_names[:] = kept
-        paths.extend(current_path / name for name in file_names)
-
-    items: list[_ReadFile] = []
-    targets: dict[Path, PurePosixPath] = {}
-    for candidate in sorted(paths, key=lambda path: (path.is_symlink(), path.as_posix())):
-        relative = _p(candidate.relative_to(root).as_posix())
-        item = _read_file(root, relative, issues)
-        if item is None:
-            continue
-        target = candidate.resolve()
-        if target in targets:
-            issues.append(
-                _issue(f"symlink-alias:{relative}", f"Path aliases {targets[target]}.", relative)
-            )
-            continue
-        targets[target] = relative
-        items.append(item)
-    return tuple(sorted(items, key=lambda item: item.relative_path))
-
-
-def _artifact(
-    tool: ConfigSyncSource,
-    kind: ArtifactKind,
-    name: str,
-    item: _ReadFile,
-    *,
-    body: bytes | None = None,
-    metadata: bytes | None = None,
-    description: str = "",
-    nonportable_metadata: tuple[str, ...] = (),
-    native_only_for: ConfigSyncSource | None = None,
-) -> WorkflowArtifact:
-    return WorkflowArtifact(
-        kind,
-        name,
-        tool,
-        item.relative_path,
-        item.content,
-        body,
-        metadata,
-        description,
-        nonportable_metadata,
-        item.executable,
-        native_only_for,
+    return tuple(
+        item
+        for path in paths
+        if (item := _read(root, _p(path.relative_to(root).as_posix()), issues)) is not None
     )
 
 
-def _read_agent(
-    tool: ConfigSyncSource, item: _ReadFile, issues: list[ValidationIssue]
-) -> WorkflowArtifact | None:
-    name = item.relative_path.stem
-    if not _NAME.fullmatch(name):
-        issues.append(_issue(f"agent-name:{name}", "Agent name is unsafe.", item.relative_path))
-        return None
+def _agent(
+    tool: ConfigSyncSource, item: _File
+) -> tuple[WorkflowArtifact | None, ValidationIssue | None]:
+    path, content, _executable = item
+    if not _NAME.fullmatch(path.stem):
+        return None, _issue(f"agent-name:{path.stem}", "Agent name is unsafe.", path)
     if tool == "codex":
         try:
-            data = cast(dict[str, object], tomllib.loads(item.content.decode()))
-        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-            issues.append(
-                _issue(f"agent-toml:{name}", "Codex agent must be UTF-8 TOML.", item.relative_path)
+            data = _mapping(tomllib.loads(content.decode()))
+        except (tomllib.TOMLDecodeError, ValueError):
+            return None, _issue(f"agent-toml:{path.stem}", "Codex agent TOML is invalid.", path)
+        if not _valid_agent(data, path.stem):
+            return None, _issue(
+                f"agent-fields:{path.stem}", "Codex agent fields are invalid.", path
             )
-            return None
-        if not _valid_codex_agent(data, name):
-            issues.append(
-                _issue(
-                    f"agent-fields:{name}", "Codex agent fields are invalid.", item.relative_path
-                )
-            )
-            return None
-        description = cast(str, data["description"])
-        prompt = cast(str, data["developer_instructions"])
         return _artifact(
             tool,
             ArtifactKind.AGENT,
-            name,
+            path.stem,
             item,
-            body=prompt.encode(),
-            metadata=item.content,
-            description=description,
-            nonportable_metadata=tuple(sorted(set(data) - _CODEX_AGENT_PORTABLE_KEYS)),
-        )
-    parsed = _markdown_parts(item.content)
-    if parsed is None:
-        return _artifact(
-            tool,
-            ArtifactKind.AGENT,
-            name,
-            item,
-            metadata=item.content,
-            nonportable_metadata=("complex-frontmatter",),
-        )
-    metadata_bytes, metadata, body = parsed
-    if metadata.get("name", name) != name or not metadata.get("description"):
-        issues.append(
-            _issue(f"agent-fields:{name}", "Markdown agent fields are invalid.", item.relative_path)
-        )
-        return None
+            cast(str, data["developer_instructions"]).encode(),
+            cast(str, data["description"]),
+            tuple(sorted(set(data) - _AGENT_FIELDS)),
+        ), None
+    parsed = _frontmatter(content)
+    if (
+        parsed is None
+        or parsed[0].get("name", path.stem) != path.stem
+        or not parsed[0].get("description")
+        or not parsed[1].strip()
+    ):
+        return None, _issue(f"agent-fields:{path.stem}", "Markdown agent fields are invalid.", path)
     return _artifact(
         tool,
         ArtifactKind.AGENT,
-        name,
+        path.stem,
         item,
-        body=body,
-        metadata=metadata_bytes,
-        description=metadata["description"],
-        nonportable_metadata=tuple(sorted(set(metadata) - _MARKDOWN_AGENT_KEYS)),
-    )
+        parsed[1],
+        parsed[0]["description"],
+        tuple(sorted(set(parsed[0]) - {"name", "description"})),
+    ), None
 
 
-def _read_markdown_command(
-    tool: ConfigSyncSource, item: _ReadFile, issues: list[ValidationIssue]
-) -> WorkflowArtifact | None:
-    name = item.relative_path.stem
-    if not _NAME.fullmatch(name):
-        issues.append(_issue(f"command-name:{name}", "Command name is unsafe.", item.relative_path))
-        return None
-    parsed = _markdown_parts(item.content)
-    owner = _NATIVE_COMMANDS.get(name)
-    if parsed is None:
-        return _artifact(
-            tool,
-            ArtifactKind.COMMAND,
-            name,
-            item,
-            metadata=item.content,
-            nonportable_metadata=("complex-frontmatter",),
-            native_only_for=owner,
+def _command(
+    tool: ConfigSyncSource, name: str, item: _File | None
+) -> tuple[WorkflowArtifact | None, UnresolvedItem | None, ValidationIssue | None]:
+    if item is None or not _NAME.fullmatch(name) or (parsed := _frontmatter(item[1])) is None:
+        return (
+            None,
+            None,
+            _issue(
+                f"command-fields:{name}",
+                "Command frontmatter is invalid.",
+                item[0] if item else None,
+            ),
         )
-    metadata_bytes, metadata, body = parsed
-    if owner == tool:
-        if not _valid_native_command(metadata, body, owner):
-            issues.append(
-                _issue(
-                    f"command-fields:{name}",
-                    "Native command frontmatter or body is invalid.",
-                    item.relative_path,
-                )
-            )
-            return None
-        nonportable_metadata: tuple[str, ...] = ()
-    else:
-        nonportable_metadata = tuple(sorted(set(metadata) - _MARKDOWN_COMMAND_KEYS))
-    return _artifact(
+    metadata, body = parsed
+    expected = f"command-{name}" if tool == "codex" else None
+    if (
+        not metadata.get("description")
+        or not body.strip()
+        or expected
+        and metadata.get("name") != expected
+    ):
+        return None, None, _issue(f"command-fields:{name}", "Command fields are invalid.", item[0])
+    native = name == "codex-review" and tool == "claude"
+    allowed = (
+        _CLAUDE_REVIEW_FIELDS
+        if native
+        else {"name", "description"}
+        if tool == "codex"
+        else {"description"}
+    )
+    if native and set(metadata) - allowed:
+        return (
+            None,
+            None,
+            _issue(f"command-fields:{name}", "Claude-only command fields are invalid.", item[0]),
+        )
+    artifact = _artifact(
         tool,
         ArtifactKind.COMMAND,
         name,
         item,
-        body=body,
-        metadata=metadata_bytes,
-        description=metadata.get("description", ""),
-        nonportable_metadata=nonportable_metadata,
-        native_only_for=owner,
+        body,
+        metadata["description"],
+        tuple(sorted(set(metadata) - allowed)),
+        "claude" if native else None,
     )
+    return artifact, _blocked(artifact) if name == "codex-review" and not native else None, None
 
 
-def _read_codex_command(
-    tool: ConfigSyncSource, directory: str, items: list[_ReadFile], issues: list[ValidationIssue]
-) -> WorkflowArtifact | None:
-    name = directory.removeprefix("command-")
-    entrypoint = next((item for item in items if item.relative_path.name == "SKILL.md"), None)
-    if entrypoint is None:
-        issues.append(_issue(f"command-entrypoint:{name}", "Command skill is missing SKILL.md."))
-        return None
-    parsed = _markdown_parts(entrypoint.content)
-    if parsed is None:
-        return _artifact(
-            tool,
-            ArtifactKind.COMMAND,
-            name,
-            entrypoint,
-            metadata=entrypoint.content,
-            nonportable_metadata=("complex-frontmatter",),
-            native_only_for=_NATIVE_COMMANDS.get(name),
-        )
-    metadata_bytes, metadata, body = parsed
-    if metadata.get("name", f"command-{name}") != f"command-{name}":
-        issues.append(_issue(f"command-name:{name}", "Command skill name does not match its path."))
-        return None
-    return _artifact(
-        tool,
-        ArtifactKind.COMMAND,
-        name,
-        entrypoint,
-        body=body,
-        metadata=metadata_bytes,
-        description=metadata.get("description", ""),
-        nonportable_metadata=tuple(sorted(set(metadata) - {"name", "description"})),
-        native_only_for=_NATIVE_COMMANDS.get(name),
-    )
-
-
-def _read_hooks(
-    root: Path,
-    tool: ConfigSyncSource,
-    owned: ToolOwnership,
+def _append(
+    value: tuple[WorkflowArtifact | None, UnresolvedItem | None, ValidationIssue | None],
     artifacts: list[WorkflowArtifact],
     unresolved: list[UnresolvedItem],
     issues: list[ValidationIssue],
 ) -> None:
-    carriers: dict[PurePosixPath, Mapping[str, object] | None] = {}
-    for hook in owned.hooks:
-        script = _read_file(root, hook.script_path, issues)
-        if script is not None and script.relative_path.suffix == ".py":
-            try:
-                ast.parse(script.content)
-            except (SyntaxError, UnicodeDecodeError):
-                issues.append(
-                    _issue(f"hook-python:{hook.name}", "Python hook is invalid.", hook.script_path)
-                )
-        if (
-            script is not None
-            and script.relative_path.suffix == ".js"
-            and not _valid_opencode_plugin(
-                script.content,
-                _OPENCODE_HOOK_PROPERTY_LITERALS[script.relative_path],
-            )
-        ):
-            issues.append(
-                _issue(
-                    f"hook-javascript:{hook.name}",
-                    "OpenCode hook plugin structure is invalid.",
-                    hook.script_path,
-                )
-            )
-        if hook.carrier_path is None:
-            if script is not None:
-                artifacts.append(_artifact(tool, ArtifactKind.HOOK, hook.name, script))
-            continue
-        if hook.carrier_path not in carriers:
-            carriers[hook.carrier_path] = _read_json(root, hook.carrier_path, issues)
-        registration = _nested(carriers[hook.carrier_path], "hooks", cast(str, hook.event))
-        if script is None and registration is None:
-            continue
-        if script is None or registration is None:
-            issues.append(
-                _issue(f"hook-incomplete:{hook.name}", "Hook script and registration must coexist.")
-            )
-            continue
-        artifact = _artifact(tool, ArtifactKind.HOOK, hook.name, script)
+    artifact, blocked, issue = value
+    if artifact:
         artifacts.append(artifact)
-        if registration != _hook_registration(tool, hook.name):
-            unresolved.append(
-                _unresolved(
-                    artifact,
-                    "Noncanonical hook registration needs adaptation.",
-                    metadata=json.dumps(
-                        registration, sort_keys=True, separators=(",", ":")
-                    ).encode(),
-                )
-            )
+    if blocked:
+        unresolved.append(blocked)
+    if issue:
+        issues.append(issue)
 
 
-def _read_json(
+def _group_skills(files: tuple[_File, ...]) -> dict[str, list[_File]]:
+    groups: dict[str, list[_File]] = {}
+    for item in files:
+        if len(item[0].parts) >= 3:
+            groups.setdefault(item[0].parts[1], []).append(item)
+    return groups
+
+
+def _entrypoint(items: list[_File]) -> _File | None:
+    return next((item for item in items if item[0].name == "SKILL.md"), None)
+
+
+def _valid_skill(name: str, item: _File | None) -> bool:
+    return (
+        item is not None
+        and _SKILL.fullmatch(name) is not None
+        and (parsed := _frontmatter(item[1])) is not None
+        and parsed[0].get("name") == name
+        and bool(parsed[0].get("description", "").strip())
+        and bool(parsed[1].strip())
+    )
+
+
+def _json(
     root: Path, path: PurePosixPath, issues: list[ValidationIssue]
 ) -> Mapping[str, object] | None:
-    item = _read_file(root, path, issues)
+    item = _read(root, path, issues)
     if item is None:
         return None
     try:
-        value: object = json.loads(item.content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _mapping(json.loads(item[1]))
+    except (json.JSONDecodeError, ValueError):
         issues.append(_issue(f"invalid-json:{path}", "Settings carrier is invalid JSON.", path))
         return None
-    if not isinstance(value, dict):
-        issues.append(_issue(f"invalid-json:{path}", "Settings carrier must be an object.", path))
-        return None
-    return cast(dict[str, object], value)
 
 
-def _nested(mapping: Mapping[str, object] | None, first: str, second: str) -> object | None:
-    if mapping is None:
-        return None
-    nested = mapping.get(first)
-    return cast(dict[str, object], nested).get(second) if isinstance(nested, dict) else None
-
-
-def _markdown_parts(content: bytes) -> tuple[bytes, dict[str, str], bytes] | None:
+def _file_issues(tool: ConfigSyncSource, item: RenderedFile) -> tuple[ValidationIssue, ...]:
     try:
-        text = content.decode()
+        text = item.content.decode()
     except UnicodeDecodeError:
-        return None
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
-        return None
-    end = next((index for index, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
-    if end is None:
-        return None
-    metadata: dict[str, str] = {}
-    for line in lines[1:end]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if line[:1].isspace() or ":" not in stripped:
-            return None
-        key, value = stripped.split(":", 1)
-        if key in metadata or not value.strip():
-            return None
-        metadata[key] = value.strip().strip('"').strip("'")
-    return "".join(lines[: end + 1]).encode(), metadata, "".join(lines[end + 1 :]).encode()
-
-
-def _valid_skill_name(name: str) -> bool:
-    return len(name) <= 64 and _SKILL_NAME.fullmatch(name) is not None
-
-
-def _valid_skill_content(content: bytes, directory_name: str) -> bool:
-    parsed = _markdown_parts(content)
-    if parsed is None or not _valid_skill_name(directory_name):
-        return False
-    _metadata_bytes, metadata, body = parsed
-    name = metadata.get("name")
-    description = metadata.get("description")
-    return (
-        name == directory_name
-        and description is not None
-        and bool(description.strip())
-        and bool(body.strip())
-    )
-
-
-def _runtime_skill_target_name(name: str, target: ConfigSyncSource) -> str | None:
-    for variants in _RUNTIME_SKILL_VARIANTS:
-        if name in variants.values():
-            return variants[target]
-    return None
-
-
-def _valid_codex_agent(data: Mapping[str, object], path_name: str) -> bool:
-    if set(data) - _CODEX_AGENT_KEYS or not set(data) >= _CODEX_AGENT_PORTABLE_KEYS:
-        return False
-    for key in data:
-        value = data[key]
-        if not isinstance(value, str) or not value.strip():
-            return False
-    return data["name"] == path_name and _NAME.fullmatch(path_name) is not None
-
-
-def _valid_native_command(
-    metadata: Mapping[str, str], body: bytes, owner: ConfigSyncSource | None
-) -> bool:
-    if owner != "claude" or set(metadata) - _CLAUDE_NATIVE_COMMAND_KEYS:
-        return False
-    return bool(metadata.get("description", "").strip() and body.strip())
-
-
-def _valid_opencode_plugin(content: bytes, expected_hook_keys: frozenset[bytes]) -> bool:
-    try:
-        content.decode()
-    except UnicodeDecodeError:
-        return False
-    try:
-        root = Parser(_JAVASCRIPT_LANGUAGE).parse(content).root_node
-        if root.has_error:
-            return False
-    except (TypeError, ValueError):
-        return False
-    return any(
-        _javascript_function_returns_object(function, expected_hook_keys)
-        for export in root.named_children
-        if export.type == "export_statement"
-        for function in _exported_javascript_functions(export)
-    )
-
-
-def _exported_javascript_functions(export: Node) -> tuple[Node, ...]:
-    declaration = export.child_by_field_name("declaration")
-    if declaration is not None and declaration.type == "function_declaration":
-        return (declaration,)
-    if declaration is not None and declaration.type in {
-        "lexical_declaration",
-        "variable_declaration",
-    }:
-        return tuple(
-            value
-            for declarator in declaration.named_children
-            if declarator.type == "variable_declarator"
-            if (value := declarator.child_by_field_name("value")) is not None
-            and value.type in {"arrow_function", "function_expression"}
+        return (
+            _issue(
+                f"invalid-utf8:{item.artifact_id}",
+                "Workflow files must be UTF-8.",
+                item.relative_path,
+            ),
         )
-    value = export.child_by_field_name("value")
-    if value is not None and value.type in {"arrow_function", "function_expression"}:
-        return (value,)
+    try:
+        if item.relative_path.suffix == ".json":
+            json.loads(text)
+        if item.relative_path.suffix == ".toml":
+            tomllib.loads(text)
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError):
+        return (
+            _issue(
+                f"invalid-data:{item.artifact_id}",
+                "Workflow data file is invalid.",
+                item.relative_path,
+            ),
+        )
+    if len(item.relative_path.parts) == 2 and item.relative_path.parts[0] == "agents":
+        if tool == "codex":
+            try:
+                valid = _valid_agent(_mapping(tomllib.loads(text)), item.relative_path.stem)
+            except ValueError:
+                valid = False
+        else:
+            parsed = _frontmatter(item.content)
+            valid = (
+                parsed is not None
+                and parsed[0].get("name", item.relative_path.stem) == item.relative_path.stem
+                and bool(parsed[0].get("description"))
+                and not (set(parsed[0]) - {"name", "description"})
+                and bool(parsed[1].strip())
+            )
+        if not valid:
+            return (
+                _issue(
+                    f"invalid-agent:{item.artifact_id}",
+                    "Agent fields are invalid.",
+                    item.relative_path,
+                ),
+            )
+    if tool == "opencode" and item.relative_path in _PLUGIN_PATHS and not _plugin(item.content):
+        return (
+            _issue(
+                f"invalid-plugin:{item.artifact_id}",
+                "OpenCode plugin export marker is missing.",
+                item.relative_path,
+            ),
+        )
+    if (
+        len(item.relative_path.parts) == 3
+        and item.relative_path.parts[0] == "skills"
+        and item.relative_path.name == "SKILL.md"
+        and not _valid_skill(
+            item.relative_path.parts[1], (item.relative_path, item.content, item.executable)
+        )
+    ):
+        return (
+            _issue(
+                f"invalid-skill:{item.artifact_id}",
+                "Skill entrypoint is invalid.",
+                item.relative_path,
+            ),
+        )
     return ()
 
 
-def _javascript_function_returns_object(
-    function: Node, expected_hook_keys: frozenset[bytes]
-) -> bool:
-    body = function.child_by_field_name("body")
-    if body is None:
-        return False
-    expression = body
-    while expression.type == "parenthesized_expression" and expression.named_child_count == 1:
-        expression = expression.named_children[0]
-    if expression.type == "object":
-        return _javascript_object_has_owned_hook(expression, expected_hook_keys)
-    return _javascript_block_returns_object(body, expected_hook_keys)
-
-
-def _javascript_block_returns_object(node: Node, expected_hook_keys: frozenset[bytes]) -> bool:
-    for child in node.named_children:
-        if child.type in {"arrow_function", "function_declaration", "function_expression"}:
-            continue
-        if child.type == "return_statement" and child.named_child_count == 1:
-            expression = child.named_children[0]
-            while (
-                expression.type == "parenthesized_expression" and expression.named_child_count == 1
-            ):
-                expression = expression.named_children[0]
-            if expression.type == "object" and _javascript_object_has_owned_hook(
-                expression, expected_hook_keys
-            ):
-                return True
-        if _javascript_block_returns_object(child, expected_hook_keys):
-            return True
-    return False
-
-
-def _javascript_object_has_owned_hook(node: Node, expected_hook_keys: frozenset[bytes]) -> bool:
-    return any(
-        key is not None
-        and key.text in expected_hook_keys
-        and value is not None
-        and value.type in {"arrow_function", "function_expression"}
-        for child in node.named_children
-        if child.type == "pair"
-        for key, value in ((child.child_by_field_name("key"), child.child_by_field_name("value")),)
-    )
-
-
-def _render_agent(artifact: WorkflowArtifact, target: ConfigSyncSource) -> RenderedFile | None:
-    if artifact.source_tool != "codex" and target != "codex":
-        return _rendered(_p("agents") / f"{artifact.name}.md", artifact)
-    if artifact.body is None or artifact.nonportable_metadata:
+def _render_agent(item: WorkflowArtifact, target: ConfigSyncSource) -> RenderedFile | None:
+    if item.body is None or item.nonportable_metadata:
         return None
     if target == "codex":
-        content = tomli_w.dumps(
-            {
-                "name": artifact.name,
-                "description": artifact.description,
-                "developer_instructions": artifact.body.decode(),
-            },
-            multiline_strings=True,
-        ).encode()
-        return _rendered(_p("agents") / f"{artifact.name}.toml", artifact, content)
-    content = _markdown(
-        ("name", artifact.name), ("description", artifact.description), body=artifact.body
+        return _rendered(
+            _p("agents") / f"{item.name}.toml",
+            item,
+            tomli_w.dumps(
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "developer_instructions": item.body.decode(),
+                },
+                multiline_strings=True,
+            ).encode(),
+        )
+    return _rendered(
+        _p("agents") / f"{item.name}.md",
+        item,
+        _markdown((("name", item.name), ("description", item.description)), item.body),
     )
-    return _rendered(_p("agents") / f"{artifact.name}.md", artifact, content)
 
 
-def _render_command(artifact: WorkflowArtifact, target: ConfigSyncSource) -> RenderedFile | None:
-    if artifact.source_tool != "codex" and target != "codex":
-        return _rendered(_p("commands") / f"{artifact.name}.md", artifact)
-    if artifact.body is None or artifact.nonportable_metadata:
+def _render_command(item: WorkflowArtifact, target: ConfigSyncSource) -> RenderedFile | None:
+    if item.body is None or item.nonportable_metadata:
         return None
     if target == "codex":
-        content = _markdown(
-            ("name", f"command-{artifact.name}"),
-            ("description", artifact.description),
-            body=artifact.body,
+        return _rendered(
+            _p("skills") / f"command-{item.name}" / "SKILL.md",
+            item,
+            _markdown(
+                (("name", f"command-{item.name}"), ("description", item.description)), item.body
+            ),
         )
-        return _rendered(_p("skills") / f"command-{artifact.name}" / "SKILL.md", artifact, content)
-    content = _markdown(("description", artifact.description), body=artifact.body)
-    return _rendered(_p("commands") / f"{artifact.name}.md", artifact, content)
-
-
-def _render_hook(
-    artifact: WorkflowArtifact, target: ConfigSyncSource
-) -> tuple[RenderedFile | None, SettingsFragment | None, UnresolvedItem | None]:
-    hook = next(item for item in OWNERSHIP_MATRIX[target].hooks if item.name == artifact.name)
-    fragment: SettingsFragment | None = None
-    if hook.carrier_path is not None and hook.event is not None:
-        value = json.dumps(
-            _hook_registration(target, hook.name), sort_keys=True, separators=(",", ":")
-        ).encode()
-        fragment = SettingsFragment(
-            hook.carrier_path, ("hooks", hook.event), value, artifact.identifier
-        )
-    return (
-        None,
-        fragment,
-        _unresolved(artifact, "Cross-tool hook script needs semantic adaptation.", target),
+    return _rendered(
+        _p("commands") / f"{item.name}.md",
+        item,
+        _markdown((("description", item.description),), item.body),
     )
 
 
-def _hook_registration(tool: ConfigSyncSource, name: str) -> object:
+def _registration(tool: ConfigSyncSource, name: str) -> object:
     if tool == "claude":
-        matcher = "Edit|Write" if name == "security" else ""
         command = {
             "startup": "uv run python3 ~/.claude/scripts/session-start-status.py",
             "security": "uv run python3 ~/.claude_seed/security_reminder_hook.py",
             "ready": "uv run python3 ~/.claude_seed/ready_notify_hook.py",
         }[name]
-        return [{"matcher": matcher, "hooks": [{"type": "command", "command": command}]}]
-    matcher = {"startup": "startup|resume", "security": "Bash|Edit|Write|apply_patch", "ready": ""}[
-        name
-    ]
+        return [
+            {
+                "matcher": "Edit|Write" if name == "security" else "",
+                "hooks": [{"type": "command", "command": command}],
+            }
+        ]
     path = {
         "startup": "scripts/session-start-status.py",
         "security": "hooks/security_guard.py",
@@ -1114,290 +725,126 @@ def _hook_registration(tool: ConfigSyncSource, name: str) -> object:
             if name == "startup"
             else "Applying Codex security guard"
         )
-    return [{"matcher": matcher, "hooks": [hook]}]
+    return [
+        {
+            "matcher": {
+                "startup": "startup|resume",
+                "security": "Bash|Edit|Write|apply_patch",
+                "ready": "",
+            }[name],
+            "hooks": [hook],
+        }
+    ]
 
 
-def _markdown(*metadata: tuple[str, str], body: bytes) -> bytes:
-    header = ["---", *(f"{key}: {json.dumps(value)}" for key, value in metadata), "---", ""]
-    return "\n".join(header).encode() + body.lstrip(b"\r\n")
+def _artifact(
+    tool: ConfigSyncSource,
+    kind: ArtifactKind,
+    name: str,
+    item: _File,
+    body: bytes | None = None,
+    description: str = "",
+    nonportable: tuple[str, ...] = (),
+    native: ConfigSyncSource | None = None,
+) -> WorkflowArtifact:
+    return WorkflowArtifact(
+        kind, name, tool, item[0], item[1], body, description, nonportable, item[2], native
+    )
 
 
 def _rendered(
-    path: PurePosixPath, artifact: WorkflowArtifact, content: bytes | None = None
+    path: PurePosixPath, item: WorkflowArtifact, content: bytes | None = None
 ) -> RenderedFile:
     return RenderedFile(
-        path,
-        artifact.content if content is None else content,
-        artifact.identifier,
-        artifact.executable,
+        path, item.content if content is None else content, item.identifier, item.executable
     )
 
 
-def path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
-    owned = OWNERSHIP_MATRIX[tool]
-    return (
-        path in {owned.instruction_path, owned.instruction_companion}
-        or (
-            len(path.parts) == 2 and path.parts[0] == "agents" and path.suffix == owned.agent_suffix
-        )
-        or (len(path.parts) >= 3 and path.parts[0] == "skills")
-        or (
-            tool != "codex"
-            and len(path.parts) == 2
-            and path.parts[0] == "commands"
-            and path.suffix == ".md"
-        )
-        or (len(path.parts) >= 2 and path.parts[0] in {"context", "scripts"})
-        or any(path == hook.script_path for hook in owned.hooks)
-    )
+def _blocked(item: WorkflowArtifact, target: ConfigSyncSource | None = None) -> UnresolvedItem:
+    from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY
 
-
-def native_only_path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
-    """Return whether path is the canonical owner path of a static native-only surface."""
-    for name, owner in _NATIVE_COMMANDS.items():
-        if owner != tool:
-            continue
-        expected = (
-            _p("skills") / f"command-{name}" / "SKILL.md"
-            if tool == "codex"
-            else _p("commands") / f"{name}.md"
-        )
-        if path == expected:
-            return True
-    return False
-
-
-def _validate_native_file(
-    tool: ConfigSyncSource, item: RenderedFile, issues: list[ValidationIssue]
-) -> None:
-    if item.relative_path.suffix in {".md", ".py", ".js", ".toml"}:
-        try:
-            item.content.decode()
-        except UnicodeDecodeError:
-            issues.append(_issue(f"invalid-utf8:{item.artifact_id}", "Native text must be UTF-8."))
-            return
-    if (
-        tool == "codex"
-        and len(item.relative_path.parts) == 2
-        and item.relative_path.parts[0] == "agents"
-    ):
-        try:
-            data = tomllib.loads(item.content.decode())
-        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-            issues.append(
-                _issue(f"invalid-agent:{item.artifact_id}", "Codex agent TOML is invalid.")
-            )
-        else:
-            if not _valid_codex_agent(data, item.relative_path.stem):
-                issues.append(
-                    _issue(
-                        f"invalid-agent:{item.artifact_id}",
-                        "Codex agent fields are invalid.",
-                        item.relative_path,
-                    )
-                )
-    if (
-        tool != "codex"
-        and len(item.relative_path.parts) == 2
-        and item.relative_path.parts[0] == "agents"
-        and item.relative_path.suffix == ".md"
-    ):
-        name = item.relative_path.stem
-        parsed = _markdown_parts(item.content)
-        if not _NAME.fullmatch(name) or parsed is None:
-            issues.append(
-                _issue(
-                    f"invalid-agent:{item.artifact_id}",
-                    "Markdown agent frontmatter is invalid.",
-                    item.relative_path,
-                )
-            )
-        else:
-            _metadata_bytes, metadata, body = parsed
-            if (
-                set(metadata) - _MARKDOWN_AGENT_KEYS
-                or metadata.get("name", name) != name
-                or not metadata.get("description")
-                or not body.strip()
-            ):
-                issues.append(
-                    _issue(
-                        f"invalid-agent:{item.artifact_id}",
-                        "Markdown agent fields are invalid.",
-                        item.relative_path,
-                    )
-                )
-    if (
-        len(item.relative_path.parts) == 3
-        and item.relative_path.parts[0] == "skills"
-        and item.relative_path.name == "SKILL.md"
-        and not _valid_skill_content(item.content, item.relative_path.parts[1])
-    ):
-        issues.append(
-            _issue(
-                f"invalid-skill:{item.artifact_id}",
-                "Skill frontmatter, name, description, or body is invalid.",
-                item.relative_path,
-            )
-        )
-    python_hooks = {
-        hook.script_path
-        for hook in OWNERSHIP_MATRIX[tool].hooks
-        if hook.script_path.suffix == ".py"
-    }
-    if item.relative_path in python_hooks:
-        try:
-            ast.parse(item.content)
-        except (SyntaxError, UnicodeDecodeError):
-            issues.append(
-                _issue(f"invalid-hook:{item.artifact_id}", "Python hook syntax is invalid.")
-            )
-    javascript_hooks = {
-        hook.script_path: _OPENCODE_HOOK_PROPERTY_LITERALS[hook.script_path]
-        for hook in OWNERSHIP_MATRIX[tool].hooks
-        if hook.script_path.suffix == ".js"
-    }
-    if item.relative_path in javascript_hooks and not _valid_opencode_plugin(
-        item.content, javascript_hooks[item.relative_path]
-    ):
-        issues.append(
-            _issue(
-                f"invalid-hook:{item.artifact_id}",
-                "OpenCode hook must export a plugin function that returns hooks.",
-                item.relative_path,
-            )
-        )
-
-
-def fragment_is_owned(
-    tool: ConfigSyncSource, carrier_path: PurePosixPath, key_path: tuple[str, ...]
-) -> bool:
-    values: set[tuple[PurePosixPath, tuple[str, ...]]] = {
-        (hook.carrier_path, ("hooks", hook.event))
-        for hook in OWNERSHIP_MATRIX[tool].hooks
-        if hook.carrier_path is not None and hook.event is not None
-    }
-    if tool == "codex":
-        values.add((_p("config.toml"), ("project_doc_fallback_filenames",)))
-    return (carrier_path, key_path) in values
-
-
-def allowed_outputs_for_unresolved(item: UnresolvedItem) -> ArtifactOutputContract:
-    """Return the closed target surface for one unresolved artifact."""
-    target = item.target_tool
-    if target is None or not is_safe_relative_path(item.source_path):
-        raise ValueError("Unresolved artifact has no safe target contract.")
-    try:
-        kind_value, name, path_value = item.identifier.split(":", 2)
-        kind = ArtifactKind(kind_value)
-    except (ValueError, TypeError):
-        raise ValueError("Unresolved artifact identifier is invalid.") from None
-    if path_value != item.source_path.as_posix():
-        raise ValueError("Unresolved artifact identifier does not match its path.")
-
-    owned = OWNERSHIP_MATRIX[target]
-    paths: tuple[PurePosixPath, ...]
-    fragments: tuple[AllowedSettingsFragment, ...] = ()
-    if kind is ArtifactKind.INSTRUCTIONS and name == "global":
-        instruction_paths = {ownership.instruction_path for ownership in OWNERSHIP_MATRIX.values()}
-        if item.source_path not in instruction_paths:
-            raise ValueError("Unresolved instruction path is invalid.")
-        paths = (owned.instruction_path, owned.instruction_companion)
-    elif kind is ArtifactKind.AGENT and _NAME.fullmatch(name):
-        if (
-            item.source_path.parent != _p("agents")
-            or item.source_path.stem != name
-            or item.source_path.suffix not in {".md", ".toml"}
-        ):
-            raise ValueError("Unresolved agent path is invalid.")
-        paths = (_p("agents") / f"{name}{owned.agent_suffix}",)
-    elif kind is ArtifactKind.SKILL and _NAME.fullmatch(name):
-        if len(item.source_path.parts) < 3 or item.source_path.parts[:2] != ("skills", name):
-            raise ValueError("Unresolved skill path is invalid.")
-        target_name = _runtime_skill_target_name(name, target) or name
-        paths = (_p("skills") / target_name / _p(*item.source_path.parts[2:]),)
-    elif kind is ArtifactKind.COMMAND and _NAME.fullmatch(name):
-        markdown_path = _p("commands") / f"{name}.md"
-        codex_path = _p("skills") / f"command-{name}" / "SKILL.md"
-        if item.source_path not in {markdown_path, codex_path}:
-            raise ValueError("Unresolved command path is invalid.")
-        paths = (codex_path if target == "codex" else markdown_path,)
-    elif kind is ArtifactKind.CONTEXT and name in {"context", "scripts"}:
-        if item.source_path.parts[0] != name:
-            raise ValueError("Unresolved support path is invalid.")
-        paths = (item.source_path,)
-    elif kind is ArtifactKind.HOOK:
-        source_hook_paths = {
-            hook.script_path
-            for ownership in OWNERSHIP_MATRIX.values()
-            for hook in ownership.hooks
-            if hook.name == name
-        }
-        if item.source_path not in source_hook_paths:
-            raise ValueError("Unresolved hook path is invalid.")
-        try:
-            hook = next(candidate for candidate in owned.hooks if candidate.name == name)
-        except StopIteration:
-            raise ValueError("Unresolved hook name is invalid.") from None
-        paths = (hook.script_path,)
-    else:
-        raise ValueError("Unresolved artifact has no target contract.")
-
-    if any(not is_safe_relative_path(path) or not path_is_owned(target, path) for path in paths):
-        raise ValueError("Unresolved artifact file contract is not owned.")
-    if any(
-        not fragment_is_owned(target, fragment.carrier_path, fragment.key_path)
-        for fragment in fragments
-    ):
-        raise ValueError("Unresolved artifact fragment contract is not owned.")
-    return ArtifactOutputContract(
-        tuple(sorted(paths)),
-        tuple(sorted(fragments, key=lambda value: (value.carrier_path, value.key_path))),
-    )
-
-
-def _unresolved(
-    artifact: WorkflowArtifact,
-    reason: str,
-    target: ConfigSyncSource | None = None,
-    *,
-    metadata: bytes | None = None,
-) -> UnresolvedItem:
     return UnresolvedItem(
-        artifact.identifier,
-        reason,
-        artifact.source_path,
-        artifact.content,
-        artifact.metadata if metadata is None else metadata,
-        target,
-        artifact.executable,
+        item.identifier, CANONICAL_REMEDY, item.source_path, item.content, target, item.executable
     )
 
 
 def _retarget(item: UnresolvedItem, target: ConfigSyncSource) -> UnresolvedItem:
     return UnresolvedItem(
-        item.identifier,
-        item.reason,
-        item.source_path,
-        item.source_bytes,
-        item.metadata,
-        target,
-        item.executable,
+        item.identifier, item.reason, item.source_path, item.source_bytes, target, item.executable
     )
 
 
-def _deduplicate(items: Iterable[UnresolvedItem]) -> tuple[UnresolvedItem, ...]:
-    values = {(item.identifier, item.reason, item.target_tool): item for item in items}
-    return tuple(values.values())
+def _frontmatter(content: bytes) -> tuple[dict[str, str], bytes] | None:
+    try:
+        lines = content.decode().splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return None
+    end = (
+        next((index for index, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
+        if lines and lines[0].strip() == "---"
+        else None
+    )
+    if end is None:
+        return None
+    metadata: dict[str, str] = {}
+    for line in lines[1:end]:
+        if line[:1].isspace() or ":" not in (text := line.strip()):
+            return None
+        key, value = text.split(":", 1)
+        if key in metadata or not value.strip():
+            return None
+        metadata[key] = value.strip().strip('"').strip("'")
+    return metadata, "".join(lines[end + 1 :]).encode()
+
+
+def _markdown(metadata: tuple[tuple[str, str], ...], body: bytes) -> bytes:
+    return "\n".join(
+        ("---", *(f"{key}: {json.dumps(value)}" for key, value in metadata), "---", "")
+    ).encode() + body.lstrip(b"\r\n")
+
+
+def _valid_agent(data: Mapping[str, object], name: str) -> bool:
+    return (
+        set(data) >= _AGENT_FIELDS
+        and data.get("name") == name
+        and _NAME.fullmatch(name) is not None
+        and all(isinstance(value, str) and value.strip() for value in data.values())
+    )
+
+
+def _plugin(content: bytes) -> bool:
+    try:
+        return "export" in content.decode()
+    except UnicodeDecodeError:
+        return False
+
+
+def _nested(data: Mapping[str, object] | None, event: str | None) -> object | None:
+    return (
+        cast(Mapping[str, object], data["hooks"]).get(event)
+        if data and event and isinstance(data.get("hooks"), Mapping)
+        else None
+    )
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError
+    raw = cast(dict[object, object], value)
+    if not all(isinstance(key, str) for key in raw):
+        raise ValueError
+    return {cast(str, key): item for key, item in raw.items()}
+
+
+def _dump(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
 
 
 def _issue(identifier: str, message: str, path: PurePosixPath | None = None) -> ValidationIssue:
     return ValidationIssue(identifier, message, path)
 
 
-def _unresolved_key(item: UnresolvedItem) -> tuple[str, str, str]:
-    return item.identifier, item.target_tool or "", item.reason
-
-
-def _issue_key(item: ValidationIssue) -> tuple[str, str]:
-    return item.identifier, item.relative_path.as_posix() if item.relative_path else ""
+def _unique(items: Iterable[UnresolvedItem]) -> tuple[UnresolvedItem, ...]:
+    return tuple(sorted({(item.identifier, item.target_tool): item for item in items}.values()))

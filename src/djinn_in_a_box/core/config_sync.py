@@ -269,7 +269,7 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
             return _build_views(snapshot_root, source, before)
     except _BuildError:
         raise
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC) from error
 
 
