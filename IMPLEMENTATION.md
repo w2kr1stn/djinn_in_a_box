@@ -56,13 +56,11 @@ stores, and local command choices remain outside the published source.
 │       ├── __init__.py
 │       ├── banner.py
 │       ├── agent_runner.py
-│       ├── atomic_mutation.py
-│       ├── config_delivery.py
 │       ├── config_lock.py
 │       ├── config_sync.py
 │       ├── config_sync_adapters.py
-│       ├── config_sync_agent.py
 │       ├── config_workflow.py
+│       ├── workflow_publisher.py
 │       ├── console.py
 │       ├── decorators.py
 │       ├── docker.py
@@ -74,7 +72,7 @@ stores, and local command choices remain outside the published source.
 │       └── theme.py
 ├── scripts/
 │   ├── entrypoint.sh
-│   ├── opencode-workflow-delivery.py
+│   ├── settings-copy.py
 │   ├── output-lib.sh
 │   ├── seed-lib.sh
 │   ├── mcp-register.sh
@@ -119,14 +117,11 @@ core + config
   |
   +-- config/models.py       AppConfig, ResourceLimits, ShellConfig, AgentConfig
   +-- config/loader.py       TOML load/save, agent default fallback
-  +-- core/config_sync.py    workflow audit, manifest, staged publication core
+  +-- core/config_sync.py    canonical workflow audit, snapshot, and sync
   +-- core/config_sync_adapters.py  closed native readers/renderers
-  +-- core/config_sync_agent.py  bounded selected-provider semantic adapter
-  +-- core/agent_runner.py   configured read-only provider subprocess runner
-  +-- core/config_delivery.py  canonical view delivery into runtime roots
-  +-- core/config_workflow.py  shared bootstrap/audit/delivery preparation
-  +-- core/atomic_mutation.py  Linux no-replace publication primitive
-  +-- core/config_lock.py    shared/exclusive workflow directory locks
+  +-- core/workflow_publisher.py  stdlib-only shared publisher and CLI
+  +-- core/config_workflow.py  shared preflight and runtime publication
+  +-- core/config_lock.py    config-setting directory lock
   +-- core/docker.py         Compose env bridge, Docker operations, backup helpers
   +-- core/seeding.py        host-side first-run seed repair/copy
   +-- core/session.py        docker exec and host-mode session runner
@@ -306,53 +301,55 @@ Only the selected tool's native instruction form is authoritative:
 
 The known fragments are `SessionStart`, `PreToolUse`, and `Stop`; Codex also
 owns the `project_doc_fallback_filenames` bridge in `config.toml`. The
-Claude-only `/codex-review` command is retained only in its native tree.
+Claude-only `/codex-review` command is validated and retained only in its native
+Claude tree.
 Repository-local instruction files, agents, skills, and commands are outside
 this global projection and are not rewritten.
 
-`core/config_sync_adapters.py` holds the closed ownership matrix, native readers
-and renderers, path/fragment predicates, and sanitized validation results.
-`core/config_sync.py` owns schema-v1 manifest parsing, content-and-executable
-observations, read-only drift analysis, source snapshots, staged deterministic
-rendering, narrow settings-carrier merges, and compare-before-replace helpers.
-Absolute/traversal paths, external symlinks, unsafe manifest ownership, and
-unmanaged collisions fail closed. Credentials, auth, history, caches, themes,
-UI policy, MCP, arbitrary plugins, `PostToolUse`, status-line configuration, and
-unlisted settings never enter the managed set.
+`core/config_sync_adapters.py` holds the closed ownership table, native readers,
+renderers, and validation. It produces a transient typed IR; it is never a
+persisted user format. Validation covers ownership, UTF-8, containment,
+required fields, and JSON/TOML parsing. The three known OpenCode plugins are
+copied byte-for-byte after UTF-8 and export-marker checks. A non-portable item
+is invalid rather than translated: workflow synchronization contains no
+provider-invocation path.
 
-The adapters produce a transient, typed workflow IR; it is not a fourth user
-configuration format. `core/config_sync.py` statically renders everything that
-has a deterministic mapping. Remaining artifacts have closed output contracts
-and may be resolved only during explicit `djinn config sync` by the selected
-source provider through `core/config_sync_agent.py` and `core/agent_runner.py`.
-That provider runs read-only with its configured authentication and network,
-with 120 seconds per item and a shared 300-second deadline. There is no provider
-substitution. Validated semantic outputs are cached in the canonical manifest
-by source/target/artifact fingerprint; bodies and raw provider output are never
-stored in the manifest or printed.
+`core/config_sync.py` snapshots the selected source, renders the other two
+views, audits the canonical tree, and invokes the publisher in canonical mode.
+It uses the publisher's content fingerprint both after snapshot creation and at
+the commit point. A source change before the first target mutation returns
+`source-changed` without a write; after that point the frozen generation
+finishes, with the manifest written last.
 
-The canonical `.djinn-config-sync.json` manifest records deployment-wide source
-authority, managed hashes/modes, native-only state, and semantic cache metadata.
-Per-destination `.djinn-workflow-delivery.json` manifests independently record
-only the exact delivered view. On first adoption, missing outputs are created,
-exact rendered outputs and known pristine seed files can be adopted, and other
-unowned content at managed paths fails closed. A source change follows switch →
-sync → edit: recorded clean candidate state can become authority, while dirty
-candidates and modified former authority fail closed.
+`core/workflow_publisher.py` is stdlib-only and is both the shared module API
+and the standalone image CLI. It owns the five drift classes, content hashes,
+executable modes, atomic replacement, stale managed-item removal, carrier-key
+merges, recovery after an interrupted publication, and canonical/runtime locking.
+A canonical publication holds one exclusive canonical lock. A runtime
+publication holds a shared canonical lock plus an exclusive target lock; an
+already-held canonical lease is inherited rather than reacquired.
 
-Both synchronization and delivery use directory locks, descriptor-relative
-staging, compare-before-mutate checks, atomic no-replace publication, and
-lossless quarantine/restore for existing targets. Parent/root attachment is
-revalidated around publication. A restore collision preserves its randomized
-`.djinn-*-stage-*` quarantine and returns an explicit operator problem. This is
-not a multi-directory database transaction: final live-state checks bound the
-remaining namespace race without adding generations or a recovery service.
+The one manifest schema is `{source, items}`. An item is either a file path or a
+carrier path plus key path and records `content_hash` and `executable`. The
+canonical instance is `config/.djinn-config-sync.json`; each publisher-managed
+runtime root uses `.djinn-workflow-state.json`. Neighboring JSON carrier keys
+are preserved semantically. The managed top-level TOML assignment is spliced
+while preserving every other byte and then re-parsed. Existing installations
+are adopted only after strict verification; an unknown or edited state fails
+closed.
 
-`djinn config status` acquires a shared directory lock and performs no writes.
-It reports only configured/manifest source, drift classes, sanitized identifiers
-and paths, and remedies. Workflow bodies and provider output never reach this
-surface. `commands/doctor.py` reuses the same audit as the read-only `Config
-workflow` check; `doctor --fix` does not synchronize workflow files.
+The audit result is one of `clean`, `source-changed`, `target-drift`,
+`collision`, or `invalid-or-semantic`. `djinn config status` takes a shared
+canonical lock, makes no writes, prints only sanitized identifiers and one
+remedy, and exits `0` iff clean. `djinn config sync` is the explicit writer.
+`commands/doctor.py` performs the same audit once for its read-only `Config
+workflow` check. `doctor --fix` may seed a source root, but does not synchronize
+workflow views.
+
+Credentials, auth, history, caches, themes, UI policy, MCP, arbitrary plugins,
+`PostToolUse`, status-line configuration, and unlisted settings never enter the
+managed set. The only non-portable-artifact remedy is: “Author or edit the
+artifact natively in the target tool's view, or make the source form portable.”
 
 ## Config Root and Compose Environment Bridge
 
@@ -396,6 +393,9 @@ It also ensures empty `config/claude`, `config/codex`, and `config/opencode`
 workflow roots. The source-aware `seed_config(..., source=...)` entry point only
 installs the Claude baseline when Claude is selected and that root is
 uninitialized; generated instruction companions are not seed files.
+`seed_config()` is called only by `djinn init` and `djinn doctor --fix`, before
+`ensure_host_env()`. Status, audit, sync, and workflow preflight never seed or
+repair a source root.
 
 `SEED_MANIFEST` defines every seed source, target, and kind:
 
@@ -418,6 +418,11 @@ type are never overwritten. Wrong-type targets are repaired by `_repair_wrong_ty
 Dangling symlinks are treated as existing targets because `Path.exists()` would
 otherwise miss them.
 
+The publisher, not `sync_seed`, is the only writer for publisher-managed
+workflow roots. `sync_seed` remains limited to the separate Gemini seed mount;
+its clean-sync behavior is never applied to a mixed or operator-owned workflow
+root.
+
 Copies are atomic:
 
 - file seeds copy to `.<name>.seed-tmp`, then `os.replace()`
@@ -433,8 +438,8 @@ raise `SeedingError` with a reinstall or reclone remedy.
 ## Container-Side Seed and Merge
 
 `scripts/entrypoint.sh` sources `/home/dev/seed-lib.sh` from `scripts/seed-lib.sh`
-inside the image. Startup then performs runtime reconciliation between host
-seed mounts and persistent container locations.
+inside the image. It keeps personal-settings persistence separate from workflow
+publication.
 
 `scripts/seed-lib.sh` provides:
 
@@ -466,7 +471,9 @@ container start
   +-- restore ~/.claude.json from the Claude volume when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
   +-- sync_seed gemini   ~/.gemini_seed   -> ~/.gemini
-  +-- opencode-workflow-delivery.py ~/.opencode/seed -> ~/.config/opencode
+  +-- settings-copy.py persists personal OpenCode settings only
+  +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
+      using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
@@ -481,19 +488,22 @@ through `ui_boxed`, so external tool chatter stays visibly nested under the MCP
 section while remaining on stderr.
 
 For Claude, `docker-compose.yml` mounts selected directories and files from
-root-level `config/claude` directly into the live `~/.claude` tree. Only
-settings are merged. In-session settings changes are reverse-synced to
-`config/claude/settings.local.json`, not to the tracked baseline template.
+root-level `config/claude` directly into the live `~/.claude` tree, including
+both `CLAUDE.md` and the generated `AGENTS.md` companion. Only settings are
+merged. This Compose-Claude runtime is manifestless: the publisher never writes
+to `${DJINN_CONFIG_ROOT}/claude`. In-session settings changes are reverse-synced
+to `config/claude/settings.local.json`, not to the tracked baseline template.
 
 `core/config_workflow.prepare_config_workflow()` is the common preparation path
-for `djinn run` and `djinn session`: provision only required roots, seed the
-selected native source, audit, auto-repair deterministic source-only drift, load
-a revision-pinned canonical view, and deliver only explicit destinations.
-Semantic adaptation, collisions, source switches, and managed edits never run
-implicitly. Compose runs prepare shared host mounts; host fallback delivers the
-selected Claude/Codex/OpenCode view to its native host root. A running-container
-OpenCode session then executes the copied standalone delivery helper to refresh
-the persistent live OpenCode directory from `/home/dev/.opencode/seed`.
+for `djinn start`, `djinn run`, and `djinn session`: it verifies image
+compatibility for Compose paths, provisions only required runtime roots, audits,
+auto-repairs deterministic `source-changed` drift, and publishes only explicit
+runtime targets. It never seeds. `target-drift`, `collision`, and
+`invalid-or-semantic` stop the command before agent or Compose invocation. Host
+fallback publishes the selected Claude/Codex/OpenCode view to its native host
+root. A running-container OpenCode session invokes the copied publisher with the
+same canonical-root, target, state-manifest, and profile arguments as the
+entrypoint.
 
 ## Docker Compose Runtime
 
@@ -513,7 +523,10 @@ Common mounts include:
 - named volumes for caches, OpenCode data, VS Code server state, and workspace
   metadata
 - read-only `~/.ssh` and `~/.gitconfig`
-- root-level `config/` seed mounts
+- the writable `config/claude` seed mount plus nested direct mounts for its
+  managed files, including `CLAUDE.md` and `AGENTS.md`
+- the read-only canonical `./config` mount at `/home/dev/.djinn-canonical` for
+  the shared publisher
 - `${CODE_DIR}` to `/home/dev/projects`
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
 
@@ -546,11 +559,15 @@ audio client support, optional packages from `packages.txt`, Docker CLI,
 Compose plugin, GitHub CLI, uv, a non-root `dev` user, zsh setup, Node via fnm,
 and the supported coding agent CLIs.
 
-The Python `djinn` CLI and its parser dependencies run on the host; the image
-copies the stdlib-only `/home/dev/opencode-workflow-delivery.py` helper for
-container refreshes. Node agents are installed through fnm, and the final image
-PATH includes `~/.local/share/fnm/aliases/default/bin` so non-interactive
-processes resolve Codex and OpenCode without sourcing shell initialization.
+The Python `djinn` CLI and its parser dependencies run on the host. The image
+copies the stdlib-only `workflow_publisher.py` to
+`/home/dev/workflow-publisher.py` and `settings-copy.py` to
+`/home/dev/settings-copy.py`. The Dockerfile also sets
+`djinn.workflow.publisher="1"`; Compose starts and OpenCode session refreshes
+check that label before doing workflow work. Node agents are installed through
+fnm, and the final image PATH includes `~/.local/share/fnm/aliases/default/bin`
+so non-interactive processes resolve Codex and OpenCode without sourcing shell
+initialization.
 
 The image locale is `C.UTF-8`. Runtime Docker access is disabled unless the user
 starts with proxy or direct Docker options.
@@ -604,16 +621,17 @@ is `PASS` when clean and `WARN` when drift or validation needs attention.
 
 `doctor --fix` calls `_doctor_fix(config)`, which attempts:
 
-- `ensure_host_env(config)`
 - `seed_config(project_root)`
+- `ensure_host_env(config)`
 - `ensure_network()`
 
 It exits non-zero when hard checks or repairs fail.
 
 `preflight(config)` first verifies Docker is installed and the daemon is
 reachable. Only after Docker is usable does it provision host directories with
-`ensure_host_env(config)` and reseed local config with `seed_config(project_root)`.
-This keeps Docker-down failures from creating unrelated host artifacts.
+`ensure_host_env(config)`. It does not call `seed_config()`; this keeps
+Docker-down failures from creating unrelated host artifacts and preserves the
+workflow seeding boundary.
 
 ## Agent Commands
 
@@ -663,7 +681,8 @@ selected agent definition and requires that agent's binary on host `PATH`.
 Claude, Codex, and OpenCode host sessions first receive their selected canonical
 workflow view. Host-mode interactive and headless commands then run directly in
 the host workspace. Container-mode OpenCode sessions refresh the live runtime
-through the standalone helper before the agent starts.
+through the shared publisher before the agent starts. Its image compatibility
+check inspects the running container image, not the current image tag.
 
 ## Backup and Restore
 
@@ -727,8 +746,8 @@ djinn init
   +-- prompt for code_dir and timezone
   +-- optionally prompt for resources and shell mounts
   +-- save ~/.config/djinn_in_a_box/config.toml atomically
-  +-- ensure_host_env(config)
   +-- seed_config(project_root)
+  +-- ensure_host_env(config)
   v
 local config is ready; build/start can run
 ```
@@ -764,7 +783,8 @@ entrypoint.sh
   |
   +-- optional pre-seed firewall initialization
   +-- repair writable volume ownership
-  +-- Seed & Config: merge/copy seed config
+  +-- Seed & Config: merge Claude settings and publish the OpenCode workflow
+      from the read-only canonical mount
   +-- MCP: register MCP servers and box third-party CLI output
   +-- Tools: install optional tools
   +-- Security: summarize firewall, Docker access, and MCP gateway state
@@ -794,8 +814,8 @@ djinn session --project name [--create]
   +-- require or create workspace
   +-- prefer docker exec into running djinn container
   +-- otherwise require the selected agent binary on host PATH
-  +-- deliver selected Claude/Codex/OpenCode host workflow
-  +-- refresh running-container OpenCode before invocation
+  +-- publish selected Claude/Codex/OpenCode host workflow when in host mode
+  +-- refresh running-container OpenCode with the shared publisher before invocation
 ```
 
 ## Error Handling
@@ -826,9 +846,11 @@ Coverage areas include:
 - host-side seed copying, repair, and template completeness
 - closed workflow ownership, adapter directions, manifest safety, and read-only
   config-workflow audit output
-- deterministic and semantic sync, six-way source switching, semantic cache and
-  deadline behavior, destination delivery, atomic race/quarantine handling, and
-  shared run/session preparation
+- shared publisher locking, stable snapshots, crash recovery, carrier
+  preservation, canonical/runtime manifest adoption, and standalone CLI use
+- deterministic projection across the 3×2 adapter matrix, non-portable
+  fail-closed behavior, runtime publication, image compatibility, and shared
+  start/run/session preparation
 - `scripts/seed-lib.sh` and entrypoint MCP behavior
 - backup/restore command behavior
 - session command containment and `SessionManager`

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import re
 import stat
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,42 @@ from djinn_in_a_box.core.config_sync import (
     sync_config,
 )
 from djinn_in_a_box.core.workflow_publisher import canonical_lock
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_REMOVED_ENGINE_TOKENS = (
+    re.compile(r"\bdirectory_is_attached\b"),
+    re.compile(r"\brename_noreplace\b"),
+    re.compile(r"\bquarantine-preserved\b"),
+    re.compile(r"\bstage-changed\b"),
+    re.compile(r"\bstage-create-failed\b"),
+    re.compile(r"(?<![A-Za-z0-9_])DELIVERY_MANIFEST_NAME(?![A-Za-z0-9_])"),
+    re.compile(r"\b_open_real_directory\b"),
+    re.compile(r"\b_reopen_real_directory\b"),
+    re.compile(r"\b_provision_real_directory\b"),
+    re.compile(r"\b_canonical_changed_failure\b"),
+    re.compile(r"\b_config_changed_failure\b"),
+    re.compile(r"\b_OPENCODE_DELIVERY_CODES\b"),
+    re.compile(r"\b_OPENCODE_RETRY_CODES\b"),
+    re.compile(r"\b_opencode_refresh_error\b"),
+    re.compile(r"\bhook-python\b"),
+    re.compile(r"\bast\.parse\b"),
+)
+
+
+def test_removed_workflow_engine_tokens_are_absent_from_product_code() -> None:
+    matches: list[str] = []
+    for root in (_PROJECT_ROOT / "src", _PROJECT_ROOT / "scripts"):
+        for path in sorted(
+            candidate
+            for candidate in root.rglob("*")
+            if candidate.is_file() and "__pycache__" not in candidate.parts
+        ):
+            source = path.read_text(encoding="utf-8")
+            for token in _REMOVED_ENGINE_TOKENS:
+                if token.search(source):
+                    matches.append(f"{path.relative_to(_PROJECT_ROOT)}: {token.pattern}")
+
+    assert not matches
 
 
 def _workspace(tmp_path: Path, *, source: ConfigSyncSource = "claude") -> tuple[Path, Path]:

@@ -15,7 +15,6 @@ import tomli_w
 
 from djinn_in_a_box.config.models import ConfigSyncSource
 
-ADAPTER_REVISION = 4
 _p = PurePosixPath
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -116,7 +115,6 @@ class ToolOwnership(NamedTuple):
     instruction_companion: PurePosixPath
     agent_suffix: str
     hooks: tuple[HookSpec, ...]
-    source_only_paths: tuple[PurePosixPath, ...] = ()
 
 
 OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
@@ -136,7 +134,6 @@ OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
             ),
             HookSpec("ready", _p("ready_notify_hook.py"), _p("settings.json"), "Stop"),
         ),
-        (_p("commands/codex-review.md"),),
     ),
     "codex": ToolOwnership(
         _p("AGENTS.md"),
@@ -383,10 +380,6 @@ def path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
         and path.parts[0] in {"context", "scripts"}
         or path in {hook.script_path for hook in owned.hooks}
     )
-
-
-def native_only_path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
-    return path in OWNERSHIP_MATRIX[tool].source_only_paths
 
 
 def fragment_is_owned(tool: ConfigSyncSource, path: PurePosixPath, keys: tuple[str, ...]) -> bool:

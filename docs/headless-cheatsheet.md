@@ -34,9 +34,9 @@ djinn config status
 ```
 
 For a source change, keep the order **switch → sync → edit**. `status` is always
-read-only; `sync` is the explicit writer. On first sync, missing outputs are
-created, exact expected outputs and known pristine seed files can be adopted,
-while other unowned content at managed paths is reported as a collision.
+read-only; `sync` is the explicit writer. Sync requires a valid source and
+refuses to overwrite an edited managed target. An unowned item at a managed path
+is reported as a collision.
 
 The setting is deployment-wide; the shared demo is one deployment, not a
 per-tenant source selector. It covers only Djinn's global instructions, agents,
@@ -45,16 +45,26 @@ Repository-local workflow files remain read-only, while credentials, auth,
 history, themes, UI policy, MCP, arbitrary plugins, and unlisted settings remain
 outside this ownership boundary.
 
-`djinn config status` is safe for diagnostics and automation: it reports
-sanitized source, drift, artifact locations, and remedies without printing any
-instruction, prompt, skill, command, hook, settings, or provider-output body.
+`djinn config status` is safe for diagnostics and automation: it reports a
+sanitized source, drift class, artifact locations, and one remedy without
+printing workflow or settings bodies. It exits `0` only when the state is
+`clean`; it exits `1` for `source-changed`, `target-drift`, `collision`, or
+`invalid-or-semantic`. `djinn config sync` is non-zero when blocked.
 
-Normal `run`/`session` bootstrap repairs deterministic source-only projection
-drift, but never starts a provider. Explicit sync may send one unresolved
-artifact at a time to the selected source provider in read-only mode, with its
-normal authentication/network access, 120 seconds per artifact and 300 seconds
-total. Djinn never substitutes another provider and never prints workflow or
-provider-response bodies.
+Normal `start`, `run`, and `session` preparation repairs only deterministic
+`source-changed` projection drift. `target-drift`, `collision`, and
+`invalid-or-semantic` stop the command before an agent starts. There is no
+semantic-provider fallback: non-portable artifacts block with this remedy:
+“Author or edit the artifact natively in the target tool's view, or make the
+source form portable.”
+
+The shared publisher records the canonical `config/` tree in
+`.djinn-config-sync.json` and every publisher-managed runtime root in
+`.djinn-workflow-state.json`. Compose Claude is manifestless: it uses direct
+mounts for both `CLAUDE.md` and its generated `AGENTS.md` companion plus the
+Claude settings merge. An image without the `djinn.workflow.publisher=1` label
+is rejected with `Rebuild/recreate required.` before a Compose run or an OpenCode
+session refresh.
 
 ---
 
@@ -148,7 +158,7 @@ preflight checks the selected agent's configured binary on host `PATH`. Claude,
 Codex, and OpenCode host fallback also receives that selected agent's canonical
 workflow.
 For a running-container OpenCode session, Djinn refreshes the live OpenCode
-runtime from its delivered seed before invocation.
+runtime through the shared publisher before invocation.
 
 ---
 

@@ -172,14 +172,13 @@ Each Djinn deployment selects one native global workflow as its source of truth:
 ```sh
 djinn config set config_sync.source claude   # or codex / opencode
 djinn config sync
-djinn config status
+djinn config status  # exit 0 when clean, otherwise exit 1
 ```
 
 When changing authority, use **switch → sync → edit**: select the new source,
-run `djinn config sync` while its recorded candidate is still clean, and only
-then edit that source. On first sync, missing outputs are created, exact expected
-outputs and known pristine seed files can be adopted, and any other unowned
-content at a managed path is reported as a collision rather than overwritten.
+run `djinn config sync`, then edit it. Sync requires a valid source and refuses
+to overwrite an edited managed target. It can adopt the recorded state of an
+existing deployment, but an unowned file at a managed path is a collision.
 
 The choice is deployment-wide. The shared demo is one deployment with one
 source; this is not a per-tenant setting. Selecting a workflow source does not
@@ -196,38 +195,58 @@ The source stays in its native project-local root:
 The closed managed surface also includes `skills/<name>/**`, `context/**`,
 `scripts/**`, the known startup/security/ready hook implementations, and only
 their narrow native registrations. The Claude-only `/codex-review` command is
-not projected to Codex or OpenCode. Repository-local instructions, agents,
-skills, and commands remain outside this global feature and are never rewritten.
+validated and retained in the Claude tree, but is never projected to Codex or
+OpenCode. Repository-local instructions, agents, skills, and commands remain
+outside this global feature and are never rewritten.
 
 Everything outside that closed surface remains unmanaged: credentials, auth,
 history, caches, themes, UI policy, MCP configuration, arbitrary plugins,
 `PostToolUse`, and status-line configuration. In particular, MCP keeps its
 separate `config/mcp-servers.json` source of truth.
 
-`djinn config status` is read-only. It reports the configured and manifest
-source, drift classes, sanitized artifact locations, and remedies. It does not
-print instruction, prompt, skill, command, hook, provider-output, or settings
-bodies. `djinn doctor` exposes the same audit boundary as its `Config workflow`
-check and does not synchronize files, including with `--fix`.
+The shared publisher uses one manifest schema in two locations:
 
-`djinn config sync` is the explicit writer. Static adapters handle compatible
-artifacts first. If an artifact needs semantic adaptation, sync invokes only
-the selected source provider, one artifact at a time, through its read-only
-agent mode. The provider retains its normal network access and authentication;
-limits are 120 seconds per artifact and 300 seconds total. Djinn does not
-substitute another provider, and neither workflow bodies nor provider output
-are printed. Drift reports distinguish source-only work, managed-target drift,
-unmanaged collisions, source switches, invalid views, and semantic work, with
-an operator remedy for each class.
+- `config/.djinn-config-sync.json` is the canonical manifest.
+- `.djinn-workflow-state.json` is the manifest in every runtime root managed by
+  the publisher.
 
-Normal `run` and `session` preparation may repair only deterministic
-source-only projection drift. It never starts a semantic provider implicitly;
-semantic work, source-switch approval, collisions, and edited managed targets
-must be resolved with explicit `djinn config sync` or operator action. Host
-fallback for Claude, Codex, or OpenCode delivers the selected agent's canonical
-view to its native host root.
-A running-container OpenCode session additionally refreshes
-`~/.config/opencode` from its delivered seed before invocation.
+Each entry names either a file or a carrier-file key and records only its
+content hash and executable flag, plus the selected source for the manifest.
+Neighboring keys in shared JSON or TOML carriers stay operator-owned. A legacy
+installation is adopted safely during sync; it does not introduce another active
+manifest format.
+
+`djinn config status` is read-only: it reports the selected source, sanitized
+locations, one drift class, and one remedy without printing workflow or settings
+bodies. Its exit status is `0` only for `clean`, and `1` for every other state.
+`djinn config sync` is the explicit full writer and exits non-zero when blocked.
+The five states are:
+
+| State | Meaning | Remedy |
+| --- | --- | --- |
+| `clean` | The selected source and all managed views match their manifests. | None. |
+| `source-changed` | The source projection changed or was unstable during publication. | Run `djinn config sync`, then retry. |
+| `target-drift` | A manifest-managed item was edited. | Restore or move the modified item, then retry. |
+| `collision` | An unmanaged item occupies a managed path. | Move or remove the conflicting item, then retry. |
+| `invalid-or-semantic` | The source is invalid, empty, or contains a non-portable artifact. | Author or edit the artifact natively in the target tool's view, or make the source form portable. |
+
+There is no semantic-provider fallback: workflow sync never invokes a provider.
+Normal `start`, `run`, and `session` preparation repairs only deterministic
+`source-changed` projection drift; all other states stop the command before an
+agent starts. Preflight, status, audit, and sync never seed or repair source
+roots. Only `djinn init` and `djinn doctor --fix` perform source seeding.
+
+Host fallback for Claude, Codex, or OpenCode receives the selected canonical
+view through the shared publisher. The container OpenCode runtime is refreshed
+the same way from the read-only canonical mount. The workflow publisher requires
+an image marked `djinn.workflow.publisher=1`; an old image causes a content-free
+`Rebuild/recreate required.` failure before Compose starts or a running-container
+session refresh executes.
+
+Compose Claude is the deliberate exception: it is manifestless and uses direct
+mounts, including both `CLAUDE.md` and the generated `AGENTS.md` companion,
+together with the existing settings merge. The publisher never writes into the
+Compose Claude runtime root.
 
 ## Doctor
 
@@ -257,8 +276,8 @@ invalid config file, or build the image.
 Djinn treats your project-local `config/` directory as blank space. It is
 root-anchored in `.gitignore`, seeded on first run, and then owned by you.
 
-On `djinn init`, and during command preflight, Djinn copies missing seed targets
-from `templates/seed/` into local paths:
+Only `djinn init` and `djinn doctor --fix` copy missing seed targets from
+`templates/seed/` into local paths:
 
 | Seed source | Local target | Purpose |
 | --- | --- | --- |
@@ -349,7 +368,7 @@ value overrides `default_model` for that invocation.
 | `djinn auth` | Runs the `dev-auth` service with the Compose `auth` profile and host networking | Starts in `/home/dev/projects` | OAuth and browser callback setup |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Mounts the current directory as `/home/dev/workspace` by default; `--mount PATH` overrides it | One-shot agent prompts |
-| `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's canonical workflow at its native host root. Running-container OpenCode sessions refresh the live OpenCode runtime before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
+| `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
 
 Common `start` options:
 
@@ -400,8 +419,10 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `~/.ssh` | `/home/dev/.ssh:ro` | Read-only SSH access |
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
+| `./config/claude/CLAUDE.md` and `AGENTS.md` | matching files in `/home/dev/.claude` | Direct Compose-Claude instruction mounts |
 | `./config/gemini` | `/home/dev/.gemini_seed` | Local Gemini seed source |
 | `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
+| `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
 
 When `--here`, `--mount`, or `djinn run` is used, an additional host directory is
