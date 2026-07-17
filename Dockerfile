@@ -152,6 +152,7 @@ RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true \
     && date +%s > ~/.build-timestamp
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
+COPY --chown=dev:dev src/djinn_in_a_box/core/workflow_publisher.py /home/dev/workflow-publisher.py
 COPY --chown=dev:dev scripts/opencode-workflow-delivery.py /home/dev/opencode-workflow-delivery.py
 COPY --chown=dev:dev scripts/output-lib.sh /home/dev/output-lib.sh
 COPY --chown=dev:dev scripts/seed-lib.sh /home/dev/seed-lib.sh
