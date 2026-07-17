@@ -104,6 +104,20 @@ class _Manifest:
 
 
 @dataclass(frozen=True, slots=True)
+class ManifestItem:
+    path: PurePosixPath
+    content_hash: str
+    executable: bool
+    key_path: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LeanManifest:
+    source: str
+    items: tuple[ManifestItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Snapshot:
     content: bytes
     executable: bool
@@ -133,7 +147,11 @@ class PublishError(RuntimeError):
         self.drift_class = drift_class
 
 
-class _ManifestError(ValueError):
+class ManifestError(ValueError):
+    pass
+
+
+class _ManifestError(ManifestError):
     pass
 
 
@@ -355,6 +373,7 @@ def _publish_locked(
         except _ManifestError as error:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     legacy_relative: PurePosixPath | None = None
+    legacy_residue = False
     if not canonical_target:
         legacy_relative = PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME)
         if prior is None:
@@ -366,18 +385,7 @@ def _publish_locked(
             if legacy is not None:
                 prior = legacy
         else:
-            legacy = target_root / legacy_relative
-            if legacy.exists():
-                legacy.unlink()
-                _fsync_directory(target_root)
-    preflight = _preflight(
-        target_root,
-        desired,
-        prior,
-        manifest_snapshot,
-        canonical_target=canonical_target,
-        target_tool=target_tool,
-    )
+            legacy_residue = (target_root / legacy_relative).exists()
     expected_fingerprint = view.source_fingerprint
     if source_root is not None:
         current_fingerprint = _fingerprint_tree(source_root, ignored_source_paths, source_profile)
@@ -385,14 +393,42 @@ def _publish_locked(
             expected_fingerprint = current_fingerprint
         elif current_fingerprint != expected_fingerprint:
             raise PublishError(DriftClass.SOURCE_CHANGED)
-    fingerprint_mismatch = (
-        source_root is not None
-        and _fingerprint_tree(source_root, ignored_source_paths, source_profile)
-        != expected_fingerprint
+    try:
+        preflight = _preflight(
+            target_root,
+            desired,
+            prior,
+            manifest_snapshot,
+            canonical_target=canonical_target,
+            target_tool=target_tool,
+        )
+    except PublishError:
+        if legacy_residue:
+            _commit(
+                target_root,
+                manifest_relative,
+                desired,
+                None,
+                prior,
+                legacy_relative,
+                source_root=source_root,
+                ignored_source_paths=ignored_source_paths,
+                source_profile=source_profile,
+                expected_fingerprint=expected_fingerprint,
+            )
+        raise
+    return _commit(
+        target_root,
+        manifest_relative,
+        desired,
+        preflight,
+        prior,
+        legacy_relative,
+        source_root=source_root,
+        ignored_source_paths=ignored_source_paths,
+        source_profile=source_profile,
+        expected_fingerprint=expected_fingerprint,
     )
-    if fingerprint_mismatch:
-        raise PublishError(DriftClass.SOURCE_CHANGED)
-    return _commit(target_root, manifest_relative, desired, preflight, prior, legacy_relative)
 
 
 @contextmanager
@@ -609,17 +645,48 @@ def _commit(
     target_root: Path,
     manifest_relative: PurePosixPath,
     desired: _Desired,
-    preflight: _Preflight,
+    preflight: _Preflight | None,
     prior: _Manifest | None,
     legacy_relative: PurePosixPath | None,
+    *,
+    source_root: Path | None,
+    ignored_source_paths: Collection[PurePosixPath],
+    source_profile: str | None,
+    expected_fingerprint: str | None,
 ) -> PublishResult:
     changed: list[PurePosixPath] = []
     removed: list[PurePosixPath] = []
     mutation_count = 0
+    commit_checked = False
+
+    def allow_mutation() -> None:
+        nonlocal commit_checked
+        if commit_checked:
+            return
+        _before_target_commit()
+        if source_root is not None and (
+            expected_fingerprint is None
+            or _fingerprint_tree(source_root, ignored_source_paths, source_profile)
+            != expected_fingerprint
+        ):
+            raise PublishError(DriftClass.SOURCE_CHANGED)
+        commit_checked = True
+
+    if preflight is None:
+        if legacy_relative is not None:
+            legacy = target_root / legacy_relative
+            if legacy.exists():
+                allow_mutation()
+                legacy.unlink()
+                _fsync_directory(target_root)
+                _after_target_mutation(1)
+        return PublishResult(DriftClass.CLEAN)
+
     for path, item in sorted(desired.files.items()):
         current = _read_snapshot(target_root / path)
         if current is not None and current.state == desired.manifest.files[path]:
             continue
+        allow_mutation()
         _atomic_replace(target_root / path, item.content, item.executable)
         changed.append(path)
         mutation_count += 1
@@ -630,6 +697,7 @@ def _commit(
         current = _read_snapshot(target_root / path)
         if current is not None and current.content == output:
             continue
+        allow_mutation()
         _atomic_replace(target_root / path, output, current.executable if current else False)
         changed.append(path)
         mutation_count += 1
@@ -640,6 +708,7 @@ def _commit(
             continue
         current = _read_snapshot(target_root / path)
         if current is not None and current.state == state:
+            allow_mutation()
             (target_root / path).unlink()
             removed.append(path)
             mutation_count += 1
@@ -647,13 +716,19 @@ def _commit(
     manifest = _encode_manifest(desired.manifest)
     current_manifest = _read_snapshot(target_root / manifest_relative)
     if current_manifest is None or current_manifest.content != manifest:
+        allow_mutation()
         _atomic_replace(target_root / manifest_relative, manifest, False)
+        mutation_count += 1
+        _after_target_mutation(mutation_count)
         _after_runtime_manifest_write()
     if legacy_relative is not None:
         legacy = target_root / legacy_relative
         if legacy.exists():
+            allow_mutation()
             legacy.unlink()
             _fsync_directory(target_root)
+            mutation_count += 1
+            _after_target_mutation(mutation_count)
     return PublishResult(DriftClass.CLEAN, tuple(changed), tuple(removed))
 
 
@@ -804,8 +879,8 @@ def _parse_json(raw: bytes | None) -> dict[str, object]:
     if raw is None:
         return {}
     try:
-        parsed: object = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        parsed = load_strict_json(raw)
+    except ManifestError as error:
         raise _CarrierError from error
     return _string_object_mapping(parsed, _CarrierError)
 
@@ -822,9 +897,9 @@ def _parse_toml(raw: bytes | None) -> dict[str, object]:
 
 def _fragment_value(fragment: CarrierFragment) -> object:
     try:
-        value: object = json.loads(fragment.value_json)
+        value = load_strict_json(fragment.value_json)
         json.dumps(value, allow_nan=False)
-    except (json.JSONDecodeError, TypeError, ValueError, UnicodeDecodeError) as error:
+    except (ManifestError, TypeError, ValueError) as error:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     return value
 
@@ -964,8 +1039,8 @@ def _decode_legacy_delivery_manifest(
     target_root: Path, raw: bytes, *, target_tool: str | None = None
 ) -> _Manifest:
     try:
-        parsed: object = json.loads(raw, object_pairs_hook=_strict_object)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
+        parsed = load_strict_json(raw)
+    except ManifestError as error:
         raise _ManifestError from error
     root = _object(parsed)
     if set(root) != {"schema_version", "tool", "files", "fragments"}:
@@ -1048,9 +1123,16 @@ def _strict_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise _ManifestError
+            raise ManifestError
         result[key] = value
     return result
+
+
+def load_strict_json(raw: bytes) -> object:
+    try:
+        return cast(object, json.loads(raw, object_pairs_hook=_strict_object))
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
+        raise ManifestError from error
 
 
 def _legacy_value_digest(value: object) -> str:
@@ -1061,26 +1143,27 @@ def _legacy_value_digest(value: object) -> str:
     return _digest(encoded.encode())
 
 
-def _decode_manifest(
+def decode_lean_manifest(
     raw: bytes,
     *,
     canonical_target: bool,
     target_tool: str | None,
-) -> _Manifest:
+) -> LeanManifest:
     try:
-        parsed: object = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise _ManifestError from error
+        parsed = load_strict_json(raw)
+    except ManifestError as error:
+        raise ManifestError from error
     root = _object(parsed)
     if set(root) != {"source", "items"}:
-        raise _ManifestError
+        raise ManifestError
     source = root["source"]
     values = root["items"]
     if not isinstance(source, str) or source not in _TOOLS or not isinstance(values, list):
-        raise _ManifestError
+        raise ManifestError
     manifest_items = cast(list[object], values)
-    files: dict[PurePosixPath, _FileState] = {}
-    fragments: dict[tuple[PurePosixPath, tuple[str, ...]], _FragmentState] = {}
+    items: list[ManifestItem] = []
+    files: set[PurePosixPath] = set()
+    fragments: set[tuple[PurePosixPath, tuple[str, ...]]] = set()
     for value in manifest_items:
         item = _object(value)
         path_value = item.get("path")
@@ -1092,18 +1175,19 @@ def _decode_manifest(
             or not isinstance(executable, bool)
             or not _valid_hash(content_hash)
         ):
-            raise _ManifestError
+            raise ManifestError
         path = PurePosixPath(path_value)
         if path_value != path.as_posix() or not _safe_relative(path):
-            raise _ManifestError
+            raise ManifestError
         if "key_path" not in item:
             if (
                 set(item) != {"path", "content_hash", "executable"}
                 or path in files
                 or not _manifest_file_is_owned(path, canonical_target, target_tool)
             ):
-                raise _ManifestError
-            files[path] = _FileState(content_hash, executable)
+                raise ManifestError
+            files.add(path)
+            items.append(ManifestItem(path, content_hash, executable))
             continue
         key_values = item["key_path"]
         if (
@@ -1115,17 +1199,49 @@ def _decode_manifest(
             or (path.suffix == ".toml" and len(cast(list[object], key_values)) != 1)
             or executable
         ):
-            raise _ManifestError
+            raise ManifestError
         key_path = tuple(cast(list[str], cast(list[object], key_values)))
         if not _manifest_fragment_is_owned(path, key_path, canonical_target, target_tool):
-            raise _ManifestError
+            raise ManifestError
         key = (path, key_path)
         if key in fragments:
-            raise _ManifestError
-        fragments[key] = _FragmentState(path, key_path, content_hash)
-    if set(files) & {path for path, _keys in fragments}:
-        raise _ManifestError
-    return _Manifest(source, files, fragments)
+            raise ManifestError
+        fragments.add(key)
+        items.append(ManifestItem(path, content_hash, False, key_path))
+    if files & {path for path, _keys in fragments}:
+        raise ManifestError
+    return LeanManifest(source, tuple(items))
+
+
+def _decode_manifest(
+    raw: bytes,
+    *,
+    canonical_target: bool,
+    target_tool: str | None,
+) -> _Manifest:
+    try:
+        lean = decode_lean_manifest(
+            raw,
+            canonical_target=canonical_target,
+            target_tool=target_tool,
+        )
+    except ManifestError as error:
+        raise _ManifestError from error
+    files = {
+        item.path: _FileState(item.content_hash, item.executable)
+        for item in lean.items
+        if item.key_path is None
+    }
+    fragments = {
+        (item.path, item.key_path): _FragmentState(
+            item.path,
+            item.key_path,
+            item.content_hash,
+        )
+        for item in lean.items
+        if item.key_path is not None
+    }
+    return _Manifest(lean.source, files, fragments)
 
 
 def _encode_manifest(manifest: _Manifest) -> bytes:
@@ -1374,6 +1490,10 @@ def _worst_class(classes: Sequence[DriftClass | None]) -> DriftClass | None:
 
 
 def _after_target_mutation(_count: int) -> None:
+    return None
+
+
+def _before_target_commit() -> None:
     return None
 
 

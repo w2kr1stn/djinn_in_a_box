@@ -8,7 +8,7 @@ import shutil
 import stat
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -32,10 +32,13 @@ from djinn_in_a_box.core.workflow_publisher import (
     CanonicalLockLease,
     CarrierFragment,
     DriftClass,
+    ManifestError,
     PublishedFile,
     PublishError,
     WorkflowView,
     canonical_lock,
+    decode_lean_manifest,
+    load_strict_json,
     publish_workflow_view,
     snapshot_file_view,
 )
@@ -162,7 +165,9 @@ def sync_config(
                         False, _audit_for(source, DriftClass.SOURCE_CHANGED), retryable=True
                     )
                 try:
-                    preflight_manifest = _migrate_legacy(config_root, legacy, source)
+                    preflight_manifest = _migrate_legacy(
+                        config_root, legacy, source, build.canonical
+                    )
                 except ValueError:
                     return ConfigSyncResult(
                         False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
@@ -259,7 +264,11 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
     legacy = _legacy_manifest(manifest_path)
     if legacy is not None:
         try:
-            source_name, _items = _legacy_items(legacy, project_root / "config")
+            source_name, _items = _legacy_items(
+                legacy,
+                project_root / "config",
+                _migration_stale_residue(build.canonical, source),
+            )
         except ValueError:
             return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
         return _audit_for(source, DriftClass.SOURCE_CHANGED, source_name)
@@ -498,9 +507,16 @@ def _legacy_manifest(path: Path) -> dict[str, object] | None:
 
 
 def _migrate_legacy(
-    config_root: Path, legacy: Mapping[str, object], selected_source: ConfigSyncSource
+    config_root: Path,
+    legacy: Mapping[str, object],
+    selected_source: ConfigSyncSource,
+    desired: WorkflowView,
 ) -> bytes:
-    manifest_source, items = _legacy_items(legacy, config_root)
+    manifest_source, items = _legacy_items(
+        legacy,
+        config_root,
+        _migration_stale_residue(desired, selected_source),
+    )
     companion = OWNERSHIP_MATRIX[selected_source].instruction_companion
     prefix = PurePosixPath(selected_source)
     managed = tuple(
@@ -532,8 +548,27 @@ def _release_selected_source_records(
     return _encode_lean(manifest_source, kept)
 
 
+def _migration_stale_residue(
+    desired: WorkflowView, selected_source: ConfigSyncSource
+) -> Callable[[_ManifestItem], bool]:
+    wanted = {
+        (item.relative_path, None)
+        for item in desired.files
+    } | {
+        (item.carrier_path, item.key_path)
+        for item in desired.fragments
+    }
+
+    def is_stale(item: _ManifestItem) -> bool:
+        return item.path.parts[0] != selected_source and (item.path, item.key_path) not in wanted
+
+    return is_stale
+
+
 def _legacy_items(
-    data: Mapping[str, object], config_root: Path
+    data: Mapping[str, object],
+    config_root: Path,
+    allow_missing: Callable[[_ManifestItem], bool] | None = None,
 ) -> tuple[ConfigSyncSource, tuple[_ManifestItem, ...]]:
     required = {
         "schema_version",
@@ -554,7 +589,7 @@ def _legacy_items(
     _valid_hash(data["source_hash"])
     source: ConfigSyncSource = active_source
     items: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem] = {}
-    _legacy_file_map(data["source_files"], PurePosixPath(source), config_root, items)
+    _legacy_file_map(data["source_files"], PurePosixPath(source), config_root, items, allow_missing)
     managed = _object_mapping(managed_raw)
     if set(managed) != set(_TOOLS):
         raise ValueError
@@ -564,9 +599,9 @@ def _legacy_items(
         if set(values) != {"files", "native_only", "fragments"}:
             raise ValueError
         prefix = PurePosixPath(tool)
-        _legacy_file_map(values["files"], prefix, config_root, items)
-        _legacy_file_map(values["native_only"], prefix, config_root, items)
-        _legacy_fragments(values["fragments"], prefix, config_root, items)
+        _legacy_file_map(values["files"], prefix, config_root, items, allow_missing)
+        _legacy_file_map(values["native_only"], prefix, config_root, items, allow_missing)
+        _legacy_fragments(values["fragments"], prefix, config_root, items, allow_missing)
     semantic = data["semantic"]
     if not isinstance(semantic, list):
         raise ValueError
@@ -587,15 +622,20 @@ def _legacy_items(
         _valid_hash(semantic_record["fingerprint"])
         source_path = _legacy_semantic_source_path(semantic_record["source_path"])
         _legacy_semantic_artifact_id(semantic_record["artifact_id"], source_path)
+        semantic_files = semantic_record["files"]
+        semantic_fragments = semantic_record["fragments"]
         if (
             semantic_record.get("source_tool") != source
             or semantic_record.get("target_tool") not in _TOOLS
             or semantic_record.get("target_tool") == source
+            or not isinstance(semantic_files, list)
+            or not isinstance(semantic_fragments, list)
+            or not semantic_files and not semantic_fragments
         ):
             raise ValueError
         target = cast(ConfigSyncSource, semantic_record["target_tool"])
-        _verify_legacy_semantic_outputs(semantic_record["files"], target, items)
-        _verify_legacy_semantic_fragments(semantic_record["fragments"], target, items)
+        _verify_legacy_semantic_outputs(cast(list[object], semantic_files), target, items)
+        _verify_legacy_semantic_fragments(cast(list[object], semantic_fragments), target, items)
     return source, tuple(sorted(items.values(), key=lambda item: (item.path, item.key_path or ())))
 
 
@@ -681,6 +721,7 @@ def _legacy_file_map(
     prefix: PurePosixPath,
     config_root: Path,
     result: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem],
+    allow_missing: Callable[[_ManifestItem], bool] | None,
 ) -> None:
     for raw_path, raw_state in _object_mapping(raw).items():
         relative = PurePosixPath(raw_path)
@@ -696,7 +737,14 @@ def _legacy_file_map(
         item = _ManifestItem(
             prefix / relative, _valid_hash(state["hash"]), _bool(state["executable"])
         )
-        if _file_item_at(config_root / item.path, item.path) != item:
+        actual = _file_item_at(config_root / item.path, item.path)
+        missing_stale_residue = (
+            actual is None
+            and allow_missing is not None
+            and allow_missing(item)
+            and _is_missing(config_root / item.path)
+        )
+        if actual != item and not missing_stale_residue:
             raise ValueError
         _add_item(result, item)
 
@@ -706,6 +754,7 @@ def _legacy_fragments(
     prefix: PurePosixPath,
     config_root: Path,
     result: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem],
+    allow_missing: Callable[[_ManifestItem], bool] | None,
 ) -> None:
     if not isinstance(raw, list):
         raise ValueError
@@ -728,62 +777,24 @@ def _legacy_fragments(
             raise ValueError
         item = _ManifestItem(prefix / path, _valid_hash(data["value_hash"]), False, keys)
         actual, issue = _carrier_item_at(config_root / item.path, item.path, keys)
-        if issue or actual != item:
+        if issue or (
+            actual != item
+            and not (actual is None and allow_missing is not None and allow_missing(item))
+        ):
             raise ValueError
         _add_item(result, item)
 
 
 def _lean_items(raw: bytes) -> tuple[ConfigSyncSource, tuple[_ManifestItem, ...]]:
     try:
-        data = _json_load(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        manifest = decode_lean_manifest(raw, canonical_target=True, target_tool=None)
+    except ManifestError as error:
         raise ValueError from error
-    values = _object_mapping(data)
-    if set(values) != {"source", "items"}:
-        raise ValueError
-    source = values.get("source")
-    raw_items = values.get("items")
-    if source not in _TOOLS or not isinstance(raw_items, list):
-        raise ValueError
-    items: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem] = {}
-    for raw_item in cast(list[object], raw_items):
-        item = _object_mapping(raw_item)
-        keys = set(item)
-        if keys not in (
-            {"path", "content_hash", "executable"},
-            {"path", "key_path", "content_hash", "executable"},
-        ):
-            raise ValueError
-        if not isinstance(item.get("path"), str):
-            raise ValueError
-        path = PurePosixPath(cast(str, item["path"]))
-        key_path: tuple[str, ...] | None = None
-        if "key_path" in item:
-            if not isinstance(item["key_path"], list):
-                raise ValueError
-            key_path = tuple(cast(str, key) for key in cast(list[object], item["key_path"]))
-            if not key_path or any(not key for key in key_path):
-                raise ValueError
-        if not is_safe_relative_path(path):
-            raise ValueError
-        tool, relative = _manifest_target_path(path)
-        if key_path is None:
-            if not path_is_owned(tool, relative):
-                raise ValueError
-        elif not fragment_is_owned(tool, relative, key_path):
-            raise ValueError
-        record = _ManifestItem(
-            path, _valid_hash(item.get("content_hash")), _bool(item.get("executable")), key_path
-        )
-        _add_item(items, record)
-    return source, tuple(sorted(items.values(), key=lambda item: (item.path, item.key_path or ())))
-
-
-def _manifest_target_path(path: PurePosixPath) -> tuple[ConfigSyncSource, PurePosixPath]:
-    if len(path.parts) < 2 or path.parts[0] not in _TOOLS:
-        raise ValueError
-    tool = path.parts[0]
-    return tool, PurePosixPath(*path.parts[1:])
+    source = cast(ConfigSyncSource, manifest.source)
+    return source, tuple(
+        _ManifestItem(item.path, item.content_hash, item.executable, item.key_path)
+        for item in manifest.items
+    )
 
 
 def _encode_lean(source: ConfigSyncSource, items: tuple[_ManifestItem, ...]) -> bytes:
@@ -815,7 +826,7 @@ def _carrier_value(path: Path, keys: tuple[str, ...]) -> tuple[object | None, bo
                 return None, False
             current = _object_mapping(cast(object, current))[key]
         return current, False
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError):
+    except (ManifestError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None, True
 
 
@@ -836,8 +847,8 @@ def _file_item(item: PublishedFile) -> _ManifestItem:
 
 def _fragment_item(item: CarrierFragment) -> _ManifestItem:
     try:
-        value: object = json.loads(item.value_json)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        value = load_strict_json(item.value_json)
+    except ManifestError as error:
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC) from error
     return _ManifestItem(item.carrier_path, _digest(_json_value(value)), False, item.key_path)
 
@@ -857,6 +868,16 @@ def _file_item_at(path: Path, manifest_path: PurePosixPath) -> _ManifestItem | N
         )
     except OSError:
         return None
+
+
+def _is_missing(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _fingerprint(root: Path) -> str:
@@ -895,7 +916,7 @@ def _object_mapping(value: object) -> dict[str, object]:
 
 
 def _json_load(raw: bytes) -> object:
-    return cast(object, json.loads(raw))
+    return load_strict_json(raw)
 
 
 def _toml_load(raw: bytes) -> object:
@@ -906,7 +927,7 @@ def _add_item(
     items: dict[tuple[PurePosixPath, tuple[str, ...] | None], _ManifestItem], item: _ManifestItem
 ) -> None:
     key = (item.path, item.key_path)
-    if key in items and items[key] != item:
+    if key in items:
         raise ValueError
     items[key] = item
 

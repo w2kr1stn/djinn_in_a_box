@@ -440,6 +440,43 @@ def test_legacy_manifest_migrates_atomically_and_removes_stale_item(tmp_path: Pa
     assert set(json.loads(manifest_path.read_text())) == {"source", "items"}
 
 
+def test_legacy_migration_retry_accepts_missing_stale_file_after_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    stale = project / "config/opencode/context/stale.md"
+    stale.parent.mkdir()
+    stale.write_text("old\n")
+    legacy = _legacy_manifest(project)
+    managed = _objects(legacy["managed"])
+    opencode = _objects(managed["opencode"])
+    files = _objects(opencode["files"])
+    files["context/stale.md"] = _hash(stale)
+    opencode["files"] = files
+    managed["opencode"] = opencode
+    legacy["managed"] = managed
+    manifest_path = project / "config" / MANIFEST_NAME
+    manifest_path.write_text(json.dumps(legacy))
+
+    def crash_after_stale_removal(count: int) -> None:
+        if count == 1:
+            raise RuntimeError("injected migration crash")
+
+    monkeypatch.setattr(publisher_module, "_after_target_mutation", crash_after_stale_removal)
+    with pytest.raises(RuntimeError, match="injected migration crash"):
+        sync_config(project, config_path=config_path)
+
+    def no_crash(_count: int) -> None:
+        return None
+
+    monkeypatch.setattr(publisher_module, "_after_target_mutation", no_crash)
+
+    assert not stale.exists()
+    assert sync_config(project, config_path=config_path).success
+    assert audit_config_sync(project, config_path=config_path).clean
+
+
 def test_legacy_migration_source_change_keeps_legacy_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -451,9 +488,12 @@ def test_legacy_migration_source_change_keeps_legacy_manifest(
     original = sync_module._migrate_legacy  # pyright: ignore[reportPrivateUsage]
 
     def migrate_then_edit(
-        config_root: Path, legacy: Mapping[str, object], selected_source: ConfigSyncSource
+        config_root: Path,
+        legacy: Mapping[str, object],
+        selected_source: ConfigSyncSource,
+        desired: sync_module.WorkflowView,
     ) -> bytes:
-        preflight = original(config_root, legacy, selected_source)
+        preflight = original(config_root, legacy, selected_source, desired)
         (project / "config/claude/CLAUDE.md").write_text("operator edit\n")
         return preflight
 

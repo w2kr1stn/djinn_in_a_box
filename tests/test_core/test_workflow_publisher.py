@@ -574,6 +574,32 @@ def test_source_change_before_commit_blocks_without_target_mutation(tmp_path: Pa
     assert _tree(target) == {}
 
 
+def test_source_change_at_commit_point_blocks_without_target_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    source = tmp_path / "view"
+    source.mkdir()
+    _write(source / "AGENTS.md", b"snapshot\n")
+    view = snapshot_file_view(source, source="claude")
+    monkeypatch.setattr(
+        workflow_publisher,
+        "_before_target_commit",
+        lambda: _write(source / "AGENTS.md", b"edited at commit point\n"),
+    )
+
+    result = publish_workflow_view(
+        view,
+        canonical,
+        target,
+        target / RUNTIME_MANIFEST_NAME,
+        source_root=source,
+    )
+
+    assert result.drift_class is DriftClass.SOURCE_CHANGED
+    assert _tree(target) == {}
+
+
 def test_source_change_after_commit_point_finishes_frozen_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
