@@ -144,6 +144,55 @@ def test_claude_settings_local_overlay_wins_over_baseline(tmp_path: Path) -> Non
     }
 
 
+def test_claude_managed_hooks_win_after_local_overlay(tmp_path: Path) -> None:
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir()
+    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    write_json(
+        seed_dir / "settings.json",
+        {
+            "hooks": {
+                "SessionStart": [{"hooks": [{"command": "baseline-start"}]}],
+                "PreToolUse": [{"hooks": [{"command": "baseline-security"}]}],
+                "Stop": [{"hooks": [{"command": "baseline-ready"}]}],
+                "PostToolUse": [{"hooks": [{"command": "baseline-post"}]}],
+            },
+            "env": {"baseline": True},
+        },
+    )
+    write_json(
+        seed_dir / "settings.local.json",
+        {
+            "hooks": {
+                "SessionStart": [{"hooks": [{"command": "local-start"}]}],
+                "PreToolUse": [{"hooks": [{"command": "local-security"}]}],
+                "Stop": [{"hooks": [{"command": "local-ready"}]}],
+                "PostToolUse": [{"hooks": [{"command": "local-post"}]}],
+                "Notification": [{"hooks": [{"command": "local-notify"}]}],
+            },
+            "env": {"local": True},
+        },
+    )
+
+    target_settings = tmp_path / ".claude" / "settings.json"
+    target_settings.parent.mkdir()
+
+    result = run_seed_lib(
+        tmp_path,
+        "claude_settings_merge "
+        f"{shlex.quote(str(seed_dir))} {shlex.quote(str(target_settings))}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    merged = json.loads(target_settings.read_text(encoding="utf-8"))
+    assert merged["hooks"]["SessionStart"] == [{"hooks": [{"command": "baseline-start"}]}]
+    assert merged["hooks"]["PreToolUse"] == [{"hooks": [{"command": "baseline-security"}]}]
+    assert merged["hooks"]["Stop"] == [{"hooks": [{"command": "baseline-ready"}]}]
+    assert merged["hooks"]["PostToolUse"] == [{"hooks": [{"command": "local-post"}]}]
+    assert merged["hooks"]["Notification"] == [{"hooks": [{"command": "local-notify"}]}]
+    assert merged["env"] == {"baseline": True, "local": True}
+
+
 def test_existing_target_settings_are_not_clobbered_without_local_overlay(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
@@ -268,3 +317,63 @@ def test_reverse_sync_file_copies_changed_file_and_skips_unchanged_file(tmp_path
     assert seed_changed.read_text(encoding="utf-8") == '{"value":"new"}\n'
     assert seed_unchanged.read_text(encoding="utf-8") == '{"value":"same"}\n'
     assert seed_unchanged.stat().st_mtime_ns == unchanged_mtime_ns
+
+
+def test_reverse_sync_claude_settings_strips_only_managed_hooks(tmp_path: Path) -> None:
+    volume_file = tmp_path / "volume" / "settings.json"
+    seed_file = tmp_path / "seed" / "settings.local.json"
+    volume_file.parent.mkdir()
+    seed_file.parent.mkdir()
+    write_json(
+        volume_file,
+        {
+            "hooks": {
+                "SessionStart": [{"hooks": [{"command": "generated-start"}]}],
+                "PreToolUse": [{"hooks": [{"command": "generated-security"}]}],
+                "Stop": [{"hooks": [{"command": "generated-ready"}]}],
+                "PostToolUse": [{"hooks": [{"command": "personal-post"}]}],
+                "Notification": [{"hooks": [{"command": "personal-notify"}]}],
+            },
+            "env": {"personal": True},
+            "theme": "kept",
+        },
+    )
+
+    result = run_seed_lib(
+        tmp_path,
+        "reverse_sync_claude_settings "
+        f"{shlex.quote(str(volume_file))} {shlex.quote(str(seed_file))}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    persisted = json.loads(seed_file.read_text(encoding="utf-8"))
+    assert "SessionStart" not in persisted["hooks"]
+    assert "PreToolUse" not in persisted["hooks"]
+    assert "Stop" not in persisted["hooks"]
+    assert persisted["hooks"]["PostToolUse"] == [{"hooks": [{"command": "personal-post"}]}]
+    assert persisted["hooks"]["Notification"] == [{"hooks": [{"command": "personal-notify"}]}]
+    assert persisted["env"] == {"personal": True}
+    assert persisted["theme"] == "kept"
+
+
+def test_reverse_sync_claude_settings_keeps_existing_on_invalid_json(
+    tmp_path: Path,
+) -> None:
+    volume_file = tmp_path / "volume" / "settings.json"
+    seed_file = tmp_path / "seed" / "settings.local.json"
+    volume_file.parent.mkdir()
+    seed_file.parent.mkdir()
+    volume_file.write_text("{not valid json", encoding="utf-8")
+    original_bytes = b'{"personal":true}\n'
+    seed_file.write_bytes(original_bytes)
+
+    result = run_seed_lib(
+        tmp_path,
+        "reverse_sync_claude_settings "
+        f"{shlex.quote(str(volume_file))} {shlex.quote(str(seed_file))}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "settings are not valid JSON" in result.stderr
+    assert seed_file.read_bytes() == original_bytes
+    assert not (seed_file.parent / "settings.local.json.tmp").exists()

@@ -52,6 +52,30 @@ merge_settings() {
     ' "$base" "$overlay" > "$output"
 }
 
+# Claude workflow hook fragments owned by Djinn. The same filter is used in both
+# directions so a generated registration can neither be overridden by the
+# personal overlay nor be persisted back into it.
+_claude_filter_managed_hooks() {
+    local input=$1 output=$2 baseline=${3:-}
+    local managed_keys='["SessionStart", "PreToolUse", "Stop"]'
+
+    if [[ -n "$baseline" ]]; then
+        jq --argjson managed_keys "$managed_keys" --slurpfile baseline "$baseline" '
+          reduce $managed_keys[] as $key (
+            .;
+            if (($baseline[0].hooks // {}) | has($key))
+              then .hooks[$key] = $baseline[0].hooks[$key]
+              else del(.hooks[$key])
+            end
+          )
+        ' "$input" > "$output"
+    else
+        jq --argjson managed_keys "$managed_keys" '
+          reduce $managed_keys[] as $key (.; del(.hooks[$key]))
+        ' "$input" > "$output"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # sync_seed: Clean-sync managed dirs/files from read-only seed to volume.
 # Subdirectories are fully replaced (rm + cp). Root files are overwritten.
@@ -153,10 +177,12 @@ claude_settings_merge() {
     else
         local base="$seed_dir/settings.json" out="$target_settings_file"
         if [[ -f "$seed_dir/settings.local.json" ]]; then
-            if merge_settings "$base" "$seed_dir/settings.local.json" "$out.tmp"; then
-                mv "$out.tmp" "$out" && ui_item "⊕" "settings.json (baseline ⊕ local)" "" "" "settings.json (baseline + local)"
-            else
+            if merge_settings "$base" "$seed_dir/settings.local.json" "$out.tmp" \
+                && _claude_filter_managed_hooks "$out.tmp" "$out.managed.tmp" "$base"; then
                 rm -f "$out.tmp"
+                mv "$out.managed.tmp" "$out" && ui_item "⊕" "settings.json (baseline ⊕ local)" "" "" "settings.json (baseline + local)"
+            else
+                rm -f "$out.tmp" "$out.managed.tmp"
                 # jq parses BOTH inputs — pinpoint the actual offender instead of
                 # blaming one unconditionally (the hand-edited baseline is at
                 # least as likely to be malformed as the machine-written overlay).
@@ -204,5 +230,37 @@ reverse_sync_file() {
                 || ui_warn "could not persist ${volume_file} → ${seed_file}"
         fi
     }
+    return 0
+}
+
+# Claude settings need a narrow reverse-sync: workflow-owned hook fragments are
+# generated from the baseline and must never become personal overlay state.
+reverse_sync_claude_settings() {
+    local volume_file=$1 seed_file=$2
+    local seed_dir_path tmp
+    seed_dir_path="$(dirname "$seed_file")"
+    tmp="${seed_file}.tmp"
+
+    # Missing volume file / missing seed dir are normal states — skip silently.
+    [[ -f "$volume_file" && -d "$seed_dir_path" ]] || return 0
+
+    if [[ ! -w "$seed_dir_path" ]]; then
+        ui_warn "could not persist ${volume_file} → ${seed_file} (target directory not writable)"
+        return 0
+    fi
+
+    if ! _claude_filter_managed_hooks "$volume_file" "$tmp"; then
+        rm -f "$tmp"
+        ui_warn "could not persist ${volume_file} → ${seed_file} (settings are not valid JSON)"
+        return 0
+    fi
+
+    if [[ -f "$seed_file" ]] && diff -q "$tmp" "$seed_file" &>/dev/null; then
+        rm -f "$tmp"
+    elif ! mv "$tmp" "$seed_file"; then
+        rm -f "$tmp"
+        ui_warn "could not persist ${volume_file} → ${seed_file}"
+    fi
+
     return 0
 }

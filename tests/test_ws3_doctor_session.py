@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,10 +15,30 @@ from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import doctor as doctor_mod
 from djinn_in_a_box.commands import session as session_mod
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.config_workflow import WorkflowPreparationResult
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.session import SessionResult
 
 runner = CliRunner()
+
+
+def _returns[T](value: T) -> Callable[..., T]:
+    def _stub(*_args: object, **_kwargs: object) -> T:
+        return value
+
+    return _stub
+
+
+@pytest.fixture(autouse=True)
+def _ready_session_workflow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(session_mod, "load_config", lambda: object())
+    monkeypatch.setattr(
+        session_mod,
+        "prepare_config_workflow",
+        _returns(WorkflowPreparationResult(True)),
+    )
+    monkeypatch.setattr(session_mod, "get_project_root", lambda: tmp_path / "project")
+    monkeypatch.setattr(session_mod, "get_config_root", _returns(tmp_path / "runtime"))
 
 
 def _quiet_doctor_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,7 +101,7 @@ def test_doctor_fix_calls_repairs_and_reports(
     assert result.exit_code == 0, result.output
     mock_checks.assert_called_once_with(mock_app_config, None)
     mock_host_env.assert_called_once_with(mock_app_config)
-    mock_seed.assert_called_once_with(tmp_path)
+    mock_seed.assert_called_once_with(tmp_path, source="claude")
     mock_network.assert_called_once_with()
     assert "Fixed: host environment" in result.output
     assert "Fixed: seed configuration" in result.output

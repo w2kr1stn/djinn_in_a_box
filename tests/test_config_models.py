@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from djinn_in_a_box.config.models import (
     AppConfig,
+    ConfigSyncConfig,
     ResourceLimits,
     ShellConfig,
     validate_memory_format,
@@ -82,11 +83,25 @@ class TestShellConfig:
 
     def test_omp_theme_path_expansion(self, mock_home: Path) -> None:
         """Test that tilde in omp_theme_path is expanded."""
-        shell = ShellConfig(omp_theme_path="~/.config/theme.omp.json")
+        shell = ShellConfig.model_validate({"omp_theme_path": "~/.config/theme.omp.json"})
         # Should be expanded to absolute path
         assert shell.omp_theme_path is not None
         assert shell.omp_theme_path.is_absolute()
         assert str(shell.omp_theme_path).endswith(".config/theme.omp.json")
+
+
+class TestConfigSyncConfig:
+    def test_defaults_to_claude(self) -> None:
+        assert ConfigSyncConfig().source == "claude"
+
+    @pytest.mark.parametrize("source", ["claude", "codex", "opencode"])
+    def test_accepts_supported_sources(self, source: str) -> None:
+        config = ConfigSyncConfig.model_validate({"source": source})
+        assert config.source == source
+
+    def test_rejects_unknown_source(self) -> None:
+        with pytest.raises(ValidationError):
+            ConfigSyncConfig.model_validate({"source": "gemini"})
 
 
 class TestAppConfig:
@@ -97,7 +112,7 @@ class TestAppConfig:
         projects_dir = mock_home / "projects"
         projects_dir.mkdir()
 
-        config = AppConfig(code_dir="~/projects")
+        config = AppConfig.model_validate({"code_dir": "~/projects"})
         assert config.code_dir == projects_dir
 
     def test_code_dir_validation_not_exists(self, tmp_path: Path) -> None:

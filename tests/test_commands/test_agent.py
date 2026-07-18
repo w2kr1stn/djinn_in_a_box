@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -11,10 +12,12 @@ import typer
 
 from djinn_in_a_box.commands.agent import build_agent_command
 from djinn_in_a_box.config.models import AgentConfig
-from djinn_in_a_box.core.docker import DockerMode, RunResult
-
-if TYPE_CHECKING:
-    from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.agent_runner import UnknownAgentError
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowPreparationProblem,
+    WorkflowPreparationResult,
+)
+from djinn_in_a_box.core.docker import DockerMode, RunResult, WorkflowImageCompatibility
 
 
 @pytest.fixture
@@ -28,21 +31,6 @@ def claude_config() -> AgentConfig:
         write_flags=["--dangerously-skip-permissions"],
         json_flags=["--output-format", "json"],
         model_flag="--model",
-        prompt_template='"$AGENT_PROMPT"',
-    )
-
-
-@pytest.fixture
-def gemini_config() -> AgentConfig:
-    """Gemini agent configuration for testing."""
-    return AgentConfig(
-        binary="gemini",
-        description="Google Gemini CLI",
-        headless_flags=["-p"],
-        read_only_flags=[],
-        write_flags=[],
-        json_flags=["--output-format", "json"],
-        model_flag="-m",
         prompt_template='"$AGENT_PROMPT"',
     )
 
@@ -135,46 +123,67 @@ class TestRunCommand:
     """Tests for the run command."""
 
     @pytest.fixture
-    def mock_agent_configs(
-        self, claude_config: AgentConfig, gemini_config: AgentConfig
-    ) -> dict[str, AgentConfig]:
-        """Provide mock agent configurations from top-level fixtures."""
-        return {"claude": claude_config, "gemini": gemini_config}
-
-    @pytest.fixture
     def run_mocks(
-        self, mock_agent_configs: dict[str, AgentConfig], mock_app_config: AppConfig
+        self,
     ) -> Generator[dict[str, Any]]:
         """Common mocks for run command tests."""
         with (
-            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
-            patch("djinn_in_a_box.commands.agent.load_agents", return_value=mock_agent_configs),
-            patch("djinn_in_a_box.commands.agent.ensure_network", return_value=True),
-            patch("djinn_in_a_box.commands.agent.compose_run") as mock_run,
-            patch("djinn_in_a_box.commands.agent.cleanup_docker_proxy") as mock_cleanup,
+            patch("djinn_in_a_box.commands.agent.run_headless_agent") as mock_run,
+            patch("djinn_in_a_box.commands.agent.load_config") as mock_config,
+            patch(
+                "djinn_in_a_box.commands.agent.prepare_config_workflow",
+                return_value=WorkflowPreparationResult(True),
+            ) as mock_workflow,
+            patch(
+                "djinn_in_a_box.commands.agent.get_project_root",
+                return_value=Path("/project"),
+            ),
+            patch(
+                "djinn_in_a_box.commands.agent.get_config_root",
+                return_value=Path("/runtime"),
+            ),
+            patch(
+                "djinn_in_a_box.commands.agent.workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ) as mock_image_compatibility,
         ):
+            config = object()
+            mock_config.return_value = config
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
-            yield {"run": mock_run, "cleanup": mock_cleanup, "config": mock_app_config}
+            yield {
+                "run": mock_run,
+                "workflow": mock_workflow,
+                "config": config,
+                "load_config": mock_config,
+                "image_compatibility": mock_image_compatibility,
+            }
 
     def test_run_validates_agent_name(
         self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
     ) -> None:
         """Test run validates the agent name."""
         from djinn_in_a_box.commands.agent import run
 
+        unknown = UnknownAgentError("invalid", ("claude", "gemini"))
         with (
-            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
-            patch("djinn_in_a_box.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("djinn_in_a_box.commands.agent.run_headless_agent", side_effect=unknown),
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=object()),
+            patch(
+                "djinn_in_a_box.commands.agent.workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(
+                "djinn_in_a_box.commands.agent.prepare_config_workflow",
+                return_value=WorkflowPreparationResult(True),
+            ),
             pytest.raises(typer.Exit) as exc_info,
         ):
             run(agent="invalid", prompt="test prompt")
 
         assert exc_info.value.exit_code == 1
 
-    def test_run_calls_compose_run(self, run_mocks: dict[str, Any]) -> None:
-        """Test run calls compose_run with correct parameters."""
+    def test_run_delegates_to_internal_runner(self, run_mocks: dict[str, Any]) -> None:
+        """Test run delegates execution and prompt handling to the internal runner."""
         from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
@@ -182,10 +191,92 @@ class TestRunCommand:
 
         mock_run = run_mocks["run"]
         mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args[1]
-        assert "AGENT_PROMPT" in call_kwargs["env"]
-        assert call_kwargs["env"]["AGENT_PROMPT"] == "test prompt"
-        assert call_kwargs["interactive"] is False
+        assert mock_run.call_args.args == ("claude", "test prompt")
+        assert mock_run.call_args.kwargs["app_config"] is run_mocks["config"]
+        assert callable(mock_run.call_args.kwargs["on_ready"])
+
+    def test_run_keeps_checked_config_when_loader_changes_after_bootstrap(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        checked = run_mocks["config"]
+        changed = object()
+
+        def flip_config_after_bootstrap(
+            *_args: object, **_kwargs: object
+        ) -> WorkflowPreparationResult:
+            run_mocks["load_config"].return_value = changed
+            return WorkflowPreparationResult(True)
+
+        run_mocks["workflow"].side_effect = flip_config_after_bootstrap
+
+        with pytest.raises(typer.Exit):
+            run(agent="claude", prompt="test prompt")
+
+        assert run_mocks["run"].call_args.kwargs["app_config"] is checked
+        run_mocks["load_config"].assert_called_once_with()
+
+    def test_opencode_prepares_canonical_workflow_without_host_delivery(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        with pytest.raises(typer.Exit):
+            run(agent="opencode", prompt="test prompt")
+
+        run_mocks["workflow"].assert_called_once_with(
+            Path("/project"),
+            (),
+            config_snapshot=run_mocks["config"],
+            require_compose_host_env=True,
+            container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+        )
+        run_mocks["run"].assert_called_once()
+
+    def test_blocked_opencode_workflow_never_starts_runner(self, run_mocks: dict[str, Any]) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["workflow"].return_value = WorkflowPreparationResult(
+            False,
+            (
+                WorkflowPreparationProblem(
+                    "semantic-agent-required",
+                    "Workflow is blocked.",
+                    "Resolve drift.",
+                ),
+            ),
+        )
+
+        with pytest.raises(typer.Exit) as exc_info:
+            run(agent="opencode", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+        run_mocks["run"].assert_not_called()
+
+    def test_blocked_gemini_workflow_never_starts_runner_and_checks_image(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["workflow"].return_value = WorkflowPreparationResult(
+            False,
+            (WorkflowPreparationProblem("blocked", "Workflow is blocked.", "Resolve drift."),),
+        )
+
+        with pytest.raises(typer.Exit) as exc_info:
+            run(agent="gemini", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+        run_mocks["workflow"].assert_called_once_with(
+            Path("/project"),
+            (),
+            config_snapshot=run_mocks["config"],
+            require_compose_host_env=True,
+            container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+        )
+        run_mocks["image_compatibility"].assert_called_once_with()
+        run_mocks["run"].assert_not_called()
 
     def test_run_with_write_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --write uses write_flags."""
@@ -194,8 +285,7 @@ class TestRunCommand:
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", write=True)
 
-        call_kwargs = run_mocks["run"].call_args[1]
-        assert "--dangerously-skip-permissions" in call_kwargs["command"]
+        assert run_mocks["run"].call_args.kwargs["write"] is True
 
     def test_run_with_timeout(self, run_mocks: dict[str, Any]) -> None:
         """Test run --timeout passes timeout value."""
@@ -204,8 +294,7 @@ class TestRunCommand:
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", timeout=300)
 
-        call_kwargs = run_mocks["run"].call_args[1]
-        assert call_kwargs["timeout"] == 300
+        assert run_mocks["run"].call_args.kwargs["timeout"] == 300
 
     def test_run_with_docker_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker enables docker option."""
@@ -214,34 +303,28 @@ class TestRunCommand:
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker=True)
 
-        options = run_mocks["run"].call_args[0][1]
-        assert options.docker_mode is DockerMode.PROXY
-        run_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, run_mocks["config"])
+        assert run_mocks["run"].call_args.kwargs["docker_mode"] is DockerMode.PROXY
 
     def test_run_with_docker_direct_flag(self, run_mocks: dict[str, Any]) -> None:
-        """Test run --docker-direct sets docker_direct option and skips proxy cleanup."""
+        """Test run --docker-direct delegates the direct Docker mode."""
         from djinn_in_a_box.commands.agent import run
 
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker_direct=True)
 
-        options = run_mocks["run"].call_args[0][1]
-        assert options.docker_mode is DockerMode.DIRECT
-        run_mocks["cleanup"].assert_called_once_with(DockerMode.DIRECT, run_mocks["config"])
+        assert run_mocks["run"].call_args.kwargs["docker_mode"] is DockerMode.DIRECT
 
     def test_run_docker_and_direct_mutually_exclusive(
         self,
-        mock_agent_configs: dict[str, AgentConfig],
-        mock_app_config: AppConfig,
     ) -> None:
         """Test run fails when both --docker and --docker-direct are used."""
         from djinn_in_a_box.commands.agent import run
 
         with (
-            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
-            patch("djinn_in_a_box.commands.agent.load_agents", return_value=mock_agent_configs),
+            patch("djinn_in_a_box.commands.agent.run_headless_agent") as mock_run,
             pytest.raises(typer.Exit) as exc_info,
         ):
             run(agent="claude", prompt="test", docker=True, docker_direct=True)
 
         assert exc_info.value.exit_code == 1
+        mock_run.assert_not_called()

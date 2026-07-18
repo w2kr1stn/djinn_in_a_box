@@ -55,6 +55,12 @@ stores, and local command choices remain outside the published source.
 │   └── core/
 │       ├── __init__.py
 │       ├── banner.py
+│       ├── agent_runner.py
+│       ├── config_lock.py
+│       ├── config_sync.py
+│       ├── config_sync_adapters.py
+│       ├── config_workflow.py
+│       ├── workflow_publisher.py
 │       ├── console.py
 │       ├── decorators.py
 │       ├── docker.py
@@ -66,6 +72,7 @@ stores, and local command choices remain outside the published source.
 │       └── theme.py
 ├── scripts/
 │   ├── entrypoint.sh
+│   ├── settings-copy.py
 │   ├── output-lib.sh
 │   ├── seed-lib.sh
 │   ├── mcp-register.sh
@@ -98,7 +105,7 @@ user
   v
 djinn CLI (Typer)
   |
-  +-- commands/config.py     init, config show/path/set/edit
+  +-- commands/config.py     init, config show/path/set/edit/status/sync
   +-- commands/container.py  build, start, auth, status, clean, audit, update, enter
   +-- commands/doctor.py     doctor, doctor --fix, preflight
   +-- commands/agent.py      djinn run, djinn agents
@@ -110,6 +117,11 @@ core + config
   |
   +-- config/models.py       AppConfig, ResourceLimits, ShellConfig, AgentConfig
   +-- config/loader.py       TOML load/save, agent default fallback
+  +-- core/config_sync.py    canonical workflow audit, snapshot, and sync
+  +-- core/config_sync_adapters.py  closed native readers/renderers
+  +-- core/workflow_publisher.py  stdlib-only shared publisher and CLI
+  +-- core/config_workflow.py  shared preflight and runtime publication
+  +-- core/config_lock.py    config-setting directory lock
   +-- core/docker.py         Compose env bridge, Docker operations, backup helpers
   +-- core/seeding.py        host-side first-run seed repair/copy
   +-- core/session.py        docker exec and host-mode session runner
@@ -183,6 +195,7 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
   `~/.djinn/config`
 - `resources: ResourceLimits`
 - `shell: ShellConfig`
+- `config_sync: ConfigSyncConfig`
 
 `ResourceLimits` defaults are:
 
@@ -203,12 +216,17 @@ uppercase suffix. Reservations cannot exceed limits.
 read-only flags, write flags, JSON flags, model flag, optional default model,
 and prompt template.
 
+`ConfigSyncConfig.source` is one of `claude`, `codex`, or `opencode` and defaults
+to `claude`. It selects the native global workflow authority for the deployment;
+it does not select an agent for `run` or `session`.
+
 ## Config File Loading
 
 `config/loader.py` loads `~/.config/djinn_in_a_box/config.toml`.
 
 The TOML layout stores top-level application fields under `[general]`, while
-`resources` and `shell` remain structured sections. `load_config()` flattens
+`resources`, `shell`, and `config_sync` remain structured sections.
+`load_config()` flattens
 `[general]` into the `AppConfig` constructor and raises:
 
 - `ConfigNotFoundError` when the file is absent
@@ -234,6 +252,8 @@ The shipped defaults cover `claude`, `gemini`, `codex`, and `opencode`.
 - `config_path()` exposed as `djinn config path`
 - `config_set()` exposed as `djinn config set`
 - `config_edit()` exposed as `djinn config edit`
+- `config_status()` exposed as `djinn config status`
+- `config_sync()` exposed as `djinn config sync`
 
 `djinn init` is the entry point. It creates the app config directory, prompts
 for the projects directory and timezone, then uses progressive disclosure for
@@ -257,8 +277,90 @@ the `ResourceLimits` bounds, and falls back to model defaults on probe failure.
 - `resources.memory_reservation`
 - `shell.skip_mounts`
 - `shell.omp_theme_path`
+- `config_sync.source`
 
 `config_edit()` runs `$EDITOR` or `vi`, then reloads and validates the file.
+Changes that may select a different workflow source coordinate through the
+exclusive lock on the existing `config/` directory.
+
+## Global Workflow Ownership and Audit
+
+The workflow source is deployment-wide, including the shared demo deployment.
+The implementation has no per-tenant source selector. Canonical native roots
+remain under the ignored project-local `config/{claude,codex,opencode}` tree.
+Only the selected tool's native instruction form is authoritative:
+
+| Category          | Claude Code                                         | Codex                                            | OpenCode                             |
+| ----------------- | --------------------------------------------------- | ------------------------------------------------ | ------------------------------------ |
+| Root instructions | `CLAUDE.md` plus managed `AGENTS.md`                | `AGENTS.md` plus managed `CLAUDE.md`             | `AGENTS.md` plus managed `CLAUDE.md` |
+| Agents            | `agents/*.md`                                       | `agents/*.toml`                                  | `agents/*.md`                        |
+| Skills            | `skills/<name>/**`                                  | `skills/<name>/**`                               | `skills/<name>/**`                   |
+| Commands          | `commands/*.md`                                     | `skills/command-<name>/**`                       | `commands/*.md`                      |
+| Support           | `context/**`, `scripts/**`                          | `context/**`, `scripts/**`                       | `context/**`, `scripts/**`           |
+| Native-only hooks | three Python scripts plus `settings.json` fragments | three Python scripts plus `hooks.json` fragments | three named plugin files             |
+
+The known hook fragments are `SessionStart`, `PreToolUse`, and `Stop`; Codex
+also owns the `project_doc_fallback_filenames` bridge in `config.toml`. Hooks
+and their registrations are native-only, like the Claude-only `/codex-review`
+command: a present native item is validated for ownership, UTF-8, and containment
+(with the OpenCode export-marker check), but is never cross-tool projected or
+stale-removed. Missing native hooks are allowed. Legacy canonical records for
+target-view hooks are released on the next sync without deleting the file or
+carrier key.
+Repository-local instruction files, agents, skills, and commands are outside
+this global projection and are not rewritten.
+
+`core/config_sync_adapters.py` holds the closed ownership table, native readers,
+renderers, and validation. It produces a transient typed IR; it is never a
+persisted user format. Validation covers ownership, UTF-8, containment,
+required fields, and JSON/TOML parsing. The three known OpenCode plugins are
+copied byte-for-byte after UTF-8 and export-marker checks. A non-portable item
+is invalid rather than translated: workflow synchronization contains no
+provider-invocation path.
+
+`core/config_sync.py` snapshots the selected source, renders the other two
+cross-tool views, reads each tool's native-only artifacts for delivery, audits
+the canonical tree, and invokes the publisher in canonical mode. Canonical
+projection excludes hooks and hook registrations; runtime delivery retains them
+in the complete tool view, so the Claude host-path rewrite and Compose-Claude
+settings merge keep their existing inputs. It uses the publisher's content
+fingerprint both after snapshot creation and at the commit point. A source
+change before the first target mutation returns `source-changed` without a
+write; after that point the frozen generation finishes, with the manifest
+written last.
+
+`core/workflow_publisher.py` is stdlib-only and is both the shared module API
+and the standalone image CLI. It owns the five drift classes, content hashes,
+executable modes, atomic replacement, stale managed-item removal, carrier-key
+merges, recovery after an interrupted publication, and canonical/runtime locking.
+A runtime manifest records the complete delivered native view, including
+native-only hooks and OpenCode plugins; the canonical manifest deliberately
+does not manage those native artifacts.
+A canonical publication holds one exclusive canonical lock. A runtime
+publication holds a shared canonical lock plus an exclusive target lock; an
+already-held canonical lease is inherited rather than reacquired.
+
+The one manifest schema is `{source, items}`. An item is either a file path or a
+carrier path plus key path and records `content_hash` and `executable`. The
+canonical instance is `config/.djinn-config-sync.json`; each publisher-managed
+runtime root uses `.djinn-workflow-state.json`. Neighboring JSON carrier keys
+are preserved semantically. The managed top-level TOML assignment is spliced
+while preserving every other byte and then re-parsed. Existing installations
+are adopted only after strict verification; an unknown or edited state fails
+closed.
+
+The audit result is one of `clean`, `source-changed`, `target-drift`,
+`collision`, or `invalid-or-semantic`. `djinn config status` takes a shared
+canonical lock, makes no writes, prints only sanitized identifiers and one
+remedy, and exits `0` iff clean. `djinn config sync` is the explicit writer.
+`commands/doctor.py` performs the same audit once for its read-only `Config
+workflow` check. `doctor --fix` may seed a source root, but does not synchronize
+workflow views.
+
+Credentials, auth, history, caches, themes, UI policy, MCP, arbitrary plugins,
+`PostToolUse`, status-line configuration, and unlisted settings never enter the
+managed set. The only non-portable-artifact remedy is: “Author or edit the
+artifact natively in the target tool's view, or make the source form portable.”
 
 ## Config Root and Compose Environment Bridge
 
@@ -298,6 +400,13 @@ applies on creation only; directories that already exist are left unchanged.
 
 `core/seeding.py` copies neutral seed templates from `templates/seed/` into the
 local root-level `config/`, `packages.txt`, and `tools/tools.txt` locations.
+It also ensures empty `config/claude`, `config/codex`, and `config/opencode`
+workflow roots. The source-aware `seed_config(..., source=...)` entry point only
+installs the Claude baseline when Claude is selected and that root is
+uninitialized; generated instruction companions are not seed files.
+`seed_config()` is called only by `djinn init` and `djinn doctor --fix`, before
+`ensure_host_env()`. Status, audit, sync, and workflow preflight never seed or
+repair a source root.
 
 `SEED_MANIFEST` defines every seed source, target, and kind:
 
@@ -320,6 +429,11 @@ type are never overwritten. Wrong-type targets are repaired by `_repair_wrong_ty
 Dangling symlinks are treated as existing targets because `Path.exists()` would
 otherwise miss them.
 
+The publisher, not `sync_seed`, is the only writer for publisher-managed
+workflow roots. `sync_seed` remains limited to the separate Gemini seed mount;
+its clean-sync behavior is never applied to a mixed or operator-owned workflow
+root.
+
 Copies are atomic:
 
 - file seeds copy to `.<name>.seed-tmp`, then `os.replace()`
@@ -335,8 +449,8 @@ raise `SeedingError` with a reinstall or reclone remedy.
 ## Container-Side Seed and Merge
 
 `scripts/entrypoint.sh` sources `/home/dev/seed-lib.sh` from `scripts/seed-lib.sh`
-inside the image. Startup then performs runtime reconciliation between host
-seed mounts and persistent container locations.
+inside the image. It keeps personal-settings persistence separate from workflow
+publication.
 
 `scripts/seed-lib.sh` provides:
 
@@ -350,9 +464,13 @@ seed mounts and persistent container locations.
 - `claude_settings_merge(seed_dir, target_settings_file)`: merges the tracked
   Claude settings baseline with optional `settings.local.json`. It has a
   minimal-seed guard: if `CLAUDE.md` or `settings.json` is missing, it prints a
-  repair hint and skips the merge rather than writing incomplete state.
+  repair hint and skips the merge rather than writing incomplete state. The
+  baseline wins for the owned `SessionStart`, `PreToolUse`, and `Stop` hook
+  fragments; neighboring settings remain overlay-controlled.
 - `reverse_sync_file(volume_file, seed_file)`: best-effort copy from container
   state back to writable seed mounts on shell exit.
+- `reverse_sync_claude_settings(volume_file, seed_file)`: persists the personal
+  Claude overlay after removing only those three managed hook fragments.
 
 `entrypoint.sh` applies those helpers as follows:
 
@@ -364,7 +482,9 @@ container start
   +-- restore ~/.claude.json from the Claude volume when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
   +-- sync_seed gemini   ~/.gemini_seed   -> ~/.gemini
-  +-- sync_seed opencode ~/.opencode/seed -> ~/.config/opencode
+  +-- settings-copy.py persists personal OpenCode settings only
+  +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
+      using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
@@ -379,9 +499,22 @@ through `ui_boxed`, so external tool chatter stays visibly nested under the MCP
 section while remaining on stderr.
 
 For Claude, `docker-compose.yml` mounts selected directories and files from
-root-level `config/claude` directly into the live `~/.claude` tree. Only
-settings are merged. In-session settings changes are reverse-synced to
-`config/claude/settings.local.json`, not to the tracked baseline template.
+root-level `config/claude` directly into the live `~/.claude` tree, including
+both `CLAUDE.md` and the generated `AGENTS.md` companion. Only settings are
+merged. This Compose-Claude runtime is manifestless: the publisher never writes
+to `${DJINN_CONFIG_ROOT}/claude`. In-session settings changes are reverse-synced
+to `config/claude/settings.local.json`, not to the tracked baseline template.
+
+`core/config_workflow.prepare_config_workflow()` is the common preparation path
+for `djinn start`, `djinn run`, and `djinn session`: it verifies image
+compatibility for Compose paths, provisions only required runtime roots, audits,
+auto-repairs deterministic `source-changed` drift, and publishes only explicit
+runtime targets. It never seeds. `target-drift`, `collision`, and
+`invalid-or-semantic` stop the command before agent or Compose invocation. Host
+fallback publishes the selected Claude/Codex/OpenCode view to its native host
+root. A running-container OpenCode session invokes the copied publisher with the
+same canonical-root, target, state-manifest, and profile arguments as the
+entrypoint.
 
 ## Docker Compose Runtime
 
@@ -401,7 +534,10 @@ Common mounts include:
 - named volumes for caches, OpenCode data, VS Code server state, and workspace
   metadata
 - read-only `~/.ssh` and `~/.gitconfig`
-- root-level `config/` seed mounts
+- the writable `config/claude` seed mount plus nested direct mounts for its
+  managed files, including `CLAUDE.md` and `AGENTS.md`
+- the read-only canonical `./config` mount at `/home/dev/.djinn-canonical` for
+  the shared publisher
 - `${CODE_DIR}` to `/home/dev/projects`
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
 
@@ -433,6 +569,16 @@ Docker control.
 audio client support, optional packages from `packages.txt`, Docker CLI,
 Compose plugin, GitHub CLI, uv, a non-root `dev` user, zsh setup, Node via fnm,
 and the supported coding agent CLIs.
+
+The Python `djinn` CLI and its parser dependencies run on the host. The image
+copies the stdlib-only `workflow_publisher.py` to
+`/home/dev/workflow-publisher.py` and `settings-copy.py` to
+`/home/dev/settings-copy.py`. The Dockerfile also sets
+`djinn.workflow.publisher="1"`; Compose starts and OpenCode session refreshes
+check that label before doing workflow work. Node agents are installed through
+fnm, and the final image PATH includes `~/.local/share/fnm/aliases/default/bin`
+so non-interactive processes resolve Codex and OpenCode without sourcing shell
+initialization.
 
 The image locale is `C.UTF-8`. Runtime Docker access is disabled unless the user
 starts with proxy or direct Docker options.
@@ -481,20 +627,22 @@ is exported in the host environment, which still takes precedence.
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,
 image, network, optional Docker MCP plugin, D-Bus session availability, and seed
-config presence.
+config presence. It also includes the read-only `Config workflow` audit, which
+is `PASS` when clean and `WARN` when drift or validation needs attention.
 
 `doctor --fix` calls `_doctor_fix(config)`, which attempts:
 
-- `ensure_host_env(config)`
 - `seed_config(project_root)`
+- `ensure_host_env(config)`
 - `ensure_network()`
 
 It exits non-zero when hard checks or repairs fail.
 
 `preflight(config)` first verifies Docker is installed and the daemon is
 reachable. Only after Docker is usable does it provision host directories with
-`ensure_host_env(config)` and reseed local config with `seed_config(project_root)`.
-This keeps Docker-down failures from creating unrelated host artifacts.
+`ensure_host_env(config)`. It does not call `seed_config()`; this keeps
+Docker-down failures from creating unrelated host artifacts and preserves the
+workflow seeding boundary.
 
 ## Agent Commands
 
@@ -505,8 +653,9 @@ command string from `AgentConfig`. It appends the prompt template, which expands
 `$AGENT_PROMPT` inside the container. An explicit `model` takes precedence;
 otherwise the command uses `AgentConfig.default_model` when configured.
 
-`run()` loads app config and agent config, validates the requested agent, ensures
-the Docker network, mounts the current directory by default, and calls
+`run()` loads app config and agent config, validates the requested agent, runs
+the shared workflow preparation for Claude/Codex/OpenCode, ensures the Docker
+network, mounts the current directory by default, and calls
 `compose_run(..., interactive=False, env={"AGENT_PROMPT": prompt})`.
 
 `agents()` lists configured agents, with verbose and JSON modes.
@@ -538,11 +687,13 @@ It maps host paths under `~/.djinn/sessions` to `/home/dev/sessions/...` and use
 `docker exec` with `TERM=xterm-256color` and `COLORTERM=truecolor`. Each session
 workspace is initialized as a git repository if needed.
 
-If no container is running, `SessionManager.preflight_check()` allows host mode
-only when `claude` is available on `PATH`. It does not check the requested
-agent's binary during preflight; selecting another host agent can still fail at
-invocation with `Agent binary not found: <binary>`. Host-mode interactive and
-headless commands run directly in the host workspace.
+If no container is running, `SessionManager.preflight_check()` resolves the
+selected agent definition and requires that agent's binary on host `PATH`.
+Claude, Codex, and OpenCode host sessions first receive their selected canonical
+workflow view. Host-mode interactive and headless commands then run directly in
+the host workspace. Container-mode OpenCode sessions refresh the live runtime
+through the shared publisher before the agent starts. Its image compatibility
+check inspects the running container image, not the current image tag.
 
 ## Backup and Restore
 
@@ -606,8 +757,8 @@ djinn init
   +-- prompt for code_dir and timezone
   +-- optionally prompt for resources and shell mounts
   +-- save ~/.config/djinn_in_a_box/config.toml atomically
-  +-- ensure_host_env(config)
   +-- seed_config(project_root)
+  +-- ensure_host_env(config)
   v
 local config is ready; build/start can run
 ```
@@ -643,7 +794,8 @@ entrypoint.sh
   |
   +-- optional pre-seed firewall initialization
   +-- repair writable volume ownership
-  +-- Seed & Config: merge/copy seed config
+  +-- Seed & Config: merge Claude settings and publish the OpenCode workflow
+      from the read-only canonical mount
   +-- MCP: register MCP servers and box third-party CLI output
   +-- Tools: install optional tools
   +-- Security: summarize firewall, Docker access, and MCP gateway state
@@ -672,8 +824,9 @@ djinn session --project name [--create]
   +-- contain workspace under ~/.djinn/sessions
   +-- require or create workspace
   +-- prefer docker exec into running djinn container
-  +-- otherwise allow host mode only when claude is on PATH
-  +-- selected non-claude host agents may still fail at invocation
+  +-- otherwise require the selected agent binary on host PATH
+  +-- publish selected Claude/Codex/OpenCode host workflow when in host mode
+  +-- refresh running-container OpenCode with the shared publisher before invocation
 ```
 
 ## Error Handling
@@ -702,6 +855,13 @@ Coverage areas include:
 - Docker Compose environment injection and Docker helper behavior
 - hostinfo detection and resource suggestions
 - host-side seed copying, repair, and template completeness
+- closed workflow ownership, adapter directions, manifest safety, and read-only
+  config-workflow audit output
+- shared publisher locking, stable snapshots, crash recovery, carrier
+  preservation, canonical/runtime manifest adoption, and standalone CLI use
+- deterministic projection across the 3×2 adapter matrix, non-portable
+  fail-closed behavior, runtime publication, image compatibility, and shared
+  start/run/session preparation
 - `scripts/seed-lib.sh` and entrypoint MCP behavior
 - backup/restore command behavior
 - session command containment and `SessionManager`

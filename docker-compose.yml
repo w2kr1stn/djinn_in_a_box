@@ -46,8 +46,10 @@ x-common-volumes: &common-volumes
   - ./config/claude/context:/home/dev/.claude/context
   - ./config/claude/scripts:/home/dev/.claude/scripts
   - ./config/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md
+  - ./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md
   - ./config/gemini:/home/dev/.gemini_seed
   - ./config/opencode:/home/dev/.opencode/seed
+  - ./config:/home/dev/.djinn-canonical:ro
   # Shared MCP server registry (all CLI tools, local-only)
   - ./config/mcp-servers.json:/home/dev/.config/mcp-servers.json:ro
   # Projects directory

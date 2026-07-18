@@ -3,27 +3,41 @@
 from __future__ import annotations
 
 import json
-import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated, cast
 
 import typer
 from rich.table import Table
 
 from djinn_in_a_box.config.loader import load_agents, load_config
-from djinn_in_a_box.core.console import console, err_console, error, info, rule, status_line
+from djinn_in_a_box.config.models import ConfigSyncSource
+from djinn_in_a_box.core.agent_runner import (
+    AgentNetworkError,
+    UnknownAgentError,
+    run_headless_agent,
+)
+from djinn_in_a_box.core.agent_runner import build_agent_command as build_agent_command
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowDeliveryTarget,
+    prepare_config_workflow,
+)
+from djinn_in_a_box.core.console import (
+    console,
+    err_console,
+    error,
+    info,
+    rule,
+    status_line,
+    warning,
+)
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
-    DJINN_NETWORK,
-    ContainerOptions,
-    cleanup_docker_proxy,
-    compose_run,
-    ensure_network,
+    DockerMode,
+    get_config_root,
     resolve_docker_mode,
+    workflow_image_compatible,
 )
-
-if TYPE_CHECKING:
-    from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.core.paths import get_project_root
 
 
 def _agent_table(title: str) -> Table:
@@ -35,38 +49,45 @@ def _agent_table(title: str) -> Table:
     )
 
 
-def build_agent_command(
-    agent_config: AgentConfig,
+def _show_run_status(
+    agent: str,
+    workspace: Path,
     *,
-    write: bool = False,
-    json_output: bool = False,
+    write: bool,
+    json_output: bool,
     model: str | None = None,
-) -> str:
-    """Build shell command string for agent execution.
+    docker_mode: DockerMode,
+    firewall: bool,
+    timeout: int | None,
+) -> None:
+    """Render CLI-only execution status after runner prerequisites pass."""
+    err_console.print()
+    info(f"Running {agent} (headless)...")
+    err_console.print()
 
-    The prompt is referenced via $AGENT_PROMPT env var, expanded at container runtime.
-    """
-    parts: list[str] = [shlex.quote(agent_config.binary)]
-    parts.extend(shlex.quote(f) for f in agent_config.headless_flags)
+    status_line("Agent", agent)
+    status_line("Workspace", str(workspace))
 
-    effective_model = model if model is not None else agent_config.default_model
-    if effective_model:
-        parts.extend(
-            [shlex.quote(agent_config.model_flag), shlex.quote(effective_model)]
-        )
+    if model:
+        status_line("Model", model)
 
     if write:
-        parts.extend(shlex.quote(f) for f in agent_config.write_flags)
+        status_line("Mode", "Read/Write (--write)", "status.disabled")
     else:
-        parts.extend(shlex.quote(f) for f in agent_config.read_only_flags)
+        status_line("Mode", "Read-only (plan/analysis)", "status.enabled")
 
+    if docker_mode is DockerMode.PROXY:
+        status_line("Docker", "Enabled (proxy)")
+    elif docker_mode is DockerMode.DIRECT:
+        status_line("Docker", "Enabled (DIRECT)", "warning")
+    if firewall:
+        status_line("Firewall", "Enabled")
     if json_output:
-        parts.extend(shlex.quote(f) for f in agent_config.json_flags)
+        status_line("Output", "JSON")
+    if timeout:
+        status_line("Timeout", f"{timeout}s")
 
-    # Append prompt template (uses $AGENT_PROMPT env var expanded at runtime)
-    parts.append(agent_config.prompt_template)
-
-    return " ".join(parts)
+    err_console.print()
 
 
 @handle_config_errors
@@ -149,77 +170,58 @@ def run(
         error(str(e))
         raise typer.Exit(1) from None
 
-    app_config = load_config()
-    agent_configs = load_agents()
-
-    if agent not in agent_configs:
-        error(f"Unknown agent: {agent}")
-        available = ", ".join(sorted(agent_configs.keys()))
-        console.print(f"Available agents: {available}")
-        raise typer.Exit(1)
-
-    agent_config = agent_configs[agent]
-
-    if not ensure_network():
-        error(f"Failed to create Docker network '{DJINN_NETWORK}'")
-        raise typer.Exit(1)
-
-    # Determine workspace path (implicit --here: default to cwd)
-    workspace = mount if mount else Path.cwd()
-
-    # Print status to stderr (matching dev.sh format)
-    err_console.print()
-    info(f"Running {agent} (headless)...")
-    err_console.print()
-
-    status_line("Agent", agent)
-    status_line("Workspace", str(workspace))
-
-    if model:
-        status_line("Model", model)
-
-    if write:
-        status_line("Mode", "Read/Write (--write)", "status.disabled")
-    else:
-        status_line("Mode", "Read-only (plan/analysis)", "status.enabled")
-
-    if docker:
-        status_line("Docker", "Enabled (proxy)")
-    elif docker_direct:
-        status_line("Docker", "Enabled (DIRECT)", "warning")
-    if firewall:
-        status_line("Firewall", "Enabled")
-    if json_output:
-        status_line("Output", "JSON")
-    if timeout:
-        status_line("Timeout", f"{timeout}s")
-
-    err_console.print()
-
-    agent_cmd = build_agent_command(
-        agent_config,
-        write=write,
-        json_output=json_output,
-        model=model,
+    checked_config = None
+    delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
+    config = load_config()
+    checked_config = config
+    if agent in {"claude", "codex"}:
+        selected_agent = cast(ConfigSyncSource, agent)
+        delivery_targets = (
+            WorkflowDeliveryTarget(selected_agent, get_config_root(config) / selected_agent),
+        )
+    workflow = prepare_config_workflow(
+        get_project_root(),
+        delivery_targets,
+        config_snapshot=config,
+        require_compose_host_env=True,
+        container_image_compatibility=workflow_image_compatible(),
     )
-
-    options = ContainerOptions(
-        docker_mode=docker_mode,
-        firewall_enabled=firewall,
-        mount_path=workspace,
-    )
+    if not workflow.success:
+        problem = workflow.problems[0]
+        error(problem.message)
+        warning(problem.remedy)
+        raise typer.Exit(1)
 
     try:
-        result = compose_run(
-            app_config,
-            options,
-            command=agent_cmd,
-            interactive=False,
-            env={"AGENT_PROMPT": prompt},
+        result = run_headless_agent(
+            agent,
+            prompt,
+            write=write,
+            json_output=json_output,
+            model=model,
+            docker_mode=docker_mode,
+            firewall=firewall,
+            mount=mount,
             timeout=timeout,
+            app_config=checked_config,
+            on_ready=lambda workspace: _show_run_status(
+                agent,
+                workspace,
+                write=write,
+                json_output=json_output,
+                model=model,
+                docker_mode=docker_mode,
+                firewall=firewall,
+                timeout=timeout,
+            ),
         )
-    finally:
-        cleanup_docker_proxy(docker_mode, app_config)
+    except UnknownAgentError as e:
+        error(str(e))
+        console.print(f"Available agents: {', '.join(e.available)}")
+        raise typer.Exit(1) from None
+    except AgentNetworkError as e:
+        error(str(e))
+        raise typer.Exit(1) from None
 
     if result.stdout:
         console.print(result.stdout, end="")

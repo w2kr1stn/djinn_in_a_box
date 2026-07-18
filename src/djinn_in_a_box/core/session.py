@@ -13,7 +13,12 @@ from pathlib import Path
 
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
-from djinn_in_a_box.core.docker import _decode_timeout_output
+from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY
+from djinn_in_a_box.core.docker import (
+    WorkflowImageCompatibility,
+    _decode_timeout_output,  # pyright: ignore[reportPrivateUsage]
+)
+from djinn_in_a_box.core.workflow_publisher import DriftClass
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +30,24 @@ _CONTAINER_SESSIONS_BASE = "/home/dev/sessions"
 _HOST_SESSIONS_BASE = Path.home() / ".djinn" / "sessions"
 _DJINN_CONTAINER_NAME = "djinn"
 _EXEC_TIMEOUT = 10.0
+_PUBLISHER_REMEDIES: dict[DriftClass, str] = {
+    DriftClass.SOURCE_CHANGED: "Run `djinn config sync`, then retry.",
+    DriftClass.TARGET_DRIFT: "Restore or move the modified managed workflow item, then retry.",
+    DriftClass.COLLISION: "Move or remove the conflicting unmanaged workflow item, then retry.",
+    DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
+    DriftClass.CLEAN: "",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTarget:
+    """Stable execution target shared by session preflight and launch."""
+
+    container_id: str | None = None
+
+    @property
+    def container_mode(self) -> bool:
+        return self.container_id is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +80,116 @@ class SessionManager:
 
     @property
     def container_mode(self) -> bool:
-        return self._find_container() is not None
+        return self.resolve_target().container_mode
 
-    def preflight_check(self) -> None:
-        if self._find_container() is not None:
-            return
-        if shutil.which("claude") is not None:
-            return
-        msg = "No running Djinn container found and no agent CLI available on PATH"
+    def resolve_target(self) -> SessionTarget:
+        """Resolve container versus host mode once for reuse by a caller."""
+        return SessionTarget(container_id=self._find_container())
+
+    def preflight_check(
+        self,
+        agent: str = "claude",
+        *,
+        target: SessionTarget | None = None,
+    ) -> SessionTarget:
+        resolved_target = target if target is not None else self.resolve_target()
+        if resolved_target.container_mode:
+            return resolved_target
+
+        agent_config = self._resolve_agent(agent)
+        if shutil.which(agent_config.binary) is not None:
+            return resolved_target
+        msg = (
+            "No running Djinn container found and selected agent CLI "
+            f"'{agent_config.binary}' is not available on PATH"
+        )
         raise RuntimeError(msg)
+
+    def refresh_opencode_workflow(self, target: SessionTarget) -> SessionResult:
+        if target.container_id is None:
+            return SessionResult(returncode=1, stderr="OpenCode container refresh unavailable")
+        image_compatibility = self.workflow_image_compatible(target)
+        if image_compatibility is WorkflowImageCompatibility.UNKNOWN:
+            return SessionResult(
+                returncode=1, stderr="Docker daemon/container not reachable — retry."
+            )
+        if image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
+            return SessionResult(returncode=1, stderr="Rebuild/recreate required.")
+        command = [
+            "docker",
+            "exec",
+            target.container_id,
+            "python3",
+            "/home/dev/workflow-publisher.py",
+            "--view",
+            "/home/dev/.opencode/seed",
+            "--canonical-root",
+            "/home/dev/.djinn-canonical",
+            "--target",
+            "/home/dev/.config/opencode",
+            "--manifest",
+            "/home/dev/.config/opencode/.djinn-workflow-state.json",
+            "--ignore",
+            ".opencode.json",
+            "--profile",
+            "opencode",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return SessionResult(returncode=124, stderr="OpenCode workflow refresh timed out")
+        except (FileNotFoundError, PermissionError, OSError):
+            return SessionResult(returncode=1, stderr="OpenCode workflow refresh failed")
+        if result.returncode != 0:
+            return SessionResult(
+                returncode=result.returncode,
+                stderr=_publisher_refresh_error(result.stderr),
+            )
+        return SessionResult(returncode=0)
+
+    def workflow_image_compatible(self, target: SessionTarget) -> WorkflowImageCompatibility:
+        if target.container_id is None:
+            return WorkflowImageCompatibility.UNKNOWN
+        try:
+            container = subprocess.run(
+                ["docker", "inspect", target.container_id, "--format", "{{.Image}}"],
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                check=False,
+            )
+            if container.returncode != 0 or not container.stdout.strip():
+                return WorkflowImageCompatibility.UNKNOWN
+            image = container.stdout.strip()
+            inspected = subprocess.run(
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    image,
+                    "--format",
+                    '{{ index .Config.Labels "djinn.workflow.publisher" }}',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                check=False,
+            )
+        except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+            return WorkflowImageCompatibility.UNKNOWN
+        if inspected.returncode != 0:
+            return WorkflowImageCompatibility.UNKNOWN
+        return (
+            WorkflowImageCompatibility.COMPATIBLE
+            if inspected.stdout.strip() == "1"
+            else WorkflowImageCompatibility.INCOMPATIBLE
+        )
 
     def run_interactive(
         self,
@@ -74,9 +198,11 @@ class SessionManager:
         agent: str = "claude",
         model: str | None = None,
         initial_prompt: str | None = None,
+        target: SessionTarget | None = None,
     ) -> SessionResult:
         agent_config = self._resolve_agent(agent)
-        container_id = self._find_container()
+        resolved_target = target if target is not None else self.resolve_target()
+        container_id = resolved_target.container_id
 
         if container_id is not None:
             cwd = self._resolve_container_workdir(workspace_dir)
@@ -113,7 +239,8 @@ class SessionManager:
             )
         except FileNotFoundError:
             return SessionResult(
-                returncode=127, stderr=f"Agent binary not found: {agent_config.binary}",
+                returncode=127,
+                stderr=f"Agent binary not found: {agent_config.binary}",
             )
         except PermissionError as e:
             return SessionResult(returncode=126, stderr=f"Permission denied: {e}")
@@ -127,11 +254,13 @@ class SessionManager:
         agent: str = "claude",
         model: str | None = None,
         timeout: int = 300,
+        target: SessionTarget | None = None,
     ) -> SessionResult:
         from djinn_in_a_box.commands.agent import build_agent_command
 
         agent_config = self._resolve_agent(agent)
-        container_id = self._find_container()
+        resolved_target = target if target is not None else self.resolve_target()
+        container_id = resolved_target.container_id
 
         if container_id is not None:
             cwd = self._resolve_container_workdir(workspace_dir)
@@ -302,9 +431,7 @@ class SessionManager:
         parts: list[str] = [shlex.quote(agent_config.binary)]
         effective_model = model if model is not None else agent_config.default_model
         if effective_model:
-            parts.extend(
-                [shlex.quote(agent_config.model_flag), shlex.quote(effective_model)]
-            )
+            parts.extend([shlex.quote(agent_config.model_flag), shlex.quote(effective_model)])
         parts.extend(shlex.quote(f) for f in agent_config.write_flags)
         if initial_prompt is not None:
             parts.append(shlex.quote(initial_prompt))
@@ -337,3 +464,17 @@ class SessionManager:
             cmd.extend([agent_config.model_flag, effective_model])
         cmd.append(prompt)
         return cmd
+
+
+def _publisher_refresh_error(stderr: str) -> str:
+    for line in reversed(stderr.splitlines()):
+        value = line.strip()
+        for drift in DriftClass:
+            if drift is DriftClass.CLEAN:
+                continue
+            if value == f"workflow publisher: {drift.value}":
+                return (
+                    f"OpenCode workflow refresh failed: {drift.value}. "
+                    f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
+                )
+    return "OpenCode workflow refresh failed"

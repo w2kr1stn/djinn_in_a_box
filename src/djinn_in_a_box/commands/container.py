@@ -16,6 +16,10 @@ from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.banner import banner
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowDeliveryTarget,
+    prepare_config_workflow,
+)
 from djinn_in_a_box.core.console import (
     blank,
     console,
@@ -151,7 +155,23 @@ def start(
         raise typer.Exit(1) from None
 
     config = load_config()
-    preflight(config)
+    preflight(config, provision_host=False)
+
+    config_root = get_config_root(config)
+    workflow = prepare_config_workflow(
+        get_project_root(),
+        (
+            WorkflowDeliveryTarget("claude", config_root / "claude"),
+            WorkflowDeliveryTarget("codex", config_root / "codex"),
+        ),
+        config_snapshot=config,
+        require_compose_host_env=True,
+    )
+    if not workflow.success:
+        problem = workflow.problems[0]
+        error(problem.message)
+        warning(problem.remedy)
+        raise typer.Exit(1)
 
     if not ensure_network():
         error(f"Failed to create Docker network '{DJINN_NETWORK}'")

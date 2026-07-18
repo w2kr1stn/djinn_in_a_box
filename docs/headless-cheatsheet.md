@@ -22,6 +22,58 @@ Check available models with the agent's own documentation or CLI help.
 
 ---
 
+## Global Workflow Source and Audit
+
+The agent selected for a headless run is independent of the deployment's global
+workflow source. Configure that native source separately:
+
+```bash
+djinn config set config_sync.source claude   # or codex / opencode
+djinn config sync
+djinn config status
+```
+
+For a source change, keep the order **switch → sync → edit**. `status` is always
+read-only; `sync` is the explicit writer. Sync requires a valid source and
+refuses to overwrite an edited managed target. An unowned item at a managed path
+is reported as a collision.
+
+The setting is deployment-wide; the shared demo is one deployment, not a
+per-tenant source selector. It covers only Djinn's global instructions, agents,
+skills, commands, support files, and known startup/security/ready behavior.
+Repository-local workflow files remain read-only, while credentials, auth,
+history, themes, UI policy, MCP, arbitrary plugins, and unlisted settings remain
+outside this ownership boundary.
+
+Known hooks are native-only per tool. Their scripts, OpenCode plugins, and hook
+registrations are optional author-owned artifacts: when present they are
+validated in their own view (OpenCode plugins also require the export marker),
+but they are never projected to another tool or stale-removed. Runtime delivery
+still receives the complete native view, including those hooks and registrations.
+
+`djinn config status` is safe for diagnostics and automation: it reports a
+sanitized source, drift class, artifact locations, and one remedy without
+printing workflow or settings bodies. It exits `0` only when the state is
+`clean`; it exits `1` for `source-changed`, `target-drift`, `collision`, or
+`invalid-or-semantic`. `djinn config sync` is non-zero when blocked.
+
+Normal `start`, `run`, and `session` preparation repairs only deterministic
+`source-changed` projection drift. `target-drift`, `collision`, and
+`invalid-or-semantic` stop the command before an agent starts. There is no
+semantic-provider fallback: non-portable artifacts block with this remedy:
+“Author or edit the artifact natively in the target tool's view, or make the
+source form portable.”
+
+The shared publisher records the canonical `config/` tree in
+`.djinn-config-sync.json` and every publisher-managed runtime root in
+`.djinn-workflow-state.json`. Compose Claude is manifestless: it uses direct
+mounts for both `CLAUDE.md` and its generated `AGENTS.md` companion plus the
+Claude settings merge. An image without the `djinn.workflow.publisher=1` label
+is rejected with `Rebuild/recreate required.` before a Compose run or an OpenCode
+session refresh.
+
+---
+
 ## CLI Usage (`djinn run`)
 
 ```bash
@@ -108,9 +160,11 @@ djinn session --project my-project --prompt "Run a deeper analysis" --timeout 90
 
 When a running `djinn` container exists, session commands run through
 `docker exec` inside that container. If no container is running, session
-preflight permits host execution only when `claude` is on `PATH`. That preflight
-does not validate the selected agent's host binary, so choosing another agent can
-still fail at invocation if its binary is missing.
+preflight checks the selected agent's configured binary on host `PATH`. Claude,
+Codex, and OpenCode host fallback also receives that selected agent's canonical
+workflow.
+For a running-container OpenCode session, Djinn refreshes the live OpenCode
+runtime through the shared publisher before invocation.
 
 ---
 

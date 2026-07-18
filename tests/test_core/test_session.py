@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from djinn_in_a_box.config.models import AgentConfig
-from djinn_in_a_box.core.session import SessionManager, SessionResult
+from djinn_in_a_box.core.docker import WorkflowImageCompatibility
+from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
 
 _SESSION_MODULE = "djinn_in_a_box.core.session"
 _SUBPROCESS_RUN = f"{_SESSION_MODULE}.subprocess.run"
@@ -41,6 +42,22 @@ def session_mgr(mock_agents: dict[str, AgentConfig]) -> SessionManager:
 
 
 # ── SessionResult Tests ──
+
+
+class TestSessionTarget:
+    def test_host_mode_default(self) -> None:
+        target = SessionTarget()
+        assert target.container_id is None
+        assert target.container_mode is False
+
+    def test_container_mode(self) -> None:
+        target = SessionTarget(container_id="abc123")
+        assert target.container_mode is True
+
+    def test_frozen_dataclass(self) -> None:
+        target = SessionTarget()
+        with pytest.raises(AttributeError):
+            target.container_id = "abc123"  # type: ignore[misc]
 
 
 class TestSessionResult:
@@ -101,6 +118,211 @@ class TestFindContainer:
             assert session_mgr._find_container() is None
 
 
+class TestResolveTarget:
+    def test_wraps_discovered_container(self, session_mgr: SessionManager) -> None:
+        with patch.object(session_mgr, "_find_container", return_value="abc123"):
+            target = session_mgr.resolve_target()
+
+        assert target == SessionTarget(container_id="abc123")
+
+    def test_wraps_host_fallback(self, session_mgr: SessionManager) -> None:
+        with patch.object(session_mgr, "_find_container", return_value=None):
+            target = session_mgr.resolve_target()
+
+        assert target == SessionTarget()
+
+
+class TestRefreshOpenCodeWorkflow:
+    def test_uses_publisher_with_exact_container_arguments(
+        self, session_mgr: SessionManager
+    ) -> None:
+        completed = MagicMock(returncode=0, stdout="ignored", stderr="ignored")
+        target = SessionTarget(container_id="stable-container-id")
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=completed) as run,
+        ):
+            result = session_mgr.refresh_opencode_workflow(target)
+
+        assert result.success is True
+        run.assert_called_once_with(
+            [
+                "docker",
+                "exec",
+                "stable-container-id",
+                "python3",
+                "/home/dev/workflow-publisher.py",
+                "--view",
+                "/home/dev/.opencode/seed",
+                "--canonical-root",
+                "/home/dev/.djinn-canonical",
+                "--target",
+                "/home/dev/.config/opencode",
+                "--manifest",
+                "/home/dev/.config/opencode/.djinn-workflow-state.json",
+                "--ignore",
+                ".opencode.json",
+                "--profile",
+                "opencode",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+
+    def test_failure_output_is_sanitized(self, session_mgr: SessionManager) -> None:
+        sentinel = "PRIVATE-CONTAINER-OUTPUT"
+        failed = MagicMock(returncode=9, stdout=sentinel, stderr=sentinel)
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.returncode == 9
+        assert result.stderr == "OpenCode workflow refresh failed"
+        assert sentinel not in repr(result)
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("source-changed", "Run `djinn config sync`"),
+            ("target-drift", "modified managed workflow item"),
+            ("collision", "conflicting unmanaged workflow item"),
+            ("invalid-or-semantic", "Author or edit the artifact natively"),
+        ],
+    )
+    def test_publisher_classes_have_one_content_free_remedy(
+        self, session_mgr: SessionManager, code: str, expected: str
+    ) -> None:
+        failed = MagicMock(
+            returncode=13,
+            stdout="",
+            stderr=f"workflow publisher: {code}\n",
+        )
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert code in result.stderr
+        assert expected in result.stderr
+
+    def test_running_old_container_blocks_before_exec_even_if_tag_is_new(
+        self, session_mgr: SessionManager
+    ) -> None:
+        container = MagicMock(returncode=0, stdout="sha256:old-image\n", stderr="")
+        image = MagicMock(returncode=0, stdout="0\n", stderr="")
+
+        with patch(_SUBPROCESS_RUN, side_effect=(container, image)) as run:
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == "Rebuild/recreate required."
+        assert run.call_count == 2
+        assert run.call_args_list[1].args[0][3] == "sha256:old-image"
+
+    def test_unreachable_container_blocks_refresh_without_rebuild_remedy(
+        self, session_mgr: SessionManager
+    ) -> None:
+        inspect_failure = MagicMock(returncode=1, stdout="", stderr="daemon unavailable")
+
+        with patch(_SUBPROCESS_RUN, return_value=inspect_failure) as run:
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == "Docker daemon/container not reachable — retry."
+        assert "Rebuild/recreate required" not in result.stderr
+        run.assert_called_once()
+
+    def test_inspect_timeout_is_unknown(self, session_mgr: SessionManager) -> None:
+        with patch(
+            _SUBPROCESS_RUN, side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)
+        ):
+            compatibility = session_mgr.workflow_image_compatible(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert compatibility is WorkflowImageCompatibility.UNKNOWN
+
+    @pytest.mark.parametrize(
+        ("label", "expected"),
+        [
+            ("", WorkflowImageCompatibility.INCOMPATIBLE),
+            ("1\n", WorkflowImageCompatibility.COMPATIBLE),
+        ],
+    )
+    def test_container_image_label_distinguishes_compatibility(
+        self,
+        session_mgr: SessionManager,
+        label: str,
+        expected: WorkflowImageCompatibility,
+    ) -> None:
+        container = MagicMock(returncode=0, stdout="sha256:image\n", stderr="")
+        image = MagicMock(returncode=0, stdout=label, stderr="")
+
+        with patch(_SUBPROCESS_RUN, side_effect=(container, image)):
+            compatibility = session_mgr.workflow_image_compatible(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert compatibility is expected
+
+    def test_publisher_refresh_maps_last_publisher_line_after_noise(
+        self, session_mgr: SessionManager
+    ) -> None:
+        failed = MagicMock(
+            returncode=13,
+            stdout="",
+            stderr="daemon note\nworkflow publisher: target-drift\ntrailing diagnostic\n",
+        )
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert "target-drift" in result.stderr
+        assert "modified managed workflow item" in result.stderr
+
+    def test_host_target_does_not_execute_refresh(self, session_mgr: SessionManager) -> None:
+        with patch(_SUBPROCESS_RUN) as run:
+            result = session_mgr.refresh_opencode_workflow(SessionTarget())
+
+        assert result.success is False
+        run.assert_not_called()
+
+
 # ── Preflight Check Tests ──
 
 
@@ -124,14 +346,47 @@ class TestPreflightCheck:
         ):
             session_mgr.preflight_check()
 
+    def test_host_mode_checks_selected_agent_binary(self, session_mgr: SessionManager) -> None:
+        session_mgr._agents["codex"] = AgentConfig(binary="custom-codex")
+        target = SessionTarget()
+        with patch(
+            f"{_SESSION_MODULE}.shutil.which", return_value="/usr/bin/custom-codex"
+        ) as which:
+            resolved = session_mgr.preflight_check(agent="codex", target=target)
+
+        assert resolved is target
+        which.assert_called_once_with("custom-codex")
+
+    def test_host_mode_error_names_selected_agent_binary(self, session_mgr: SessionManager) -> None:
+        session_mgr._agents["codex"] = AgentConfig(binary="custom-codex")
+        with (
+            patch(f"{_SESSION_MODULE}.shutil.which", return_value=None),
+            pytest.raises(RuntimeError, match="custom-codex"),
+        ):
+            session_mgr.preflight_check(agent="codex", target=SessionTarget())
+
+    def test_resolved_target_is_shared_by_preflight_and_launch(
+        self, session_mgr: SessionManager
+    ) -> None:
+        mock_result = MagicMock(returncode=0)
+        with (
+            patch.object(session_mgr, "_find_container", return_value="abc123") as find,
+            patch(_SUBPROCESS_RUN, return_value=mock_result) as run,
+        ):
+            target = session_mgr.resolve_target()
+            assert session_mgr.preflight_check(target=target) is target
+            result = session_mgr.run_interactive(workspace_dir=Path("/tmp/ws"), target=target)
+
+        find.assert_called_once_with()
+        assert "abc123" in run.call_args.args[0]
+        assert result.returncode == 0
+
 
 # ── Interactive Session Tests ──
 
 
 class TestRunInteractiveContainer:
-    def test_calls_docker_exec_with_correct_args(
-        self, session_mgr: SessionManager
-    ) -> None:
+    def test_calls_docker_exec_with_correct_args(self, session_mgr: SessionManager) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         with (
@@ -207,9 +462,7 @@ class TestRunInteractiveHost:
 
 
 class TestRunHeadlessContainer:
-    def test_calls_docker_exec_without_it(
-        self, session_mgr: SessionManager
-    ) -> None:
+    def test_calls_docker_exec_without_it(self, session_mgr: SessionManager) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "output"
@@ -219,9 +472,7 @@ class TestRunHeadlessContainer:
             patch(_AGENT_LOAD, return_value=session_mgr._agents),
             patch(_SUBPROCESS_RUN, return_value=mock_result) as mock_run,
         ):
-            result = session_mgr.run_headless(
-                workspace_dir=Path("/tmp/ws"), prompt="test"
-            )
+            result = session_mgr.run_headless(workspace_dir=Path("/tmp/ws"), prompt="test")
 
             cmd = mock_run.call_args[0][0]
             assert "-it" not in cmd
@@ -253,9 +504,7 @@ class TestRunHeadlessContainer:
             patch(_AGENT_LOAD, return_value=session_mgr._agents),
             patch(_SUBPROCESS_RUN, return_value=mock_result) as mock_run,
         ):
-            session_mgr.run_headless(
-                workspace_dir=Path("/tmp/ws"), prompt="hello world"
-            )
+            session_mgr.run_headless(workspace_dir=Path("/tmp/ws"), prompt="hello world")
 
             cmd = mock_run.call_args[0][0]
             cmd_str = " ".join(cmd)
@@ -263,9 +512,7 @@ class TestRunHeadlessContainer:
 
 
 class TestRunHeadlessHost:
-    def test_captures_output_in_host_mode(
-        self, session_mgr: SessionManager
-    ) -> None:
+    def test_captures_output_in_host_mode(self, session_mgr: SessionManager) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "host output"
@@ -275,9 +522,7 @@ class TestRunHeadlessHost:
             patch.object(session_mgr, "_git_init_workspace"),
             patch(_SUBPROCESS_RUN, return_value=mock_result),
         ):
-            result = session_mgr.run_headless(
-                workspace_dir=Path("/tmp/ws"), prompt="test"
-            )
+            result = session_mgr.run_headless(workspace_dir=Path("/tmp/ws"), prompt="test")
             assert result.stdout == "host output"
 
     def test_timeout_returns_124_host(self, session_mgr: SessionManager) -> None:
@@ -289,27 +534,40 @@ class TestRunHeadlessHost:
                 side_effect=subprocess.TimeoutExpired(cmd=[], timeout=10),
             ),
         ):
-            result = session_mgr.run_headless(
-                workspace_dir=Path("/tmp/ws"), prompt="test"
-            )
+            result = session_mgr.run_headless(workspace_dir=Path("/tmp/ws"), prompt="test")
             assert result.returncode == 124
+
+    def test_reuses_caller_resolved_host_target(self, session_mgr: SessionManager) -> None:
+        mock_result = MagicMock(returncode=0, stdout="host", stderr="")
+        with (
+            patch.object(
+                session_mgr,
+                "_find_container",
+                side_effect=AssertionError("target was resolved again"),
+            ),
+            patch.object(session_mgr, "_git_init_workspace"),
+            patch(_SUBPROCESS_RUN, return_value=mock_result),
+        ):
+            result = session_mgr.run_headless(
+                workspace_dir=Path("/tmp/ws"),
+                prompt="test",
+                target=SessionTarget(),
+            )
+
+        assert result.stdout == "host"
 
 
 # ── Git Init Tests ──
 
 
 class TestGitInitWorkspace:
-    def test_skips_if_git_dir_exists(
-        self, session_mgr: SessionManager, tmp_path: Path
-    ) -> None:
+    def test_skips_if_git_dir_exists(self, session_mgr: SessionManager, tmp_path: Path) -> None:
         (tmp_path / ".git").mkdir()
         with patch(_SUBPROCESS_RUN) as mock_run:
             session_mgr._git_init_workspace(tmp_path)
             mock_run.assert_not_called()
 
-    def test_runs_git_init_if_no_git_dir(
-        self, session_mgr: SessionManager, tmp_path: Path
-    ) -> None:
+    def test_runs_git_init_if_no_git_dir(self, session_mgr: SessionManager, tmp_path: Path) -> None:
         with patch(_SUBPROCESS_RUN) as mock_run:
             session_mgr._git_init_workspace(tmp_path)
             mock_run.assert_called_once()
@@ -341,9 +599,7 @@ class TestResolveContainerWorkdir:
         result = session_mgr._resolve_container_workdir(ws)
         assert result == "/home/dev/sessions/testproject"
 
-    def test_workspace_at_project_root(
-        self, session_mgr: SessionManager, tmp_path: Path
-    ) -> None:
+    def test_workspace_at_project_root(self, session_mgr: SessionManager, tmp_path: Path) -> None:
         """Workspace at project root (no subdir) maps correctly."""
         host_base = tmp_path / ".djinn" / "sessions"
         ws = host_base / "myproject"
@@ -373,13 +629,9 @@ class TestSessionModelResolution:
 
         assert command == ["codex", "--model", "configured-model"]
 
-    def test_interactive_command_prefers_explicit_model(
-        self, session_mgr: SessionManager
-    ) -> None:
+    def test_interactive_command_prefers_explicit_model(self, session_mgr: SessionManager) -> None:
         config = AgentConfig(binary="codex", default_model="configured-model")
 
-        command = session_mgr._build_host_interactive_command(
-            config, "gpt-5.6", None
-        )
+        command = session_mgr._build_host_interactive_command(config, "gpt-5.6", None)
 
         assert command == ["codex", "--model", "gpt-5.6"]

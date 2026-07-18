@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.paths import get_project_root
+from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 
 DJINN_NETWORK: str = "djinn-network"
 """Docker network name for Djinn containers."""
@@ -28,6 +29,9 @@ _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
     "dev-auth": "djinn-auth",
 }
+_WORKFLOW_IMAGE = "djinn-in-a-box:latest"
+_WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
+_WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 
 
 class DockerMode(Enum):
@@ -36,6 +40,12 @@ class DockerMode(Enum):
     NONE = "none"
     PROXY = "proxy"
     DIRECT = "direct"
+
+
+class WorkflowImageCompatibility(Enum):
+    COMPATIBLE = "compatible"
+    INCOMPATIBLE = "incompatible"
+    UNKNOWN = "unknown"
 
 
 def resolve_docker_mode(docker: bool, docker_direct: bool) -> DockerMode:
@@ -388,9 +398,12 @@ def compose_run(
                 returncode=result.returncode,
             )
 
-        # Headless mode: capture output with optional timeout
+        # Headless mode: capture output with optional timeout. stdin must be
+        # closed explicitly: agent CLIs such as `codex exec` block waiting for
+        # stdin when they inherit an open terminal descriptor.
         result = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             cwd=project_root,
@@ -539,6 +552,35 @@ def get_config_root(config: AppConfig | None = None) -> Path:
     return Path.home() / ".djinn" / "config"
 
 
+def workflow_image_compatible(
+    image: str = _WORKFLOW_IMAGE,
+) -> WorkflowImageCompatibility:
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{ index .Config.Labels \"djinn.workflow.publisher\" }}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_WORKFLOW_IMAGE_INSPECT_TIMEOUT,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return WorkflowImageCompatibility.UNKNOWN
+    if result.returncode != 0:
+        return WorkflowImageCompatibility.UNKNOWN
+    return (
+        WorkflowImageCompatibility.COMPATIBLE
+        if result.stdout.strip() == "1"
+        else WorkflowImageCompatibility.INCOMPATIBLE
+    )
+
+
 def ensure_host_env(config: AppConfig | None = None) -> None:
     """Idempotently create the unconditional host bind-mount sources.
 
@@ -558,6 +600,13 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
         # 0700: credential stores hold secrets (OAuth tokens, age identities).
         # Applies on creation only, matching the ~/.ssh precedent below.
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    claude_root = get_project_root() / "config" / "claude"
+    companion = claude_root / "AGENTS.md"
+    if not workflow_root_is_uninitialized(claude_root) and not (
+        companion.exists() or companion.is_symlink()
+    ):
+        companion.touch(exist_ok=False)
 
     djinn_dir = Path.home() / ".djinn"
     for sub in ("sessions", "backups"):

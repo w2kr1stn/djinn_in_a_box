@@ -60,6 +60,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         binary="codex",
         description="OpenAI Codex CLI",
         headless_flags=["exec"],
+        read_only_flags=["--sandbox", "read-only"],
         write_flags=["--full-auto"],
         json_flags=["--json"],
         model_flag="--model",
