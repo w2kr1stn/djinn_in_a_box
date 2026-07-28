@@ -106,7 +106,7 @@ user
 djinn CLI (Typer)
   |
   +-- commands/config.py     init, config show/path/set/edit/status/sync
-  +-- commands/container.py  build, start, auth, status, clean, audit, update, enter
+  +-- commands/container.py  build, start, status, clean, audit, update, enter
   +-- commands/doctor.py     doctor, doctor --fix, preflight
   +-- commands/agent.py      djinn run, djinn agents
   +-- commands/session.py    djinn session
@@ -381,7 +381,7 @@ host interpolation through:
 - `_compose_host_env(config)` overlays them onto `os.environ`
 - `_run_compose(args, config, cwd)` is the captured `docker compose` choke-point
 
-Captured Compose calls such as `compose_build()`, `compose_up()`,
+Captured Compose calls such as `compose_build()`,
 `compose_down()`, and Docker proxy cleanup route through `_run_compose()`.
 `compose_run()` is the sanctioned interactive/headless run site; it also builds
 `host_env = _compose_host_env(config)` before calling `subprocess.run()`.
@@ -518,10 +518,27 @@ entrypoint.
 
 ## Docker Compose Runtime
 
-`docker-compose.yml` defines a stable project name and two services:
+`docker-compose.yml` defines a stable project name and one service:
 
 - `dev`: normal development container on `djinn-network`
-- `dev-auth`: auth profile using host networking for OAuth-style callbacks
+
+There is no separate authentication service. Every bundled CLI signs in from
+inside a normal `dev` session: the tool prints a URL, the user opens it in the
+host browser and pastes the returned code back into the container. No loopback
+callback is *needed*, so the container requires neither host networking nor a
+published port.
+
+Selecting that flow is not uniform. Claude Code and OpenCode prompt for a pasted
+code by default; Gemini CLI picks its code-paste path automatically because the
+image sets `DEBIAN_FRONTEND=noninteractive` (`Dockerfile`) and no display
+variable is present, which suppresses its browser launch. Codex is the
+exception: plain `codex login` starts a container-local login server that the
+host browser cannot reach, so users must run `codex login --device-auth` (or
+choose the remote/headless option in its TUI). README documents this.
+
+Claude Code, Gemini CLI, Codex, and the GitHub CLI persist the resulting
+credentials in their config-root bind mounts; OpenCode writes `auth.json` into
+the `djinn-opencode-data` named volume.
 
 Common mounts include:
 
@@ -595,12 +612,12 @@ backed by named volumes.
 - `start()`: resolves Docker mode, preflights, ensures `djinn-network`, resolves
   `--here` or `--mount`, prints the banner plus `Environment` and `Container`
   rules on stderr, then calls `compose_run()` for `dev`.
-- `auth()`: starts the `dev-auth` profile with host networking; proxy mode
-  starts `docker-proxy` separately because the auth container uses host network.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with
-  `compose_down(config=None)`, using best-effort placeholders.
+  `compose_down(config=None)`, using best-effort placeholders. `compose_down`
+  passes `--remove-orphans`, without which Compose skips the one-off containers
+  that `start` and `run` create and also leaves a proxy from `--docker` behind.
 - `clean_volumes()`: lists or deletes named volume categories and clears
   config-root sync paths by category.
 - `clean_all()`: stops containers, deletes all known named volumes, clears all
@@ -621,8 +638,16 @@ is exported in the host environment, which still takes precedence.
 `commands/doctor.py` has two levels:
 
 - `doctor(fix=False)`: full diagnostic report
-- `preflight(config)`: fast critical path used before `build`, `start`, and
-  `auth`
+- `preflight(config)`: fast critical path used before `build` and `start`. It
+  provisions the host bind-mount sources unless the caller passes
+  `provision_host=False`, which `start` does
+
+Host bind-mount provisioning (`ensure_host_env`) is reached through two entry
+paths. `init`, `doctor --fix`, and the `build` preflight call it directly.
+`start`, `run`, and container-mode `session` reach it through
+`prepare_config_workflow(require_compose_host_env=True)`, which provisions after
+the image-compatibility check and before Compose runs. `start` therefore skips
+only the preflight provisioning, not provisioning as such.
 
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,
@@ -743,9 +768,8 @@ Commands include:
 - `test`
 - `clean`
 
-The main dev container receives `MCP_GATEWAY_URL` pointing at the gateway over
-the Docker network. The auth container uses a host endpoint because it runs with
-host networking.
+The dev container receives `MCP_GATEWAY_URL` pointing at the gateway over the
+Docker network.
 
 ## Data Flow Diagrams
 

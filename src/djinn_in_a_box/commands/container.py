@@ -1,10 +1,9 @@
-"""Container lifecycle commands — build, start, auth, status, clean, and more."""
+"""Container lifecycle commands — build, start, status, clean, and more."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Annotated
 
@@ -35,13 +34,11 @@ from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     ContainerOptions,
-    DockerMode,
     cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
     compose_down,
     compose_run,
-    compose_up,
     delete_network,
     delete_volume,
     delete_volumes,
@@ -245,77 +242,6 @@ def start(
 
     try:
         result = compose_run(config, options, interactive=True)
-    finally:
-        cleanup_docker_proxy(docker_mode, config)
-
-    raise typer.Exit(result.returncode)
-
-
-@handle_config_errors
-def auth(
-    docker: Annotated[
-        bool,
-        typer.Option("--docker", "-d", help="Enable Docker access via proxy"),
-    ] = False,
-    docker_direct: Annotated[
-        bool,
-        typer.Option("--docker-direct", help="Enable direct Docker socket access (no proxy)"),
-    ] = False,
-) -> None:
-    """Start with host network for OAuth authentication.
-
-    This mode uses network_mode: host so OAuth callbacks from CLI tools
-    (Claude Code, Gemini CLI, Codex) can reach localhost.
-
-    After authenticating all tools, exit and use 'djinn start' for
-    normal development with the isolated network.
-
-    Example:
-        djinn auth                   # Authenticate CLI tools
-        djinn auth --docker          # With Docker access (proxy)
-        djinn auth --docker-direct   # With Docker access (direct)
-    """
-    try:
-        docker_mode = resolve_docker_mode(docker, docker_direct)
-    except ValueError as e:
-        error(str(e))
-        raise typer.Exit(1) from None
-
-    config = load_config()
-    preflight(config)
-
-    info("Starting Djinn with host network for OAuth authentication...")
-    blank()
-    err_console.print("This mode uses network_mode: host so OAuth callbacks work.")
-    err_console.print(
-        "After authenticating Claude Code, Gemini CLI and Codex, exit and use 'djinn start'"
-    )
-    blank()
-
-    # Start docker proxy separately if docker proxy mode is enabled
-    # In host network mode, the proxy needs to be started as a separate service
-    if docker:
-        err_console.print(
-            "[warning]Docker proxy starting separately for host network mode...[/warning]"
-        )
-        proxy_result = compose_up(
-            services=["docker-proxy"], config=config, docker_mode=DockerMode.PROXY
-        )
-        if not proxy_result.success:
-            error("Failed to start Docker proxy for host network mode")
-            raise typer.Exit(proxy_result.returncode)
-        time.sleep(2)
-
-    if docker_direct:
-        warning(
-            "Direct Docker socket access grants full Docker control. "
-            "Use --docker (proxy) for safer operation."
-        )
-
-    # Run auth container via compose_run
-    options = ContainerOptions(docker_mode=docker_mode)
-    try:
-        result = compose_run(config, options, service="dev-auth", profile="auth", interactive=True)
     finally:
         cleanup_docker_proxy(docker_mode, config)
 

@@ -2,8 +2,10 @@
 
 ``doctor()`` is the full, report-only diagnostic (PASS/FAIL/WARN + remedy per
 check). ``preflight()`` is the fast critical subset that auto-runs before
-``build``/``start``/``auth``: it provisions the host bind-mount sources
-(``ensure_host_env``) and refuses with a friendly message if Docker is unusable.
+``build``/``start``: it refuses with a friendly message if Docker is unusable,
+then provisions the host bind-mount sources (``ensure_host_env``) unless the
+caller opts out with ``provision_host=False``. ``start`` opts out here because
+it provisions later through compose workflow preparation instead.
 """
 
 from __future__ import annotations
@@ -494,7 +496,7 @@ def doctor(
 
 
 def preflight(config: AppConfig, *, provision_host: bool = True) -> None:
-    """Fast critical preflight before build/start/auth.
+    """Fast critical preflight before build/start.
 
     Verifies Docker is usable first (cheap read-only probes), then provisions the
     host bind-mount sources — so a Docker-down failure leaves no provisioning

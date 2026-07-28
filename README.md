@@ -28,7 +28,6 @@ Djinn gives you one repeatable container image and several ways to use it:
 - Attach another shell to a running container with `djinn enter`.
 - Keep reusable session workspaces under `~/.djinn/sessions/` with
   `djinn session`.
-- Run OAuth-style authentication flows with `djinn auth`.
 - Diagnose the host and seeded configuration with `djinn doctor`.
 - Back up and restore the managed volumes and config-root directories with
   `djinn backup` and `djinn restore`.
@@ -104,19 +103,44 @@ djinn run claude "Fix the failing test." --write
 
 ## First Authentication
 
-Use `djinn auth` when an agent needs a browser or loopback OAuth flow:
+Sign in from inside a normal development shell:
 
 ```sh
-djinn auth
+djinn start
 ```
 
-This starts the auth service with host networking so local callback flows can
-complete. Exit the shell after signing in, then use `djinn start` or `djinn run`
-for normal work.
+Authenticate the tools one by one in that shell by running each agent binary and
+following its prompts. Every bundled CLI can sign in without a loopback
+callback: the tool prints a URL, you open it in your host browser, and you paste
+the resulting code back into the container.
 
-You can authenticate tools one by one inside that shell, for example by running
-the agent binary directly. The resulting credentials persist in your configured
-config root, not in the container image.
+Claude Code, Gemini CLI, and OpenCode select that flow on their own inside the
+container. **Codex needs to be told:** plain `codex login` starts a login server
+on a container-local port that your host browser cannot reach, and the sign-in
+never completes. Use the device flow instead:
+
+```sh
+codex login --device-auth
+```
+
+In the Codex TUI sign-in screen, the equivalent is the *remote or headless
+machine* option.
+
+The GitHub CLI is not an agent binary but shares the same model — run
+`gh auth login` in that shell and choose the device-code flow when prompted.
+
+The resulting credentials persist outside the container image, so you only do
+this once per tool. Note where each tool stores them, because the two locations
+back up and move differently:
+
+| Tool | Credential location | Backup category |
+| --- | --- | --- |
+| Claude Code, Gemini CLI, Codex, GitHub CLI | your configured config root | `credentials` |
+| OpenCode | the `djinn-opencode-data` named volume (`auth.json`) | `data` |
+
+`djinn backup` includes both categories by default. If you back up selectively,
+or copy only your config root to another machine, OpenCode's login does not
+travel with it.
 
 ## Configuration
 
@@ -373,7 +397,6 @@ value overrides `default_model` for that invocation.
 | Command | Container behavior | Workspace behavior | Main use |
 | --- | --- | --- | --- |
 | `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit | Starts in `/home/dev/projects`; add `--here` or `--mount PATH` to mount `/home/dev/workspace` and work there | Daily interactive shell |
-| `djinn auth` | Runs the `dev-auth` service with the Compose `auth` profile and host networking | Starts in `/home/dev/projects` | OAuth and browser callback setup |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Mounts the current directory as `/home/dev/workspace` by default; `--mount PATH` overrides it | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |

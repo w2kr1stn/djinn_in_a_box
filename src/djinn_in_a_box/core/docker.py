@@ -27,7 +27,6 @@ _CONTAINER_USER_UID: int = 1000
 
 _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
-    "dev-auth": "djinn-auth",
 }
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
@@ -319,7 +318,6 @@ def compose_run(
     interactive: bool = True,
     env: dict[str, str] | None = None,
     service: str = "dev",
-    profile: str | None = None,
     timeout: int | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
@@ -331,7 +329,6 @@ def compose_run(
         interactive: Enable TTY and stdin (default: True).
         env: Additional environment variables to pass to the container.
         service: Compose service name (default: dev).
-        profile: Compose profile to activate (e.g., "auth").
         timeout: Timeout in seconds (headless only). Returns exit code 124 on timeout.
     """
     project_root = get_project_root()
@@ -341,12 +338,8 @@ def compose_run(
     # Map service to fixed container name (matches container_name in compose YAML)
     container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
 
-    if profile:
-        cmd = ["docker", "compose", *compose_files, "--profile", profile, "run", "--rm",
-               "--name", container_name]
-    else:
-        cmd = ["docker", "compose", *compose_files, "run", "--rm",
-               "--name", container_name]
+    cmd = ["docker", "compose", *compose_files, "run", "--rm",
+           "--name", container_name]
 
     # TTY handling
     if not interactive:
@@ -434,24 +427,27 @@ def compose_run(
         )
 
 
-def compose_up(
-    services: list[str] | None = None,
-    *,
-    config: AppConfig | None = None,
-    docker_mode: DockerMode = DockerMode.NONE,
-) -> RunResult:
-    project_root = get_project_root()
-    compose_files = get_compose_files(docker_mode)
-    args = [*compose_files, "up", "-d"]
-    if services:
-        args.extend(services)
-    return _run_compose(args, config=config, cwd=project_root)
-
-
 def compose_down(config: AppConfig | None = None) -> RunResult:
+    """Stop and remove the project's containers.
+
+    ``--remove-orphans`` is required for correctness, not tidiness, and the
+    load-bearing reason is easy to miss: Compose classifies containers created
+    by ``compose run`` as one-off and skips them on a plain ``down`` — and that
+    is exactly how ``start`` and ``run`` create the dev container. Without the
+    flag, ``djinn clean`` reports success while the live session survives, and
+    ``djinn backup``'s stop-all-containers guard then keeps refusing the very
+    thing the user was just told to do.
+
+    It additionally reaps containers the project owns but this file does not
+    declare — a proxy left by ``--docker``, or a service dropped in an upgrade.
+    Those two are transient; the one-off case is permanent. Do not drop the flag
+    on the reasoning that ``cleanup_docker_proxy`` already covers the proxy.
+    """
     project_root = get_project_root()
     compose_files = get_compose_files()
-    return _run_compose([*compose_files, "down"], config=config, cwd=project_root)
+    return _run_compose(
+        [*compose_files, "down", "--remove-orphans"], config=config, cwd=project_root
+    )
 
 
 def cleanup_docker_proxy(docker_mode: DockerMode, config: AppConfig | None = None) -> None:
@@ -587,8 +583,12 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     The compose file mounts these paths unconditionally; if a source is missing
     when ``docker compose`` runs, the root Docker daemon auto-creates it
     root-owned. Creating them here (user-owned, before any compose call) prevents
-    that footgun. Single host-provisioning routine — called by ``init`` and the
-    ``build``/``start``/``auth`` preflight.
+    that footgun. Single host-provisioning routine reached through two entry
+    paths: ``init``, ``doctor --fix``, and the ``build`` preflight call it
+    directly; ``start``, ``run``, and container-mode ``session`` reach it via
+    ``prepare_config_workflow(require_compose_host_env=True)``. ``start`` opts
+    out of the *preflight* provisioning only (``provision_host=False``) — it
+    still provisions through that workflow path before Compose runs.
 
     Provisions the compose-mounted credential subdirs (``SYNC_PATHS['credentials']``)
     plus the fixed extras. ``repo-dotfiles`` is intentionally NOT provisioned: it

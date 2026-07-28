@@ -90,7 +90,9 @@
     //   "ghcr.io/devcontainers/features/rust:1": {},
     // }
     // -------------------------------------------------------------------------
-    // NOTE: For OAuth authentication, first use `djinn auth` from the
-    // djinn_in_a_box directory to authenticate with host network.
+    // NOTE: Sign in to the agent CLIs from inside the container; they print a
+    // URL and accept a code pasted back from the host browser. Codex is the
+    // exception and needs `codex login --device-auth` — plain `codex login`
+    // binds a container-local port your host browser cannot reach.
     // -------------------------------------------------------------------------
 }
