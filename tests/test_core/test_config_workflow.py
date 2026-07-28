@@ -179,6 +179,43 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     assert not (runtime / "codex").exists()
 
 
+def test_host_provisioning_failure_reports_the_path_not_workflow_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unwritable config root must not be reported as a workflow-artifact problem.
+
+    Routing the OSError through the canonical drift remedy told users to make a
+    workflow artifact portable when the actual cause was a permission denial on
+    a host path — a diagnosable failure turned into a misleading one.
+    """
+    project, config_path, runtime = _workspace(tmp_path)
+
+    def _refuse(_config: AppConfig) -> None:
+        raise PermissionError(13, "Permission denied", "/root-owned/gemini")
+
+    monkeypatch.setattr(
+        workflow_module,
+        "workflow_image_compatible",
+        lambda: WorkflowImageCompatibility.COMPATIBLE,
+    )
+    monkeypatch.setattr(workflow_module, "ensure_host_env", _refuse)
+    monkeypatch.setattr(workflow_module, "audit_config_sync", _audit_must_not_run)
+
+    result = prepare_config_workflow(
+        project,
+        (WorkflowDeliveryTarget("codex", runtime / "codex", provision=True),),
+        config_path=config_path,
+        require_compose_host_env=True,
+    )
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "host-provisioning-failed"
+    assert "/root-owned/gemini" in problem.message
+    assert "writable" in problem.remedy
+    assert "portable" not in problem.remedy
+
+
 def test_compose_uses_the_running_container_image_compatibility(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

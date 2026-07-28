@@ -381,7 +381,7 @@ host interpolation through:
 - `_compose_host_env(config)` overlays them onto `os.environ`
 - `_run_compose(args, config, cwd)` is the captured `docker compose` choke-point
 
-Captured Compose calls such as `compose_build()`, `compose_up()`,
+Captured Compose calls such as `compose_build()`,
 `compose_down()`, and Docker proxy cleanup route through `_run_compose()`.
 `compose_run()` is the sanctioned interactive/headless run site; it also builds
 `host_env = _compose_host_env(config)` before calling `subprocess.run()`.
@@ -522,6 +522,14 @@ entrypoint.
 
 - `dev`: normal development container on `djinn-network`
 
+There is no separate authentication service. Every bundled CLI signs in from
+inside a normal `dev` session: the tool prints a URL, the user opens it in the
+host browser and pastes the returned code back into the container. No loopback
+callback is involved, so the container needs neither host networking nor a
+published port. Claude Code, Gemini CLI, Codex, and the GitHub CLI persist the
+resulting credentials in their config-root bind mounts; OpenCode writes
+`auth.json` into the `djinn-opencode-data` named volume.
+
 Common mounts include:
 
 - `${DJINN_CONFIG_ROOT}/claude` to `/home/dev/.claude`
@@ -620,8 +628,14 @@ is exported in the host environment, which still takes precedence.
 - `doctor(fix=False)`: full diagnostic report
 - `preflight(config)`: fast critical path used before `build` and `start`. It
   provisions the host bind-mount sources unless the caller passes
-  `provision_host=False`, which `start` does — provisioning owners are `init`,
-  `build`, and `doctor --fix`
+  `provision_host=False`, which `start` does
+
+Host bind-mount provisioning (`ensure_host_env`) is reached through two entry
+paths. `init`, `doctor --fix`, and the `build` preflight call it directly.
+`start`, `run`, and container-mode `session` reach it through
+`prepare_config_workflow(require_compose_host_env=True)`, which provisions after
+the image-compatibility check and before Compose runs. `start` therefore skips
+only the preflight provisioning, not provisioning as such.
 
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,

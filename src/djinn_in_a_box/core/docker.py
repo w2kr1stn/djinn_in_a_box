@@ -427,24 +427,19 @@ def compose_run(
         )
 
 
-def compose_up(
-    services: list[str] | None = None,
-    *,
-    config: AppConfig | None = None,
-    docker_mode: DockerMode = DockerMode.NONE,
-) -> RunResult:
-    project_root = get_project_root()
-    compose_files = get_compose_files(docker_mode)
-    args = [*compose_files, "up", "-d"]
-    if services:
-        args.extend(services)
-    return _run_compose(args, config=config, cwd=project_root)
-
-
 def compose_down(config: AppConfig | None = None) -> RunResult:
+    """Stop and remove the project's containers.
+
+    ``--remove-orphans`` is required for correctness, not tidiness: teardown
+    loads only the base compose file, so any container the project owns but the
+    base file does not declare — a proxy from ``--docker``, or a service removed
+    in an upgrade — would otherwise survive while the caller reports success.
+    """
     project_root = get_project_root()
     compose_files = get_compose_files()
-    return _run_compose([*compose_files, "down"], config=config, cwd=project_root)
+    return _run_compose(
+        [*compose_files, "down", "--remove-orphans"], config=config, cwd=project_root
+    )
 
 
 def cleanup_docker_proxy(docker_mode: DockerMode, config: AppConfig | None = None) -> None:
@@ -580,9 +575,12 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     The compose file mounts these paths unconditionally; if a source is missing
     when ``docker compose`` runs, the root Docker daemon auto-creates it
     root-owned. Creating them here (user-owned, before any compose call) prevents
-    that footgun. Single host-provisioning routine — called by ``init``,
-    ``doctor --fix``, and the ``build`` preflight (``start`` opts out via
-    ``provision_host=False``).
+    that footgun. Single host-provisioning routine reached through two entry
+    paths: ``init``, ``doctor --fix``, and the ``build`` preflight call it
+    directly; ``start``, ``run``, and container-mode ``session`` reach it via
+    ``prepare_config_workflow(require_compose_host_env=True)``. ``start`` opts
+    out of the *preflight* provisioning only (``provision_host=False``) — it
+    still provisions through that workflow path before Compose runs.
 
     Provisions the compose-mounted credential subdirs (``SYNC_PATHS['credentials']``)
     plus the fixed extras. ``repo-dotfiles`` is intentionally NOT provisioned: it

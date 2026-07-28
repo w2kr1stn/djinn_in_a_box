@@ -29,7 +29,6 @@ from djinn_in_a_box.core.docker import (
     compose_build,
     compose_down,
     compose_run,
-    compose_up,
     ensure_host_env,
     get_config_root,
 )
@@ -102,21 +101,28 @@ class TestComposeEnvBridge:
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_compose_up(
-        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
-    ) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        compose_up(config=mock_app_config)
-        self._assert_guarded(self._env_of(mock_run), mock_app_config)
-
-    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
-    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_compose_down(
         self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
     ) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)
         self._assert_guarded(self._env_of(mock_run), mock_app_config)
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_compose_down_removes_orphans(
+        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
+    ) -> None:
+        """Teardown must reap containers the base compose file no longer declares.
+
+        Without this, a service dropped in an upgrade (or a proxy from
+        ``--docker``) survives ``djinn clean`` while it reports success.
+        """
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        compose_down(mock_app_config)
+        argv = mock_run.call_args.args[0]
+        assert "down" in argv
+        assert "--remove-orphans" in argv
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")

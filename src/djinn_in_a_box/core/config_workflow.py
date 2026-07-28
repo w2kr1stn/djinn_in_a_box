@@ -153,8 +153,21 @@ def prepare_config_workflow(
             )
         try:
             ensure_host_env(config)
-        except OSError:
-            return _failure("invalid-or-semantic")
+        except OSError as e:
+            # A host-path permission problem is not workflow drift. Routing it
+            # through _failure() would answer "your config root is unwritable"
+            # with the canonical remedy about non-portable workflow artifacts,
+            # which sends the user looking in entirely the wrong place.
+            return WorkflowPreparationResult(
+                False,
+                (
+                    WorkflowPreparationProblem(
+                        "host-provisioning-failed",
+                        f"Failed to provision host directories: {e}",
+                        "Check that your home and config-root paths are writable, then retry.",
+                    ),
+                ),
+            )
 
     audit = audit_config_sync(project_root, config_path=config_path)
     if not audit.clean:

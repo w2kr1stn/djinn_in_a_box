@@ -4,7 +4,8 @@
 check). ``preflight()`` is the fast critical subset that auto-runs before
 ``build``/``start``: it refuses with a friendly message if Docker is unusable,
 then provisions the host bind-mount sources (``ensure_host_env``) unless the
-caller opts out with ``provision_host=False``, as ``start`` does.
+caller opts out with ``provision_host=False``. ``start`` opts out here because
+it provisions later through compose workflow preparation instead.
 """
 
 from __future__ import annotations
