@@ -525,10 +525,20 @@ entrypoint.
 There is no separate authentication service. Every bundled CLI signs in from
 inside a normal `dev` session: the tool prints a URL, the user opens it in the
 host browser and pastes the returned code back into the container. No loopback
-callback is involved, so the container needs neither host networking nor a
-published port. Claude Code, Gemini CLI, Codex, and the GitHub CLI persist the
-resulting credentials in their config-root bind mounts; OpenCode writes
-`auth.json` into the `djinn-opencode-data` named volume.
+callback is *needed*, so the container requires neither host networking nor a
+published port.
+
+Selecting that flow is not uniform. Claude Code and OpenCode prompt for a pasted
+code by default; Gemini CLI picks its code-paste path automatically because the
+image sets `DEBIAN_FRONTEND=noninteractive` (`Dockerfile`) and no display
+variable is present, which suppresses its browser launch. Codex is the
+exception: plain `codex login` starts a container-local login server that the
+host browser cannot reach, so users must run `codex login --device-auth` (or
+choose the remote/headless option in its TUI). README documents this.
+
+Claude Code, Gemini CLI, Codex, and the GitHub CLI persist the resulting
+credentials in their config-root bind mounts; OpenCode writes `auth.json` into
+the `djinn-opencode-data` named volume.
 
 Common mounts include:
 
@@ -605,7 +615,9 @@ backed by named volumes.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with
-  `compose_down(config=None)`, using best-effort placeholders.
+  `compose_down(config=None)`, using best-effort placeholders. `compose_down`
+  passes `--remove-orphans`, without which Compose skips the one-off containers
+  that `start` and `run` create and also leaves a proxy from `--docker` behind.
 - `clean_volumes()`: lists or deletes named volume categories and clears
   config-root sync paths by category.
 - `clean_all()`: stops containers, deletes all known named volumes, clears all

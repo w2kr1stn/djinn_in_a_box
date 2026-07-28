@@ -110,9 +110,21 @@ djinn start
 ```
 
 Authenticate the tools one by one in that shell by running each agent binary and
-following its prompts. All bundled CLIs support signing in without a loopback
+following its prompts. Every bundled CLI can sign in without a loopback
 callback: the tool prints a URL, you open it in your host browser, and you paste
 the resulting code back into the container.
+
+Claude Code, Gemini CLI, and OpenCode select that flow on their own inside the
+container. **Codex needs to be told:** plain `codex login` starts a login server
+on a container-local port that your host browser cannot reach, and the sign-in
+never completes. Use the device flow instead:
+
+```sh
+codex login --device-auth
+```
+
+In the Codex TUI sign-in screen, the equivalent is the *remote or headless
+machine* option.
 
 The resulting credentials persist outside the container image, so you only do
 this once per tool. Note where each tool stores them, because the two locations

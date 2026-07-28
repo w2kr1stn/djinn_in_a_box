@@ -28,8 +28,28 @@ Versioning before and after the first stable release.
 - Propagated `NO_COLOR` and terminal width into Compose startup so container
   shell output follows host plain-output and wrapping behavior.
 
+### Removed
+
+- The `djinn auth` command, the `dev-auth` Compose service, and the `auth`
+  Compose profile. They existed only for OAuth flows needing a loopback
+  callback, which required host networking. Every bundled CLI can now sign in
+  with a code pasted back from the host browser, so authentication happens
+  inside a normal `djinn start` session. Codex needs `codex login --device-auth`
+  to select that flow; the other CLIs pick it automatically. See "First
+  Authentication" in the README.
+
 ### Fixed
 
+- `djinn clean` now removes the containers it reports as removed. Compose treats
+  containers created by `compose run` as one-off and skips them on a plain
+  `down`, which is how `djinn start` and `djinn run` create the dev container —
+  so cleanup printed success while a live session survived and `djinn backup`
+  kept refusing with "stop all containers first". Teardown also reaps a Docker
+  proxy left behind by `--docker`.
+- A host path that cannot be provisioned (for example an unwritable or
+  root-owned config root) now reports the failing path and a writability remedy
+  instead of being classified as workflow drift, which advised making a workflow
+  artifact portable.
 - Optional tools no longer reinstall on every container start when their binary
   name differs from the installer name or they lack a `--version` flag (for
   example Azure CLI's `az` binary and Pulumi's `version` subcommand). Installer

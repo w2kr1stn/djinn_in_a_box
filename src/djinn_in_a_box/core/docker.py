@@ -430,10 +430,18 @@ def compose_run(
 def compose_down(config: AppConfig | None = None) -> RunResult:
     """Stop and remove the project's containers.
 
-    ``--remove-orphans`` is required for correctness, not tidiness: teardown
-    loads only the base compose file, so any container the project owns but the
-    base file does not declare — a proxy from ``--docker``, or a service removed
-    in an upgrade — would otherwise survive while the caller reports success.
+    ``--remove-orphans`` is required for correctness, not tidiness, and the
+    load-bearing reason is easy to miss: Compose classifies containers created
+    by ``compose run`` as one-off and skips them on a plain ``down`` — and that
+    is exactly how ``start`` and ``run`` create the dev container. Without the
+    flag, ``djinn clean`` reports success while the live session survives, and
+    ``djinn backup``'s stop-all-containers guard then keeps refusing the very
+    thing the user was just told to do.
+
+    It additionally reaps containers the project owns but this file does not
+    declare — a proxy left by ``--docker``, or a service dropped in an upgrade.
+    Those two are transient; the one-off case is permanent. Do not drop the flag
+    on the reasoning that ``cleanup_docker_proxy`` already covers the proxy.
     """
     project_root = get_project_root()
     compose_files = get_compose_files()

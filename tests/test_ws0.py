@@ -113,10 +113,13 @@ class TestComposeEnvBridge:
     def test_compose_down_removes_orphans(
         self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
     ) -> None:
-        """Teardown must reap containers the base compose file no longer declares.
+        """Teardown must reap one-off containers and undeclared project containers.
 
-        Without this, a service dropped in an upgrade (or a proxy from
-        ``--docker``) survives ``djinn clean`` while it reports success.
+        Compose skips ``compose run`` containers on a plain ``down`` — which is
+        how ``start``/``run`` create the dev container — so without this flag
+        ``djinn clean`` reports success while the live session survives and
+        ``djinn backup`` keeps refusing. It also reaps a proxy left by
+        ``--docker`` and services dropped in an upgrade.
         """
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)
