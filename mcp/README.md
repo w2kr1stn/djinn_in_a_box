@@ -192,10 +192,6 @@ mcpgateway start
 mcpgateway enable duckduckgo
 mcpgateway enable memory
 
-# Optional: authenticate agent CLIs with host networking
-djinn auth
-exit
-
 # Daily work
 djinn start
 claude

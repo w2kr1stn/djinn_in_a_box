@@ -106,7 +106,7 @@ user
 djinn CLI (Typer)
   |
   +-- commands/config.py     init, config show/path/set/edit/status/sync
-  +-- commands/container.py  build, start, auth, status, clean, audit, update, enter
+  +-- commands/container.py  build, start, status, clean, audit, update, enter
   +-- commands/doctor.py     doctor, doctor --fix, preflight
   +-- commands/agent.py      djinn run, djinn agents
   +-- commands/session.py    djinn session
@@ -518,10 +518,9 @@ entrypoint.
 
 ## Docker Compose Runtime
 
-`docker-compose.yml` defines a stable project name and two services:
+`docker-compose.yml` defines a stable project name and one service:
 
 - `dev`: normal development container on `djinn-network`
-- `dev-auth`: auth profile using host networking for OAuth-style callbacks
 
 Common mounts include:
 
@@ -595,8 +594,6 @@ backed by named volumes.
 - `start()`: resolves Docker mode, preflights, ensures `djinn-network`, resolves
   `--here` or `--mount`, prints the banner plus `Environment` and `Container`
   rules on stderr, then calls `compose_run()` for `dev`.
-- `auth()`: starts the `dev-auth` profile with host networking; proxy mode
-  starts `docker-proxy` separately because the auth container uses host network.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with
@@ -621,8 +618,10 @@ is exported in the host environment, which still takes precedence.
 `commands/doctor.py` has two levels:
 
 - `doctor(fix=False)`: full diagnostic report
-- `preflight(config)`: fast critical path used before `build`, `start`, and
-  `auth`
+- `preflight(config)`: fast critical path used before `build` and `start`. It
+  provisions the host bind-mount sources unless the caller passes
+  `provision_host=False`, which `start` does — provisioning owners are `init`,
+  `build`, and `doctor --fix`
 
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,
@@ -743,9 +742,8 @@ Commands include:
 - `test`
 - `clean`
 
-The main dev container receives `MCP_GATEWAY_URL` pointing at the gateway over
-the Docker network. The auth container uses a host endpoint because it runs with
-host networking.
+The dev container receives `MCP_GATEWAY_URL` pointing at the gateway over the
+Docker network.
 
 ## Data Flow Diagrams
 

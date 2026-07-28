@@ -27,7 +27,6 @@ _CONTAINER_USER_UID: int = 1000
 
 _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
-    "dev-auth": "djinn-auth",
 }
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
@@ -319,7 +318,6 @@ def compose_run(
     interactive: bool = True,
     env: dict[str, str] | None = None,
     service: str = "dev",
-    profile: str | None = None,
     timeout: int | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
@@ -331,7 +329,6 @@ def compose_run(
         interactive: Enable TTY and stdin (default: True).
         env: Additional environment variables to pass to the container.
         service: Compose service name (default: dev).
-        profile: Compose profile to activate (e.g., "auth").
         timeout: Timeout in seconds (headless only). Returns exit code 124 on timeout.
     """
     project_root = get_project_root()
@@ -341,12 +338,8 @@ def compose_run(
     # Map service to fixed container name (matches container_name in compose YAML)
     container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
 
-    if profile:
-        cmd = ["docker", "compose", *compose_files, "--profile", profile, "run", "--rm",
-               "--name", container_name]
-    else:
-        cmd = ["docker", "compose", *compose_files, "run", "--rm",
-               "--name", container_name]
+    cmd = ["docker", "compose", *compose_files, "run", "--rm",
+           "--name", container_name]
 
     # TTY handling
     if not interactive:
@@ -587,8 +580,9 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     The compose file mounts these paths unconditionally; if a source is missing
     when ``docker compose`` runs, the root Docker daemon auto-creates it
     root-owned. Creating them here (user-owned, before any compose call) prevents
-    that footgun. Single host-provisioning routine — called by ``init`` and the
-    ``build``/``start``/``auth`` preflight.
+    that footgun. Single host-provisioning routine — called by ``init``,
+    ``doctor --fix``, and the ``build`` preflight (``start`` opts out via
+    ``provision_host=False``).
 
     Provisions the compose-mounted credential subdirs (``SYNC_PATHS['credentials']``)
     plus the fixed extras. ``repo-dotfiles`` is intentionally NOT provisioned: it

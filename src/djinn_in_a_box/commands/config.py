@@ -34,7 +34,7 @@ from djinn_in_a_box.core.config_sync import (
 from djinn_in_a_box.core.config_sync import (
     sync_config as synchronize_workflow_config,
 )
-from djinn_in_a_box.core.console import console, error, info, rule, success, warning
+from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import ensure_host_env
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
@@ -232,11 +232,15 @@ def init_config(
 
     rule("Next steps")
     console.print("  [muted]1.[/muted] djinn build    [muted]# Build the Docker image[/muted]")
-    console.print("  [muted]2.[/muted] djinn auth     [muted]# Authenticate with AI[/muted]")
-    console.print("  [muted]3.[/muted] djinn start    [muted]# Start development shell[/muted]")
+    console.print("  [muted]2.[/muted] djinn start    [muted]# Start development shell[/muted]")
     console.print(
-        "  [muted]4.[/muted] (optional) mcpgateway start   "
+        "  [muted]3.[/muted] (optional) mcpgateway start   "
         "[muted]# MCP tools — not required[/muted]"
+    )
+    blank()
+    console.print(
+        "  [muted]Sign in to each CLI inside that shell — the tools print a URL and "
+        "accept a code pasted back from the browser.[/muted]"
     )
 
 

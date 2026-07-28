@@ -20,7 +20,6 @@ from djinn_in_a_box.commands.config import (
 )
 from djinn_in_a_box.commands.container import (
     audit,
-    auth,
     build,
     clean_app,
     enter,
@@ -88,7 +87,6 @@ app.add_typer(config_app, name="config")
 
 app.command()(build)
 app.command()(start)
-app.command()(auth)
 app.command()(status)
 app.command()(doctor)
 app.command()(audit)

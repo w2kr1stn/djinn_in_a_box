@@ -105,25 +105,6 @@ services:
     deploy: *resource-limits
     working_dir: /home/dev/projects
 
-  # ---------------------------------------------------------------------------
-  # OAuth authentication container (uses host network)
-  # ---------------------------------------------------------------------------
-  dev-auth:
-    image: djinn-in-a-box:latest
-    container_name: djinn-auth
-    hostname: djinn
-    stdin_open: true
-    tty: true
-    profiles:
-      - auth
-    network_mode: "host"
-    volumes: *common-volumes
-    environment:
-      <<: *common-environment
-      MCP_GATEWAY_URL: http://localhost:8811/
-    deploy: *resource-limits
-    working_dir: /home/dev/projects
-
 networks:
   djinn-network:
     external: true
