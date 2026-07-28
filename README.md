@@ -126,6 +126,9 @@ codex login --device-auth
 In the Codex TUI sign-in screen, the equivalent is the *remote or headless
 machine* option.
 
+The GitHub CLI is not an agent binary but shares the same model — run
+`gh auth login` in that shell and choose the device-code flow when prompted.
+
 The resulting credentials persist outside the container image, so you only do
 this once per tool. Note where each tool stores them, because the two locations
 back up and move differently:

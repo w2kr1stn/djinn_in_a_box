@@ -44,7 +44,7 @@ Versioning before and after the first stable release.
   containers created by `compose run` as one-off and skips them on a plain
   `down`, which is how `djinn start` and `djinn run` create the dev container —
   so cleanup printed success while a live session survived and `djinn backup`
-  kept refusing with "stop all containers first". Teardown also reaps a Docker
+  kept refusing with its stop-all-containers guard. Teardown also reaps a Docker
   proxy left behind by `--docker`.
 - A host path that cannot be provisioned (for example an unwritable or
   root-owned config root) now reports the failing path and a writability remedy

@@ -240,7 +240,8 @@ def init_config(
     blank()
     console.print(
         "  [muted]Sign in to each CLI inside that shell — the tools print a URL and "
-        "accept a code pasted back from the browser.[/muted]"
+        "accept a code pasted back from the browser. Codex needs "
+        "`codex login --device-auth`; see \"First Authentication\" in the README.[/muted]"
     )
 
 
