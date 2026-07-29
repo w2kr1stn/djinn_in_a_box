@@ -58,6 +58,23 @@ def _write_test_config(config_file: Path, projects_dir: Path) -> AppConfig:
     return config
 
 
+@pytest.fixture
+def config_edit_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """Provide the project-local config directory required by ``config edit``."""
+    project_root = tmp_path / "project"
+    config_dir = project_root / "config"
+    config_dir.mkdir(parents=True)
+    get_project_root = MagicMock(return_value=project_root)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", get_project_root)
+
+    yield config_dir
+
+    assert config_dir.is_dir()
+    get_project_root.assert_called_once_with()
+
+
 class TestDjinnVersion:
     """Tests for the --version flag."""
 
@@ -500,7 +517,7 @@ class TestConfigEditCommand:
     """Tests for the config edit command."""
 
     def test_config_edit_warns_when_editor_corrupts_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -523,7 +540,7 @@ class TestConfigEditCommand:
         assert "Invalid TOML" in combined
 
     def test_config_edit_splits_editor_command_with_arguments(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -547,7 +564,7 @@ class TestConfigEditCommand:
         assert "# edited" in config_file.read_text()
 
     def test_config_edit_holds_exclusive_config_directory_lock(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -555,15 +572,11 @@ class TestConfigEditCommand:
         _write_test_config(config_file, projects_dir)
         monkeypatch.setattr("djinn_in_a_box.commands.config.CONFIG_FILE", config_file)
         monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
-        project_root = tmp_path / "project"
-        config_dir = project_root / "config"
-        config_dir.mkdir(parents=True)
-        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
         events: list[str] = []
 
         @contextmanager
         def record_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
-            assert path == config_dir
+            assert path == config_edit_project
             assert exclusive is True
             events.append("lock")
             yield
@@ -582,7 +595,7 @@ class TestConfigEditCommand:
         assert events == ["lock", "editor", "unlock"]
 
     def test_config_edit_warns_when_editor_deletes_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -605,7 +618,7 @@ class TestConfigEditCommand:
         assert not config_file.exists()
 
     def test_config_edit_bad_editor_exits_cleanly(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
