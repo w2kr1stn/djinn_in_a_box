@@ -337,8 +337,13 @@ def _canonical_lock_failure(canonical_root: Path, error: PublishError) -> Workfl
         (
             WorkflowPreparationProblem(
                 "canonical-lock-failed",
-                f"Failed to acquire the canonical workflow lock at {canonical_root}: {cause}",
-                "Restore the canonical workflow root as a readable directory, then retry.",
+                # Deliberately does not say "acquire": the same channel carries
+                # release failures (an interrupted unlock or close), where the
+                # lease was held successfully and telling the user to restore
+                # directory readability would be false advice.
+                f"Canonical workflow lock failed at {canonical_root}: {cause}",
+                "Check that the canonical workflow root is a readable, lockable "
+                "directory and that no other Djinn process is stuck on it, then retry.",
             ),
         ),
     )
