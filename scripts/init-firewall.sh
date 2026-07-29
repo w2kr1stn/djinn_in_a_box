@@ -182,8 +182,22 @@ for domain in "${ALLOWED_DOMAINS[@]}"; do
     fi
 done
 
-# Default deny
-iptables -A OUTPUT -j DROP
+# Default deny.
+#
+# REJECT, not DROP: a dropped packet gives the client nothing to react to, so a
+# blocked request sits until its own timeout expires. Measured in this image,
+# curl took 12.0 s to fail with "Connection timed out" under DROP and 0.2 s to
+# fail with "Couldn't connect to server" under REJECT. The agent that hangs for
+# twelve seconds tells the user nothing; the immediate refusal at least says a
+# connection was refused rather than lost.
+#
+# Deliberately no --reject-with tcp-reset: that option requires -p tcp, so on
+# this catch-all rule `iptables` fails with "RULE_APPEND failed (Invalid
+# argument)" and appends nothing — leaving the chain with no terminal rule and
+# the policy at ACCEPT. Verified: with tcp-reset the script still printed
+# "Firewall initialized" while every outbound request succeeded. The default
+# icmp-port-unreachable works on a protocol-agnostic rule.
+iptables -A OUTPUT -j REJECT
 
 echo "" >&2
 ui_ok "Firewall initialized. Outbound traffic restricted to whitelist."

@@ -420,11 +420,16 @@ in `scripts/init-firewall.sh`: package registries, the four bundled CLIs' API an
 sign-in endpoints, GitHub, and the Docker networks. Every address a domain
 resolves to is permitted.
 
-Two limits are worth knowing before you rely on it. The list is resolved **once**
-at container start, so an address a provider rotates in later is denied until you
-restart. And only IPv4 is covered. If a tool fails in unusual ways under
+A blocked connection is refused immediately rather than dropped, so a tool that
+hits the allowlist fails in about 0.2 seconds with "connection refused" instead
+of hanging until its own timeout. If something fails in unusual ways under
 `--firewall`, that list is the first place to look — add the domain you need at
 the marked spot near the end of the array.
+
+One limit is worth knowing before you rely on it: the list is resolved **once**
+at container start, so an address a provider rotates in later is denied until you
+restart. IPv4 only, which matches the Djinn network — it runs with IPv6
+disabled.
 
 Third-party model providers you configure yourself (OpenRouter, x.ai, and the
 like) are deliberately absent; add the ones you actually use.
