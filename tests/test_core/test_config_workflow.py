@@ -117,6 +117,103 @@ def test_preflight_does_not_repair_a_missing_managed_canonical_file(tmp_path: Pa
     assert not managed.exists()
 
 
+def test_target_symlink_reports_the_destination_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    managed_by_dotfiles = tmp_path / "dotfiles-claude"
+    managed_by_dotfiles.mkdir()
+    target = WorkflowDeliveryTarget("claude", tmp_path / ".claude", provision=True)
+    target.destination_root.symlink_to(managed_by_dotfiles, target_is_directory=True)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-symlink"
+    assert str(target.destination_root) in problem.message
+    assert "symlink" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_file_reports_not_a_directory_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    target.destination_root.write_text("not a directory")
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-not-directory"
+    assert str(target.destination_root) in problem.message
+    assert "not a directory" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_provisioning_os_error_reports_the_path_not_workflow_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "unwritable" / "codex", provision=True)
+    original_mkdir = Path.mkdir
+
+    def refuse_target_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path == target.destination_root:
+            raise PermissionError(13, "Permission denied", path)
+        original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", refuse_target_mkdir)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-provisioning-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_missing_target_reports_the_destination_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "missing-codex")
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-missing"
+    assert str(target.destination_root) in problem.message
+    assert "does not exist" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_publish_os_error_reports_the_path_not_workflow_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    failed_path = target.destination_root / RUNTIME_MANIFEST_NAME
+
+    def no_space(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError(28, "No space left on device", failed_path)
+
+    monkeypatch.setattr(workflow_module, "publish_workflow_view", no_space)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-publish-failed"
+    assert str(failed_path) in problem.message
+    assert "No space left on device" in problem.message
+    assert "portable" not in problem.remedy
+
+
 def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publisher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -184,8 +184,9 @@ def prepare_config_workflow(
             if not retired.success:
                 return _publish_failure(retired)
             continue
-        if not _prepare_target(target):
-            return _failure("invalid-or-semantic")
+        target_problem = _prepare_target(target)
+        if target_problem is not None:
+            return WorkflowPreparationResult(False, (target_problem,))
         try:
             with canonical_lock(canonical_root, exclusive=False) as lease:
                 loaded = load_canonical_delivery_view(
@@ -208,8 +209,18 @@ def prepare_config_workflow(
                     source_root=canonical_root / loaded.audit.configured_source,
                     source_inputs=loaded.source_inputs,
                 )
-        except OSError:
-            return _failure("invalid-or-semantic")
+        except OSError as error:
+            return WorkflowPreparationResult(
+                False,
+                (
+                    WorkflowPreparationProblem(
+                        "workflow-publish-failed",
+                        f"Failed to publish workflow to {target.destination_root}: {error}",
+                        "Check that the workflow destination and its parent directories are "
+                        "writable with available space, then retry.",
+                    ),
+                ),
+            )
         if not published.success:
             return _publish_failure(published)
     return WorkflowPreparationResult(True)
@@ -225,16 +236,36 @@ def _compose_claude_target(
     )
 
 
-def _prepare_target(target: WorkflowDeliveryTarget) -> bool:
+def _prepare_target(target: WorkflowDeliveryTarget) -> WorkflowPreparationProblem | None:
     try:
+        if target.destination_root.is_symlink():
+            return WorkflowPreparationProblem(
+                "target-symlink",
+                f"Workflow destination is a symlink: {target.destination_root}",
+                "Replace the symlink with a directory managed by Djinn, then retry.",
+            )
         if target.destination_root.exists():
-            return target.destination_root.is_dir() and not target.destination_root.is_symlink()
+            if target.destination_root.is_dir():
+                return None
+            return WorkflowPreparationProblem(
+                "target-not-directory",
+                f"Workflow destination is not a directory: {target.destination_root}",
+                "Replace the destination with a directory managed by Djinn, then retry.",
+            )
         if not target.provision:
-            return False
+            return WorkflowPreparationProblem(
+                "target-missing",
+                f"Workflow destination does not exist: {target.destination_root}",
+                "Create the destination directory or enable its provisioning, then retry.",
+            )
         target.destination_root.mkdir(parents=True)
-        return True
-    except OSError:
-        return False
+        return None
+    except OSError as error:
+        return WorkflowPreparationProblem(
+            "target-provisioning-failed",
+            f"Failed to prepare workflow destination {target.destination_root}: {error}",
+            "Check that the destination and its parent directories are writable, then retry.",
+        )
 
 
 def _host_claude_view(
