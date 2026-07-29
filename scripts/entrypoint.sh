@@ -113,6 +113,10 @@ elif [[ -e "$OPENCODE_LEGACY_SETTINGS" || -L "$OPENCODE_LEGACY_SETTINGS" ]]; the
         --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
 fi
 
+OPENCODE_CREDENTIALS_HELPER="${OPENCODE_CREDENTIALS_HELPER:-/home/dev/opencode-credentials.sh}"
+source "$OPENCODE_CREDENTIALS_HELPER"
+ensure_opencode_credentials
+
 ui_info "[workflow-delivery] opencode:"
 WORKFLOW_PUBLISHER="${WORKFLOW_PUBLISHER:-/home/dev/workflow-publisher.py}"
 CANONICAL_CONFIG_ROOT="${DJINN_CANONICAL_ROOT:-/home/dev/.djinn-canonical}"

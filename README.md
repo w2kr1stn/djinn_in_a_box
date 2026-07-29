@@ -130,17 +130,14 @@ The GitHub CLI is not an agent binary but shares the same model — run
 `gh auth login` in that shell and choose the device-code flow when prompted.
 
 The resulting credentials persist outside the container image, so you only do
-this once per tool. Note where each tool stores them, because the two locations
-back up and move differently:
+this once per tool:
 
 | Tool | Credential location | Backup category |
 | --- | --- | --- |
-| Claude Code, Gemini CLI, Codex, GitHub CLI | your configured config root | `credentials` |
-| OpenCode | the `djinn-opencode-data` named volume (`auth.json`) | `data` |
+| Claude Code, Gemini CLI, Codex, OpenCode, GitHub CLI | your configured config root | `credentials` |
 
 `djinn backup` includes both categories by default. If you back up selectively,
-or copy only your config root to another machine, OpenCode's login does not
-travel with it.
+copy the matching credential category.
 
 ## Configuration
 

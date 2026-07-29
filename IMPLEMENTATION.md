@@ -483,6 +483,8 @@ container start
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
   +-- sync_seed gemini   ~/.gemini_seed   -> ~/.gemini
   +-- settings-copy.py persists personal OpenCode settings only
+  +-- opencode-credentials.sh migrates legacy OpenCode credential files and
+      re-establishes volume-to-config-root symlinks on every start
   +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
       using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
@@ -536,9 +538,13 @@ exception: plain `codex login` starts a container-local login server that the
 host browser cannot reach, so users must run `codex login --device-auth` (or
 choose the remote/headless option in its TUI). README documents this.
 
-Claude Code, Gemini CLI, Codex, and the GitHub CLI persist the resulting
-credentials in their config-root bind mounts; OpenCode writes `auth.json` into
-the `djinn-opencode-data` named volume.
+Claude Code, Gemini CLI, Codex, GitHub CLI, and OpenCode persist the resulting
+credentials in config-root bind mounts. At each container start, the entrypoint
+reconciles legacy OpenCode `auth.json` and `mcp-auth.json` files from the
+`djinn-opencode-data` volume: it migrates volume-only files, or preserves the
+config-root file and sets aside the volume file on conflict. It then
+re-establishes the volume paths under `~/.local/share/opencode/` as symlinks to
+the config-root files.
 
 Common mounts include:
 
