@@ -80,6 +80,7 @@ class PublishResult:
     drift_class: DriftClass
     changed_paths: tuple[PurePosixPath, ...] = ()
     removed_paths: tuple[PurePosixPath, ...] = ()
+    write_error: OSError | None = None
 
     @property
     def success(self) -> bool:
@@ -341,7 +342,9 @@ def publish_workflow_view(
             )
     except PublishError as error:
         return PublishResult(error.drift_class)
-    except (OSError, UnicodeError, ValueError):
+    except OSError as error:
+        return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
+    except (UnicodeError, ValueError):
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC)
 
 

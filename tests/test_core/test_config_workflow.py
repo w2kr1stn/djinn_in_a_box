@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
@@ -12,6 +13,7 @@ from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig, ConfigSync
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     CanonicalDeliveryViewResult,
+    ConfigSyncAudit,
     DriftClass,
     audit_config_sync,
 )
@@ -211,26 +213,74 @@ def test_missing_target_reports_the_destination_not_workflow_drift(tmp_path: Pat
     assert "portable" not in problem.remedy
 
 
-def test_publish_os_error_reports_the_path_not_workflow_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_non_traversable_target_parent_reports_preparation_failure(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    parent = tmp_path / "blocked-parent"
+    target = WorkflowDeliveryTarget("codex", parent / "existing-target")
+    target.destination_root.mkdir(parents=True)
+    original_mode = stat.S_IMODE(parent.stat().st_mode)
+    parent.chmod(0o000)
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        parent.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-provisioning-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_publish_write_error_reports_the_path_not_workflow_drift(tmp_path: Path) -> None:
     project, config_path, _runtime = _workspace(tmp_path)
     target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
-    failed_path = target.destination_root / RUNTIME_MANIFEST_NAME
-
-    def no_space(*_args: object, **_kwargs: object) -> NoReturn:
-        raise OSError(28, "No space left on device", failed_path)
-
-    monkeypatch.setattr(workflow_module, "publish_workflow_view", no_space)
-
-    result = prepare_config_workflow(project, (target,), config_path=config_path)
+    target.destination_root.mkdir()
+    original_mode = stat.S_IMODE(target.destination_root.stat().st_mode)
+    target.destination_root.chmod(0o555)
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        target.destination_root.chmod(original_mode)
 
     assert not result.success
     problem = result.problems[0]
     assert problem.identifier == "workflow-publish-failed"
-    assert str(failed_path) in problem.message
-    assert "No space left on device" in problem.message
+    assert str(target.destination_root) in problem.message
+    assert "Permission denied" in problem.message
     assert "portable" not in problem.remedy
+
+
+def test_canonical_config_reload_os_error_is_not_reported_as_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex")
+    target.destination_root.mkdir()
+    original_audit = workflow_module.audit_config_sync
+    original_mode = stat.S_IMODE(config_path.stat().st_mode)
+    config_file = config_path
+
+    def make_config_unreadable_after_audit(
+        project_root: Path, *, config_path: Path | None = None
+    ) -> ConfigSyncAudit:
+        audit = original_audit(project_root, config_path=config_path)
+        config_file.chmod(0o000)
+        return audit
+
+    monkeypatch.setattr(workflow_module, "audit_config_sync", make_config_unreadable_after_audit)
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        config_path.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == DriftClass.INVALID_OR_SEMANTIC.value
+    assert "publish" not in problem.message
+    assert str(target.destination_root) not in problem.message
 
 
 def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publisher(

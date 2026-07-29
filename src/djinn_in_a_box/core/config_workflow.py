@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -218,18 +219,10 @@ def prepare_config_workflow(
                     source_root=canonical_root / loaded.audit.configured_source,
                     source_inputs=loaded.source_inputs,
                 )
-        except OSError as error:
-            return WorkflowPreparationResult(
-                False,
-                (
-                    WorkflowPreparationProblem(
-                        "workflow-publish-failed",
-                        f"Failed to publish workflow to {target.destination_root}: {error}",
-                        "Check that the workflow destination and its parent directories are "
-                        "writable with available space, then retry.",
-                    ),
-                ),
-            )
+        except OSError:
+            return _failure(DriftClass.INVALID_OR_SEMANTIC.value)
+        if published.write_error is not None:
+            return _publish_write_failure(target.destination_root, published.write_error)
         if not published.success:
             return _publish_failure(published)
     return WorkflowPreparationResult(True)
@@ -247,34 +240,46 @@ def _compose_claude_target(
 
 def _prepare_target(target: WorkflowDeliveryTarget) -> WorkflowPreparationProblem | None:
     try:
-        if target.destination_root.is_symlink():
-            return WorkflowPreparationProblem(
-                "target-symlink",
-                f"Workflow destination is a symlink: {target.destination_root}",
-                "Replace the symlink with a directory managed by Djinn, then retry.",
-            )
-        if target.destination_root.exists():
-            if target.destination_root.is_dir():
-                return None
-            return WorkflowPreparationProblem(
-                "target-not-directory",
-                f"Workflow destination is not a directory: {target.destination_root}",
-                "Replace the destination with a directory managed by Djinn, then retry.",
-            )
-        if not target.provision:
-            return WorkflowPreparationProblem(
-                "target-missing",
-                f"Workflow destination does not exist: {target.destination_root}",
-                "Create the destination directory or enable its provisioning, then retry.",
-            )
-        target.destination_root.mkdir(parents=True)
-        return None
+        entry = target.destination_root.lstat()
+    except FileNotFoundError:
+        return _prepare_missing_target(target)
     except OSError as error:
         return WorkflowPreparationProblem(
             "target-provisioning-failed",
             f"Failed to prepare workflow destination {target.destination_root}: {error}",
             "Check that the destination and its parent directories are writable, then retry.",
         )
+    if stat.S_ISLNK(entry.st_mode):
+        return WorkflowPreparationProblem(
+            "target-symlink",
+            f"Workflow destination is a symlink: {target.destination_root}",
+            "Replace the symlink with a directory managed by Djinn, then retry.",
+        )
+    if stat.S_ISDIR(entry.st_mode):
+        return None
+    return WorkflowPreparationProblem(
+        "target-not-directory",
+        f"Workflow destination is not a directory: {target.destination_root}",
+        "Replace the destination with a directory managed by Djinn, then retry.",
+    )
+
+
+def _prepare_missing_target(target: WorkflowDeliveryTarget) -> WorkflowPreparationProblem | None:
+    if not target.provision:
+        return WorkflowPreparationProblem(
+            "target-missing",
+            f"Workflow destination does not exist: {target.destination_root}",
+            "Create the destination directory or enable its provisioning, then retry.",
+        )
+    try:
+        target.destination_root.mkdir(parents=True)
+    except OSError as error:
+        return WorkflowPreparationProblem(
+            "target-provisioning-failed",
+            f"Failed to prepare workflow destination {target.destination_root}: {error}",
+            "Check that the destination and its parent directories are writable, then retry.",
+        )
+    return None
 
 
 def _host_claude_view(
@@ -320,6 +325,20 @@ def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
 
 def _publish_failure(result: PublishResult) -> WorkflowPreparationResult:
     return _failure(result.drift_class.value)
+
+
+def _publish_write_failure(destination: Path, error: OSError) -> WorkflowPreparationResult:
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                "workflow-publish-failed",
+                f"Failed to publish workflow to {destination}: {error}",
+                "Check that the workflow destination and its parent directories are writable "
+                "with available space, then retry.",
+            ),
+        ),
+    )
 
 
 def _failure(identifier: str) -> WorkflowPreparationResult:
