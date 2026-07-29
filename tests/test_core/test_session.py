@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import stat
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -228,6 +230,70 @@ class TestRefreshOpenCodeWorkflow:
 
         assert code in result.stderr
         assert expected in result.stderr
+
+    def test_publisher_write_error_reports_destination_io(
+        self, session_mgr: SessionManager, tmp_path: Path
+    ) -> None:
+        canonical = tmp_path / "canonical"
+        target = tmp_path / "target"
+        view = tmp_path / "view"
+        publisher = (
+            Path(__file__).resolve().parents[2]
+            / "src/djinn_in_a_box/core/workflow_publisher.py"
+        )
+        canonical.mkdir()
+        target.mkdir()
+        view.mkdir()
+        (canonical / ".djinn-config-sync.json").write_text('{"source":"opencode","items":[]}')
+        sentinel = "PRIVATE-WORKFLOW-BODY-SENTINEL"
+        (view / "AGENTS.md").write_text(sentinel)
+        original_mode = stat.S_IMODE(target.stat().st_mode)
+        target.chmod(0o555)
+        try:
+            failed = subprocess.run(
+                [
+                    sys.executable,
+                    str(publisher),
+                    "--view",
+                    str(view),
+                    "--canonical-root",
+                    str(canonical),
+                    "--target",
+                    str(target),
+                    "--manifest",
+                    str(target / ".djinn-workflow-state.json"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            target.chmod(original_mode)
+
+        assert failed.returncode == 13
+        assert str(target) in failed.stderr
+        assert "Permission denied" in failed.stderr
+        assert sentinel not in failed.stderr
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.returncode == failed.returncode
+        assert result.stderr == (
+            f"OpenCode workflow refresh failed to publish workflow to {target}: Permission denied. "
+            "Remedy: Check that the workflow destination and its parent directories are writable "
+            "with available space, then retry."
+        )
+        assert sentinel not in result.stderr
 
     def test_running_old_container_blocks_before_exec_even_if_tag_is_new(
         self, session_mgr: SessionManager

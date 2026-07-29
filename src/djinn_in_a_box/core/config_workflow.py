@@ -24,6 +24,7 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
+    PublishError,
     PublishResult,
     WorkflowView,
     canonical_lock,
@@ -219,6 +220,8 @@ def prepare_config_workflow(
                     source_root=canonical_root / loaded.audit.configured_source,
                     source_inputs=loaded.source_inputs,
                 )
+        except PublishError as error:
+            return _canonical_lock_failure(canonical_root, error)
         except OSError:
             return _failure(DriftClass.INVALID_OR_SEMANTIC.value)
         if published.write_error is not None:
@@ -325,6 +328,22 @@ def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
 
 def _publish_failure(result: PublishResult) -> WorkflowPreparationResult:
     return _failure(result.drift_class.value)
+
+
+def _canonical_lock_failure(
+    canonical_root: Path, error: OSError | PublishError
+) -> WorkflowPreparationResult:
+    cause = error.__cause__ if isinstance(error.__cause__, OSError) else error
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                "canonical-lock-failed",
+                f"Failed to acquire the canonical workflow lock at {canonical_root}: {cause}",
+                "Restore the canonical workflow root as a readable directory, then retry.",
+            ),
+        ),
+    )
 
 
 def _publish_write_failure(destination: Path, error: OSError) -> WorkflowPreparationResult:

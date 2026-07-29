@@ -18,6 +18,7 @@ from djinn_in_a_box.core import workflow_publisher
 from djinn_in_a_box.core.workflow_publisher import (
     CANONICAL_MANIFEST_NAME,
     EXIT_CODES,
+    PUBLISHER_WRITE_ERROR_PREFIX,
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
     DriftClass,
@@ -897,6 +898,33 @@ def test_standalone_file_only_publish_exit_codes_fragment_refusal_and_missing_ca
     sentinel = "operator edit"
     assert sentinel not in drift.stderr
     assert sentinel not in collision.stderr
+
+
+def test_standalone_write_failure_reports_destination_io_without_workflow_content(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    view = tmp_path / "view"
+    canonical.mkdir()
+    target.mkdir()
+    view.mkdir()
+    sentinel = "PRIVATE-WORKFLOW-BODY-SENTINEL"
+    _canonical_identity(canonical)
+    _write(view / "AGENTS.md", sentinel.encode())
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    target.chmod(0o555)
+    try:
+        result = _run_cli(view, canonical, target)
+    finally:
+        target.chmod(original_mode)
+
+    assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert result.stderr.splitlines()[0] == "workflow publisher: invalid-or-semantic"
+    diagnostic_line = result.stderr.splitlines()[1]
+    diagnostic = json.loads(diagnostic_line.removeprefix(PUBLISHER_WRITE_ERROR_PREFIX))
+    assert diagnostic == {"destination": str(target), "error": "Permission denied"}
+    assert sentinel not in result.stderr
 
 
 @pytest.mark.parametrize("foreign_path", ("operator-private.txt", "commands/codex-review.md"))

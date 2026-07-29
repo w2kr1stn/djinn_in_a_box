@@ -22,6 +22,7 @@ from typing import cast
 CANONICAL_MANIFEST_NAME = ".djinn-config-sync.json"
 RUNTIME_MANIFEST_NAME = ".djinn-workflow-state.json"
 LEGACY_DELIVERY_MANIFEST_NAME = ".djinn-workflow-delivery.json"
+PUBLISHER_WRITE_ERROR_PREFIX = "workflow publisher write-error: "
 
 
 class DriftClass(StrEnum):
@@ -1645,6 +1646,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _write_error_diagnostic(destination: Path, error: OSError) -> str:
+    return PUBLISHER_WRITE_ERROR_PREFIX + json.dumps(
+        {
+            "destination": str(destination),
+            "error": error.strerror or "OS error",
+        },
+        separators=(",", ":"),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parse_args(argv)
     if arguments.fragment:
@@ -1687,6 +1698,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = PublishResult(error.drift_class)
     if not result.success:
         print(f"workflow publisher: {result.drift_class.value}", file=sys.stderr)
+        if result.write_error is not None:
+            print(
+                _write_error_diagnostic(Path(arguments.target), result.write_error),
+                file=sys.stderr,
+            )
     return EXIT_CODES[result.drift_class]
 
 

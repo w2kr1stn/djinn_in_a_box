@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
@@ -21,7 +23,7 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.docker import (
     workflow_image_compatible as inspect_workflow_image,
 )
-from djinn_in_a_box.core.workflow_publisher import DriftClass
+from djinn_in_a_box.core.workflow_publisher import PUBLISHER_WRITE_ERROR_PREFIX, DriftClass
 
 log = logging.getLogger(__name__)
 
@@ -460,6 +462,9 @@ class SessionManager:
 def _publisher_refresh_error(stderr: str) -> str:
     for line in reversed(stderr.splitlines()):
         value = line.strip()
+        write_failure = _publisher_write_failure(value)
+        if write_failure is not None:
+            return write_failure
         for drift in DriftClass:
             if drift is DriftClass.CLEAN:
                 continue
@@ -469,3 +474,24 @@ def _publisher_refresh_error(stderr: str) -> str:
                     f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
                 )
     return "OpenCode workflow refresh failed"
+
+
+def _publisher_write_failure(value: str) -> str | None:
+    if not value.startswith(PUBLISHER_WRITE_ERROR_PREFIX):
+        return None
+    try:
+        diagnostic = json.loads(value.removeprefix(PUBLISHER_WRITE_ERROR_PREFIX))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(diagnostic, dict):
+        return None
+    details = cast(dict[str, object], diagnostic)
+    destination = details.get("destination")
+    error = details.get("error")
+    if not isinstance(destination, str) or not isinstance(error, str):
+        return None
+    return (
+        f"OpenCode workflow refresh failed to publish workflow to {destination}: {error}. "
+        "Remedy: Check that the workflow destination and its parent directories are writable "
+        "with available space, then retry."
+    )

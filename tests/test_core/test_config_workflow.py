@@ -252,6 +252,40 @@ def test_publish_write_error_reports_the_path_not_workflow_drift(tmp_path: Path)
     assert "portable" not in problem.remedy
 
 
+def test_unreadable_canonical_root_reports_lock_failure_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    canonical_root = project / "config"
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_audit = workflow_module.audit_config_sync
+    original_mode = stat.S_IMODE(canonical_root.stat().st_mode)
+
+    def make_canonical_root_unreadable_after_audit(
+        project_root: Path, *, config_path: Path | None = None
+    ) -> ConfigSyncAudit:
+        audit = original_audit(project_root, config_path=config_path)
+        canonical_root.chmod(0o000)
+        return audit
+
+    monkeypatch.setattr(
+        workflow_module, "audit_config_sync", make_canonical_root_unreadable_after_audit
+    )
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        canonical_root.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert str(canonical_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "Traceback" not in repr(result)
+    assert "portable" not in problem.remedy
+
+
 def test_canonical_config_reload_os_error_is_not_reported_as_publish_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
