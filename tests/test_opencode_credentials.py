@@ -281,3 +281,34 @@ def test_missing_volume_links_are_reestablished_silently(tmp_path: Path) -> None
         volume_path = volume_credential(tmp_path, name)
         assert volume_path.is_symlink()
         assert volume_path.resolve() == config_credential(tmp_path, name)
+
+
+def test_credentials_clean_leaves_a_startable_state(tmp_path: Path) -> None:
+    """`clean volumes --credentials` must not make the next start refuse.
+
+    That command empties the config-root credential directory while the named
+    volume keeps its symlinks, so both links dangle. Refusing there would make
+    the very cleanup #19 enabled leave Djinn unable to start.
+    """
+    first = run_credentials(tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    # Exactly what clear_sync_path does to the config-root credential directory.
+    for name in ("auth.json", "mcp-auth.json"):
+        config_credential(tmp_path, name).unlink()
+        assert volume_credential(tmp_path, name).is_symlink()
+        assert not volume_credential(tmp_path, name).exists()  # dangling
+
+    result = run_credentials(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+    for name in ("auth.json", "mcp-auth.json"):
+        config_path = config_credential(tmp_path, name)
+        volume_path = volume_credential(tmp_path, name)
+        assert config_path.is_file() and not config_path.is_symlink()
+        assert config_path.read_text(encoding="utf-8") == "{}"
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+        assert volume_path.is_symlink()
+        assert volume_path.resolve() == config_path

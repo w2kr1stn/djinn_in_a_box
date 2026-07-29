@@ -23,7 +23,19 @@ ensure_opencode_credentials() {
         fi
 
         if [[ -L "$volume_path" ]]; then
-            if [[ ! -f "$config_path" || ! "$volume_path" -ef "$config_path" ]]; then
+            # A canonical link whose target is gone is the state
+            # `djinn clean volumes --credentials` leaves behind: it empties the
+            # config-root directory while the volume mount keeps its links. That
+            # must stay recoverable — the target is recreated below — so compare
+            # where the link points rather than whether it resolves. `-ef` when
+            # the target exists (robust against equivalent path spellings),
+            # falling back to the link text when it does not.
+            if [[ -f "$config_path" ]]; then
+                if [[ ! "$volume_path" -ef "$config_path" ]]; then
+                    ui_err "OpenCode credential $credential_name at $volume_path must be a regular file or the canonical symlink to $config_path; refusing to change it."
+                    return 1
+                fi
+            elif [[ "$(readlink -- "$volume_path")" != "$config_path" ]]; then
                 ui_err "OpenCode credential $credential_name at $volume_path must be a regular file or the canonical symlink to $config_path; refusing to change it."
                 return 1
             fi
