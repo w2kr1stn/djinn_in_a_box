@@ -62,6 +62,14 @@ ALLOWED_DOMAINS=(
     # AI APIs (for direct API usage, not via MCP)
     "api.anthropic.com"
     "api.openai.com"
+    # Gemini CLI: model endpoint, plus the Code Assist backend it uses when
+    # signed in with a Google account rather than an API key.
+    "generativelanguage.googleapis.com"
+    "cloudcode-pa.googleapis.com"
+    # OpenCode's own service (auth, updates). Third-party providers a user may
+    # configure (openrouter, x.ai, …) are deliberately not listed — add the ones
+    # you actually use.
+    "opencode.ai"
     
     # Code hosting
     "github.com"
@@ -78,6 +86,11 @@ ALLOWED_DOMAINS=(
     # OAuth endpoints (for authentication)
     "console.anthropic.com"
     "auth.openai.com"
+    # Google sign-in for Gemini CLI: consent screen, token exchange, and the
+    # host its pasted-code flow redirects to.
+    "accounts.google.com"
+    "oauth2.googleapis.com"
+    "codeassist.google.com"
     
     # Add project-specific domains below:
     # "api.example.com"
@@ -96,7 +109,22 @@ DOCKER_NETWORKS=(
 # Resolve domains to IPs
 # -----------------------------------------------------------------------------
 resolve_domain() {
-    getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | head -1
+    # Every A record, not just the first.
+    #
+    # Taking only the first worked, but only by relying on something nothing
+    # guarantees: that the resolver returns addresses in a stable order and that
+    # every client then picks the same one. Measured here, glibc returns the
+    # same first address on repeated lookups and curl connects to it — so a
+    # single allowed IP sufficed. That breaks with `options rotate` in
+    # resolv.conf, a different resolver, or a client that walks the address list
+    # itself (Node's happy-eyeballs does), where the connection lands on an
+    # address that was never allowed and is dropped.
+    #
+    # Allowing the full set removes that dependency. It does not make the
+    # allowlist correct: the set is resolved once at container start, so an
+    # address the provider rotates in later is still denied, and IPv6 is not
+    # covered at all. See the tracking issue.
+    getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u
 }
 
 # -----------------------------------------------------------------------------
@@ -134,10 +162,21 @@ done
 echo "" >&2
 ui_info "Allowing whitelisted domains..."
 for domain in "${ALLOWED_DOMAINS[@]}"; do
-    ip=$(resolve_domain "$domain")
-    if [ -n "$ip" ]; then
-        iptables -A OUTPUT -d "$ip" -j ACCEPT
-        ui_ok "Allowed: $domain ($ip)"
+    ips=$(resolve_domain "$domain")
+    if [ -n "$ips" ]; then
+        count=0
+        for ip in $ips; do
+            iptables -A OUTPUT -d "$ip" -j ACCEPT
+            count=$((count + 1))
+        done
+        if [ "$count" -eq 1 ]; then
+            ui_ok "Allowed: $domain ($ips)"
+        else
+            # Listing all of them would run to ~180 characters for a registry
+            # with a dozen records; the count is what tells you the allowlist
+            # widened as intended.
+            ui_ok "Allowed: $domain ($count addresses)"
+        fi
     else
         ui_warn "Could not resolve: $domain"
     fi
