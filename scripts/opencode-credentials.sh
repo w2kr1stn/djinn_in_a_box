@@ -2,6 +2,18 @@
 
 # Reconcile OpenCode's volume-backed credential locations with the config-root
 # credential files. The entrypoint sources output-lib.sh before this helper.
+
+# Absolute, normalised target of a symlink, without needing it to resolve.
+# `-ef` handles equivalent spellings while the target exists; once
+# `clean volumes --credentials` removes it, the link dangles and only its text
+# remains. Comparing that text raw would reject a relative or `..`-containing
+# canonical link that the same helper accepts while the target is present.
+_opencode_link_target() {
+    local target
+    target="$(readlink -- "$1")"
+    [[ "$target" != /* ]] && target="${1:h}/$target"
+    printf '%s' "${target:a}"
+}
 ensure_opencode_credentials() {
     local credential_name
     local volume_path
@@ -23,19 +35,21 @@ ensure_opencode_credentials() {
         fi
 
         if [[ -L "$volume_path" ]]; then
-            # A canonical link whose target is gone is the state
-            # `djinn clean volumes --credentials` leaves behind: it empties the
-            # config-root directory while the volume mount keeps its links. That
-            # must stay recoverable — the target is recreated below — so compare
-            # where the link points rather than whether it resolves. `-ef` when
-            # the target exists (robust against equivalent path spellings),
-            # falling back to the link text when it does not.
-            if [[ -f "$config_path" ]]; then
-                if [[ ! "$volume_path" -ef "$config_path" ]]; then
-                    ui_err "OpenCode credential $credential_name at $volume_path must be a regular file or the canonical symlink to $config_path; refusing to change it."
-                    return 1
-                fi
-            elif [[ "$(readlink -- "$volume_path")" != "$config_path" ]]; then
+            # One definition of "canonical", used whether or not the target
+            # currently exists. `djinn clean volumes --credentials` empties the
+            # config-root directory while the volume mount keeps its links, so
+            # every link dangles afterwards and must still be recoverable — the
+            # target is recreated below. Deciding by filesystem identity (`-ef`)
+            # cannot survive that, because the inode is gone; deciding by path
+            # can. Using both, one per branch, is what made an alias accepted
+            # before a clean and refused after it.
+            #
+            # Lexical comparison also refuses two arrangements `-ef` would have
+            # accepted — a link through an aliased directory, and a link to a
+            # hard link of the credential. Both are deliberate redirects that
+            # this design does not manage, so refusing them consistently is the
+            # intended behaviour rather than a side effect.
+            if [[ "$(_opencode_link_target "$volume_path")" != "${config_path:a}" ]]; then
                 ui_err "OpenCode credential $credential_name at $volume_path must be a regular file or the canonical symlink to $config_path; refusing to change it."
                 return 1
             fi

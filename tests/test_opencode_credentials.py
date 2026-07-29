@@ -312,3 +312,97 @@ def test_credentials_clean_leaves_a_startable_state(tmp_path: Path) -> None:
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
         assert volume_path.is_symlink()
         assert volume_path.resolve() == config_path
+
+
+def test_relative_canonical_link_survives_a_credentials_clean(tmp_path: Path) -> None:
+    """An equivalent link spelling must recover like the one the helper writes.
+
+    `-ef` accepts a relative or `..`-containing link while the target exists, so
+    such a link is a valid already-done state. Comparing the raw link text after
+    a clean would reject exactly that state and abort the start — the same
+    regression as before, one spelling further out.
+    """
+    for name in ("auth.json", "mcp-auth.json"):
+        config_path = config_credential(tmp_path, name)
+        config_path.parent.mkdir(exist_ok=True)
+        config_path.write_text(f"{name}-secret", encoding="utf-8")
+        config_path.chmod(0o600)
+        volume_path = volume_credential(tmp_path, name)
+        volume_path.parent.mkdir(parents=True, exist_ok=True)
+        volume_path.symlink_to(Path("../../..") / ".opencode" / name)
+
+    assert run_credentials(tmp_path).returncode == 0
+
+    for name in ("auth.json", "mcp-auth.json"):
+        config_credential(tmp_path, name).unlink()
+
+    result = run_credentials(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    for name in ("auth.json", "mcp-auth.json"):
+        config_path = config_credential(tmp_path, name)
+        assert config_path.read_text(encoding="utf-8") == "{}"
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+        assert volume_credential(tmp_path, name).is_symlink()
+
+
+def test_relative_link_to_an_unrelated_file_is_still_refused(tmp_path: Path) -> None:
+    external = tmp_path / "external.json"
+    external.write_text("external-secret", encoding="utf-8")
+    external.chmod(0o640)
+    volume_path = volume_credential(tmp_path, "auth.json")
+    volume_path.parent.mkdir(parents=True, exist_ok=True)
+    volume_path.symlink_to(Path("../../..") / "external.json")
+
+    result = run_credentials(tmp_path)
+
+    assert result.returncode == 1
+    assert "refusing to change it" in result.stderr
+    assert external.read_text(encoding="utf-8") == "external-secret"
+    assert stat.S_IMODE(external.stat().st_mode) == 0o640
+
+
+def test_aliased_directory_link_is_refused_consistently(tmp_path: Path) -> None:
+    """One definition of canonical, before and after a clean.
+
+    `-ef` accepted a link through an aliased directory while the target existed
+    and the text comparison refused it afterwards, so the same arrangement was
+    valid on one start and unstartable on the next. Lexical comparison refuses it
+    in both, which is the intended handling of a deliberate redirect.
+    """
+    config_path = config_credential(tmp_path, "auth.json")
+    config_path.parent.mkdir(exist_ok=True)
+    config_path.write_text("secret", encoding="utf-8")
+    alias_dir = tmp_path / ".opencode-alias"
+    alias_dir.symlink_to(config_path.parent, target_is_directory=True)
+    volume_path = volume_credential(tmp_path, "auth.json")
+    volume_path.parent.mkdir(parents=True, exist_ok=True)
+    volume_path.symlink_to(alias_dir / "auth.json")
+
+    before = run_credentials(tmp_path)
+    config_path.unlink()
+    after = run_credentials(tmp_path)
+
+    assert before.returncode == 1
+    assert after.returncode == 1
+    assert "refusing to change it" in before.stderr
+
+
+def test_hard_link_target_is_refused_consistently(tmp_path: Path) -> None:
+    config_path = config_credential(tmp_path, "auth.json")
+    config_path.parent.mkdir(exist_ok=True)
+    config_path.write_text("secret", encoding="utf-8")
+    hard_link = tmp_path / "hard-link.json"
+    os.link(config_path, hard_link)
+    volume_path = volume_credential(tmp_path, "auth.json")
+    volume_path.parent.mkdir(parents=True, exist_ok=True)
+    volume_path.symlink_to(hard_link)
+
+    before = run_credentials(tmp_path)
+    config_path.unlink()
+    after = run_credentials(tmp_path)
+
+    assert before.returncode == 1
+    assert after.returncode == 1
+    assert hard_link.read_text(encoding="utf-8") == "secret"
