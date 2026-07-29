@@ -18,6 +18,9 @@ from djinn_in_a_box.core.docker import (
     WorkflowImageCompatibility,
     _decode_timeout_output,  # pyright: ignore[reportPrivateUsage]
 )
+from djinn_in_a_box.core.docker import (
+    workflow_image_compatible as inspect_workflow_image,
+)
 from djinn_in_a_box.core.workflow_publisher import DriftClass
 
 log = logging.getLogger(__name__)
@@ -113,8 +116,16 @@ class SessionManager:
             return SessionResult(
                 returncode=1, stderr="Docker daemon/container not reachable — retry."
             )
+        if image_compatibility is WorkflowImageCompatibility.MISSING:
+            return SessionResult(
+                returncode=1,
+                stderr="Workflow image is not built — run `djinn build`, then retry.",
+            )
         if image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
             return SessionResult(returncode=1, stderr="Rebuild/recreate required.")
+        if image_compatibility is not WorkflowImageCompatibility.COMPATIBLE:
+            msg = f"Unhandled workflow image compatibility: {image_compatibility!r}"
+            raise AssertionError(msg)
         command = [
             "docker",
             "exec",
@@ -167,29 +178,9 @@ class SessionManager:
             if container.returncode != 0 or not container.stdout.strip():
                 return WorkflowImageCompatibility.UNKNOWN
             image = container.stdout.strip()
-            inspected = subprocess.run(
-                [
-                    "docker",
-                    "image",
-                    "inspect",
-                    image,
-                    "--format",
-                    '{{ index .Config.Labels "djinn.workflow.publisher" }}',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=_EXEC_TIMEOUT,
-                check=False,
-            )
         except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
             return WorkflowImageCompatibility.UNKNOWN
-        if inspected.returncode != 0:
-            return WorkflowImageCompatibility.UNKNOWN
-        return (
-            WorkflowImageCompatibility.COMPATIBLE
-            if inspected.stdout.strip() == "1"
-            else WorkflowImageCompatibility.INCOMPATIBLE
-        )
+        return inspect_workflow_image(image)
 
     def run_interactive(
         self,

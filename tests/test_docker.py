@@ -96,8 +96,25 @@ class TestWorkflowImageCompatibility:
         assert workflow_image_compatible() is WorkflowImageCompatibility.INCOMPATIBLE
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_inspect_failure_is_unknown(self, run: MagicMock) -> None:
-        run.return_value = MagicMock(returncode=1, stdout="")
+    def test_missing_image_is_distinguished_from_an_unreachable_daemon(
+        self, run: MagicMock
+    ) -> None:
+        run.side_effect = (
+            MagicMock(returncode=1, stdout=""),
+            MagicMock(returncode=0, stdout=""),
+        )
+
+        assert workflow_image_compatible() is WorkflowImageCompatibility.MISSING
+        assert run.call_args_list[1].args[0] == ["docker", "info"]
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_inspect_failure_is_unknown_when_daemon_is_unreachable(
+        self, run: MagicMock
+    ) -> None:
+        run.side_effect = (
+            MagicMock(returncode=1, stdout=""),
+            MagicMock(returncode=1, stdout=""),
+        )
 
         assert workflow_image_compatible() is WorkflowImageCompatibility.UNKNOWN
 

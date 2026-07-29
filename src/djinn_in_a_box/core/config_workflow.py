@@ -141,12 +141,21 @@ def prepare_config_workflow(
                     "Docker daemon/container not reachable.",
                     "Retry.",
                 )
-            else:
+            elif image_compatibility is WorkflowImageCompatibility.MISSING:
+                problem = WorkflowPreparationProblem(
+                    "image-not-built",
+                    "Workflow image is not built.",
+                    "Run `djinn build`, then retry.",
+                )
+            elif image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
                 problem = WorkflowPreparationProblem(
                     "image-incompatible",
                     "Workflow image is incompatible.",
                     "Rebuild/recreate required.",
                 )
+            else:
+                msg = f"Unhandled workflow image compatibility: {image_compatibility!r}"
+                raise AssertionError(msg)
             return WorkflowPreparationResult(
                 False,
                 (problem,),

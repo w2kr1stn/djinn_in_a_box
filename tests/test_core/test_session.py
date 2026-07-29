@@ -258,6 +258,24 @@ class TestRefreshOpenCodeWorkflow:
         assert "Rebuild/recreate required" not in result.stderr
         run.assert_called_once()
 
+    def test_missing_image_blocks_refresh_with_build_remedy(
+        self, session_mgr: SessionManager
+    ) -> None:
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.MISSING,
+            ),
+            patch(_SUBPROCESS_RUN) as run,
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == "Workflow image is not built — run `djinn build`, then retry."
+        run.assert_not_called()
+
     def test_inspect_timeout_is_unknown(self, session_mgr: SessionManager) -> None:
         with patch(
             _SUBPROCESS_RUN, side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)
@@ -267,6 +285,20 @@ class TestRefreshOpenCodeWorkflow:
             )
 
         assert compatibility is WorkflowImageCompatibility.UNKNOWN
+
+    def test_missing_container_image_is_distinguished_when_daemon_replies(
+        self, session_mgr: SessionManager
+    ) -> None:
+        container = MagicMock(returncode=0, stdout="sha256:image\n", stderr="")
+        image = MagicMock(returncode=1, stdout="", stderr="")
+        daemon = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(_SUBPROCESS_RUN, side_effect=(container, image, daemon)):
+            compatibility = session_mgr.workflow_image_compatible(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert compatibility is WorkflowImageCompatibility.MISSING
 
     @pytest.mark.parametrize(
         ("label", "expected"),

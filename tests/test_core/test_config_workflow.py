@@ -54,6 +54,25 @@ def _ensure_host_env(_config: AppConfig) -> None:
     return None
 
 
+_IMAGE_GATE_FAILURES = {
+    WorkflowImageCompatibility.UNKNOWN: (
+        "image-unreachable",
+        "Docker daemon/container not reachable.",
+        "Retry.",
+    ),
+    WorkflowImageCompatibility.MISSING: (
+        "image-not-built",
+        "Workflow image is not built.",
+        "Run `djinn build`, then retry.",
+    ),
+    WorkflowImageCompatibility.INCOMPATIBLE: (
+        "image-incompatible",
+        "Workflow image is incompatible.",
+        "Rebuild/recreate required.",
+    ),
+}
+
+
 def _audit_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
     pytest.fail("audit")
 
@@ -274,6 +293,37 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     assert result.problems[0].remedy == "Rebuild/recreate required."
     assert sentinel not in repr(result)
     assert not (runtime / "codex").exists()
+
+
+def test_compose_image_gate_handles_every_noncompatible_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert set(_IMAGE_GATE_FAILURES) == {
+        compatibility
+        for compatibility in WorkflowImageCompatibility
+        if compatibility is not WorkflowImageCompatibility.COMPATIBLE
+    }
+
+    for compatibility, expected in _IMAGE_GATE_FAILURES.items():
+        project, config_path, runtime = _workspace(tmp_path / compatibility.value)
+        monkeypatch.setattr(
+            workflow_module,
+            "workflow_image_compatible",
+            lambda compatibility=compatibility: compatibility,
+        )
+        monkeypatch.setattr(workflow_module, "audit_config_sync", _audit_must_not_run)
+
+        result = prepare_config_workflow(
+            project,
+            (WorkflowDeliveryTarget("codex", runtime / "codex", provision=True),),
+            config_path=config_path,
+            require_compose_host_env=True,
+        )
+
+        assert not result.success
+        problem = result.problems[0]
+        assert (problem.identifier, problem.message, problem.remedy) == expected
+        assert not (runtime / "codex").exists()
 
 
 def test_host_provisioning_failure_reports_the_path_not_workflow_drift(
