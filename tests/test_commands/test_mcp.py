@@ -207,11 +207,16 @@ class TestCleanCommand:
         with patch("typer.confirm", return_value=False), pytest.raises(typer.Abort):
             mcp.clean()
 
-    def test_clean_stops_gateway_and_removes_network(self) -> None:
+    def test_clean_stops_gateway_and_removes_network(self, tmp_path: Path) -> None:
+        # get_project_root is patched explicitly: the global Path.exists stub
+        # below would otherwise reach it too, making it raise on a cold cache and
+        # skip the compose call this test asserts on. That made the test pass
+        # only when an earlier test in the file had warmed the cache.
         with (
             patch("typer.confirm", return_value=True),
             patch("subprocess.run") as mock_run,
             patch("shutil.rmtree"),
+            patch("djinn_in_a_box.commands.mcp.get_project_root", return_value=tmp_path),
             patch("pathlib.Path.exists", return_value=False),
         ):
             mock_run.return_value = MagicMock(returncode=0)
@@ -224,11 +229,15 @@ class TestCleanCommand:
                 DJINN_NETWORK,
             ]
 
-    def test_clean_removes_mcp_config_dir(self) -> None:
+    def test_clean_removes_mcp_config_dir(self, tmp_path: Path) -> None:
+        # Same reason as above, inverted: with Path.exists stubbed True, an
+        # unpatched get_project_root caches the first directory it probes and
+        # serves that wrong root to every later test in the process.
         with (
             patch("typer.confirm", return_value=True),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
             patch("shutil.rmtree") as mock_rmtree,
+            patch("djinn_in_a_box.commands.mcp.get_project_root", return_value=tmp_path),
             patch("pathlib.Path.exists", return_value=True),
             patch("pathlib.Path.home", return_value=Path("/fake/home")),
         ):

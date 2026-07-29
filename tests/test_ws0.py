@@ -219,6 +219,10 @@ class TestEnsureHostEnv:
         self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+        # ensure_host_env touches get_project_root()/config/claude. Without this
+        # patch that is the real checkout — this test created the repo's own
+        # config/claude/AGENTS.md. Tests must not write into the working copy.
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: mock_home / "project")
         config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
 
         ensure_host_env(config)
@@ -241,6 +245,7 @@ class TestEnsureHostEnv:
         self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: mock_home / "project")
         gitconfig = mock_home / ".gitconfig"
         gitconfig.write_text("[user]\n  name = existing\n")
         config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
