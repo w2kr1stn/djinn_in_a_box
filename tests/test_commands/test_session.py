@@ -77,6 +77,9 @@ class TestSessionCommand:
             mock_sys.stdin.isatty.return_value = True
             mock_instance = mock_mgr.return_value
             mock_instance.resolve_target.return_value = target
+            mock_instance.workflow_image_compatible.return_value = (
+                WorkflowImageCompatibility.COMPATIBLE
+            )
             mock_instance.run_interactive.return_value = mock_session_result
             mock_instance.preflight_check.return_value = None
 
@@ -132,6 +135,7 @@ class TestSessionCommand:
 
             instance = mock_mgr.return_value
             instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.COMPATIBLE
             instance.refresh_opencode_workflow.side_effect = _refresh
             instance.preflight_check.side_effect = _preflight
             instance.run_headless.side_effect = _run
@@ -169,6 +173,7 @@ class TestSessionCommand:
             workflow.return_value = WorkflowPreparationResult(True)
             instance = mock_mgr.return_value
             instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.COMPATIBLE
             instance.run_headless.return_value = SessionResult(0)
 
             result = runner.invoke(
@@ -210,6 +215,7 @@ class TestSessionCommand:
         ):
             instance = mock_mgr.return_value
             instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.COMPATIBLE
             result = runner.invoke(
                 app,
                 [
@@ -272,6 +278,7 @@ class TestSessionCommand:
         ):
             instance = mock_mgr.return_value
             instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.COMPATIBLE
             instance.refresh_opencode_workflow.return_value = SessionResult(
                 1, stderr="OpenCode workflow refresh failed"
             )
@@ -342,6 +349,32 @@ class TestSessionCommand:
         assert result.exit_code == 1
         assert "Docker daemon/container not reachable" in result.output
         assert "Rebuild/recreate required." not in result.output
+        assert not (tmp_path / ".djinn/sessions/new-project").exists()
+        workflow.assert_not_called()
+        instance.refresh_opencode_workflow.assert_not_called()
+        instance.preflight_check.assert_not_called()
+
+    def test_missing_running_image_stops_with_build_remedy(
+        self, tmp_path: Path
+    ) -> None:
+        target = SessionTarget(container_id="container-123")
+        with (
+            patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
+            patch("djinn_in_a_box.commands.session.prepare_config_workflow") as workflow,
+        ):
+            instance = mock_mgr.return_value
+            instance.resolve_target.return_value = target
+            instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.MISSING
+            result = runner.invoke(
+                app,
+                ["session", "--project", "new-project", "--agent", "opencode", "--create"],
+            )
+
+        assert result.exit_code == 1
+        assert "Workflow image is not built." in result.output
+        assert "Run `djinn build`, then retry." in result.output
+        assert "Docker daemon/container not reachable" not in result.output
         assert not (tmp_path / ".djinn/sessions/new-project").exists()
         workflow.assert_not_called()
         instance.refresh_opencode_workflow.assert_not_called()

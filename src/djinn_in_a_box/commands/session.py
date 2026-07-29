@@ -85,10 +85,17 @@ def session(
             error("Docker daemon/container not reachable.")
             warning("Retry.")
             raise typer.Exit(1)
+        if container_image_compatibility is WorkflowImageCompatibility.MISSING:
+            error("Workflow image is not built.")
+            warning("Run `djinn build`, then retry.")
+            raise typer.Exit(1)
         if container_image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
             error("Workflow image is incompatible.")
             warning("Rebuild/recreate required.")
             raise typer.Exit(1)
+        if container_image_compatibility is not WorkflowImageCompatibility.COMPATIBLE:
+            msg = f"Unhandled workflow image compatibility: {container_image_compatibility!r}"
+            raise AssertionError(msg)
 
     config = load_config()
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()

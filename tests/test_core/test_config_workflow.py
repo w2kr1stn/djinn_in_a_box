@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
@@ -9,9 +13,12 @@ import pytest
 import djinn_in_a_box.core.config_workflow as workflow_module
 from djinn_in_a_box.config.loader import save_config
 from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig, ConfigSyncSource
+from djinn_in_a_box.core import workflow_publisher
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
+    LOCK_REMEDY,
     CanonicalDeliveryViewResult,
+    ConfigSyncAudit,
     DriftClass,
     audit_config_sync,
 )
@@ -52,6 +59,25 @@ def _legacy_manifest() -> bytes:
 
 def _ensure_host_env(_config: AppConfig) -> None:
     return None
+
+
+_IMAGE_GATE_FAILURES = {
+    WorkflowImageCompatibility.UNKNOWN: (
+        "image-unreachable",
+        "Docker daemon/container not reachable.",
+        "Retry.",
+    ),
+    WorkflowImageCompatibility.MISSING: (
+        "image-not-built",
+        "Workflow image is not built.",
+        "Run `djinn build`, then retry.",
+    ),
+    WorkflowImageCompatibility.INCOMPATIBLE: (
+        "image-incompatible",
+        "Workflow image is incompatible.",
+        "Rebuild/recreate required.",
+    ),
+}
 
 
 def _audit_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
@@ -117,6 +143,376 @@ def test_preflight_does_not_repair_a_missing_managed_canonical_file(tmp_path: Pa
     assert not managed.exists()
 
 
+def test_target_symlink_reports_the_destination_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    managed_by_dotfiles = tmp_path / "dotfiles-claude"
+    managed_by_dotfiles.mkdir()
+    target = WorkflowDeliveryTarget("claude", tmp_path / ".claude", provision=True)
+    target.destination_root.symlink_to(managed_by_dotfiles, target_is_directory=True)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-symlink"
+    assert str(target.destination_root) in problem.message
+    assert "symlink" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_file_reports_not_a_directory_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    target.destination_root.write_text("not a directory")
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-not-directory"
+    assert str(target.destination_root) in problem.message
+    assert "not a directory" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_provisioning_os_error_reports_the_path_not_workflow_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "unwritable" / "codex", provision=True)
+    original_mkdir = Path.mkdir
+
+    def refuse_target_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path == target.destination_root:
+            raise PermissionError(13, "Permission denied", path)
+        original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", refuse_target_mkdir)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-provisioning-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_missing_target_reports_the_destination_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "missing-codex")
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-missing"
+    assert str(target.destination_root) in problem.message
+    assert "does not exist" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_non_traversable_target_parent_reports_preparation_failure(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    parent = tmp_path / "blocked-parent"
+    target = WorkflowDeliveryTarget("codex", parent / "existing-target")
+    target.destination_root.mkdir(parents=True)
+    original_mode = stat.S_IMODE(parent.stat().st_mode)
+    parent.chmod(0o000)
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        parent.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "target-provisioning-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_lock_failure_is_not_reported_as_a_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lease failure must not borrow the publish wording.
+
+    Nothing was published, so "Failed to publish ... check the directory is
+    writable with available space" names the wrong operation and offers a remedy
+    that does not apply to a missing lock. Mock-based: ENOLCK cannot be provoked
+    reliably on an ordinary filesystem.
+    """
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    assert prepare_config_workflow(project, (target,), config_path=config_path).success
+
+    real_flock = fcntl.flock
+    seen = {"count": 0}
+
+    def fail_target_acquisition(descriptor: int, operation: int) -> None:
+        seen["count"] += 1
+        # The canonical shared lock comes first; fail only the later exclusive
+        # acquisition, which is the target lock.
+        if seen["count"] > 2 and operation == fcntl.LOCK_EX:
+            raise OSError(37, "No locks available")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_target_acquisition)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-lock-failed"
+    assert "No locks available" in problem.message
+    assert "lock" in problem.message
+    assert "publish" not in problem.message
+    assert "writable" not in problem.remedy
+
+
+def test_publish_write_error_reports_the_path_not_workflow_drift(tmp_path: Path) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    target.destination_root.mkdir()
+    original_mode = stat.S_IMODE(target.destination_root.stat().st_mode)
+    target.destination_root.chmod(0o555)
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        target.destination_root.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-publish-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_lock_acquisition_reports_a_lock_failure_not_a_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_open = workflow_publisher._open_directory
+    original_flock = workflow_publisher.fcntl.flock
+    descriptor: int | None = None
+
+    def record_target_descriptor(path: Path) -> int:
+        nonlocal descriptor
+        candidate = original_open(path)
+        if path == target.destination_root:
+            descriptor = candidate
+        return candidate
+
+    def fail_target_acquisition(candidate: int, operation: int) -> None:
+        if candidate == descriptor and operation == workflow_publisher.fcntl.LOCK_EX:
+            raise OSError(errno.ENOLCK, "No locks available")
+        original_flock(candidate, operation)
+
+    monkeypatch.setattr(workflow_publisher, "_open_directory", record_target_descriptor)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_target_acquisition)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-lock-failed"
+    assert str(target.destination_root) in problem.message
+    assert "No locks available" in problem.message
+    assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
+
+
+def test_target_lock_release_reports_a_lock_failure_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_open = workflow_publisher._open_directory
+    original_flock = workflow_publisher.fcntl.flock
+    descriptor: int | None = None
+
+    def record_target_descriptor(path: Path) -> int:
+        nonlocal descriptor
+        candidate = original_open(path)
+        if path == target.destination_root:
+            descriptor = candidate
+        return candidate
+
+    def fail_target_unlock(candidate: int, operation: int) -> None:
+        if candidate == descriptor and operation == workflow_publisher.fcntl.LOCK_UN:
+            raise OSError(errno.EINTR, "Interrupted system call")
+        original_flock(candidate, operation)
+
+    monkeypatch.setattr(workflow_publisher, "_open_directory", record_target_descriptor)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_target_unlock)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert descriptor is not None
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-lock-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Interrupted system call" in problem.message
+    assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
+
+
+def test_unreadable_canonical_root_reports_lock_failure_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    canonical_root = project / "config"
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_audit = workflow_module.audit_config_sync
+    original_mode = stat.S_IMODE(canonical_root.stat().st_mode)
+
+    def make_canonical_root_unreadable_after_audit(
+        project_root: Path, *, config_path: Path | None = None
+    ) -> ConfigSyncAudit:
+        audit = original_audit(project_root, config_path=config_path)
+        canonical_root.chmod(0o000)
+        return audit
+
+    monkeypatch.setattr(
+        workflow_module, "audit_config_sync", make_canonical_root_unreadable_after_audit
+    )
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        canonical_root.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert str(canonical_root) in problem.message
+    assert "Permission denied" in problem.message
+    assert "Traceback" not in repr(result)
+    assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
+
+
+def test_flock_acquisition_failure_reports_canonical_lock_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    audit = audit_config_sync(project, config_path=config_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+
+    def fixed_audit(*_args: object, **_kwargs: object) -> ConfigSyncAudit:
+        return audit
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(workflow_module, "audit_config_sync", fixed_audit)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_acquisition)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert problem.identifier != DriftClass.INVALID_OR_SEMANTIC.value
+    assert "No locks available" in problem.message
+
+
+def test_initial_audit_lock_failure_reports_the_structured_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_acquisition)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert str(project / "config") in problem.message
+    assert "No locks available" in problem.message
+    assert problem.remedy == LOCK_REMEDY
+    assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
+
+
+def test_canonical_unlock_failure_reports_preparation_lock_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    audit = audit_config_sync(project, config_path=config_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_flock = workflow_publisher.fcntl.flock
+
+    def fixed_audit(*_args: object, **_kwargs: object) -> ConfigSyncAudit:
+        return audit
+
+    def failed_view(*_args: object, **_kwargs: object) -> CanonicalDeliveryViewResult:
+        return CanonicalDeliveryViewResult(False, audit)
+
+    def fail_unlock(descriptor: int, operation: int) -> None:
+        if operation == workflow_publisher.fcntl.LOCK_UN:
+            raise OSError(errno.EINTR, "Interrupted system call")
+        original_flock(descriptor, operation)
+
+    monkeypatch.setattr(workflow_module, "audit_config_sync", fixed_audit)
+    monkeypatch.setattr(workflow_module, "load_canonical_delivery_view", failed_view)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_unlock)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert "Interrupted system call" in problem.message
+
+
+def test_canonical_config_reload_os_error_is_not_reported_as_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex")
+    target.destination_root.mkdir()
+    original_audit = workflow_module.audit_config_sync
+    original_mode = stat.S_IMODE(config_path.stat().st_mode)
+    config_file = config_path
+
+    def make_config_unreadable_after_audit(
+        project_root: Path, *, config_path: Path | None = None
+    ) -> ConfigSyncAudit:
+        audit = original_audit(project_root, config_path=config_path)
+        config_file.chmod(0o000)
+        return audit
+
+    monkeypatch.setattr(workflow_module, "audit_config_sync", make_config_unreadable_after_audit)
+    try:
+        result = prepare_config_workflow(project, (target,), config_path=config_path)
+    finally:
+        config_path.chmod(original_mode)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == DriftClass.INVALID_OR_SEMANTIC.value
+    assert "publish" not in problem.message
+    assert str(target.destination_root) not in problem.message
+
+
 def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publisher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -149,6 +545,36 @@ def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publishe
     assert (codex_root / RUNTIME_MANIFEST_NAME).is_file()
 
 
+def test_compose_retirement_write_error_reports_the_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    claude_root = runtime / "claude"
+    claude_root.mkdir(parents=True)
+    (claude_root / ".djinn-workflow-delivery.json").write_bytes(_legacy_manifest())
+
+    def fail_fsync(_root: Path) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(workflow_module, "ensure_host_env", _ensure_host_env)
+    monkeypatch.setattr(workflow_publisher, "_fsync_directory", fail_fsync)
+    result = prepare_config_workflow(
+        project,
+        (WorkflowDeliveryTarget("claude", claude_root),),
+        config_path=config_path,
+        require_compose_host_env=True,
+        container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+    )
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-publish-failed"
+    assert str(claude_root) in problem.message
+    assert "No space left on device" in problem.message
+    assert "portable" not in problem.remedy
+
+
 def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,6 +603,37 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
     assert result.problems[0].remedy == "Rebuild/recreate required."
     assert sentinel not in repr(result)
     assert not (runtime / "codex").exists()
+
+
+def test_compose_image_gate_handles_every_noncompatible_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert set(_IMAGE_GATE_FAILURES) == {
+        compatibility
+        for compatibility in WorkflowImageCompatibility
+        if compatibility is not WorkflowImageCompatibility.COMPATIBLE
+    }
+
+    for compatibility, expected in _IMAGE_GATE_FAILURES.items():
+        project, config_path, runtime = _workspace(tmp_path / compatibility.value)
+        monkeypatch.setattr(
+            workflow_module,
+            "workflow_image_compatible",
+            lambda compatibility=compatibility: compatibility,
+        )
+        monkeypatch.setattr(workflow_module, "audit_config_sync", _audit_must_not_run)
+
+        result = prepare_config_workflow(
+            project,
+            (WorkflowDeliveryTarget("codex", runtime / "codex", provision=True),),
+            config_path=config_path,
+            require_compose_host_env=True,
+        )
+
+        assert not result.success
+        problem = result.problems[0]
+        assert (problem.identifier, problem.message, problem.remedy) == expected
+        assert not (runtime / "codex").exists()
 
 
 def test_host_provisioning_failure_reports_the_path_not_workflow_drift(

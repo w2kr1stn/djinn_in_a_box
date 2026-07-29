@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -10,15 +11,23 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
-from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY
+from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY, LOCK_REMEDY
 from djinn_in_a_box.core.docker import (
     WorkflowImageCompatibility,
     _decode_timeout_output,  # pyright: ignore[reportPrivateUsage]
 )
-from djinn_in_a_box.core.workflow_publisher import DriftClass
+from djinn_in_a_box.core.docker import (
+    workflow_image_compatible as inspect_workflow_image,
+)
+from djinn_in_a_box.core.workflow_publisher import (
+    PUBLISHER_LOCK_ERROR_PREFIX,
+    PUBLISHER_WRITE_ERROR_PREFIX,
+    DriftClass,
+)
 
 log = logging.getLogger(__name__)
 
@@ -113,8 +122,16 @@ class SessionManager:
             return SessionResult(
                 returncode=1, stderr="Docker daemon/container not reachable — retry."
             )
+        if image_compatibility is WorkflowImageCompatibility.MISSING:
+            return SessionResult(
+                returncode=1,
+                stderr="Workflow image is not built — run `djinn build`, then retry.",
+            )
         if image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
             return SessionResult(returncode=1, stderr="Rebuild/recreate required.")
+        if image_compatibility is not WorkflowImageCompatibility.COMPATIBLE:
+            msg = f"Unhandled workflow image compatibility: {image_compatibility!r}"
+            raise AssertionError(msg)
         command = [
             "docker",
             "exec",
@@ -167,29 +184,9 @@ class SessionManager:
             if container.returncode != 0 or not container.stdout.strip():
                 return WorkflowImageCompatibility.UNKNOWN
             image = container.stdout.strip()
-            inspected = subprocess.run(
-                [
-                    "docker",
-                    "image",
-                    "inspect",
-                    image,
-                    "--format",
-                    '{{ index .Config.Labels "djinn.workflow.publisher" }}',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=_EXEC_TIMEOUT,
-                check=False,
-            )
         except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
             return WorkflowImageCompatibility.UNKNOWN
-        if inspected.returncode != 0:
-            return WorkflowImageCompatibility.UNKNOWN
-        return (
-            WorkflowImageCompatibility.COMPATIBLE
-            if inspected.stdout.strip() == "1"
-            else WorkflowImageCompatibility.INCOMPATIBLE
-        )
+        return inspect_workflow_image(image)
 
     def run_interactive(
         self,
@@ -469,6 +466,12 @@ class SessionManager:
 def _publisher_refresh_error(stderr: str) -> str:
     for line in reversed(stderr.splitlines()):
         value = line.strip()
+        lock_failure = _publisher_lock_failure(value)
+        if lock_failure is not None:
+            return lock_failure
+        write_failure = _publisher_write_failure(value)
+        if write_failure is not None:
+            return write_failure
         for drift in DriftClass:
             if drift is DriftClass.CLEAN:
                 continue
@@ -478,3 +481,44 @@ def _publisher_refresh_error(stderr: str) -> str:
                     f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
                 )
     return "OpenCode workflow refresh failed"
+
+
+def _publisher_lock_failure(value: str) -> str | None:
+    if not value.startswith(PUBLISHER_LOCK_ERROR_PREFIX):
+        return None
+    try:
+        diagnostic = json.loads(value.removeprefix(PUBLISHER_LOCK_ERROR_PREFIX))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(diagnostic, dict):
+        return None
+    details = cast(dict[str, object], diagnostic)
+    root = details.get("root")
+    error = details.get("error")
+    if not isinstance(root, str) or not isinstance(error, str):
+        return None
+    return (
+        f"OpenCode workflow refresh failed: Canonical workflow lock failed at {root}: {error}. "
+        f"Remedy: {LOCK_REMEDY}"
+    )
+
+
+def _publisher_write_failure(value: str) -> str | None:
+    if not value.startswith(PUBLISHER_WRITE_ERROR_PREFIX):
+        return None
+    try:
+        diagnostic = json.loads(value.removeprefix(PUBLISHER_WRITE_ERROR_PREFIX))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(diagnostic, dict):
+        return None
+    details = cast(dict[str, object], diagnostic)
+    destination = details.get("destination")
+    error = details.get("error")
+    if not isinstance(destination, str) or not isinstance(error, str):
+        return None
+    return (
+        f"OpenCode workflow refresh failed to publish workflow to {destination}: {error}. "
+        "Remedy: Check that the workflow destination and its parent directories are writable "
+        "with available space, then retry."
+    )

@@ -44,6 +44,7 @@ class DockerMode(Enum):
 class WorkflowImageCompatibility(Enum):
     COMPATIBLE = "compatible"
     INCOMPATIBLE = "incompatible"
+    MISSING = "missing"
     UNKNOWN = "unknown"
 
 
@@ -569,12 +570,31 @@ def workflow_image_compatible(
     except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
         return WorkflowImageCompatibility.UNKNOWN
     if result.returncode != 0:
-        return WorkflowImageCompatibility.UNKNOWN
+        return (
+            WorkflowImageCompatibility.MISSING
+            if _docker_daemon_reachable()
+            else WorkflowImageCompatibility.UNKNOWN
+        )
     return (
         WorkflowImageCompatibility.COMPATIBLE
         if result.stdout.strip() == "1"
         else WorkflowImageCompatibility.INCOMPATIBLE
     )
+
+
+def _docker_daemon_reachable() -> bool:
+    """Return whether Docker responds after an image-inspect failure."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=_WORKFLOW_IMAGE_INSPECT_TIMEOUT,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def ensure_host_env(config: AppConfig | None = None) -> None:

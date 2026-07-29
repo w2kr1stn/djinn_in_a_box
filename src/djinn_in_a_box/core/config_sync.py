@@ -55,6 +55,10 @@ CANONICAL_REMEDY = (
     "Author or edit the artifact natively in the target tool's view, "
     "or make the source form portable."
 )
+LOCK_REMEDY = (
+    "Check that the canonical workflow root is a readable, lockable directory "
+    "and that no other Djinn process is stuck on it, then retry."
+)
 _TOOLS: tuple[ConfigSyncSource, ...] = ("claude", "codex", "opencode")
 _LEGACY_ARTIFACT_KINDS = frozenset(
     {"instructions", "agent", "skill", "command", "context", "hook"}
@@ -76,6 +80,7 @@ class SyncProblem:
     message: str
     tool: ConfigSyncSource | None = None
     relative_path: PurePosixPath | None = None
+    remedy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +153,11 @@ def audit_config_sync(
     try:
         with canonical_lock(config_root, exclusive=False):
             return _audit_locked(project_root, source)
-    except (OSError, PublishError):
+    except PublishError as error:
+        if error.lock_error is not None:
+            return _lock_failure_audit(source, config_root, error.lock_error)
+        return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+    except OSError:
         return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
 
 
@@ -212,7 +221,13 @@ def sync_config(
             _audit_for(source, error.drift),
             retryable=error.drift is DriftClass.SOURCE_CHANGED,
         )
-    except (OSError, PublishError, ValueError):
+    except PublishError as error:
+        if error.lock_error is not None:
+            return ConfigSyncResult(
+                False, _lock_failure_audit(source, config_root, error.lock_error)
+            )
+        return ConfigSyncResult(False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC))
+    except (OSError, ValueError):
         return ConfigSyncResult(False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC))
 
 
@@ -236,7 +251,15 @@ def load_canonical_delivery_view(
             _audit_for(source, error.drift),
             retryable=error.drift is DriftClass.SOURCE_CHANGED,
         )
-    except (KeyError, OSError, PublishError):
+    except PublishError as error:
+        if error.lock_error is not None:
+            return CanonicalDeliveryViewResult(
+                False, _lock_failure_audit(source, config_root, error.lock_error)
+            )
+        return CanonicalDeliveryViewResult(
+            False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+        )
+    except (KeyError, OSError):
         return CanonicalDeliveryViewResult(
             False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
         )
@@ -1090,6 +1113,22 @@ def _invalid_audit(
         None,
         (DriftItem(DriftClass.INVALID_OR_SEMANTIC, "Workflow artifact is invalid."),),
         tuple(problems),
+    )
+
+
+def _lock_failure_audit(
+    source: ConfigSyncSource, config_root: Path, error: OSError
+) -> ConfigSyncAudit:
+    return ConfigSyncAudit(
+        source,
+        None,
+        problems=(
+            SyncProblem(
+                "canonical-lock-failed",
+                f"Canonical workflow lock failed at {config_root}: {error.strerror or 'OS error'}",
+                remedy=LOCK_REMEDY,
+            ),
+        ),
     )
 
 

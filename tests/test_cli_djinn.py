@@ -1,5 +1,6 @@
 """Tests for the djinn CLI entry point."""
 
+import errno
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.config.loader import load_config as load_config_file
 from djinn_in_a_box.config.loader import save_config as save_config_file
 from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
+from djinn_in_a_box.core import config_lock
 
 runner = CliRunner()
 
@@ -353,6 +355,36 @@ class TestConfigSetCommand:
         assert load_config_file(config_file).config_sync.source == "codex"
         assert lock_calls == [(config_dir, True)]
 
+    def test_config_set_reports_unlock_failure_after_writing_without_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.toml"
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _write_test_config(config_file, projects_dir)
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+        project_root = tmp_path / "project"
+        config_dir = project_root / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
+        original_flock = config_lock.fcntl.flock
+
+        def fail_unlock(descriptor: int, operation: int) -> None:
+            if operation == config_lock.fcntl.LOCK_UN:
+                raise OSError(errno.EINTR, "Interrupted system call")
+            original_flock(descriptor, operation)
+
+        monkeypatch.setattr(config_lock.fcntl, "flock", fail_unlock)
+
+        result = runner.invoke(app, ["config", "set", "config_sync.source", "codex"])
+
+        assert result.exit_code == 1, result.output
+        assert load_config_file(config_file).config_sync.source == "codex"
+        assert "Configuration value was written, but releasing its lock failed." in result.output
+        assert "Interrupted system call" in result.output
+        assert "config_sync.source = codex" not in result.output
+        assert "Traceback" not in result.output
+
     def test_config_set_rejects_unknown_source_without_writing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -608,6 +640,23 @@ class TestConfigEditCommand:
 
         assert result.exit_code == 0, result.output
         assert events == ["lock", "editor", "unlock"]
+
+    def test_config_edit_reports_lock_acquisition_failure_without_traceback(
+        self, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
+    ) -> None:
+        def fail_acquisition(_descriptor: int, _operation: int) -> None:
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        monkeypatch.setattr(config_lock.fcntl, "flock", fail_acquisition)
+
+        result = runner.invoke(app, ["config", "edit"])
+
+        assert result.exit_code == 1, result.output
+        assert str(config_edit_project) in result.output
+        normalized = " ".join(result.output.split())
+        assert "No locks available" in normalized
+        assert "djinn init" not in normalized
+        assert "Traceback" not in normalized
 
     def test_config_edit_warns_when_editor_deletes_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path

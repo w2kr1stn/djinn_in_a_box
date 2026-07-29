@@ -17,7 +17,7 @@ from djinn_in_a_box.commands import session as session_mod
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.config_workflow import WorkflowPreparationResult
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
-from djinn_in_a_box.core.session import SessionResult
+from djinn_in_a_box.core.session import SessionResult, SessionTarget
 
 runner = CliRunner()
 
@@ -233,6 +233,7 @@ def test_session_create_absent_workspace_creates_and_proceeds(tmp_path: Path) ->
         patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
     ):
         mock_instance = mock_mgr.return_value
+        mock_instance.resolve_target.return_value = SessionTarget()
         mock_instance.preflight_check.return_value = None
         mock_instance.run_headless.return_value = mock_result
 
@@ -253,6 +254,7 @@ def test_session_without_create_absent_workspace_errors(tmp_path: Path) -> None:
         patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
         patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
     ):
+        mock_mgr.return_value.resolve_target.return_value = SessionTarget()
         result = runner.invoke(app, ["session", "--project", "missing", "--prompt", "hello"])
 
         assert result.exit_code == 1
@@ -269,6 +271,7 @@ def test_session_create_existing_file_errors_cleanly(tmp_path: Path) -> None:
         patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
         patch("djinn_in_a_box.commands.session.SessionManager") as mock_mgr,
     ):
+        mock_mgr.return_value.resolve_target.return_value = SessionTarget()
         result = runner.invoke(
             app,
             ["session", "--project", "testproj", "--prompt", "hello", "--create"],
@@ -295,6 +298,7 @@ def test_session_interactive_failure_prints_stderr(tmp_path: Path) -> None:
         patch.object(session_mod.err_console, "print") as mock_err_print,
     ):
         mock_instance = mock_mgr.return_value
+        mock_instance.resolve_target.return_value = SessionTarget()
         mock_instance.preflight_check.return_value = None
         mock_instance.run_interactive.return_value = mock_result
 

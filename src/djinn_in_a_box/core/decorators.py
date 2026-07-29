@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from collections.abc import Callable
 from functools import wraps
 from typing import ParamSpec, TypeVar
@@ -30,7 +31,14 @@ def handle_config_errors(func: Callable[P, R]) -> Callable[P, R]:
             return func(*args, **kwargs)
         except ConfigDirectoryLockError as e:
             error(str(e))
-            warning("Run `djinn init` to create it, then retry.")
+            cause = e.__cause__
+            if isinstance(cause, OSError) and cause.errno == errno.ENOENT:
+                warning("Run `djinn init` to create it, then retry.")
+            else:
+                warning(
+                    "Check that the configuration directory is readable and lockable, "
+                    "then retry."
+                )
             raise typer.Exit(1) from None
         except (ConfigNotFoundError, ConfigValidationError) as e:
             error(str(e))

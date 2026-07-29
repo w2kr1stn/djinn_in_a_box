@@ -11,10 +11,12 @@ from djinn_in_a_box.commands import doctor as doctor_module
 from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
+    LOCK_REMEDY,
     ConfigSyncAudit,
     ConfigSyncResult,
     DriftClass,
     DriftItem,
+    SyncProblem,
 )
 
 runner = CliRunner()
@@ -108,6 +110,68 @@ def test_config_sync_reports_canonical_nonportable_remedy(
     assert _SENTINEL not in result.output
 
 
+def test_config_status_reports_lock_failure_without_portability_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "project" / "config"
+    audit = ConfigSyncAudit(
+        "claude",
+        None,
+        problems=(
+            SyncProblem(
+                "canonical-lock-failed",
+                f"Canonical workflow lock failed at {config_root}: No locks available",
+                remedy=LOCK_REMEDY,
+            ),
+        ),
+    )
+    service = MagicMock(return_value=audit)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: tmp_path)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.audit_workflow_config", service)
+
+    result = runner.invoke(app, ["config", "status"])
+
+    assert result.exit_code == 1, result.output
+    assert "canonical-lock-failed" in result.output
+    assert str(config_root) in result.output
+    normalized = " ".join(result.output.split())
+    assert "No locks available" in normalized
+    assert LOCK_REMEDY in normalized
+    assert CANONICAL_REMEDY not in normalized
+    assert _SENTINEL not in normalized
+
+
+def test_config_sync_reports_lock_failure_without_portability_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "project" / "config"
+    audit = ConfigSyncAudit(
+        "claude",
+        None,
+        problems=(
+            SyncProblem(
+                "canonical-lock-failed",
+                f"Canonical workflow lock failed at {config_root}: Interrupted system call",
+                remedy=LOCK_REMEDY,
+            ),
+        ),
+    )
+    service = MagicMock(return_value=ConfigSyncResult(False, audit))
+    monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: tmp_path)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.synchronize_workflow_config", service)
+
+    result = runner.invoke(app, ["config", "sync"])
+
+    assert result.exit_code == 1, result.output
+    assert "canonical-lock-failed" in result.output
+    assert str(config_root) in result.output
+    normalized = " ".join(result.output.split())
+    assert "Interrupted system call" in normalized
+    assert LOCK_REMEDY in normalized
+    assert CANONICAL_REMEDY not in normalized
+    assert "Traceback" not in normalized
+
+
 def test_config_status_missing_canonical_root_is_content_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,9 +190,13 @@ def test_config_status_missing_canonical_root_is_content_free(
     result = runner.invoke(app, ["config", "status"])
 
     assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    assert "invalid-or-semantic" in result.output
-    assert CANONICAL_REMEDY in " ".join(result.output.split())
+    normalized = " ".join(result.output.split())
+    assert "Traceback" not in normalized
+    assert "canonical-lock-failed" in normalized
+    assert str(tmp_path / "config") in normalized
+    assert "No such file or directory" in normalized
+    assert LOCK_REMEDY in normalized
+    assert CANONICAL_REMEDY not in normalized
 
 
 def test_config_sync_requires_a_clean_reaudit(

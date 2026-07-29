@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import stat
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +14,10 @@ import pytest
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
+from djinn_in_a_box.core.workflow_publisher import (
+    PUBLISHER_LOCK_ERROR_PREFIX,
+    PUBLISHER_WRITE_ERROR_PREFIX,
+)
 
 _SESSION_MODULE = "djinn_in_a_box.core.session"
 _SUBPROCESS_RUN = f"{_SESSION_MODULE}.subprocess.run"
@@ -229,6 +236,70 @@ class TestRefreshOpenCodeWorkflow:
         assert code in result.stderr
         assert expected in result.stderr
 
+    def test_publisher_write_error_reports_destination_io(
+        self, session_mgr: SessionManager, tmp_path: Path
+    ) -> None:
+        canonical = tmp_path / "canonical"
+        target = tmp_path / "target"
+        view = tmp_path / "view"
+        publisher = (
+            Path(__file__).resolve().parents[2]
+            / "src/djinn_in_a_box/core/workflow_publisher.py"
+        )
+        canonical.mkdir()
+        target.mkdir()
+        view.mkdir()
+        (canonical / ".djinn-config-sync.json").write_text('{"source":"opencode","items":[]}')
+        sentinel = "PRIVATE-WORKFLOW-BODY-SENTINEL"
+        (view / "AGENTS.md").write_text(sentinel)
+        original_mode = stat.S_IMODE(target.stat().st_mode)
+        target.chmod(0o555)
+        try:
+            failed = subprocess.run(
+                [
+                    sys.executable,
+                    str(publisher),
+                    "--view",
+                    str(view),
+                    "--canonical-root",
+                    str(canonical),
+                    "--target",
+                    str(target),
+                    "--manifest",
+                    str(target / ".djinn-workflow-state.json"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            target.chmod(original_mode)
+
+        assert failed.returncode == 13
+        assert str(target) in failed.stderr
+        assert "Permission denied" in failed.stderr
+        assert sentinel not in failed.stderr
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.returncode == failed.returncode
+        assert result.stderr == (
+            f"OpenCode workflow refresh failed to publish workflow to {target}: Permission denied. "
+            "Remedy: Check that the workflow destination and its parent directories are writable "
+            "with available space, then retry."
+        )
+        assert sentinel not in result.stderr
+
     def test_running_old_container_blocks_before_exec_even_if_tag_is_new(
         self, session_mgr: SessionManager
     ) -> None:
@@ -258,6 +329,24 @@ class TestRefreshOpenCodeWorkflow:
         assert "Rebuild/recreate required" not in result.stderr
         run.assert_called_once()
 
+    def test_missing_image_blocks_refresh_with_build_remedy(
+        self, session_mgr: SessionManager
+    ) -> None:
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.MISSING,
+            ),
+            patch(_SUBPROCESS_RUN) as run,
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == "Workflow image is not built — run `djinn build`, then retry."
+        run.assert_not_called()
+
     def test_inspect_timeout_is_unknown(self, session_mgr: SessionManager) -> None:
         with patch(
             _SUBPROCESS_RUN, side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)
@@ -267,6 +356,20 @@ class TestRefreshOpenCodeWorkflow:
             )
 
         assert compatibility is WorkflowImageCompatibility.UNKNOWN
+
+    def test_missing_container_image_is_distinguished_when_daemon_replies(
+        self, session_mgr: SessionManager
+    ) -> None:
+        container = MagicMock(returncode=0, stdout="sha256:image\n", stderr="")
+        image = MagicMock(returncode=1, stdout="", stderr="")
+        daemon = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(_SUBPROCESS_RUN, side_effect=(container, image, daemon)):
+            compatibility = session_mgr.workflow_image_compatible(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert compatibility is WorkflowImageCompatibility.MISSING
 
     @pytest.mark.parametrize(
         ("label", "expected"),
@@ -314,6 +417,41 @@ class TestRefreshOpenCodeWorkflow:
 
         assert "target-drift" in result.stderr
         assert "modified managed workflow item" in result.stderr
+
+    def test_publisher_refresh_prefers_the_later_lock_diagnostic_over_write_diagnostic(
+        self, session_mgr: SessionManager
+    ) -> None:
+        failed = MagicMock(
+            returncode=13,
+            stdout="",
+            stderr=(
+                "workflow publisher: invalid-or-semantic\n"
+                + PUBLISHER_WRITE_ERROR_PREFIX
+                + json.dumps({"destination": "/destination", "error": "No space left on device"})
+                + "\n"
+                + PUBLISHER_LOCK_ERROR_PREFIX
+                + json.dumps({"root": "/canonical", "error": "No locks available"})
+                + "\n"
+            ),
+        )
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == (
+            "OpenCode workflow refresh failed: Canonical workflow lock failed at /canonical: "
+            "No locks available. Remedy: Check that the canonical workflow root is a readable, "
+            "lockable directory and that no other Djinn process is stuck on it, then retry."
+        )
 
     def test_host_target_does_not_execute_refresh(self, session_mgr: SessionManager) -> None:
         with patch(_SUBPROCESS_RUN) as run:

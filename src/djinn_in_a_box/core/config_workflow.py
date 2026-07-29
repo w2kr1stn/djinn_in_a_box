@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     ConfigSyncAudit,
     DriftClass,
+    SyncProblem,
     audit_config_sync,
     load_canonical_delivery_view,
     sync_config,
@@ -23,6 +25,7 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
+    PublishError,
     PublishResult,
     WorkflowView,
     canonical_lock,
@@ -141,12 +144,21 @@ def prepare_config_workflow(
                     "Docker daemon/container not reachable.",
                     "Retry.",
                 )
-            else:
+            elif image_compatibility is WorkflowImageCompatibility.MISSING:
+                problem = WorkflowPreparationProblem(
+                    "image-not-built",
+                    "Workflow image is not built.",
+                    "Run `djinn build`, then retry.",
+                )
+            elif image_compatibility is WorkflowImageCompatibility.INCOMPATIBLE:
                 problem = WorkflowPreparationProblem(
                     "image-incompatible",
                     "Workflow image is incompatible.",
                     "Rebuild/recreate required.",
                 )
+            else:
+                msg = f"Unhandled workflow image compatibility: {image_compatibility!r}"
+                raise AssertionError(msg)
             return WorkflowPreparationResult(
                 False,
                 (problem,),
@@ -181,11 +193,16 @@ def prepare_config_workflow(
     for target in targets:
         if _compose_claude_target(config, target, require_compose_host_env):
             retired = retire_legacy_delivery_manifest(target.destination_root)
+            if retired.lock_error is not None:
+                return _publish_lock_failure(target.destination_root, retired.lock_error)
+            if retired.write_error is not None:
+                return _publish_write_failure(target.destination_root, retired.write_error)
             if not retired.success:
                 return _publish_failure(retired)
             continue
-        if not _prepare_target(target):
-            return _failure("invalid-or-semantic")
+        target_problem = _prepare_target(target)
+        if target_problem is not None:
+            return WorkflowPreparationResult(False, (target_problem,))
         try:
             with canonical_lock(canonical_root, exclusive=False) as lease:
                 loaded = load_canonical_delivery_view(
@@ -208,8 +225,14 @@ def prepare_config_workflow(
                     source_root=canonical_root / loaded.audit.configured_source,
                     source_inputs=loaded.source_inputs,
                 )
+        except PublishError as error:
+            return _canonical_lock_failure(canonical_root, error)
         except OSError:
-            return _failure("invalid-or-semantic")
+            return _failure(DriftClass.INVALID_OR_SEMANTIC.value)
+        if published.lock_error is not None:
+            return _publish_lock_failure(target.destination_root, published.lock_error)
+        if published.write_error is not None:
+            return _publish_write_failure(target.destination_root, published.write_error)
         if not published.success:
             return _publish_failure(published)
     return WorkflowPreparationResult(True)
@@ -225,16 +248,48 @@ def _compose_claude_target(
     )
 
 
-def _prepare_target(target: WorkflowDeliveryTarget) -> bool:
+def _prepare_target(target: WorkflowDeliveryTarget) -> WorkflowPreparationProblem | None:
     try:
-        if target.destination_root.exists():
-            return target.destination_root.is_dir() and not target.destination_root.is_symlink()
-        if not target.provision:
-            return False
+        entry = target.destination_root.lstat()
+    except FileNotFoundError:
+        return _prepare_missing_target(target)
+    except OSError as error:
+        return WorkflowPreparationProblem(
+            "target-provisioning-failed",
+            f"Failed to prepare workflow destination {target.destination_root}: {error}",
+            "Check that the destination and its parent directories are writable, then retry.",
+        )
+    if stat.S_ISLNK(entry.st_mode):
+        return WorkflowPreparationProblem(
+            "target-symlink",
+            f"Workflow destination is a symlink: {target.destination_root}",
+            "Replace the symlink with a directory managed by Djinn, then retry.",
+        )
+    if stat.S_ISDIR(entry.st_mode):
+        return None
+    return WorkflowPreparationProblem(
+        "target-not-directory",
+        f"Workflow destination is not a directory: {target.destination_root}",
+        "Replace the destination with a directory managed by Djinn, then retry.",
+    )
+
+
+def _prepare_missing_target(target: WorkflowDeliveryTarget) -> WorkflowPreparationProblem | None:
+    if not target.provision:
+        return WorkflowPreparationProblem(
+            "target-missing",
+            f"Workflow destination does not exist: {target.destination_root}",
+            "Create the destination directory or enable its provisioning, then retry.",
+        )
+    try:
         target.destination_root.mkdir(parents=True)
-        return True
-    except OSError:
-        return False
+    except OSError as error:
+        return WorkflowPreparationProblem(
+            "target-provisioning-failed",
+            f"Failed to prepare workflow destination {target.destination_root}: {error}",
+            "Check that the destination and its parent directories are writable, then retry.",
+        )
+    return None
 
 
 def _host_claude_view(
@@ -271,6 +326,8 @@ def _auto_repairable(audit: ConfigSyncAudit) -> bool:
 
 
 def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
+    if audit.problems:
+        return _sync_problem_failure(audit.problems[0])
     drift = next(
         (item.kind for item in audit.drifts if item.kind is not DriftClass.CLEAN),
         DriftClass.INVALID_OR_SEMANTIC,
@@ -278,8 +335,74 @@ def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
     return _failure(drift.value)
 
 
+def _sync_problem_failure(problem: SyncProblem) -> WorkflowPreparationResult:
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                problem.identifier,
+                problem.message,
+                problem.remedy or CANONICAL_REMEDY,
+            ),
+        ),
+    )
+
+
 def _publish_failure(result: PublishResult) -> WorkflowPreparationResult:
     return _failure(result.drift_class.value)
+
+
+def _canonical_lock_failure(canonical_root: Path, error: PublishError) -> WorkflowPreparationResult:
+    cause = error.__cause__ if isinstance(error.__cause__, OSError) else error
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                "canonical-lock-failed",
+                # Deliberately does not say "acquire": the same channel carries
+                # release failures (an interrupted unlock or close), where the
+                # lease was held successfully and telling the user to restore
+                # directory readability would be false advice.
+                f"Canonical workflow lock failed at {canonical_root}: {cause}",
+                "Check that the canonical workflow root is a readable, lockable "
+                "directory and that no other Djinn process is stuck on it, then retry.",
+            ),
+        ),
+    )
+
+
+def _publish_lock_failure(destination: Path, error: OSError) -> WorkflowPreparationResult:
+    """A lease failure, not a write failure.
+
+    Kept apart from _publish_write_failure because nothing was published: naming
+    the operation "publish" and advising writable directories with free space
+    would describe neither what failed nor what fixes it.
+    """
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                "workflow-lock-failed",
+                f"Failed to lock the workflow destination {destination}: {error}",
+                "Check that the destination is a lockable directory and that no other Djinn "
+                "process is stuck on it, then retry.",
+            ),
+        ),
+    )
+
+
+def _publish_write_failure(destination: Path, error: OSError) -> WorkflowPreparationResult:
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                "workflow-publish-failed",
+                f"Failed to publish workflow to {destination}: {error}",
+                "Check that the workflow destination and its parent directories are writable "
+                "with available space, then retry.",
+            ),
+        ),
+    )
 
 
 def _failure(identifier: str) -> WorkflowPreparationResult:

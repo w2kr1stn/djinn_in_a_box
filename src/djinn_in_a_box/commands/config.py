@@ -22,7 +22,7 @@ from djinn_in_a_box.config.models import (
     ResourceLimits,
     ShellConfig,
 )
-from djinn_in_a_box.core.config_lock import config_directory_lock
+from djinn_in_a_box.core.config_lock import ConfigDirectoryLockError, config_directory_lock
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     ConfigSyncAudit,
@@ -54,6 +54,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "shell.omp_theme_path",
     "config_sync.source",
 )
+_LOCK_PROBLEM_IDENTIFIER = "canonical-lock-failed"
 
 
 def _print_config_table(
@@ -395,14 +396,23 @@ def config_set(
     """Set one supported configuration value."""
     if key == "config_sync.source":
         config_dir = get_project_root() / "config"
-        with config_directory_lock(config_dir, exclusive=True):
-            _set_and_save_config_value(key, value)
+        value_written = False
+        try:
+            with config_directory_lock(config_dir, exclusive=True):
+                updated = _set_and_save_config_value(key, value)
+                value_written = True
+        except ConfigDirectoryLockError:
+            if value_written:
+                warning("Configuration value was written, but releasing its lock failed.")
+            raise
+        success(f"{key} = {_format_config_value(updated, key)}")
         return
 
-    _set_and_save_config_value(key, value)
+    updated = _set_and_save_config_value(key, value)
+    success(f"{key} = {_format_config_value(updated, key)}")
 
 
-def _set_and_save_config_value(key: str, value: str) -> None:
+def _set_and_save_config_value(key: str, value: str) -> AppConfig:
     config = load_config()
 
     try:
@@ -418,7 +428,7 @@ def _set_and_save_config_value(key: str, value: str) -> None:
         error(f"Failed to write configuration to {CONFIG_FILE}: {e}")
         warning(f"Check that {CONFIG_FILE.parent} is writable, then retry.")
         raise typer.Exit(1) from e
-    success(f"{key} = {_format_config_value(updated, key)}")
+    return updated
 
 
 @handle_config_errors
@@ -569,16 +579,29 @@ def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
             f"({_status_location(drift.tool, drift.relative_path)})"
         )
     for problem in audit.problems:
-        console.print(
+        line = (
             f"Problem: {_status_label(problem.identifier)} "
             f"({_status_location(problem.tool, problem.relative_path)})"
         )
+        if problem.identifier == _LOCK_PROBLEM_IDENTIFIER:
+            line += f": {problem.message}"
+        console.print(line)
 
     if not audit.clean:
-        drift = next(
-            (item.kind for item in audit.drifts if item.kind is not DriftClass.CLEAN), None
+        operational_remedy = next(
+            (problem.remedy for problem in audit.problems if problem.remedy is not None), None
         )
-        remedy = CANONICAL_REMEDY if drift is None else _DRIFT_REMEDIES.get(drift, CANONICAL_REMEDY)
+        if operational_remedy is not None:
+            remedy = operational_remedy
+        else:
+            drift = next(
+                (item.kind for item in audit.drifts if item.kind is not DriftClass.CLEAN), None
+            )
+            remedy = (
+                CANONICAL_REMEDY
+                if drift is None
+                else _DRIFT_REMEDIES.get(drift, CANONICAL_REMEDY)
+            )
         console.print(f"Remedy: {remedy}")
 
 
