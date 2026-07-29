@@ -413,6 +413,22 @@ Common `start` options:
 
 `--docker` and `--docker-direct` are mutually exclusive.
 
+### What `--firewall` allows
+
+The firewall denies outbound traffic by default and permits a fixed domain list
+in `scripts/init-firewall.sh`: package registries, the four bundled CLIs' API and
+sign-in endpoints, GitHub, and the Docker networks. Every address a domain
+resolves to is permitted.
+
+Two limits are worth knowing before you rely on it. The list is resolved **once**
+at container start, so an address a provider rotates in later is denied until you
+restart. And only IPv4 is covered. If a tool fails in unusual ways under
+`--firewall`, that list is the first place to look — add the domain you need at
+the marked spot near the end of the array.
+
+Third-party model providers you configure yourself (OpenRouter, x.ai, and the
+like) are deliberately absent; add the ones you actually use.
+
 ## Docker Access Modes
 
 The base mode gives the container no Docker socket access. This is the safest
