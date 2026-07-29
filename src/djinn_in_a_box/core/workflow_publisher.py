@@ -83,6 +83,10 @@ class PublishResult:
     changed_paths: tuple[PurePosixPath, ...] = ()
     removed_paths: tuple[PurePosixPath, ...] = ()
     write_error: OSError | None = None
+    lock_error: OSError | None = None
+    """Separate from write_error on purpose: a lease failure means nothing was
+    written, so reporting it as a publish failure would name the wrong operation
+    and offer a remedy about writability that does not apply."""
 
     @property
     def success(self) -> bool:
@@ -363,7 +367,7 @@ def publish_workflow_view(
                 preflight_manifest,
             )
     except PublishError as error:
-        return PublishResult(error.drift_class, write_error=error.lock_error)
+        return PublishResult(error.drift_class, lock_error=error.lock_error)
     except OSError as error:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
     except (UnicodeError, ValueError):
@@ -1093,7 +1097,7 @@ def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
             _fsync_directory(target_root)
             return PublishResult(DriftClass.CLEAN)
     except PublishError as error:
-        return PublishResult(error.drift_class, write_error=error.lock_error)
+        return PublishResult(error.drift_class, lock_error=error.lock_error)
     except OSError as error:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
 
@@ -1737,6 +1741,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _write_error_diagnostic(Path(arguments.target), result.write_error),
                 file=sys.stderr,
             )
+        # Two sources: a PublishError that reached this frame, and one
+        # publish_workflow_view already converted into the result field.
+        lock_error = lock_error or result.lock_error
         if lock_error is not None:
             print(
                 _lock_error_diagnostic(Path(arguments.canonical_root), lock_error),

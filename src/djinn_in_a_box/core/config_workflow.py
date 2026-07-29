@@ -193,6 +193,8 @@ def prepare_config_workflow(
     for target in targets:
         if _compose_claude_target(config, target, require_compose_host_env):
             retired = retire_legacy_delivery_manifest(target.destination_root)
+            if retired.lock_error is not None:
+                return _publish_lock_failure(target.destination_root, retired.lock_error)
             if retired.write_error is not None:
                 return _publish_write_failure(target.destination_root, retired.write_error)
             if not retired.success:
@@ -227,6 +229,8 @@ def prepare_config_workflow(
             return _canonical_lock_failure(canonical_root, error)
         except OSError:
             return _failure(DriftClass.INVALID_OR_SEMANTIC.value)
+        if published.lock_error is not None:
+            return _publish_lock_failure(target.destination_root, published.lock_error)
         if published.write_error is not None:
             return _publish_write_failure(target.destination_root, published.write_error)
         if not published.success:
@@ -362,6 +366,26 @@ def _canonical_lock_failure(canonical_root: Path, error: PublishError) -> Workfl
                 f"Canonical workflow lock failed at {canonical_root}: {cause}",
                 "Check that the canonical workflow root is a readable, lockable "
                 "directory and that no other Djinn process is stuck on it, then retry.",
+            ),
+        ),
+    )
+
+
+def _publish_lock_failure(destination: Path, error: OSError) -> WorkflowPreparationResult:
+    """A lease failure, not a write failure.
+
+    Kept apart from _publish_write_failure because nothing was published: naming
+    the operation "publish" and advising writable directories with free space
+    would describe neither what failed nor what fixes it.
+    """
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                "workflow-lock-failed",
+                f"Failed to lock the workflow destination {destination}: {error}",
+                "Check that the destination is a lockable directory and that no other Djinn "
+                "process is stuck on it, then retry.",
             ),
         ),
     )

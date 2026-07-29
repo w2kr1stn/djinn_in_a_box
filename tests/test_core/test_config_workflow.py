@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import stat
@@ -237,6 +238,44 @@ def test_non_traversable_target_parent_reports_preparation_failure(tmp_path: Pat
     assert "portable" not in problem.remedy
 
 
+def test_target_lock_failure_is_not_reported_as_a_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lease failure must not borrow the publish wording.
+
+    Nothing was published, so "Failed to publish ... check the directory is
+    writable with available space" names the wrong operation and offers a remedy
+    that does not apply to a missing lock. Mock-based: ENOLCK cannot be provoked
+    reliably on an ordinary filesystem.
+    """
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    assert prepare_config_workflow(project, (target,), config_path=config_path).success
+
+    real_flock = fcntl.flock
+    seen = {"count": 0}
+
+    def fail_target_acquisition(descriptor: int, operation: int) -> None:
+        seen["count"] += 1
+        # The canonical shared lock comes first; fail only the later exclusive
+        # acquisition, which is the target lock.
+        if seen["count"] > 2 and operation == fcntl.LOCK_EX:
+            raise OSError(37, "No locks available")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_target_acquisition)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-lock-failed"
+    assert "No locks available" in problem.message
+    assert "lock" in problem.message
+    assert "publish" not in problem.message
+    assert "writable" not in problem.remedy
+
+
 def test_publish_write_error_reports_the_path_not_workflow_drift(tmp_path: Path) -> None:
     project, config_path, _runtime = _workspace(tmp_path)
     target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
@@ -256,7 +295,7 @@ def test_publish_write_error_reports_the_path_not_workflow_drift(tmp_path: Path)
     assert "portable" not in problem.remedy
 
 
-def test_target_lock_acquisition_reports_an_operational_publish_failure(
+def test_target_lock_acquisition_reports_a_lock_failure_not_a_publish_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, config_path, _runtime = _workspace(tmp_path)
@@ -284,13 +323,14 @@ def test_target_lock_acquisition_reports_an_operational_publish_failure(
 
     assert not result.success
     problem = result.problems[0]
-    assert problem.identifier == "workflow-publish-failed"
+    assert problem.identifier == "workflow-lock-failed"
     assert str(target.destination_root) in problem.message
     assert "No locks available" in problem.message
     assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
 
 
-def test_target_lock_release_reports_an_operational_publish_failure_and_closes_descriptor(
+def test_target_lock_release_reports_a_lock_failure_and_closes_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, config_path, _runtime = _workspace(tmp_path)
@@ -322,10 +362,11 @@ def test_target_lock_release_reports_an_operational_publish_failure_and_closes_d
     assert closed.value.errno == errno.EBADF
     assert not result.success
     problem = result.problems[0]
-    assert problem.identifier == "workflow-publish-failed"
+    assert problem.identifier == "workflow-lock-failed"
     assert str(target.destination_root) in problem.message
     assert "Interrupted system call" in problem.message
     assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
 
 
 def test_unreadable_canonical_root_reports_lock_failure_without_traceback(
@@ -360,6 +401,7 @@ def test_unreadable_canonical_root_reports_lock_failure_without_traceback(
     assert "Permission denied" in problem.message
     assert "Traceback" not in repr(result)
     assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
 
 
 def test_flock_acquisition_failure_reports_canonical_lock_failure(
@@ -406,6 +448,7 @@ def test_initial_audit_lock_failure_reports_the_structured_problem(
     assert "No locks available" in problem.message
     assert problem.remedy == LOCK_REMEDY
     assert "portable" not in problem.remedy
+    assert "writable" not in problem.remedy
 
 
 def test_canonical_unlock_failure_reports_preparation_lock_failure(
