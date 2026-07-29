@@ -23,6 +23,7 @@ CANONICAL_MANIFEST_NAME = ".djinn-config-sync.json"
 RUNTIME_MANIFEST_NAME = ".djinn-workflow-state.json"
 LEGACY_DELIVERY_MANIFEST_NAME = ".djinn-workflow-delivery.json"
 PUBLISHER_WRITE_ERROR_PREFIX = "workflow publisher write-error: "
+PUBLISHER_LOCK_ERROR_PREFIX = "workflow publisher lock-error: "
 
 
 class DriftClass(StrEnum):
@@ -155,9 +156,10 @@ class _Preflight:
 
 
 class PublishError(RuntimeError):
-    def __init__(self, drift_class: DriftClass) -> None:
+    def __init__(self, drift_class: DriftClass, *, lock_error: OSError | None = None) -> None:
         super().__init__(drift_class)
         self.drift_class = drift_class
+        self.lock_error = lock_error
 
 
 class ManifestError(ValueError):
@@ -262,14 +264,14 @@ def canonical_lock(root: Path, *, exclusive: bool) -> Iterator[CanonicalLockLeas
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         except OSError as error:
-            raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
         locked = True
         yield CanonicalLockLease(root.resolve(), descriptor, exclusive)
     finally:
-        _release_canonical_lock(descriptor, locked)
+        _release_directory_lock(descriptor, locked)
 
 
-def _release_canonical_lock(descriptor: int, locked: bool) -> None:
+def _release_directory_lock(descriptor: int, locked: bool) -> None:
     release_error: OSError | None = None
     if locked:
         try:
@@ -282,7 +284,9 @@ def _release_canonical_lock(descriptor: int, locked: bool) -> None:
         if release_error is None:
             release_error = error
     if release_error is not None:
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from release_error
+        raise PublishError(
+            DriftClass.INVALID_OR_SEMANTIC, lock_error=release_error
+        ) from release_error
 
 
 def snapshot_file_view(
@@ -359,7 +363,7 @@ def publish_workflow_view(
                 preflight_manifest,
             )
     except PublishError as error:
-        return PublishResult(error.drift_class)
+        return PublishResult(error.drift_class, write_error=error.lock_error)
     except OSError as error:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
     except (UnicodeError, ValueError):
@@ -517,13 +521,14 @@ def _target_lock(root: Path) -> Iterator[None]:
     descriptor = _open_directory(root)
     locked = False
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError as error:
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
         locked = True
         yield
     finally:
-        if locked:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        _release_directory_lock(descriptor, locked)
 
 
 def _validate_lease(
@@ -1088,7 +1093,7 @@ def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
             _fsync_directory(target_root)
             return PublishResult(DriftClass.CLEAN)
     except PublishError as error:
-        return PublishResult(error.drift_class)
+        return PublishResult(error.drift_class, write_error=error.lock_error)
     except OSError:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC)
 
@@ -1496,7 +1501,7 @@ def _open_directory(path: Path) -> int:
     try:
         return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as error:
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
 
 
 def _same_directory(first: Path, second: Path) -> bool:
@@ -1673,8 +1678,19 @@ def _write_error_diagnostic(destination: Path, error: OSError) -> str:
     )
 
 
+def _lock_error_diagnostic(root: Path, error: OSError) -> str:
+    return PUBLISHER_LOCK_ERROR_PREFIX + json.dumps(
+        {
+            "root": str(root),
+            "error": error.strerror or "OS error",
+        },
+        separators=(",", ":"),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parse_args(argv)
+    lock_error: OSError | None = None
     if arguments.fragment:
         result = PublishResult(DriftClass.INVALID_OR_SEMANTIC)
     else:
@@ -1712,12 +1728,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source_profile=arguments.profile,
                 )
         except PublishError as error:
+            lock_error = error.lock_error
             result = PublishResult(error.drift_class)
     if not result.success:
         print(f"workflow publisher: {result.drift_class.value}", file=sys.stderr)
         if result.write_error is not None:
             print(
                 _write_error_diagnostic(Path(arguments.target), result.write_error),
+                file=sys.stderr,
+            )
+        if lock_error is not None:
+            print(
+                _lock_error_diagnostic(Path(arguments.canonical_root), lock_error),
                 file=sys.stderr,
             )
     return EXIT_CODES[result.drift_class]

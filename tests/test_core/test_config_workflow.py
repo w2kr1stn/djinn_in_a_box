@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import stat
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
@@ -251,6 +252,78 @@ def test_publish_write_error_reports_the_path_not_workflow_drift(tmp_path: Path)
     assert problem.identifier == "workflow-publish-failed"
     assert str(target.destination_root) in problem.message
     assert "Permission denied" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_lock_acquisition_reports_an_operational_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_open = workflow_publisher._open_directory
+    original_flock = workflow_publisher.fcntl.flock
+    descriptor: int | None = None
+
+    def record_target_descriptor(path: Path) -> int:
+        nonlocal descriptor
+        candidate = original_open(path)
+        if path == target.destination_root:
+            descriptor = candidate
+        return candidate
+
+    def fail_target_acquisition(candidate: int, operation: int) -> None:
+        if candidate == descriptor and operation == workflow_publisher.fcntl.LOCK_EX:
+            raise OSError(errno.ENOLCK, "No locks available")
+        original_flock(candidate, operation)
+
+    monkeypatch.setattr(workflow_publisher, "_open_directory", record_target_descriptor)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_target_acquisition)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-publish-failed"
+    assert str(target.destination_root) in problem.message
+    assert "No locks available" in problem.message
+    assert "portable" not in problem.remedy
+
+
+def test_target_lock_release_reports_an_operational_publish_failure_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_open = workflow_publisher._open_directory
+    original_flock = workflow_publisher.fcntl.flock
+    descriptor: int | None = None
+
+    def record_target_descriptor(path: Path) -> int:
+        nonlocal descriptor
+        candidate = original_open(path)
+        if path == target.destination_root:
+            descriptor = candidate
+        return candidate
+
+    def fail_target_unlock(candidate: int, operation: int) -> None:
+        if candidate == descriptor and operation == workflow_publisher.fcntl.LOCK_UN:
+            raise OSError(errno.EINTR, "Interrupted system call")
+        original_flock(candidate, operation)
+
+    monkeypatch.setattr(workflow_publisher, "_open_directory", record_target_descriptor)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_target_unlock)
+
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert descriptor is not None
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-publish-failed"
+    assert str(target.destination_root) in problem.message
+    assert "Interrupted system call" in problem.message
     assert "portable" not in problem.remedy
 
 

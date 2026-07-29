@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -19,6 +20,7 @@ import djinn_in_a_box.core.workflow_publisher as publisher_module
 from djinn_in_a_box.config.loader import save_config
 from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig, ConfigSyncSource
 from djinn_in_a_box.core.config_sync import (
+    LOCK_REMEDY,
     MANIFEST_NAME,
     DriftClass,
     audit_config_sync,
@@ -161,6 +163,46 @@ def test_representative_sync_publishes_all_views_and_lean_manifest(tmp_path: Pat
         )
         for item in manifest["items"]
     )
+
+
+def test_audit_reports_canonical_lock_failure_as_an_operational_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path = _workspace(tmp_path)
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(publisher_module.fcntl, "flock", fail_acquisition)
+
+    audit = audit_config_sync(project, config_path=config_path)
+
+    assert not audit.clean
+    assert audit.drift_classes == (DriftClass.CLEAN,)
+    assert audit.problems[0].identifier == "canonical-lock-failed"
+    assert str(project / "config") in audit.problems[0].message
+    assert "No locks available" in audit.problems[0].message
+    assert audit.problems[0].remedy == LOCK_REMEDY
+
+
+def test_sync_reports_canonical_lock_failure_as_an_operational_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path = _workspace(tmp_path)
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(publisher_module.fcntl, "flock", fail_acquisition)
+
+    result = sync_config(project, config_path=config_path)
+
+    assert not result.success
+    assert result.audit.drift_classes == (DriftClass.CLEAN,)
+    assert result.audit.problems[0].identifier == "canonical-lock-failed"
+    assert str(project / "config") in result.audit.problems[0].message
+    assert "No locks available" in result.audit.problems[0].message
+    assert result.audit.problems[0].remedy == LOCK_REMEDY
 
 
 def _change_source(project: Path) -> None:

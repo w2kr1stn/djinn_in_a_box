@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import json
 import multiprocessing
+import os
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from djinn_in_a_box.core import workflow_publisher
 from djinn_in_a_box.core.workflow_publisher import (
     CANONICAL_MANIFEST_NAME,
     EXIT_CODES,
+    PUBLISHER_LOCK_ERROR_PREFIX,
     PUBLISHER_WRITE_ERROR_PREFIX,
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
@@ -819,6 +821,59 @@ def test_canonical_lock_wraps_close_failure(
     assert exc_info.value.__cause__.errno == errno.EIO
 
 
+def test_target_lock_wraps_acquisition_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _canonical, target = _roots(tmp_path)
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_acquisition)
+
+    with pytest.raises(PublishError) as exc_info, workflow_publisher._target_lock(target):
+        pass
+
+    assert exc_info.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert exc_info.value.lock_error is exc_info.value.__cause__
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert exc_info.value.__cause__.errno == errno.ENOLCK
+
+
+def test_target_lock_wraps_unlock_failure_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _canonical, target = _roots(tmp_path)
+    original_open = workflow_publisher._open_directory
+    original_flock = workflow_publisher.fcntl.flock
+    descriptor: int | None = None
+
+    def record_descriptor(path: Path) -> int:
+        nonlocal descriptor
+        descriptor = original_open(path)
+        return descriptor
+
+    def fail_unlock(candidate: int, operation: int) -> None:
+        if candidate == descriptor and operation == workflow_publisher.fcntl.LOCK_UN:
+            raise OSError(errno.EINTR, "Interrupted system call")
+        original_flock(candidate, operation)
+
+    monkeypatch.setattr(workflow_publisher, "_open_directory", record_descriptor)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_unlock)
+
+    with pytest.raises(PublishError) as exc_info, workflow_publisher._target_lock(target):
+        pass
+
+    assert descriptor is not None
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF
+    assert exc_info.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert exc_info.value.lock_error is exc_info.value.__cause__
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert exc_info.value.__cause__.errno == errno.EINTR
+
+
 def test_parallel_canonical_and_runtime_publish_complete_without_deadlock(tmp_path: Path) -> None:
     canonical, runtime = _roots(tmp_path)
     canonical_publisher = multiprocessing.Process(
@@ -917,6 +972,8 @@ def test_standalone_cli_reports_flock_acquisition_failure(
     canonical, target = _roots(tmp_path)
     view = tmp_path / "view"
     view.mkdir()
+    sentinel = "PRIVATE-WORKFLOW-BODY-SENTINEL"
+    _write(view / "AGENTS.md", sentinel.encode())
 
     def fail_acquisition(_descriptor: int, _operation: int) -> None:
         raise OSError(errno.ENOLCK, "No locks available")
@@ -937,7 +994,10 @@ def test_standalone_cli_reports_flock_acquisition_failure(
     captured = capsys.readouterr()
 
     assert code == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
-    assert captured.err.splitlines() == ["workflow publisher: invalid-or-semantic"]
+    assert captured.err.splitlines()[0] == "workflow publisher: invalid-or-semantic"
+    diagnostic = json.loads(captured.err.splitlines()[1].removeprefix(PUBLISHER_LOCK_ERROR_PREFIX))
+    assert diagnostic == {"root": str(canonical), "error": "No locks available"}
+    assert sentinel not in captured.err
     assert "Traceback" not in captured.err
 
 
@@ -948,7 +1008,8 @@ def test_standalone_cli_reports_canonical_unlock_failure(
     view = tmp_path / "view"
     view.mkdir()
     _canonical_identity(canonical)
-    _write(view / "AGENTS.md", b"cli view\n")
+    sentinel = "PRIVATE-WORKFLOW-BODY-SENTINEL"
+    _write(view / "AGENTS.md", sentinel.encode())
     original_open = workflow_publisher._open_directory
     original_flock = workflow_publisher.fcntl.flock
     descriptor: int | None = None
@@ -982,8 +1043,14 @@ def test_standalone_cli_reports_canonical_unlock_failure(
     captured = capsys.readouterr()
 
     assert descriptor is not None
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF
     assert code == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
-    assert captured.err.splitlines() == ["workflow publisher: invalid-or-semantic"]
+    assert captured.err.splitlines()[0] == "workflow publisher: invalid-or-semantic"
+    diagnostic = json.loads(captured.err.splitlines()[1].removeprefix(PUBLISHER_LOCK_ERROR_PREFIX))
+    assert diagnostic == {"root": str(canonical), "error": "Interrupted system call"}
+    assert sentinel not in captured.err
     assert "Traceback" not in captured.err
 
 
