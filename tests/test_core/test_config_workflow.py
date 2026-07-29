@@ -15,6 +15,7 @@ from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig, ConfigSync
 from djinn_in_a_box.core import workflow_publisher
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
+    LOCK_REMEDY,
     CanonicalDeliveryViewResult,
     ConfigSyncAudit,
     DriftClass,
@@ -386,6 +387,27 @@ def test_flock_acquisition_failure_reports_canonical_lock_failure(
     assert "No locks available" in problem.message
 
 
+def test_initial_audit_lock_failure_reports_the_structured_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_acquisition)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert str(project / "config") in problem.message
+    assert "No locks available" in problem.message
+    assert problem.remedy == LOCK_REMEDY
+    assert "portable" not in problem.remedy
+
+
 def test_canonical_unlock_failure_reports_preparation_lock_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -478,6 +500,36 @@ def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publishe
     assert not (claude_root / ".djinn-workflow-delivery.json").exists()
     assert not (claude_root / RUNTIME_MANIFEST_NAME).exists()
     assert (codex_root / RUNTIME_MANIFEST_NAME).is_file()
+
+
+def test_compose_retirement_write_error_reports_the_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    claude_root = runtime / "claude"
+    claude_root.mkdir(parents=True)
+    (claude_root / ".djinn-workflow-delivery.json").write_bytes(_legacy_manifest())
+
+    def fail_fsync(_root: Path) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(workflow_module, "ensure_host_env", _ensure_host_env)
+    monkeypatch.setattr(workflow_publisher, "_fsync_directory", fail_fsync)
+    result = prepare_config_workflow(
+        project,
+        (WorkflowDeliveryTarget("claude", claude_root),),
+        config_path=config_path,
+        require_compose_host_env=True,
+        container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+    )
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "workflow-publish-failed"
+    assert str(claude_root) in problem.message
+    assert "No space left on device" in problem.message
+    assert "portable" not in problem.remedy
 
 
 def test_compose_image_gate_blocks_before_audit_or_runtime_write(

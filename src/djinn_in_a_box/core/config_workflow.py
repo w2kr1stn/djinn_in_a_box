@@ -11,6 +11,7 @@ from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     ConfigSyncAudit,
     DriftClass,
+    SyncProblem,
     audit_config_sync,
     load_canonical_delivery_view,
     sync_config,
@@ -192,6 +193,8 @@ def prepare_config_workflow(
     for target in targets:
         if _compose_claude_target(config, target, require_compose_host_env):
             retired = retire_legacy_delivery_manifest(target.destination_root)
+            if retired.write_error is not None:
+                return _publish_write_failure(target.destination_root, retired.write_error)
             if not retired.success:
                 return _publish_failure(retired)
             continue
@@ -319,11 +322,26 @@ def _auto_repairable(audit: ConfigSyncAudit) -> bool:
 
 
 def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
+    if audit.problems:
+        return _sync_problem_failure(audit.problems[0])
     drift = next(
         (item.kind for item in audit.drifts if item.kind is not DriftClass.CLEAN),
         DriftClass.INVALID_OR_SEMANTIC,
     )
     return _failure(drift.value)
+
+
+def _sync_problem_failure(problem: SyncProblem) -> WorkflowPreparationResult:
+    return WorkflowPreparationResult(
+        False,
+        (
+            WorkflowPreparationProblem(
+                problem.identifier,
+                problem.message,
+                problem.remedy or CANONICAL_REMEDY,
+            ),
+        ),
+    )
 
 
 def _publish_failure(result: PublishResult) -> WorkflowPreparationResult:

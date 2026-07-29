@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 import sys
@@ -13,6 +14,10 @@ import pytest
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
+from djinn_in_a_box.core.workflow_publisher import (
+    PUBLISHER_LOCK_ERROR_PREFIX,
+    PUBLISHER_WRITE_ERROR_PREFIX,
+)
 
 _SESSION_MODULE = "djinn_in_a_box.core.session"
 _SUBPROCESS_RUN = f"{_SESSION_MODULE}.subprocess.run"
@@ -412,6 +417,41 @@ class TestRefreshOpenCodeWorkflow:
 
         assert "target-drift" in result.stderr
         assert "modified managed workflow item" in result.stderr
+
+    def test_publisher_refresh_prefers_the_later_lock_diagnostic_over_write_diagnostic(
+        self, session_mgr: SessionManager
+    ) -> None:
+        failed = MagicMock(
+            returncode=13,
+            stdout="",
+            stderr=(
+                "workflow publisher: invalid-or-semantic\n"
+                + PUBLISHER_WRITE_ERROR_PREFIX
+                + json.dumps({"destination": "/destination", "error": "No space left on device"})
+                + "\n"
+                + PUBLISHER_LOCK_ERROR_PREFIX
+                + json.dumps({"root": "/canonical", "error": "No locks available"})
+                + "\n"
+            ),
+        )
+
+        with (
+            patch.object(
+                session_mgr,
+                "workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch(_SUBPROCESS_RUN, return_value=failed),
+        ):
+            result = session_mgr.refresh_opencode_workflow(
+                SessionTarget(container_id="container-id")
+            )
+
+        assert result.stderr == (
+            "OpenCode workflow refresh failed: Canonical workflow lock failed at /canonical: "
+            "No locks available. Remedy: Check that the canonical workflow root is a readable, "
+            "lockable directory and that no other Djinn process is stuck on it, then retry."
+        )
 
     def test_host_target_does_not_execute_refresh(self, session_mgr: SessionManager) -> None:
         with patch(_SUBPROCESS_RUN) as run:

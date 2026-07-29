@@ -1094,8 +1094,8 @@ def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
             return PublishResult(DriftClass.CLEAN)
     except PublishError as error:
         return PublishResult(error.drift_class, write_error=error.lock_error)
-    except OSError:
-        return PublishResult(DriftClass.INVALID_OR_SEMANTIC)
+    except OSError as error:
+        return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
 
 
 def _load_legacy_delivery_manifest(

@@ -449,6 +449,25 @@ def test_compose_retirement_retries_after_verify_before_remove_crash(
     assert not legacy.exists()
 
 
+def test_retirement_carries_directory_fsync_error_as_write_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "claude"
+    root.mkdir()
+    (root / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME).write_bytes(_legacy_manifest({}))
+
+    def fail_fsync(_root: Path) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(workflow_publisher, "_fsync_directory", fail_fsync)
+    result = retire_legacy_delivery_manifest(root)
+
+    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert result.write_error is not None
+    assert result.write_error.errno == errno.ENOSPC
+    assert result.write_error.strerror == "No space left on device"
+
+
 def test_stale_file_and_owned_json_key_are_removed_without_touching_neighbor(
     tmp_path: Path,
 ) -> None:
