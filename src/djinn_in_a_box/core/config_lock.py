@@ -18,8 +18,11 @@ def config_directory_lock(config_dir: Path, *, exclusive: bool) -> Iterator[int]
     try:
         descriptor = os.open(config_dir, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as error:
+        # Name the directory: the most common cause is a clone that has never
+        # run `djinn init`, since config/ is git-ignored blank space. A generic
+        # message leaves that user with nothing to act on.
         raise ConfigDirectoryLockError(
-            "Configuration directory cannot be locked safely."
+            f"Configuration directory cannot be locked safely: {config_dir} ({error.strerror})"
         ) from error
     locked = False
     try:

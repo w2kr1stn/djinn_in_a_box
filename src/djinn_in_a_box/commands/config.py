@@ -421,6 +421,7 @@ def _set_and_save_config_value(key: str, value: str) -> None:
     success(f"{key} = {_format_config_value(updated, key)}")
 
 
+@handle_config_errors
 def config_edit() -> None:
     """Open the configuration file in $EDITOR and validate it afterward."""
     config_dir = get_project_root() / "config"
