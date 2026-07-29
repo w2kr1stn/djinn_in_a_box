@@ -148,7 +148,9 @@ def audit_config_sync(
     try:
         with canonical_lock(config_root, exclusive=False):
             return _audit_locked(project_root, source)
-    except (OSError, PublishError):
+    except PublishError:
+        return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+    except OSError:
         return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
 
 
@@ -212,7 +214,9 @@ def sync_config(
             _audit_for(source, error.drift),
             retryable=error.drift is DriftClass.SOURCE_CHANGED,
         )
-    except (OSError, PublishError, ValueError):
+    except PublishError:
+        return ConfigSyncResult(False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC))
+    except (OSError, ValueError):
         return ConfigSyncResult(False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC))
 
 
@@ -236,7 +240,11 @@ def load_canonical_delivery_view(
             _audit_for(source, error.drift),
             retryable=error.drift is DriftClass.SOURCE_CHANGED,
         )
-    except (KeyError, OSError, PublishError):
+    except PublishError:
+        return CanonicalDeliveryViewResult(
+            False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+        )
+    except (KeyError, OSError):
         return CanonicalDeliveryViewResult(
             False, _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
         )

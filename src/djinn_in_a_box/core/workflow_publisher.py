@@ -259,13 +259,30 @@ def canonical_lock(root: Path, *, exclusive: bool) -> Iterator[CanonicalLockLeas
     descriptor = _open_directory(root)
     locked = False
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        except OSError as error:
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
         locked = True
         yield CanonicalLockLease(root.resolve(), descriptor, exclusive)
     finally:
-        if locked:
+        _release_canonical_lock(descriptor, locked)
+
+
+def _release_canonical_lock(descriptor: int, locked: bool) -> None:
+    release_error: OSError | None = None
+    if locked:
+        try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError as error:
+            release_error = error
+    try:
         os.close(descriptor)
+    except OSError as error:
+        if release_error is None:
+            release_error = error
+    if release_error is not None:
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from release_error
 
 
 def snapshot_file_view(

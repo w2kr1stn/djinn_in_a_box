@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import stat
 from pathlib import Path, PurePosixPath
@@ -10,6 +11,7 @@ import pytest
 import djinn_in_a_box.core.config_workflow as workflow_module
 from djinn_in_a_box.config.loader import save_config
 from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig, ConfigSyncSource
+from djinn_in_a_box.core import workflow_publisher
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     CanonicalDeliveryViewResult,
@@ -284,6 +286,62 @@ def test_unreadable_canonical_root_reports_lock_failure_without_traceback(
     assert "Permission denied" in problem.message
     assert "Traceback" not in repr(result)
     assert "portable" not in problem.remedy
+
+
+def test_flock_acquisition_failure_reports_canonical_lock_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    audit = audit_config_sync(project, config_path=config_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+
+    def fixed_audit(*_args: object, **_kwargs: object) -> ConfigSyncAudit:
+        return audit
+
+    def fail_acquisition(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(workflow_module, "audit_config_sync", fixed_audit)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_acquisition)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert problem.identifier != DriftClass.INVALID_OR_SEMANTIC.value
+    assert "No locks available" in problem.message
+
+
+def test_canonical_unlock_failure_reports_preparation_lock_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _runtime = _workspace(tmp_path)
+    assert prepare_config_workflow(project, config_path=config_path).success
+    audit = audit_config_sync(project, config_path=config_path)
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    original_flock = workflow_publisher.fcntl.flock
+
+    def fixed_audit(*_args: object, **_kwargs: object) -> ConfigSyncAudit:
+        return audit
+
+    def failed_view(*_args: object, **_kwargs: object) -> CanonicalDeliveryViewResult:
+        return CanonicalDeliveryViewResult(False, audit)
+
+    def fail_unlock(descriptor: int, operation: int) -> None:
+        if operation == workflow_publisher.fcntl.LOCK_UN:
+            raise OSError(errno.EINTR, "Interrupted system call")
+        original_flock(descriptor, operation)
+
+    monkeypatch.setattr(workflow_module, "audit_config_sync", fixed_audit)
+    monkeypatch.setattr(workflow_module, "load_canonical_delivery_view", failed_view)
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", fail_unlock)
+    result = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert not result.success
+    problem = result.problems[0]
+    assert problem.identifier == "canonical-lock-failed"
+    assert "Interrupted system call" in problem.message
 
 
 def test_canonical_config_reload_os_error_is_not_reported_as_publish_failure(

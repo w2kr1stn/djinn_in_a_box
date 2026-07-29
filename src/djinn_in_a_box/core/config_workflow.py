@@ -330,9 +330,7 @@ def _publish_failure(result: PublishResult) -> WorkflowPreparationResult:
     return _failure(result.drift_class.value)
 
 
-def _canonical_lock_failure(
-    canonical_root: Path, error: OSError | PublishError
-) -> WorkflowPreparationResult:
+def _canonical_lock_failure(canonical_root: Path, error: PublishError) -> WorkflowPreparationResult:
     cause = error.__cause__ if isinstance(error.__cause__, OSError) else error
     return WorkflowPreparationResult(
         False,
