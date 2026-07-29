@@ -58,6 +58,28 @@ def _write_test_config(config_file: Path, projects_dir: Path) -> AppConfig:
     return config
 
 
+@pytest.fixture
+def config_edit_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """Provide the project-local config directory required by ``config edit``."""
+    project_root = tmp_path / "project"
+    config_dir = project_root / "config"
+    config_dir.mkdir(parents=True)
+    get_project_root = MagicMock(return_value=project_root)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", get_project_root)
+
+    yield config_dir
+
+    # Both halves must be load-bearing. Without the mkdir check the stubbed-lock
+    # test would pass with no directory; without the call check, dropping the
+    # patch would leave every test green locally — on the real ./config — which
+    # is exactly how this bug reached CI. `assert_called` rather than
+    # `assert_called_once`: the count carries no signal, only coupling.
+    assert config_dir.is_dir()
+    get_project_root.assert_called()
+
+
 class TestDjinnVersion:
     """Tests for the --version flag."""
 
@@ -496,11 +518,21 @@ class TestConfigSetCommand:
         assert "Traceback" not in combined
 
 
+@pytest.mark.usefixtures("config_edit_project")
 class TestConfigEditCommand:
-    """Tests for the config edit command."""
+    """Tests for the config edit command.
+
+    The class-level usefixtures is deliberate: `config edit` locks the
+    project-local `config/`, which is git-ignored and therefore present on every
+    developer machine and absent on a fresh checkout. A test that forgets the
+    fixture locks the real one, passes locally and fails on CI — which is how
+    this class went red for ten days. Applying it class-wide means a new test
+    cannot reintroduce that by omission. Tests needing the path still request
+    the fixture by name and get the same instance.
+    """
 
     def test_config_edit_warns_when_editor_corrupts_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -523,7 +555,7 @@ class TestConfigEditCommand:
         assert "Invalid TOML" in combined
 
     def test_config_edit_splits_editor_command_with_arguments(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -547,7 +579,7 @@ class TestConfigEditCommand:
         assert "# edited" in config_file.read_text()
 
     def test_config_edit_holds_exclusive_config_directory_lock(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -555,15 +587,11 @@ class TestConfigEditCommand:
         _write_test_config(config_file, projects_dir)
         monkeypatch.setattr("djinn_in_a_box.commands.config.CONFIG_FILE", config_file)
         monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
-        project_root = tmp_path / "project"
-        config_dir = project_root / "config"
-        config_dir.mkdir(parents=True)
-        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
         events: list[str] = []
 
         @contextmanager
         def record_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
-            assert path == config_dir
+            assert path == config_edit_project
             assert exclusive is True
             events.append("lock")
             yield
@@ -582,7 +610,7 @@ class TestConfigEditCommand:
         assert events == ["lock", "editor", "unlock"]
 
     def test_config_edit_warns_when_editor_deletes_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -605,7 +633,7 @@ class TestConfigEditCommand:
         assert not config_file.exists()
 
     def test_config_edit_bad_editor_exits_cleanly(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_edit_project: Path
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
@@ -622,6 +650,42 @@ class TestConfigEditCommand:
         assert "Cannot run editor" in combined
         assert "$EDITOR" in combined
         assert "No closing quotation" in combined
+        assert "Traceback" not in combined
+
+class TestConfigEditWithoutProjectConfig:
+    """`config edit` on a clone that never ran `djinn init`.
+
+    Deliberately outside `TestConfigEditCommand`: that class applies
+    `config_edit_project` to every test, and the whole point here is the
+    directory's absence.
+    """
+
+    def test_config_edit_without_project_config_dir_is_actionable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A clone that never ran `djinn init` must get guidance, not a traceback.
+
+        `config/` is git-ignored blank space, so this is the state of every fresh
+        clone.
+        """
+        config_file = tmp_path / "config.toml"
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _write_test_config(config_file, projects_dir)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.CONFIG_FILE", config_file)
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+        bare_root = tmp_path / "bare-project"
+        bare_root.mkdir()
+        monkeypatch.setattr(
+            "djinn_in_a_box.commands.config.get_project_root", lambda: bare_root
+        )
+
+        result = runner.invoke(app, ["config", "edit"])
+
+        assert result.exit_code == 1
+        combined = result.stdout + result.output
+        assert "config" in combined
+        assert "djinn init" in combined
         assert "Traceback" not in combined
 
 
