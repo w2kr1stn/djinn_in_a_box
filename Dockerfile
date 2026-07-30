@@ -80,10 +80,10 @@ ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
 # CLI Agent versions - update with: ./scripts/update-agents.sh
-ARG CLAUDE_CODE_VERSION=2.1.114
-ARG GEMINI_CLI_VERSION=0.38.2
-ARG CODEX_VERSION=0.121.0
-ARG OPENCODE_VERSION=1.4.12
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG GEMINI_CLI_VERSION=0.53.0
+ARG CODEX_VERSION=0.146.0
+ARG OPENCODE_VERSION=1.18.9
 
 # Claude Code via native installer (no npm/Node.js dependency)
 # Installs to ~/.local/bin/claude (already in PATH via .zshrc)
