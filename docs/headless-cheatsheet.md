@@ -131,6 +131,7 @@ with the agent's return code.
 | `--model <name>`, `-m <name>` | Model override forwarded to the agent. |
 | `--write`, `-w` | Enable the agent's write/edit mode. |
 | `--json`, `-j` | Request JSON output from the agent. |
+| `--here` | Mount the current directory at `/home/dev/workspace`; repeatable with `--mount`. |
 | `--mount SRC[:DST[:ro\|rw]]` | Repeatable host-directory mount. Without `DST`, Djinn derives `/home/dev/mount/<basename>`; append `:ro` for read-only. |
 | `--docker`, `-d` | Enable Docker socket access through the proxy. |
 | `--docker-direct` | Enable direct Docker socket access without the proxy. |
@@ -139,11 +140,11 @@ with the agent's return code.
 
 `--docker` and `--docker-direct` are mutually exclusive.
 
-`djinn run` without `--mount` keeps its implicit `--here` behavior: the current
-directory is mounted at `/home/dev/workspace` and is the workdir. With mounts,
-the first mount target is the workdir. For `djinn start`, `--here` is the only
-explicit way to use `/home/dev/workspace`; a target-free mount uses
-`/home/dev/mount/<basename>`.
+`djinn run` without `--mount` and without `--here` keeps its implicit `--here`
+behavior: the current directory is mounted at `/home/dev/workspace` and is the
+workdir. `--here` can be combined with repeatable mounts; the workspace remains
+the first mount and therefore the workdir. Without `--here`, the first explicit
+mount target is the workdir. A target-free mount uses `/home/dev/mount/<basename>`.
 
 ---
 

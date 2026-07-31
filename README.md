@@ -395,7 +395,7 @@ value overrides `default_model` for that invocation.
 | --- | --- | --- | --- |
 | `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit | Starts in `/home/dev/projects` without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
-| `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount`, mounts the current directory at `/home/dev/workspace`; otherwise accepts repeatable `--mount` values | One-shot agent prompts |
+| `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
 
 Common `start` options:
@@ -474,13 +474,15 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
 
-`--here` is the only way to mount the current directory at `/home/dev/workspace`.
-Each `--mount SRC[:DST[:ro|rw]]` adds a host directory; without `DST`, Djinn derives
+`--here` mounts the current directory at `/home/dev/workspace` for both `start` and
+`run`; for `run` it can be combined with any number of `--mount` values. Each
+`--mount SRC[:DST[:ro|rw]]` adds a host directory; without `DST`, Djinn derives
 `/home/dev/mount/<basename>`, and `:ro` makes that mount read-only. The working
 directory is `/home/dev/workspace` with `--here`, otherwise the first mount target;
 `djinn start` without mounts passes no `--workdir`, so the Compose service default
 `working_dir: /home/dev/projects` applies.
-`djinn run` without `--mount` keeps its implicit `--here` behavior.
+`djinn run` without `--mount` and without `--here` keeps its implicit `--here`
+behavior.
 
 Named volumes are Docker-managed and host-local:
 

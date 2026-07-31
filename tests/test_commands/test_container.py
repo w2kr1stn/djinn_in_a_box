@@ -24,6 +24,7 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     DockerMode,
     MountCollisionError,
+    MountSpecificationError,
     RunResult,
 )
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
@@ -96,6 +97,7 @@ class TestStartCommand:
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
+            patch("djinn_in_a_box.commands.container.get_dbus_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.banner") as mock_banner,
             patch(
                 "djinn_in_a_box.commands.container.prepare_config_workflow",
@@ -170,6 +172,34 @@ class TestStartCommand:
             container.start(firewall=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.firewall_enabled is True
+
+    def test_start_passes_each_precomputed_runtime_mount_list(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
+        audio_args = ["-v", "/host/pulse:/run/user/1000/pulse/native"]
+        dbus_args = ["-v", "/host/bus:/run/user/1000/bus:ro"]
+        with (
+            patch(
+                "djinn_in_a_box.commands.container.get_shell_mount_args",
+                return_value=shell_args,
+            ),
+            patch(
+                "djinn_in_a_box.commands.container.get_audio_mount_args",
+                return_value=audio_args,
+            ),
+            patch(
+                "djinn_in_a_box.commands.container.get_dbus_mount_args",
+                return_value=dbus_args,
+            ),
+            pytest.raises(typer.Exit),
+        ):
+            container.start()
+
+        kwargs = start_mocks["run"].call_args.kwargs
+        assert kwargs["shell_mount_args"] is shell_args
+        assert kwargs["audio_mount_args"] is audio_args
+        assert kwargs["dbus_mount_args"] is dbus_args
 
     def test_start_with_here_flag(
         self, start_mocks: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -263,6 +293,17 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         assert "mount collision detail" in start_mocks["err_output"].getvalue()
         start_mocks["cleanup"].assert_called_once_with(DockerMode.NONE, start_mocks["config"])
+
+    def test_start_reports_a_mount_specification_error_from_the_core(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["run"].side_effect = MountSpecificationError("bad volume arguments")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        assert "bad volume arguments" in start_mocks["err_output"].getvalue()
 
     def test_start_uses_the_common_mount_path_validation(
         self, start_mocks: dict[str, Any], tmp_path: Path

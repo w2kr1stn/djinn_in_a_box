@@ -141,6 +141,10 @@ def run(
         bool,
         typer.Option("--firewall", "-f", help="Enable network firewall"),
     ] = False,
+    here: Annotated[
+        bool,
+        typer.Option("--here", help="Mount current directory as ~/workspace"),
+    ] = False,
     mount: Annotated[
         list[str] | None,
         typer.Option(
@@ -160,8 +164,8 @@ def run(
     to stderr to keep stdout clean for agent output.
 
     By default, the current working directory is mounted as ~/workspace
-    in the container (implicit --here behavior). Use repeatable --mount
-    values to mount one or more different directories.
+    in the container (implicit --here behavior). Use --here to request that
+    workspace explicitly alongside repeatable --mount values.
 
     Examples:
 
@@ -176,6 +180,10 @@ def run(
 
         # With Docker access and timeout
         djinn run claude "Build the Docker image" --docker --timeout 300
+
+        # Mount the current directory and two additional directories
+        djinn run claude "Compare these projects" --here \
+            --mount ~/other-project --mount ~/reference:/home/dev/reference:ro
     """
     try:
         docker_mode = resolve_docker_mode(docker, docker_direct)
@@ -206,7 +214,9 @@ def run(
         raise typer.Exit(1)
 
     try:
-        resolved_mounts = resolve_container_mounts(tuple(mount or ()), here=not mount)
+        resolved_mounts = resolve_container_mounts(
+            tuple(mount or ()), here=here or not mount
+        )
     except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
         error(str(e))
         raise typer.Exit(1) from None
@@ -220,7 +230,6 @@ def run(
             model=model,
             docker_mode=docker_mode,
             firewall=firewall,
-            mounts=tuple(mount or ()),
             resolved_mounts=resolved_mounts,
             timeout=timeout,
             app_config=checked_config,
@@ -242,7 +251,7 @@ def run(
     except AgentNetworkError as e:
         error(str(e))
         raise typer.Exit(1) from None
-    except MountCollisionError as e:
+    except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
         raise typer.Exit(1) from None
 

@@ -23,6 +23,7 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     DockerMode,
     MountCollisionError,
+    MountSpecificationError,
     RunResult,
     WorkflowImageCompatibility,
 )
@@ -200,9 +201,68 @@ class TestRunCommand:
         mock_run = run_mocks["run"]
         mock_run.assert_called_once()
         assert mock_run.call_args.args == ("claude", "test prompt")
-        assert mock_run.call_args.kwargs["mounts"] == ()
+        assert "mounts" not in mock_run.call_args.kwargs
+        assert "resolved_mounts" in mock_run.call_args.kwargs
         assert mock_run.call_args.kwargs["app_config"] is run_mocks["config"]
         assert callable(mock_run.call_args.kwargs["on_ready"])
+
+    def test_run_without_mount_resolves_implicit_here_at_cli_boundary(
+        self,
+        run_mocks: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(app, ["run", "claude", "test prompt"])
+
+        assert result.exit_code == 0, result.output
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+        )
+
+    def test_run_here_alone_resolves_current_directory(
+        self,
+        run_mocks: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(typer.Exit):
+            run(agent="claude", prompt="test prompt", here=True)
+
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+        )
+
+    def test_run_here_keeps_workspace_first_with_two_additional_mounts(
+        self,
+        run_mocks: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        monkeypatch.chdir(tmp_path)
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
+        with pytest.raises(typer.Exit):
+            run(
+                agent="claude",
+                prompt="test prompt",
+                here=True,
+                mount=[str(first), str(second)],
+            )
+
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/home/dev/mount/second")),
+        )
 
     def test_run_passes_each_mount_specification_to_the_runner(
         self, run_mocks: dict[str, Any], tmp_path: Path
@@ -221,9 +281,10 @@ class TestRunCommand:
                 mount=[str(first), f"{second}:/container/two:ro"],
             )
 
-        assert run_mocks["run"].call_args.kwargs["mounts"] == (
-            str(first),
-            f"{second}:/container/two:ro",
+        assert "mounts" not in run_mocks["run"].call_args.kwargs
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(first, Path("/home/dev/mount/one")),
+            ContainerMount(second, Path("/container/two"), read_only=True),
         )
 
     def test_run_cli_preserves_repeated_mount_options(
@@ -248,7 +309,11 @@ class TestRunCommand:
         )
 
         assert result.exit_code == 0, result.output
-        assert run_mocks["run"].call_args.kwargs["mounts"] == (str(first), str(second))
+        assert "mounts" not in run_mocks["run"].call_args.kwargs
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/home/dev/mount/second")),
+        )
 
     def test_run_status_lists_mounts_and_labels_only_an_actual_workspace(
         self, run_mocks: dict[str, Any]
@@ -330,6 +395,21 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
         error.assert_called_once_with("mount collision detail")
+
+    def test_run_reports_a_mount_specification_error(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["run"].side_effect = MountSpecificationError("bad volume arguments")
+        with (
+            patch("djinn_in_a_box.commands.agent.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="claude", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with("bad volume arguments")
 
     def test_run_keeps_checked_config_when_loader_changes_after_bootstrap(
         self, run_mocks: dict[str, Any]

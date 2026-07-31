@@ -34,6 +34,7 @@ _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 _MOUNT_ROOT = Path("/home/dev/mount")
 _WORKSPACE_PATH = Path("/home/dev/workspace")
+_FORBIDDEN_MOUNT_TARGET_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
 _IMAGE_SYMLINK_MOUNT_TARGETS = (
     Path("/home/dev/.config/claude"),
 )
@@ -138,6 +139,12 @@ def parse_mount_spec(specification: str) -> tuple[str, Path | None, bool]:
             target = Path(normalized_target)
             if not target.is_absolute():
                 msg = f"Mount target must be an absolute container path: {target_or_mode!r}"
+                raise MountSpecificationError(msg)
+            if any(
+                target == root or target.is_relative_to(root)
+                for root in _FORBIDDEN_MOUNT_TARGET_ROOTS
+            ):
+                msg = f"Mount target {target} is not allowed under /proc, /sys, or /dev"
                 raise MountSpecificationError(msg)
 
     if len(fields) == 3:
@@ -467,14 +474,16 @@ def _mount_targets_from_args(args: list[str]) -> list[Path]:
         argument = args[index]
         if argument in {"-v", "--volume"}:
             if index + 1 == len(args):
-                raise ValueError(f"Volume flag {argument!r} requires a specification")
+                raise MountSpecificationError(
+                    f"Volume flag {argument!r} requires a specification"
+                )
             specification = args[index + 1]
             index += 2
         elif argument.startswith("--volume="):
             specification = argument.split("=", 1)[1]
             index += 1
         elif argument.startswith("--volume") or argument.startswith("--mount"):
-            raise ValueError(f"Unknown volume flag {argument!r}")
+            raise MountSpecificationError(f"Unknown volume flag {argument!r}")
         else:
             index += 1
             continue

@@ -47,6 +47,7 @@ from djinn_in_a_box.core.docker import (
     ensure_network,
     get_audio_mount_args,
     get_config_root,
+    get_dbus_mount_args,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
     get_running_containers,
@@ -224,6 +225,7 @@ def start(
 
     # Audio passthrough status
     audio_args = get_audio_mount_args()
+    dbus_args = get_dbus_mount_args()
     if audio_args:
         status_line("Audio", "PulseAudio forwarding enabled", "status.enabled")
     else:
@@ -254,8 +256,9 @@ def start(
             interactive=True,
             shell_mount_args=shell_args,
             audio_mount_args=audio_args,
+            dbus_mount_args=dbus_args,
         )
-    except MountCollisionError as e:
+    except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
         raise typer.Exit(1) from None
     finally:
