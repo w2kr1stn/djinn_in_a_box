@@ -10,7 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 from rich.console import Console
+from typer.testing import CliRunner
 
+from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import container
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
@@ -180,6 +182,22 @@ class TestStartCommand:
             ContainerMount(tmp_path, Path("/home/dev/workspace")),
         )
 
+    def test_start_keeps_here_mount_first_with_additional_mount(
+        self, start_mocks: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        additional = tmp_path / "additional"
+        additional.mkdir()
+
+        with pytest.raises(typer.Exit):
+            container.start(here=True, mount=[str(additional)])
+
+        options = start_mocks["run"].call_args[0][1]
+        assert options.mounts == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+            ContainerMount(additional, Path("/home/dev/mount/additional")),
+        )
+
     def test_start_collects_repeatable_mounts(
         self, start_mocks: dict[str, Any], tmp_path: Path
     ) -> None:
@@ -194,6 +212,23 @@ class TestStartCommand:
             ContainerMount(first, Path("/home/dev/mount/first")),
             ContainerMount(second, Path("/opt/second"), read_only=True),
         )
+
+    def test_start_cli_preserves_repeated_mount_options(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
+        result = CliRunner().invoke(
+            app,
+            ["start", "--mount", str(first), "--mount", str(second)],
+        )
+
+        assert result.exit_code == 0, result.output
+        options = start_mocks["run"].call_args[0][1]
+        assert [mount.source for mount in options.mounts] == [first, second]
 
     def test_start_lists_each_resolved_mount(
         self, start_mocks: dict[str, Any], tmp_path: Path

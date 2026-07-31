@@ -66,7 +66,7 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     tmp_path: Path,
     runner_mocks: dict[str, Any],
 ) -> None:
-    ready: list[Path] = []
+    ready: list[tuple[ContainerMount, ...]] = []
 
     result = run_headless_agent(
         "codex",
@@ -80,7 +80,9 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     )
 
     assert result is runner_mocks["result"]
-    assert ready == [tmp_path]
+    assert ready == [
+        (ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),)
+    ]
     compose = runner_mocks["compose"]
     compose.assert_called_once()
     assert compose.call_args.args[0] is runner_mocks["app_config"]
@@ -112,6 +114,30 @@ def test_run_headless_agent_uses_current_directory_by_default(
     assert options.mounts == (
         ContainerMount(tmp_path, Path("/home/dev/workspace")),
     )
+
+
+def test_run_headless_agent_on_ready_receives_all_resolved_mounts(
+    tmp_path: Path,
+    runner_mocks: dict[str, Any],
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    ready: list[tuple[ContainerMount, ...]] = []
+
+    run_headless_agent(
+        "codex",
+        "inspect",
+        mounts=(str(first), str(second)),
+        on_ready=ready.append,
+    )
+
+    expected = (
+        ContainerMount(first, Path("/home/dev/mount/first")),
+        ContainerMount(second, Path("/home/dev/mount/second")),
+    )
+    assert ready == [expected]
 
 
 def test_run_headless_agent_validates_mount_before_network(

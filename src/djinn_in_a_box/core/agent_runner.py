@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
-from pathlib import Path
 
 from djinn_in_a_box.config.loader import load_agents, load_config
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
+    ContainerMount,
     ContainerOptions,
     DockerMode,
     RunResult,
@@ -71,8 +71,9 @@ def run_headless_agent(
     docker_mode: DockerMode = DockerMode.NONE,
     firewall: bool = False,
     mounts: tuple[str, ...] = (),
+    resolved_mounts: tuple[ContainerMount, ...] | None = None,
     timeout: int | None = None,
-    on_ready: Callable[[Path], None] | None = None,
+    on_ready: Callable[[tuple[ContainerMount, ...]], None] | None = None,
     app_config: AppConfig | None = None,
 ) -> RunResult:
     """Run one configured agent without invoking workflow bootstrap or UI code."""
@@ -83,13 +84,16 @@ def run_headless_agent(
     except KeyError:
         raise UnknownAgentError(agent, tuple(sorted(agent_configs))) from None
 
-    container_mounts = resolve_container_mounts(mounts, here=not mounts)
+    container_mounts = (
+        resolved_mounts
+        if resolved_mounts is not None
+        else resolve_container_mounts(mounts, here=not mounts)
+    )
     if not ensure_network():
         raise AgentNetworkError
 
-    workspace = container_mounts[0].source
     if on_ready is not None:
-        on_ready(workspace)
+        on_ready(container_mounts)
 
     agent_command = build_agent_command(
         agent_config,

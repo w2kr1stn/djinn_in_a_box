@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,13 @@ _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 _MOUNT_ROOT = Path("/home/dev/mount")
 _WORKSPACE_PATH = Path("/home/dev/workspace")
+_IMAGE_SYMLINK_MOUNT_TARGETS = (
+    Path("/home/dev/.config/claude"),
+)
+_DIRECT_DOCKER_SOCKET_TARGETS = (
+    Path("/var/run/docker.sock"),
+    Path("/run/docker.sock"),
+)
 _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/.claude"),
     Path("/home/dev/.gemini"),
@@ -126,7 +134,8 @@ def parse_mount_spec(specification: str) -> tuple[str, Path | None, bool]:
         if target_or_mode in {"ro", "rw"}:
             read_only = target_or_mode == "ro"
         else:
-            target = Path(os.path.normpath(target_or_mode))
+            normalized_target = re.sub(r"^/+", "/", os.path.normpath(target_or_mode))
+            target = Path(normalized_target)
             if not target.is_absolute():
                 msg = f"Mount target must be an absolute container path: {target_or_mode!r}"
                 raise MountSpecificationError(msg)
@@ -451,26 +460,52 @@ def get_dbus_mount_args() -> list[str]:
 
 
 def _mount_targets_from_args(args: list[str]) -> list[Path]:
-    """Extract container targets from the ``-v`` arguments built in this module."""
+    """Extract container targets from volume arguments built in this module."""
     targets: list[Path] = []
-    for index, argument in enumerate(args):
-        if argument != "-v" or index + 1 == len(args):
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument in {"-v", "--volume"}:
+            if index + 1 == len(args):
+                raise ValueError(f"Volume flag {argument!r} requires a specification")
+            specification = args[index + 1]
+            index += 2
+        elif argument.startswith("--volume="):
+            specification = argument.split("=", 1)[1]
+            index += 1
+        elif argument.startswith("--volume") or argument.startswith("--mount"):
+            raise ValueError(f"Unknown volume flag {argument!r}")
+        else:
+            index += 1
             continue
-        specification = args[index + 1]
+
         parts = specification.rsplit(":", 2)
         target = parts[-2] if parts[-1] in {"ro", "rw"} else parts[-1]
         targets.append(Path(target))
     return targets
 
 
-def _reserved_mount_targets(config: AppConfig, docker_mode: DockerMode) -> list[Path]:
+def _reserved_mount_targets(
+    config: AppConfig,
+    docker_mode: DockerMode,
+    *,
+    shell_args: list[str] | None = None,
+    audio_args: list[str] | None = None,
+    dbus_args: list[str] | None = None,
+) -> list[Path]:
     """Return targets occupied by this particular ``dev`` container invocation."""
-    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, _MOUNT_ROOT]
-    targets.extend(_mount_targets_from_args(get_shell_mount_args(config)))
-    targets.extend(_mount_targets_from_args(get_audio_mount_args()))
-    targets.extend(_mount_targets_from_args(get_dbus_mount_args()))
+    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, *_IMAGE_SYMLINK_MOUNT_TARGETS, _MOUNT_ROOT]
+    if shell_args is None:
+        shell_args = get_shell_mount_args(config)
+    if audio_args is None:
+        audio_args = get_audio_mount_args()
+    if dbus_args is None:
+        dbus_args = get_dbus_mount_args()
+    targets.extend(_mount_targets_from_args(shell_args))
+    targets.extend(_mount_targets_from_args(audio_args))
+    targets.extend(_mount_targets_from_args(dbus_args))
     if docker_mode is DockerMode.DIRECT:
-        targets.append(Path("/var/run/docker.sock"))
+        targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     return targets
 
 
@@ -478,11 +513,21 @@ def validate_container_mounts(
     mounts: tuple[ContainerMount, ...],
     config: AppConfig,
     docker_mode: DockerMode,
+    *,
+    shell_args: list[str] | None = None,
+    audio_args: list[str] | None = None,
+    dbus_args: list[str] | None = None,
 ) -> None:
     """Reject user targets that equal or are ancestors of an occupied target."""
     occupied: list[tuple[Path, str]] = [
         (target, f"reserved mount at {target}")
-        for target in _reserved_mount_targets(config, docker_mode)
+        for target in _reserved_mount_targets(
+            config,
+            docker_mode,
+            shell_args=shell_args,
+            audio_args=audio_args,
+            dbus_args=dbus_args,
+        )
     ]
 
     for mount in mounts:
@@ -513,6 +558,9 @@ def compose_run(
     env: dict[str, str] | None = None,
     service: str = "dev",
     timeout: int | None = None,
+    shell_mount_args: list[str] | None = None,
+    audio_mount_args: list[str] | None = None,
+    dbus_mount_args: list[str] | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
 
@@ -549,7 +597,17 @@ def compose_run(
     for key, value in env_vars.items():
         cmd.extend(["-e", f"{key}={value}"])
 
-    validate_container_mounts(options.mounts, config, options.docker_mode)
+    shell_args = get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
+    audio_args = get_audio_mount_args() if audio_mount_args is None else audio_mount_args
+    dbus_args = get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
+    validate_container_mounts(
+        options.mounts,
+        config,
+        options.docker_mode,
+        shell_args=shell_args,
+        audio_args=audio_args,
+        dbus_args=dbus_args,
+    )
 
     for mount in options.mounts:
         mount_str = f"{mount.source}:{mount.target}"
@@ -562,9 +620,9 @@ def compose_run(
         cmd.extend(["--workdir", str(workdir)])
 
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)
-    cmd.extend(get_shell_mount_args(config))
-    cmd.extend(get_audio_mount_args())
-    cmd.extend(get_dbus_mount_args())
+    cmd.extend(shell_args)
+    cmd.extend(audio_args)
+    cmd.extend(dbus_args)
 
     # Service name
     cmd.append(service)

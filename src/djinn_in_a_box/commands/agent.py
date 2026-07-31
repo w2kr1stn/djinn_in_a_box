@@ -32,10 +32,12 @@ from djinn_in_a_box.core.console import (
 )
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
+    ContainerMount,
     DockerMode,
     MountCollisionError,
     MountSpecificationError,
     get_config_root,
+    resolve_container_mounts,
     resolve_docker_mode,
     workflow_image_compatible,
 )
@@ -53,7 +55,7 @@ def _agent_table(title: str) -> Table:
 
 def _show_run_status(
     agent: str,
-    workspace: Path,
+    mounts: tuple[ContainerMount, ...],
     *,
     write: bool,
     json_output: bool,
@@ -68,7 +70,20 @@ def _show_run_status(
     err_console.print()
 
     status_line("Agent", agent)
-    status_line("Workspace", str(workspace))
+    for mount in mounts:
+        mode = "ro" if mount.read_only else "rw"
+        status_line(
+            "Mount",
+            f"{mount.source} -> {mount.target} ({mode})",
+            value_style="path",
+        )
+
+    workspace = next(
+        (mount.source for mount in mounts if mount.target == Path("/home/dev/workspace")),
+        None,
+    )
+    if workspace is not None:
+        status_line("Workspace", str(workspace), value_style="path")
 
     if model:
         status_line("Model", model)
@@ -191,6 +206,12 @@ def run(
         raise typer.Exit(1)
 
     try:
+        resolved_mounts = resolve_container_mounts(tuple(mount or ()), here=not mount)
+    except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
+        error(str(e))
+        raise typer.Exit(1) from None
+
+    try:
         result = run_headless_agent(
             agent,
             prompt,
@@ -200,11 +221,12 @@ def run(
             docker_mode=docker_mode,
             firewall=firewall,
             mounts=tuple(mount or ()),
+            resolved_mounts=resolved_mounts,
             timeout=timeout,
             app_config=checked_config,
-            on_ready=lambda workspace: _show_run_status(
+            on_ready=lambda mounts: _show_run_status(
                 agent,
-                workspace,
+                mounts,
                 write=write,
                 json_output=json_output,
                 model=model,
@@ -220,12 +242,7 @@ def run(
     except AgentNetworkError as e:
         error(str(e))
         raise typer.Exit(1) from None
-    except (
-        MountSpecificationError,
-        MountCollisionError,
-        FileNotFoundError,
-        NotADirectoryError,
-    ) as e:
+    except MountCollisionError as e:
         error(str(e))
         raise typer.Exit(1) from None
 

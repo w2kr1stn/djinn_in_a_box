@@ -586,6 +586,27 @@ Docker control.
 - `get_shell_mount_args(config)` mounts `.zshrc`, an explicit Oh My Posh theme,
   and the host shell custom directory unless `shell.skip_mounts` is true
 
+The same module owns the repeatable user-mount contract:
+
+- `ContainerMount` stores a resolved host source, container target, and
+  read-only flag.
+- `parse_mount_spec()` accepts `SRC[:DST[:ro|rw]]`, normalizes absolute targets,
+  and rejects relative targets or invalid modes.
+- `resolve_container_mounts()` resolves every source directory, keeps
+  `--here` at `/home/dev/workspace`, and derives target-free mounts below
+  `/home/dev/mount/<basename>`. A duplicate basename first receives one parent
+  component (`parent-basename`), then a numeric suffix (`-2`, `-3`, ...).
+- `validate_container_mounts()` checks the targets actually occupied by this
+  `dev` invocation, including Compose, image-alias, runtime, Direct-socket, and
+  user mounts. Equal targets and user targets that are ancestors of an occupied
+  target raise `MountCollisionError`; child targets remain valid.
+- `MountSpecificationError` reports invalid mount grammar or reserved targets;
+  `MountCollisionError` reports the two involved mounts and the conflict path.
+
+When a mount exists, `compose_run()` uses the first mount target as
+`--workdir`. With no mount it omits `--workdir`, so the Compose service's
+`working_dir: /home/dev/projects` remains effective.
+
 ## Image Build
 
 `Dockerfile` builds from `debian:bookworm-slim`. It installs base packages,
@@ -615,9 +636,14 @@ backed by named volumes.
 
 - `build()`: loads config, runs `preflight(config)`, refreshes build-time
   local-only files via `_sync_build_files()`, then calls `compose_build()`.
-- `start()`: resolves Docker mode, preflights, ensures `djinn-network`, resolves
-  `--here` or `--mount`, prints the banner plus `Environment` and `Container`
-  rules on stderr, then calls `compose_run()` for `dev`.
+- `start()`: resolves Docker mode, preflights, ensures `djinn-network`, parses
+  repeatable `--mount SRC[:DST[:ro|rw]]` values, and resolves each source with
+  `resolve_container_mounts()`. `--here` is placed first at
+  `/home/dev/workspace`; explicit targets are assigned before derived targets,
+  which use `/home/dev/mount/<basename>` with parent and numeric collision
+  fallbacks. The command rejects source errors and mount collisions before
+  calling `compose_run()`, then prints one source-to-target mode line per mount
+  in the `Environment`/`Container` output.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with
@@ -685,9 +711,13 @@ command string from `AgentConfig`. It appends the prompt template, which expands
 otherwise the command uses `AgentConfig.default_model` when configured.
 
 `run()` loads app config and agent config, validates the requested agent, runs
-the shared workflow preparation for Claude/Codex/OpenCode, ensures the Docker
-network, mounts the current directory by default, and calls
-`compose_run(..., interactive=False, env={"AGENT_PROMPT": prompt})`.
+the shared workflow preparation for Claude/Codex/OpenCode, accepts repeatable
+`--mount SRC[:DST[:ro|rw]]` values, and ensures the Docker network. Without an
+explicit mount it keeps the implicit current-directory mount at
+`/home/dev/workspace`; with explicit mounts it uses their resolved targets and
+the first target as the workdir. It then calls
+`compose_run(..., interactive=False, env={"AGENT_PROMPT": prompt})` and reports
+the complete resolved mount collection before execution.
 
 `agents()` lists configured agents, with verbose and JSON modes.
 

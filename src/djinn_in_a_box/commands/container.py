@@ -248,7 +248,13 @@ def start(
     )
 
     try:
-        result = compose_run(config, options, interactive=True)
+        result = compose_run(
+            config,
+            options,
+            interactive=True,
+            shell_mount_args=shell_args,
+            audio_mount_args=audio_args,
+        )
     except MountCollisionError as e:
         error(str(e))
         raise typer.Exit(1) from None
