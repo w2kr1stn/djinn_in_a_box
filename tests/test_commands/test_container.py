@@ -10,7 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 from rich.console import Console
+from typer.testing import CliRunner
 
+from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import container
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
@@ -18,8 +20,18 @@ from djinn_in_a_box.core.config_workflow import (
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
-from djinn_in_a_box.core.docker import DockerMode, RunResult
-from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.docker import (
+    ContainerMount,
+    DockerMode,
+    MountCollisionError,
+    MountSpecificationError,
+    RunResult,
+)
+from djinn_in_a_box.core.exceptions import (
+    ConfigNotFoundError,
+    ConfigValidationError,
+    RuntimeMountSpecificationError,
+)
 from djinn_in_a_box.core.theme import DJINN_THEME
 
 
@@ -89,6 +101,7 @@ class TestStartCommand:
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
+            patch("djinn_in_a_box.commands.container.get_dbus_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.banner") as mock_banner,
             patch(
                 "djinn_in_a_box.commands.container.prepare_config_workflow",
@@ -164,6 +177,34 @@ class TestStartCommand:
         options = start_mocks["run"].call_args[0][1]
         assert options.firewall_enabled is True
 
+    def test_start_passes_each_precomputed_runtime_mount_list(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
+        audio_args = ["-v", "/host/pulse:/run/user/1000/pulse/native"]
+        dbus_args = ["-v", "/host/bus:/run/user/1000/bus:ro"]
+        with (
+            patch(
+                "djinn_in_a_box.commands.container.get_shell_mount_args",
+                return_value=shell_args,
+            ),
+            patch(
+                "djinn_in_a_box.commands.container.get_audio_mount_args",
+                return_value=audio_args,
+            ),
+            patch(
+                "djinn_in_a_box.commands.container.get_dbus_mount_args",
+                return_value=dbus_args,
+            ),
+            pytest.raises(typer.Exit),
+        ):
+            container.start()
+
+        kwargs = start_mocks["run"].call_args.kwargs
+        assert kwargs["shell_mount_args"] is shell_args
+        assert kwargs["audio_mount_args"] is audio_args
+        assert kwargs["dbus_mount_args"] is dbus_args
+
     def test_start_with_here_flag(
         self, start_mocks: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -171,16 +212,163 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(here=True)
         options = start_mocks["run"].call_args[0][1]
-        assert options.mount_path == tmp_path
+        assert options.mounts == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+        )
 
-    def test_start_with_mount_path(self, start_mocks: dict[str, Any], tmp_path: Path) -> None:
+    def test_start_keeps_here_mount_first_with_additional_mount(
+        self, start_mocks: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        additional = tmp_path / "additional"
+        additional.mkdir()
+
+        with pytest.raises(typer.Exit):
+            container.start(here=True, mount=[str(additional)])
+
+        options = start_mocks["run"].call_args[0][1]
+        assert options.mounts == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+            ContainerMount(additional, Path("/home/dev/mount/additional")),
+        )
+
+    def test_start_collects_repeatable_mounts(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        with pytest.raises(typer.Exit):
+            container.start(mount=[str(first), f"{second}:/opt/second:ro"])
+        options = start_mocks["run"].call_args[0][1]
+        assert options.mounts == (
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/opt/second"), read_only=True),
+        )
+
+    def test_start_cli_preserves_repeated_mount_options(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
+        result = CliRunner().invoke(
+            app,
+            ["start", "--mount", str(first), "--mount", str(second)],
+        )
+
+        assert result.exit_code == 0, result.output
+        options = start_mocks["run"].call_args[0][1]
+        assert [mount.source for mount in options.mounts] == [first, second]
+
+    def test_start_lists_each_resolved_mount(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
         with (
-            patch("djinn_in_a_box.commands.container.resolve_mount_path", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.container.status_line") as status_line,
             pytest.raises(typer.Exit),
         ):
-            container.start(mount=tmp_path)
-        options = start_mocks["run"].call_args[0][1]
-        assert options.mount_path == tmp_path
+            container.start(mount=[str(first), f"{second}:/opt/second:ro"])
+
+        mount_lines = [
+            call.args for call in status_line.call_args_list if call.args[0] == "Mount"
+        ]
+        assert mount_lines == [
+            ("Mount", f"{first} -> /home/dev/mount/first (rw)"),
+            ("Mount", f"{second} -> /opt/second (ro)"),
+        ]
+
+    def test_start_reports_a_mount_collision_from_the_core(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["run"].side_effect = MountCollisionError("mount collision detail")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        assert "mount collision detail" in start_mocks["err_output"].getvalue()
+        start_mocks["cleanup"].assert_called_once_with(DockerMode.NONE, start_mocks["config"])
+
+    def test_start_reports_a_mount_specification_error_from_the_core(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["run"].side_effect = MountSpecificationError("bad volume arguments")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        assert "bad volume arguments" in start_mocks["err_output"].getvalue()
+
+    def test_start_reports_a_runtime_mount_builder_failure(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["run"].side_effect = RuntimeMountSpecificationError("bad builder output")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        assert "Internal runtime mount construction failed" in start_mocks["err_output"].getvalue()
+
+    def test_start_prints_compose_stderr(
+        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        start_mocks["run"].return_value = RunResult(returncode=127, stderr="docker missing\n")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 127
+        assert "docker missing" in capsys.readouterr().err
+
+    def test_start_uses_the_common_mount_path_validation(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "missing"
+
+        with (
+            patch("djinn_in_a_box.commands.container.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            container.start(mount=[str(missing)])
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with(f"Mount path does not exist: {missing}")
+        start_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("mount", ["~nosuchuser/x", "\x00"])
+    def test_start_cli_reports_unresolvable_mount_without_traceback(
+        self, start_mocks: dict[str, Any], mount: str
+    ) -> None:
+        result = CliRunner().invoke(app, ["start", "--mount", mount])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount path cannot be resolved" in start_mocks["err_output"].getvalue()
+        start_mocks["run"].assert_not_called()
+
+    def test_start_cli_reports_unresolvable_mount_target_without_traceback(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        result = CliRunner().invoke(
+            app,
+            ["start", "--mount", f"{tmp_path}:/work\x00bad"],
+        )
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount target cannot contain a NUL byte" in start_mocks["err_output"].getvalue()
+        start_mocks["run"].assert_not_called()
 
     def test_start_exits_on_config_not_found(self, tmp_path: Path) -> None:
         from djinn_in_a_box.core.exceptions import ConfigNotFoundError

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,11 @@ if TYPE_CHECKING:
 
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.core.console import warning
-from djinn_in_a_box.core.paths import get_project_root
+from djinn_in_a_box.core.exceptions import (
+    MountSpecificationError,
+    RuntimeMountSpecificationError,
+)
+from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 
 DJINN_NETWORK: str = "djinn-network"
@@ -31,6 +36,94 @@ _SERVICE_CONTAINER_NAMES: dict[str, str] = {
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
+_MOUNT_ROOT = Path("/home/dev/mount")
+_WORKSPACE_PATH = Path("/home/dev/workspace")
+_FORBIDDEN_MOUNT_TARGET_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
+_IMAGE_PATH_ALIASES = {
+    Path("/var/run"): Path("/run"),
+    Path("/home/dev/.config/claude"): Path("/home/dev/.claude"),
+}
+_DIRECT_DOCKER_SOCKET_TARGETS = (Path("/run/docker.sock"),)
+_COMPOSE_DEV_MOUNT_TARGETS = (
+    Path("/home/dev/.claude"),
+    Path("/home/dev/.gemini"),
+    Path("/home/dev/.codex"),
+    Path("/home/dev/.opencode"),
+    Path("/home/dev/.local/share/opencode"),
+    Path("/home/dev/.config/gh"),
+    Path("/home/dev/.config/age"),
+    Path("/home/dev/.cache/uv"),
+    Path("/home/dev/.cache/djinn-tools"),
+    Path("/home/dev/.vscode-server"),
+    Path("/home/dev/workspaces"),
+    Path("/home/dev/.ssh"),
+    Path("/home/dev/.gitconfig"),
+    Path("/home/dev/.claude_seed"),
+    Path("/home/dev/.claude/skills"),
+    Path("/home/dev/.claude/commands"),
+    Path("/home/dev/.claude/agents"),
+    Path("/home/dev/.claude/context"),
+    Path("/home/dev/.claude/scripts"),
+    Path("/home/dev/.claude/CLAUDE.md"),
+    Path("/home/dev/.claude/AGENTS.md"),
+    Path("/home/dev/.gemini_seed"),
+    Path("/home/dev/.opencode/seed"),
+    Path("/home/dev/.djinn-canonical"),
+    Path("/home/dev/.config/mcp-servers.json"),
+    Path("/home/dev/projects"),
+    Path("/home/dev/sessions"),
+)
+
+
+def _resolve_image_aliases(target: Path) -> Path:
+    for link, real in _IMAGE_PATH_ALIASES.items():
+        if target == link or target.is_relative_to(link):
+            return real / target.relative_to(link)
+    return target
+
+
+def _image_alias_variants(target: Path) -> tuple[Path, ...]:
+    canonical = _resolve_image_aliases(target)
+    variants = [canonical]
+    for link, real in _IMAGE_PATH_ALIASES.items():
+        if canonical == real or canonical.is_relative_to(real):
+            alias = link / canonical.relative_to(real)
+            if alias not in variants:
+                variants.append(alias)
+    return tuple(variants)
+
+
+def _validate_mount_target(target: Path) -> None:
+    if any(
+        target == root or target.is_relative_to(root)
+        for root in _FORBIDDEN_MOUNT_TARGET_ROOTS
+    ):
+        msg = f"Mount target {target} is not allowed under /proc, /sys, or /dev"
+        raise MountSpecificationError(msg)
+
+
+def _normalize_mount_target(target: str | Path) -> Path:
+    target_text = str(target)
+    if "\x00" in target_text:
+        raise MountSpecificationError("Mount target cannot contain a NUL byte")
+
+    normalized = Path(re.sub(r"^/+", "/", os.path.normpath(target_text)))
+    if not normalized.is_absolute():
+        msg = f"Mount target must be an absolute container path: {target_text!r}"
+        raise MountSpecificationError(msg)
+
+    canonical = _resolve_image_aliases(normalized)
+    _validate_mount_target(canonical)
+    return canonical
+
+
+def _normalize_runtime_mount_target(target: str) -> Path:
+    try:
+        return _normalize_mount_target(target)
+    except MountSpecificationError as e:
+        raise RuntimeMountSpecificationError(
+            f"Invalid internal runtime mount target {target!r}: {e}"
+        ) from e
 
 
 class DockerMode(Enum):
@@ -60,6 +153,115 @@ def resolve_docker_mode(docker: bool, docker_direct: bool) -> DockerMode:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainerMount:
+    """A host directory mounted at a container destination."""
+
+    source: Path
+    target: Path
+    read_only: bool = False
+
+
+class MountCollisionError(ValueError):
+    """Raised when a user mount would hide another container mount."""
+
+
+def parse_mount_spec(specification: str) -> tuple[str, Path | None, bool]:
+    """Parse ``SRC[:DST[:ro|rw]]`` into source, optional target, and mode."""
+    fields = specification.split(":")
+    if not 1 <= len(fields) <= 3:
+        msg = f"Invalid mount specification {specification!r}: expected SRC[:DST[:ro|rw]]"
+        raise MountSpecificationError(msg)
+
+    source = fields[0]
+    if not source:
+        msg = "Invalid mount specification: source path must not be empty"
+        raise MountSpecificationError(msg)
+
+    target: Path | None = None
+    read_only = False
+    if len(fields) >= 2:
+        target_or_mode = fields[1]
+        if target_or_mode in {"ro", "rw"}:
+            read_only = target_or_mode == "ro"
+        else:
+            target = _normalize_mount_target(target_or_mode)
+
+    if len(fields) == 3:
+        if target is None:
+            msg = "Mount target must be an absolute container path when a mode is provided"
+            raise MountSpecificationError(msg)
+        mode = fields[2]
+        if mode not in {"ro", "rw"}:
+            msg = f"Invalid mount mode {mode!r}: expected 'ro' or 'rw'"
+            raise MountSpecificationError(msg)
+        read_only = mode == "ro"
+
+    return source, target, read_only
+
+
+def _derived_mount_target(source: Path, assigned_targets: set[Path]) -> Path:
+    """Choose a stable child of ``/home/dev/mount`` for a target-free mount."""
+    basename = source.name
+    candidate_name = basename
+    candidate = _MOUNT_ROOT / candidate_name
+
+    if not basename or candidate in assigned_targets:
+        parent_name = source.parent.name
+        if parent_name:
+            candidate_name = f"{parent_name}-{basename}" if basename else parent_name
+        elif basename:
+            candidate_name = basename
+        else:
+            candidate_name = "root"
+        candidate = _MOUNT_ROOT / candidate_name
+
+    suffix = 2
+    while candidate in assigned_targets:
+        candidate = _MOUNT_ROOT / f"{candidate_name}-{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def resolve_container_mounts(
+    specifications: tuple[str, ...], *, here: bool = False
+) -> tuple[ContainerMount, ...]:
+    """Resolve sources and assign targets for one start or headless-run invocation."""
+    parsed = [parse_mount_spec(specification) for specification in specifications]
+    if any(target == _WORKSPACE_PATH for _, target, _ in parsed):
+        msg = f"Mount target {_WORKSPACE_PATH} is reserved for --here"
+        raise MountSpecificationError(msg)
+    source_mounts = [
+        (resolve_mount_path(source), target, read_only)
+        for source, target, read_only in parsed
+    ]
+
+    mounts: list[ContainerMount] = []
+    if here:
+        mounts.append(
+            ContainerMount(
+                source=resolve_mount_path(Path.cwd()),
+                target=_WORKSPACE_PATH,
+            )
+        )
+
+    assigned_targets = {target for _, target, _ in source_mounts if target is not None}
+    if here:
+        assigned_targets.add(_WORKSPACE_PATH)
+
+    for source, target, read_only in source_mounts:
+        resolved_target = target
+        if resolved_target is None:
+            resolved_target = _derived_mount_target(source, assigned_targets)
+        assigned_targets.add(resolved_target)
+        mounts.append(
+            ContainerMount(source=source, target=resolved_target, read_only=read_only)
+        )
+
+    return tuple(mounts)
+
+
+@dataclass(frozen=True, slots=True)
 class ContainerOptions:
     """Options for container execution (Docker access, firewall, mounts)."""
 
@@ -69,8 +271,8 @@ class ContainerOptions:
     firewall_enabled: bool = False
     """Enable network firewall (restricts outbound traffic)."""
 
-    mount_path: Path | None = None
-    """Additional workspace mount path (maps to ~/workspace in container)."""
+    mounts: tuple[ContainerMount, ...] = ()
+    """Additional host-directory mounts for this container execution."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +505,163 @@ def get_dbus_mount_args() -> list[str]:
     ]
 
 
+def _mount_targets_from_args(args: list[str]) -> list[Path]:
+    """Extract container targets from volume arguments built in this module."""
+    targets: list[Path] = []
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument in {"-v", "--volume"}:
+            if index + 1 == len(args):
+                raise RuntimeMountSpecificationError(
+                    f"Volume flag {argument!r} requires a specification"
+                )
+            specification = args[index + 1]
+            index += 2
+        elif argument.startswith("--volume="):
+            specification = argument.split("=", 1)[1]
+            index += 1
+        elif argument.startswith("--volume") or argument.startswith("--mount"):
+            raise RuntimeMountSpecificationError(f"Unknown volume flag {argument!r}")
+        else:
+            index += 1
+            continue
+
+        _, target, _ = _normalize_runtime_mount_specification(specification)
+        targets.append(target)
+    return targets
+
+
+def _normalize_runtime_mount_specification(
+    specification: str,
+) -> tuple[str, Path, str | None]:
+    parts = specification.rsplit(":", 2)
+    if len(parts) not in {2, 3} or not parts[0]:
+        raise RuntimeMountSpecificationError(
+            f"Invalid internal runtime mount specification {specification!r}"
+        )
+    if len(parts) == 3 and parts[2] not in {"ro", "rw"}:
+        raise RuntimeMountSpecificationError(
+            f"Invalid internal runtime mount mode in {specification!r}"
+        )
+    mode = parts[2] if len(parts) == 3 else None
+    return parts[0], _normalize_runtime_mount_target(parts[1]), mode
+
+
+def _canonicalize_runtime_mount_args(args: list[str]) -> list[str]:
+    canonical_args = list(args)
+    index = 0
+    while index < len(canonical_args):
+        argument = canonical_args[index]
+        if argument in {"-v", "--volume"}:
+            if index + 1 == len(canonical_args):
+                raise RuntimeMountSpecificationError(
+                    f"Volume flag {argument!r} requires a specification"
+                )
+            source, target, mode = _normalize_runtime_mount_specification(
+                canonical_args[index + 1]
+            )
+            canonical_args[index + 1] = (
+                f"{source}:{target}" + (f":{mode}" if mode is not None else "")
+            )
+            index += 2
+        elif argument.startswith("--volume="):
+            source, target, mode = _normalize_runtime_mount_specification(
+                argument.split("=", 1)[1]
+            )
+            canonical_args[index] = (
+                f"--volume={source}:{target}"
+                + (f":{mode}" if mode is not None else "")
+            )
+            index += 1
+        elif argument.startswith("--volume") or argument.startswith("--mount"):
+            raise RuntimeMountSpecificationError(f"Unknown volume flag {argument!r}")
+        else:
+            index += 1
+    return canonical_args
+
+
+def _reserved_mount_targets(
+    config: AppConfig,
+    docker_mode: DockerMode,
+    *,
+    shell_args: list[str] | None = None,
+    audio_args: list[str] | None = None,
+    dbus_args: list[str] | None = None,
+) -> list[Path]:
+    """Return targets occupied by this particular ``dev`` container invocation."""
+    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, _MOUNT_ROOT]
+    if docker_mode is DockerMode.DIRECT:
+        targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
+    if shell_args is None:
+        shell_args = get_shell_mount_args(config)
+    if audio_args is None:
+        audio_args = get_audio_mount_args()
+    if dbus_args is None:
+        dbus_args = get_dbus_mount_args()
+    runtime_targets = [
+        *_mount_targets_from_args(shell_args),
+        *_mount_targets_from_args(audio_args),
+        *_mount_targets_from_args(dbus_args),
+    ]
+    accepted_runtime_targets: list[Path] = []
+    for runtime_target in runtime_targets:
+        if any(
+            variant == runtime_target or variant.is_relative_to(runtime_target)
+            for occupied_target in [*targets, *accepted_runtime_targets]
+            for variant in _image_alias_variants(occupied_target)
+        ):
+            raise RuntimeMountSpecificationError(
+                f"Internal runtime mount target {runtime_target} conflicts with "
+                "another container mount"
+            )
+        accepted_runtime_targets.append(runtime_target)
+    return [*targets, *accepted_runtime_targets]
+
+
+def validate_container_mounts(
+    mounts: tuple[ContainerMount, ...],
+    config: AppConfig,
+    docker_mode: DockerMode,
+    *,
+    shell_args: list[str] | None = None,
+    audio_args: list[str] | None = None,
+    dbus_args: list[str] | None = None,
+) -> None:
+    """Reject user targets that equal or are ancestors of an occupied target."""
+    normalized_mounts = tuple(
+        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        for mount in mounts
+    )
+
+    reserved_targets = _reserved_mount_targets(
+        config,
+        docker_mode,
+        shell_args=shell_args,
+        audio_args=audio_args,
+        dbus_args=dbus_args,
+    )
+    occupied: list[tuple[Path, str, Path]] = []
+    for target in reserved_targets:
+        occupied.extend(
+            (variant, f"reserved mount at {target}", target)
+            for variant in _image_alias_variants(target)
+        )
+
+    for mount in normalized_mounts:
+        mount_target = mount.target
+        for target, description, display_target in occupied:
+            if mount_target == target or target.is_relative_to(mount_target):
+                msg = (
+                    f"Mount {mount.source} -> {mount_target} conflicts with {description} "
+                    f"(conflict path: {display_target})"
+                )
+                raise MountCollisionError(msg)
+        occupied.append(
+            (mount_target, f"mount {mount.source} -> {mount_target}", mount_target)
+        )
+
+
 def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) -> RunResult:
     project_root = get_project_root()
     args = ["build"]
@@ -320,6 +679,9 @@ def compose_run(
     env: dict[str, str] | None = None,
     service: str = "dev",
     timeout: int | None = None,
+    shell_mount_args: list[str] | None = None,
+    audio_mount_args: list[str] | None = None,
+    dbus_mount_args: list[str] | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
 
@@ -356,16 +718,43 @@ def compose_run(
     for key, value in env_vars.items():
         cmd.extend(["-e", f"{key}={value}"])
 
-    # Workspace mount
-    if options.mount_path is not None:
-        mount_str = f"{options.mount_path}:/home/dev/workspace"
+    mounts = tuple(
+        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        for mount in options.mounts
+    )
+    shell_args = _canonicalize_runtime_mount_args(
+        get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
+    )
+    audio_args = _canonicalize_runtime_mount_args(
+        get_audio_mount_args() if audio_mount_args is None else audio_mount_args
+    )
+    dbus_args = _canonicalize_runtime_mount_args(
+        get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
+    )
+    validate_container_mounts(
+        mounts,
+        config,
+        options.docker_mode,
+        shell_args=shell_args,
+        audio_args=audio_args,
+        dbus_args=dbus_args,
+    )
+
+    for mount in mounts:
+        mount_target = _resolve_image_aliases(mount.target)
+        mount_str = f"{mount.source}:{mount_target}"
+        if mount.read_only:
+            mount_str += ":ro"
         cmd.extend(["-v", mount_str])
-        cmd.extend(["--workdir", "/home/dev/workspace"])
+
+    if mounts:
+        workdir = mounts[0].target
+        cmd.extend(["--workdir", str(workdir)])
 
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)
-    cmd.extend(get_shell_mount_args(config))
-    cmd.extend(get_audio_mount_args())
-    cmd.extend(get_dbus_mount_args())
+    cmd.extend(shell_args)
+    cmd.extend(audio_args)
+    cmd.extend(dbus_args)
 
     # Service name
     cmd.append(service)

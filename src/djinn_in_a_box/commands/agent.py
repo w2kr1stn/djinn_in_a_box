@@ -32,10 +32,17 @@ from djinn_in_a_box.core.console import (
 )
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
+    ContainerMount,
     DockerMode,
+    MountCollisionError,
     get_config_root,
+    resolve_container_mounts,
     resolve_docker_mode,
     workflow_image_compatible,
+)
+from djinn_in_a_box.core.exceptions import (
+    MountSpecificationError,
+    RuntimeMountSpecificationError,
 )
 from djinn_in_a_box.core.paths import get_project_root
 
@@ -51,7 +58,7 @@ def _agent_table(title: str) -> Table:
 
 def _show_run_status(
     agent: str,
-    workspace: Path,
+    mounts: tuple[ContainerMount, ...],
     *,
     write: bool,
     json_output: bool,
@@ -66,7 +73,20 @@ def _show_run_status(
     err_console.print()
 
     status_line("Agent", agent)
-    status_line("Workspace", str(workspace))
+    for mount in mounts:
+        mode = "ro" if mount.read_only else "rw"
+        status_line(
+            "Mount",
+            f"{mount.source} -> {mount.target} ({mode})",
+            value_style="path",
+        )
+
+    workspace = next(
+        (mount.source for mount in mounts if mount.target == Path("/home/dev/workspace")),
+        None,
+    )
+    if workspace is not None:
+        status_line("Workspace", str(workspace), value_style="path")
 
     if model:
         status_line("Model", model)
@@ -124,15 +144,15 @@ def run(
         bool,
         typer.Option("--firewall", "-f", help="Enable network firewall"),
     ] = False,
+    here: Annotated[
+        bool,
+        typer.Option("--here", help="Mount current directory as ~/workspace"),
+    ] = False,
     mount: Annotated[
-        Path | None,
+        list[str] | None,
         typer.Option(
             "--mount",
-            help="Workspace path to mount (default: current directory)",
-            exists=True,
-            file_okay=False,
-            dir_okay=True,
-            resolve_path=True,
+            help="Host directory to mount; repeatable: SRC[:DST[:ro|rw]]",
         ),
     ] = None,
     timeout: Annotated[
@@ -147,8 +167,8 @@ def run(
     to stderr to keep stdout clean for agent output.
 
     By default, the current working directory is mounted as ~/workspace
-    in the container (implicit --here behavior). Use --mount to specify
-    a different directory.
+    in the container (implicit --here behavior). Use --here to request that
+    workspace explicitly alongside repeatable --mount values.
 
     Examples:
 
@@ -163,6 +183,10 @@ def run(
 
         # With Docker access and timeout
         djinn run claude "Build the Docker image" --docker --timeout 300
+
+        # Mount the current directory and two additional directories
+        djinn run claude "Compare these projects" --here \\
+            --mount ~/other-project --mount ~/reference:/home/dev/reference:ro
     """
     try:
         docker_mode = resolve_docker_mode(docker, docker_direct)
@@ -193,6 +217,14 @@ def run(
         raise typer.Exit(1)
 
     try:
+        resolved_mounts = resolve_container_mounts(
+            tuple(mount or ()), here=here or not mount
+        )
+    except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
+        error(str(e))
+        raise typer.Exit(1) from None
+
+    try:
         result = run_headless_agent(
             agent,
             prompt,
@@ -201,12 +233,12 @@ def run(
             model=model,
             docker_mode=docker_mode,
             firewall=firewall,
-            mount=mount,
+            resolved_mounts=resolved_mounts,
             timeout=timeout,
             app_config=checked_config,
-            on_ready=lambda workspace: _show_run_status(
+            on_ready=lambda mounts: _show_run_status(
                 agent,
-                workspace,
+                mounts,
                 write=write,
                 json_output=json_output,
                 model=model,
@@ -220,6 +252,12 @@ def run(
         console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
     except AgentNetworkError as e:
+        error(str(e))
+        raise typer.Exit(1) from None
+    except RuntimeMountSpecificationError as e:
+        error(f"Internal runtime mount construction failed: {e}")
+        raise typer.Exit(1) from None
+    except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
         raise typer.Exit(1) from None
 

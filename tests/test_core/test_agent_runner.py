@@ -13,7 +13,7 @@ from djinn_in_a_box.core.agent_runner import (
     UnknownAgentError,
     run_headless_agent,
 )
-from djinn_in_a_box.core.docker import DockerMode, RunResult
+from djinn_in_a_box.core.docker import ContainerMount, DockerMode, RunResult
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     tmp_path: Path,
     runner_mocks: dict[str, Any],
 ) -> None:
-    ready: list[Path] = []
+    ready: list[tuple[ContainerMount, ...]] = []
 
     result = run_headless_agent(
         "codex",
@@ -74,20 +74,26 @@ def test_run_headless_agent_builds_and_executes_typed_request(
         json_output=True,
         docker_mode=DockerMode.PROXY,
         firewall=True,
-        mount=tmp_path,
+        resolved_mounts=(
+            ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),
+        ),
         timeout=120,
         on_ready=ready.append,
     )
 
     assert result is runner_mocks["result"]
-    assert ready == [tmp_path]
+    assert ready == [
+        (ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),)
+    ]
     compose = runner_mocks["compose"]
     compose.assert_called_once()
     assert compose.call_args.args[0] is runner_mocks["app_config"]
     options = compose.call_args.args[1]
     assert options.docker_mode is DockerMode.PROXY
     assert options.firewall_enabled is True
-    assert options.mount_path == tmp_path
+    assert options.mounts == (
+        ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),
+    )
     assert "--model configured-model" in compose.call_args.kwargs["command"]
     assert "--sandbox read-only" in compose.call_args.kwargs["command"]
     assert "--json" in compose.call_args.kwargs["command"]
@@ -97,17 +103,53 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     runner_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, runner_mocks["app_config"])
 
 
-def test_run_headless_agent_uses_current_directory_by_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_run_headless_agent_requires_resolved_mounts(
     runner_mocks: dict[str, Any],
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    with pytest.raises(TypeError, match="resolved_mounts"):
+        run_headless_agent("codex", "inspect")  # type: ignore[call-arg]
 
-    run_headless_agent("codex", "inspect")
+
+def test_run_headless_agent_uses_supplied_mount_collection_unchanged(
+    tmp_path: Path,
+    runner_mocks: dict[str, Any],
+) -> None:
+    # The CLI-level implicit --here contract is guarded by
+    # test_run_without_mount_resolves_implicit_here_at_cli_boundary. This
+    # lower-level test guards that the runner uses the resolved collection as-is.
+    resolved = (ContainerMount(tmp_path, Path("/home/dev/workspace")),)
+
+    run_headless_agent("codex", "inspect", resolved_mounts=resolved)
 
     options = runner_mocks["compose"].call_args.args[1]
-    assert options.mount_path == tmp_path
+    assert options.mounts is resolved
+
+
+def test_run_headless_agent_on_ready_receives_all_resolved_mounts(
+    tmp_path: Path,
+    runner_mocks: dict[str, Any],
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    ready: list[tuple[ContainerMount, ...]] = []
+
+    run_headless_agent(
+        "codex",
+        "inspect",
+        resolved_mounts=(
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/home/dev/mount/second")),
+        ),
+        on_ready=ready.append,
+    )
+
+    expected = (
+        ContainerMount(first, Path("/home/dev/mount/first")),
+        ContainerMount(second, Path("/home/dev/mount/second")),
+    )
+    assert ready == [expected]
 
 
 def test_checked_config_snapshot_is_used_without_reload(
@@ -119,7 +161,12 @@ def test_checked_config_snapshot_is_used_without_reload(
     runner_mocks["load_config"].reset_mock()
     runner_mocks["load_config"].return_value = changed
 
-    run_headless_agent("codex", "inspect", app_config=checked)
+    run_headless_agent(
+        "codex",
+        "inspect",
+        resolved_mounts=(),
+        app_config=checked,
+    )
 
     runner_mocks["load_config"].assert_not_called()
     assert runner_mocks["compose"].call_args.args[0] is checked
@@ -138,7 +185,7 @@ def test_run_headless_agent_rejects_unknown_agent_before_network(
         patch("djinn_in_a_box.core.agent_runner.ensure_network") as network,
         pytest.raises(UnknownAgentError) as exc_info,
     ):
-        run_headless_agent("missing", "inspect")
+        run_headless_agent("missing", "inspect", resolved_mounts=())
 
     assert exc_info.value.available == ("codex",)
     network.assert_not_called()
@@ -159,7 +206,7 @@ def test_run_headless_agent_reports_network_failure_without_container(
         patch("djinn_in_a_box.core.agent_runner.cleanup_docker_proxy") as cleanup,
         pytest.raises(AgentNetworkError),
     ):
-        run_headless_agent("codex", "inspect")
+        run_headless_agent("codex", "inspect", resolved_mounts=())
 
     compose.assert_not_called()
     cleanup.assert_not_called()
@@ -171,6 +218,11 @@ def test_run_headless_agent_cleans_proxy_after_execution_error(
     runner_mocks["compose"].side_effect = RuntimeError("compose failed")
 
     with pytest.raises(RuntimeError, match="compose failed"):
-        run_headless_agent("codex", "inspect", docker_mode=DockerMode.PROXY)
+        run_headless_agent(
+            "codex",
+            "inspect",
+            docker_mode=DockerMode.PROXY,
+            resolved_mounts=(),
+        )
 
     runner_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, runner_mocks["app_config"])

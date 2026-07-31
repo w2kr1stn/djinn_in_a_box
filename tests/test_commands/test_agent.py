@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,9 @@ from unittest.mock import patch
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
+from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands.agent import build_agent_command
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.agent_runner import UnknownAgentError
@@ -17,7 +20,15 @@ from djinn_in_a_box.core.config_workflow import (
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
-from djinn_in_a_box.core.docker import DockerMode, RunResult, WorkflowImageCompatibility
+from djinn_in_a_box.core.docker import (
+    ContainerMount,
+    DockerMode,
+    MountCollisionError,
+    MountSpecificationError,
+    RunResult,
+    WorkflowImageCompatibility,
+)
+from djinn_in_a_box.core.exceptions import RuntimeMountSpecificationError
 
 
 @pytest.fixture
@@ -192,8 +203,265 @@ class TestRunCommand:
         mock_run = run_mocks["run"]
         mock_run.assert_called_once()
         assert mock_run.call_args.args == ("claude", "test prompt")
+        assert "mounts" not in mock_run.call_args.kwargs
+        assert "resolved_mounts" in mock_run.call_args.kwargs
         assert mock_run.call_args.kwargs["app_config"] is run_mocks["config"]
         assert callable(mock_run.call_args.kwargs["on_ready"])
+
+    def test_run_without_mount_resolves_implicit_here_at_cli_boundary(
+        self,
+        run_mocks: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(app, ["run", "claude", "test prompt"])
+
+        assert result.exit_code == 0, result.output
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+        )
+
+    @pytest.mark.parametrize("mount", ["~nosuchuser/x", "\x00"])
+    def test_run_cli_reports_unresolvable_mount_without_traceback(
+        self, run_mocks: dict[str, Any], mount: str
+    ) -> None:
+        result = CliRunner().invoke(
+            app,
+            ["run", "claude", "test prompt", "--mount", mount],
+        )
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount path cannot be resolved" in result.output
+        run_mocks["run"].assert_not_called()
+
+    def test_run_cli_reports_unresolvable_mount_target_without_traceback(
+        self, run_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        result = CliRunner().invoke(
+            app,
+            ["run", "claude", "test prompt", "--mount", f"{tmp_path}:/work\x00bad"],
+        )
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount target cannot contain a NUL byte" in result.output
+        run_mocks["run"].assert_not_called()
+
+    def test_run_cli_labels_runtime_mount_builder_failures(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        run_mocks["run"].side_effect = RuntimeMountSpecificationError("bad builder output")
+
+        result = CliRunner().invoke(app, ["run", "claude", "test prompt"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Internal runtime mount construction failed" in result.output
+
+    def test_run_help_preserves_example_line_continuation(self, run_mocks: dict[str, Any]) -> None:
+        result = CliRunner().invoke(app, ["run", "--help"])
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+
+        assert result.exit_code == 0
+        lines = plain_output.splitlines()
+        example_index = next(
+            index for index, line in enumerate(lines) if "Compare these projects" in line
+        )
+        assert lines[example_index].rstrip().endswith("--here \\")
+        assert "--mount" in lines[example_index + 1]
+
+    def test_run_here_alone_resolves_current_directory(
+        self,
+        run_mocks: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(typer.Exit):
+            run(agent="claude", prompt="test prompt", here=True)
+
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+        )
+
+    def test_run_here_keeps_workspace_first_with_two_additional_mounts(
+        self,
+        run_mocks: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        monkeypatch.chdir(tmp_path)
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
+        with pytest.raises(typer.Exit):
+            run(
+                agent="claude",
+                prompt="test prompt",
+                here=True,
+                mount=[str(first), str(second)],
+            )
+
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/home/dev/mount/second")),
+        )
+
+    def test_run_passes_each_mount_specification_to_the_runner(
+        self, run_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        first = tmp_path / "one"
+        second = tmp_path / "two"
+        first.mkdir()
+        second.mkdir()
+
+        with pytest.raises(typer.Exit):
+            run(
+                agent="claude",
+                prompt="test prompt",
+                mount=[str(first), f"{second}:/container/two:ro"],
+            )
+
+        assert "mounts" not in run_mocks["run"].call_args.kwargs
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(first, Path("/home/dev/mount/one")),
+            ContainerMount(second, Path("/container/two"), read_only=True),
+        )
+
+    def test_run_cli_preserves_repeated_mount_options(
+        self, run_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "run",
+                "claude",
+                "test prompt",
+                "--mount",
+                str(first),
+                "--mount",
+                str(second),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "mounts" not in run_mocks["run"].call_args.kwargs
+        assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/home/dev/mount/second")),
+        )
+
+    def test_run_status_lists_mounts_and_labels_only_an_actual_workspace(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        with pytest.raises(typer.Exit):
+            run(agent="claude", prompt="test prompt")
+        on_ready = run_mocks["run"].call_args.kwargs["on_ready"]
+        assert callable(on_ready)
+
+        extra_mounts = (
+            ContainerMount(Path("/host/readonly"), Path("/home/dev/mount/readonly"), True),
+            ContainerMount(Path("/host/reference"), Path("/home/dev/mount/reference")),
+        )
+        with patch("djinn_in_a_box.commands.agent.status_line") as status_line:
+            on_ready(extra_mounts)
+
+        mount_lines = [
+            call.args for call in status_line.call_args_list if call.args[0] == "Mount"
+        ]
+        workspace_lines = [
+            call.args for call in status_line.call_args_list if call.args[0] == "Workspace"
+        ]
+        assert mount_lines == [
+            ("Mount", "/host/readonly -> /home/dev/mount/readonly (ro)"),
+            ("Mount", "/host/reference -> /home/dev/mount/reference (rw)"),
+        ]
+        assert workspace_lines == []
+
+        workspace_mount = ContainerMount(Path("/host/workspace"), Path("/home/dev/workspace"))
+        with patch("djinn_in_a_box.commands.agent.status_line") as status_line:
+            on_ready((workspace_mount, extra_mounts[1]))
+
+        workspace_lines = [
+            call.args for call in status_line.call_args_list if call.args[0] == "Workspace"
+        ]
+        assert workspace_lines == [("Workspace", "/host/workspace")]
+
+    def test_run_reports_a_mount_validation_error(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        with (
+            patch(
+                "djinn_in_a_box.commands.agent.resolve_container_mounts",
+                side_effect=FileNotFoundError("Mount path does not exist: /missing"),
+            ),
+            patch("djinn_in_a_box.commands.agent.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="claude", prompt="test prompt", mount=["/missing"])
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with("Mount path does not exist: /missing")
+
+    def test_run_does_not_translate_runner_file_not_found(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["run"].side_effect = FileNotFoundError("runner cwd disappeared")
+
+        with pytest.raises(FileNotFoundError, match="runner cwd disappeared"):
+            run(agent="claude", prompt="test prompt")
+
+    def test_run_reports_a_mount_collision_error(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["run"].side_effect = MountCollisionError("mount collision detail")
+        with (
+            patch("djinn_in_a_box.commands.agent.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="claude", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with("mount collision detail")
+
+    def test_run_reports_a_mount_specification_error(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["run"].side_effect = MountSpecificationError("bad volume arguments")
+        with (
+            patch("djinn_in_a_box.commands.agent.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="claude", prompt="test prompt")
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with("bad volume arguments")
 
     def test_run_keeps_checked_config_when_loader_changes_after_bootstrap(
         self, run_mocks: dict[str, Any]
