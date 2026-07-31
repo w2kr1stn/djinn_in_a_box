@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.core.console import warning
+from djinn_in_a_box.core.exceptions import (
+    MountSpecificationError,
+    RuntimeMountSpecificationError,
+)
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 
@@ -35,13 +39,11 @@ _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 _MOUNT_ROOT = Path("/home/dev/mount")
 _WORKSPACE_PATH = Path("/home/dev/workspace")
 _FORBIDDEN_MOUNT_TARGET_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
-_IMAGE_SYMLINK_MOUNT_TARGETS = (
-    Path("/home/dev/.config/claude"),
-)
-_DIRECT_DOCKER_SOCKET_TARGETS = (
-    Path("/var/run/docker.sock"),
-    Path("/run/docker.sock"),
-)
+_IMAGE_PATH_ALIASES = {
+    Path("/var/run"): Path("/run"),
+    Path("/home/dev/.config/claude"): Path("/home/dev/.claude"),
+}
+_DIRECT_DOCKER_SOCKET_TARGETS = (Path("/run/docker.sock"),)
 _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/.claude"),
     Path("/home/dev/.gemini"),
@@ -71,6 +73,57 @@ _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/projects"),
     Path("/home/dev/sessions"),
 )
+
+
+def _resolve_image_aliases(target: Path) -> Path:
+    for link, real in _IMAGE_PATH_ALIASES.items():
+        if target == link or target.is_relative_to(link):
+            return real / target.relative_to(link)
+    return target
+
+
+def _image_alias_variants(target: Path) -> tuple[Path, ...]:
+    canonical = _resolve_image_aliases(target)
+    variants = [canonical]
+    for link, real in _IMAGE_PATH_ALIASES.items():
+        if canonical == real or canonical.is_relative_to(real):
+            alias = link / canonical.relative_to(real)
+            if alias not in variants:
+                variants.append(alias)
+    return tuple(variants)
+
+
+def _validate_mount_target(target: Path) -> None:
+    if any(
+        target == root or target.is_relative_to(root)
+        for root in _FORBIDDEN_MOUNT_TARGET_ROOTS
+    ):
+        msg = f"Mount target {target} is not allowed under /proc, /sys, or /dev"
+        raise MountSpecificationError(msg)
+
+
+def _normalize_mount_target(target: str | Path) -> Path:
+    target_text = str(target)
+    if "\x00" in target_text:
+        raise MountSpecificationError("Mount target cannot contain a NUL byte")
+
+    normalized = Path(re.sub(r"^/+", "/", os.path.normpath(target_text)))
+    if not normalized.is_absolute():
+        msg = f"Mount target must be an absolute container path: {target_text!r}"
+        raise MountSpecificationError(msg)
+
+    canonical = _resolve_image_aliases(normalized)
+    _validate_mount_target(canonical)
+    return canonical
+
+
+def _normalize_runtime_mount_target(target: str) -> Path:
+    try:
+        return _normalize_mount_target(target)
+    except MountSpecificationError as e:
+        raise RuntimeMountSpecificationError(
+            f"Invalid internal runtime mount target {target!r}: {e}"
+        ) from e
 
 
 class DockerMode(Enum):
@@ -108,10 +161,6 @@ class ContainerMount:
     read_only: bool = False
 
 
-class MountSpecificationError(ValueError):
-    """Raised when a ``--mount`` value does not match Djinn's mount grammar."""
-
-
 class MountCollisionError(ValueError):
     """Raised when a user mount would hide another container mount."""
 
@@ -135,17 +184,7 @@ def parse_mount_spec(specification: str) -> tuple[str, Path | None, bool]:
         if target_or_mode in {"ro", "rw"}:
             read_only = target_or_mode == "ro"
         else:
-            normalized_target = re.sub(r"^/+", "/", os.path.normpath(target_or_mode))
-            target = Path(normalized_target)
-            if not target.is_absolute():
-                msg = f"Mount target must be an absolute container path: {target_or_mode!r}"
-                raise MountSpecificationError(msg)
-            if any(
-                target == root or target.is_relative_to(root)
-                for root in _FORBIDDEN_MOUNT_TARGET_ROOTS
-            ):
-                msg = f"Mount target {target} is not allowed under /proc, /sys, or /dev"
-                raise MountSpecificationError(msg)
+            target = _normalize_mount_target(target_or_mode)
 
     if len(fields) == 3:
         if target is None:
@@ -474,7 +513,7 @@ def _mount_targets_from_args(args: list[str]) -> list[Path]:
         argument = args[index]
         if argument in {"-v", "--volume"}:
             if index + 1 == len(args):
-                raise MountSpecificationError(
+                raise RuntimeMountSpecificationError(
                     f"Volume flag {argument!r} requires a specification"
                 )
             specification = args[index + 1]
@@ -483,15 +522,63 @@ def _mount_targets_from_args(args: list[str]) -> list[Path]:
             specification = argument.split("=", 1)[1]
             index += 1
         elif argument.startswith("--volume") or argument.startswith("--mount"):
-            raise MountSpecificationError(f"Unknown volume flag {argument!r}")
+            raise RuntimeMountSpecificationError(f"Unknown volume flag {argument!r}")
         else:
             index += 1
             continue
 
-        parts = specification.rsplit(":", 2)
-        target = parts[-2] if parts[-1] in {"ro", "rw"} else parts[-1]
-        targets.append(Path(target))
+        _, target, _ = _normalize_runtime_mount_specification(specification)
+        targets.append(target)
     return targets
+
+
+def _normalize_runtime_mount_specification(
+    specification: str,
+) -> tuple[str, Path, str | None]:
+    parts = specification.rsplit(":", 2)
+    if len(parts) not in {2, 3} or not parts[0]:
+        raise RuntimeMountSpecificationError(
+            f"Invalid internal runtime mount specification {specification!r}"
+        )
+    if len(parts) == 3 and parts[2] not in {"ro", "rw"}:
+        raise RuntimeMountSpecificationError(
+            f"Invalid internal runtime mount mode in {specification!r}"
+        )
+    mode = parts[2] if len(parts) == 3 else None
+    return parts[0], _normalize_runtime_mount_target(parts[1]), mode
+
+
+def _canonicalize_runtime_mount_args(args: list[str]) -> list[str]:
+    canonical_args = list(args)
+    index = 0
+    while index < len(canonical_args):
+        argument = canonical_args[index]
+        if argument in {"-v", "--volume"}:
+            if index + 1 == len(canonical_args):
+                raise RuntimeMountSpecificationError(
+                    f"Volume flag {argument!r} requires a specification"
+                )
+            source, target, mode = _normalize_runtime_mount_specification(
+                canonical_args[index + 1]
+            )
+            canonical_args[index + 1] = (
+                f"{source}:{target}" + (f":{mode}" if mode is not None else "")
+            )
+            index += 2
+        elif argument.startswith("--volume="):
+            source, target, mode = _normalize_runtime_mount_specification(
+                argument.split("=", 1)[1]
+            )
+            canonical_args[index] = (
+                f"--volume={source}:{target}"
+                + (f":{mode}" if mode is not None else "")
+            )
+            index += 1
+        elif argument.startswith("--volume") or argument.startswith("--mount"):
+            raise RuntimeMountSpecificationError(f"Unknown volume flag {argument!r}")
+        else:
+            index += 1
+    return canonical_args
 
 
 def _reserved_mount_targets(
@@ -503,19 +590,33 @@ def _reserved_mount_targets(
     dbus_args: list[str] | None = None,
 ) -> list[Path]:
     """Return targets occupied by this particular ``dev`` container invocation."""
-    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, *_IMAGE_SYMLINK_MOUNT_TARGETS, _MOUNT_ROOT]
+    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, _MOUNT_ROOT]
+    if docker_mode is DockerMode.DIRECT:
+        targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     if shell_args is None:
         shell_args = get_shell_mount_args(config)
     if audio_args is None:
         audio_args = get_audio_mount_args()
     if dbus_args is None:
         dbus_args = get_dbus_mount_args()
-    targets.extend(_mount_targets_from_args(shell_args))
-    targets.extend(_mount_targets_from_args(audio_args))
-    targets.extend(_mount_targets_from_args(dbus_args))
-    if docker_mode is DockerMode.DIRECT:
-        targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
-    return targets
+    runtime_targets = [
+        *_mount_targets_from_args(shell_args),
+        *_mount_targets_from_args(audio_args),
+        *_mount_targets_from_args(dbus_args),
+    ]
+    accepted_runtime_targets: list[Path] = []
+    for runtime_target in runtime_targets:
+        if any(
+            variant == runtime_target or variant.is_relative_to(runtime_target)
+            for occupied_target in [*targets, *accepted_runtime_targets]
+            for variant in _image_alias_variants(occupied_target)
+        ):
+            raise RuntimeMountSpecificationError(
+                f"Internal runtime mount target {runtime_target} conflicts with "
+                "another container mount"
+            )
+        accepted_runtime_targets.append(runtime_target)
+    return [*targets, *accepted_runtime_targets]
 
 
 def validate_container_mounts(
@@ -528,26 +629,37 @@ def validate_container_mounts(
     dbus_args: list[str] | None = None,
 ) -> None:
     """Reject user targets that equal or are ancestors of an occupied target."""
-    occupied: list[tuple[Path, str]] = [
-        (target, f"reserved mount at {target}")
-        for target in _reserved_mount_targets(
-            config,
-            docker_mode,
-            shell_args=shell_args,
-            audio_args=audio_args,
-            dbus_args=dbus_args,
-        )
-    ]
+    normalized_mounts = tuple(
+        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        for mount in mounts
+    )
 
-    for mount in mounts:
-        for target, description in occupied:
-            if mount.target == target or target.is_relative_to(mount.target):
+    reserved_targets = _reserved_mount_targets(
+        config,
+        docker_mode,
+        shell_args=shell_args,
+        audio_args=audio_args,
+        dbus_args=dbus_args,
+    )
+    occupied: list[tuple[Path, str, Path]] = []
+    for target in reserved_targets:
+        occupied.extend(
+            (variant, f"reserved mount at {target}", target)
+            for variant in _image_alias_variants(target)
+        )
+
+    for mount in normalized_mounts:
+        mount_target = mount.target
+        for target, description, display_target in occupied:
+            if mount_target == target or target.is_relative_to(mount_target):
                 msg = (
-                    f"Mount {mount.source} -> {mount.target} conflicts with {description} "
-                    f"(conflict path: {target})"
+                    f"Mount {mount.source} -> {mount_target} conflicts with {description} "
+                    f"(conflict path: {display_target})"
                 )
                 raise MountCollisionError(msg)
-        occupied.append((mount.target, f"mount {mount.source} -> {mount.target}"))
+        occupied.append(
+            (mount_target, f"mount {mount.source} -> {mount_target}", mount_target)
+        )
 
 
 def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) -> RunResult:
@@ -606,11 +718,21 @@ def compose_run(
     for key, value in env_vars.items():
         cmd.extend(["-e", f"{key}={value}"])
 
-    shell_args = get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
-    audio_args = get_audio_mount_args() if audio_mount_args is None else audio_mount_args
-    dbus_args = get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
+    mounts = tuple(
+        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        for mount in options.mounts
+    )
+    shell_args = _canonicalize_runtime_mount_args(
+        get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
+    )
+    audio_args = _canonicalize_runtime_mount_args(
+        get_audio_mount_args() if audio_mount_args is None else audio_mount_args
+    )
+    dbus_args = _canonicalize_runtime_mount_args(
+        get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
+    )
     validate_container_mounts(
-        options.mounts,
+        mounts,
         config,
         options.docker_mode,
         shell_args=shell_args,
@@ -618,14 +740,15 @@ def compose_run(
         dbus_args=dbus_args,
     )
 
-    for mount in options.mounts:
-        mount_str = f"{mount.source}:{mount.target}"
+    for mount in mounts:
+        mount_target = _resolve_image_aliases(mount.target)
+        mount_str = f"{mount.source}:{mount_target}"
         if mount.read_only:
             mount_str += ":ro"
         cmd.extend(["-v", mount_str])
 
-    if options.mounts:
-        workdir = options.mounts[0].target
+    if mounts:
+        workdir = mounts[0].target
         cmd.extend(["--workdir", str(workdir)])
 
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)

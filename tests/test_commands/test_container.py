@@ -27,7 +27,11 @@ from djinn_in_a_box.core.docker import (
     MountSpecificationError,
     RunResult,
 )
-from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.exceptions import (
+    ConfigNotFoundError,
+    ConfigValidationError,
+    RuntimeMountSpecificationError,
+)
 from djinn_in_a_box.core.theme import DJINN_THEME
 
 
@@ -305,6 +309,28 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         assert "bad volume arguments" in start_mocks["err_output"].getvalue()
 
+    def test_start_reports_a_runtime_mount_builder_failure(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["run"].side_effect = RuntimeMountSpecificationError("bad builder output")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        assert "Internal runtime mount construction failed" in start_mocks["err_output"].getvalue()
+
+    def test_start_prints_compose_stderr(
+        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        start_mocks["run"].return_value = RunResult(returncode=127, stderr="docker missing\n")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 127
+        assert "docker missing" in capsys.readouterr().err
+
     def test_start_uses_the_common_mount_path_validation(
         self, start_mocks: dict[str, Any], tmp_path: Path
     ) -> None:
@@ -318,6 +344,30 @@ class TestStartCommand:
 
         assert exc_info.value.exit_code == 1
         error.assert_called_once_with(f"Mount path does not exist: {missing}")
+        start_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("mount", ["~nosuchuser/x", "\x00"])
+    def test_start_cli_reports_unresolvable_mount_without_traceback(
+        self, start_mocks: dict[str, Any], mount: str
+    ) -> None:
+        result = CliRunner().invoke(app, ["start", "--mount", mount])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount path cannot be resolved" in start_mocks["err_output"].getvalue()
+        start_mocks["run"].assert_not_called()
+
+    def test_start_cli_reports_unresolvable_mount_target_without_traceback(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        result = CliRunner().invoke(
+            app,
+            ["start", "--mount", f"{tmp_path}:/work\x00bad"],
+        )
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount target cannot contain a NUL byte" in start_mocks["err_output"].getvalue()
         start_mocks["run"].assert_not_called()
 
     def test_start_exits_on_config_not_found(self, tmp_path: Path) -> None:

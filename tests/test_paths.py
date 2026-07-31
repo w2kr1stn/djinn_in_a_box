@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from djinn_in_a_box.core.exceptions import MountSpecificationError
 from djinn_in_a_box.core.paths import resolve_mount_path
 
 
@@ -43,3 +44,17 @@ class TestResolveMountPath:
 
         with pytest.raises(NotADirectoryError, match="not a directory"):
             resolve_mount_path(test_file)
+
+    @pytest.mark.parametrize("path", ["~nosuchuser/x", "\x00"])
+    def test_wraps_unresolvable_paths(self, path: str) -> None:
+        with pytest.raises(MountSpecificationError, match="Mount path cannot be resolved"):
+            resolve_mount_path(path)
+
+    def test_wraps_oserror_from_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail_resolution(*_args: object, **_kwargs: object) -> Path:
+            raise OSError("resolution failed")
+
+        monkeypatch.setattr(Path, "resolve", fail_resolution)
+
+        with pytest.raises(MountSpecificationError, match="resolution failed"):
+            resolve_mount_path("/tmp")

@@ -35,7 +35,6 @@ from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     ContainerOptions,
     MountCollisionError,
-    MountSpecificationError,
     cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
@@ -58,7 +57,12 @@ from djinn_in_a_box.core.docker import (
     resolve_docker_mode,
     volume_exists,
 )
-from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.exceptions import (
+    ConfigNotFoundError,
+    ConfigValidationError,
+    MountSpecificationError,
+    RuntimeMountSpecificationError,
+)
 from djinn_in_a_box.core.paths import get_project_root
 
 
@@ -261,8 +265,14 @@ def start(
     except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
         raise typer.Exit(1) from None
+    except RuntimeMountSpecificationError as e:
+        error(f"Internal runtime mount construction failed: {e}")
+        raise typer.Exit(1) from None
     finally:
         cleanup_docker_proxy(docker_mode, config)
+
+    if result.stderr:
+        err_console.print(result.stderr, end="")
 
     raise typer.Exit(result.returncode)
 

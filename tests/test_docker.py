@@ -19,6 +19,7 @@ from djinn_in_a_box.core.docker import (
     DockerMode,
     MountCollisionError,
     MountSpecificationError,
+    RuntimeMountSpecificationError,
     WorkflowImageCompatibility,
     backup_sync_path,
     backup_volume,
@@ -53,26 +54,28 @@ def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
     return []
 
 
-def _parse_dockerfile_symlink_line(line: str) -> tuple[str, str] | None:
-    """Return source and alias tokens from one ``ln`` symlink command."""
-    match = re.search(r"\bln\s+(--?[^\s]+)\s+(.+)", line)
-    if match is None:
-        return None
+def _parse_dockerfile_symlink_line(line: str) -> list[tuple[str, str]]:
+    """Return source and alias tokens from every ``ln`` symlink command on one line."""
+    parsed: list[tuple[str, str]] = []
+    for match in re.finditer(r"\bln\b([^;&|\n]*)", line):
+        tokens = match.group(1).split()
+        flags: list[str] = []
+        while tokens and tokens[0].startswith("-") and tokens[0] != "\\":
+            flags.append(tokens.pop(0))
 
-    flags, operands = match.groups()
-    is_symlink = (
-        flags in {"--symbolic", "--symbolic-force"}
-        or (flags.startswith("-") and not flags.startswith("--") and "s" in flags[1:])
-    )
-    if not is_symlink:
-        return None
+        is_symlink = any(
+            flag == "--symbolic"
+            or flag.startswith("--symbolic-")
+            or (flag.startswith("-") and not flag.startswith("--") and "s" in flag[1:])
+            for flag in flags
+        )
+        if not is_symlink:
+            continue
 
-    path_tokens = [
-        token for token in operands.split() if not token.startswith("-") and token != "\\"
-    ]
-    if len(path_tokens) < 2:
-        return None
-    return path_tokens[0], path_tokens[1]
+        path_tokens = [token for token in tokens if token != "\\"]
+        if len(path_tokens) >= 2:
+            parsed.append((path_tokens[0], path_tokens[1]))
+    return parsed
 
 
 def _assert_dockerfile_aliases_are_reserved(
@@ -83,29 +86,33 @@ def _assert_dockerfile_aliases_are_reserved(
     home = Path("/home/dev")
 
     for line in dockerfile.splitlines():
-        parsed = _parse_dockerfile_symlink_line(line)
-        if parsed is None:
-            continue
-
-        source_token, alias_token = parsed
-        source = (
-            home / source_token[2:]
-            if source_token.startswith("~/")
-            else Path(source_token)
-        )
-        alias = home / alias_token[2:] if alias_token.startswith("~/") else Path(alias_token)
-        matched += 1
-        source_contains_reserved_target = any(
-            source == target or target.is_relative_to(source) for target in reserved
-        )
-        if source_contains_reserved_target and alias.is_relative_to(home):
-            assert alias in reserved, (
-                f"Dockerfile alias {alias} points to reserved source/ancestor {source} "
-                "but is not itself reserved"
+        for source_token, alias_token in _parse_dockerfile_symlink_line(line):
+            source = (
+                home / source_token[2:] if source_token.startswith("~/") else Path(source_token)
             )
+            alias = home / alias_token[2:] if alias_token.startswith("~/") else Path(alias_token)
+            canonical_alias = docker_mod._resolve_image_aliases(alias)
+            matched += 1
+            source_contains_reserved_target = any(
+                source == target or target.is_relative_to(source) for target in reserved
+            )
+            if source_contains_reserved_target:
+                assert any(
+                    canonical_alias == target or canonical_alias.is_relative_to(target)
+                    for target in reserved
+                ), (
+                    f"Dockerfile alias {alias} points to reserved source/ancestor {source} "
+                    "but is not itself reserved"
+                )
 
     assert matched, "Dockerfile alias drift guard matched no symlink lines"
     return matched
+
+
+def _assert_compose_anchor_uses_short_form(lines: list[str]) -> None:
+    assert not any(
+        re.match(r"\s*(?:-\s+)?type\s*:", line) for line in lines
+    )
 
 
 class TestParseMountSpec:
@@ -139,6 +146,10 @@ class TestParseMountSpec:
         with pytest.raises(MountSpecificationError, match="absolute container path"):
             parse_mount_spec("/host/src:relative/path")
 
+    def test_rejects_nul_in_target(self) -> None:
+        with pytest.raises(MountSpecificationError, match="NUL"):
+            parse_mount_spec("/host/src:/container/\x00dst")
+
     def test_rejects_unknown_mode(self) -> None:
         with pytest.raises(MountSpecificationError, match="expected 'ro' or 'rw'"):
             parse_mount_spec("/host/src:/container/dst:read-only")
@@ -152,6 +163,23 @@ class TestParseMountSpec:
         _, target, _ = parse_mount_spec("/host/src:/home/dev/mount/../.claude")
 
         assert target == Path("/home/dev/.claude")
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            ("/home/dev/.config/claude/skills", Path("/home/dev/.claude/skills")),
+            (
+                "/var/run/user/1000/pulse/native",
+                Path("/run/user/1000/pulse/native"),
+            ),
+            ("/var/run/user/1000/bus", Path("/run/user/1000/bus")),
+            ("/var/run", Path("/run")),
+        ],
+    )
+    def test_resolves_image_alias_subtrees(self, target: str, expected: Path) -> None:
+        _, resolved, _ = parse_mount_spec(f"/host/src:{target}")
+
+        assert resolved == expected
 
 
 class TestResolveContainerMounts:
@@ -230,12 +258,85 @@ class TestMountTargetCollisions:
         ) == [Path("/container/target")]
 
     def test_mount_targets_from_args_rejects_unknown_volume_flag(self) -> None:
-        with pytest.raises(MountSpecificationError, match="Unknown volume flag"):
+        with pytest.raises(RuntimeMountSpecificationError, match="Unknown volume flag"):
             docker_mod._mount_targets_from_args(["--volumes-from", "other-container"])
 
     def test_mount_targets_from_args_rejects_missing_volume_specification(self) -> None:
-        with pytest.raises(MountSpecificationError, match="requires a specification"):
+        with pytest.raises(RuntimeMountSpecificationError, match="requires a specification"):
             docker_mod._mount_targets_from_args(["-v"])
+
+    @pytest.mark.parametrize(
+        "specification",
+        ["/target", "/host:relative", "/host:/proc/../dev", "/host:/target:bad"],
+    )
+    def test_mount_targets_from_args_rejects_invalid_internal_specification(
+        self, specification: str
+    ) -> None:
+        with pytest.raises(RuntimeMountSpecificationError):
+            docker_mod._mount_targets_from_args(["-v", specification])
+
+    def test_validator_normalizes_direct_container_mount_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+
+        with pytest.raises(MountCollisionError, match=r"conflict path: /home/dev/\.claude"):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path("/home/dev/tmp/../.claude")),),
+                mock_app_config,
+                DockerMode.NONE,
+            )
+
+    def test_validator_rejects_runtime_mount_over_compose_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+
+        with pytest.raises(RuntimeMountSpecificationError, match="conflicts"):
+            validate_container_mounts(
+                (),
+                mock_app_config,
+                DockerMode.NONE,
+                shell_args=["-v", "/host:/home/dev/.claude"],
+                audio_args=[],
+                dbus_args=[],
+            )
+
+    @pytest.mark.parametrize("specification", ["/host:relative", "/host:/proc/../dev"])
+    def test_validator_rejects_invalid_runtime_mount_target(
+        self,
+        specification: str,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+
+        with pytest.raises(RuntimeMountSpecificationError):
+            validate_container_mounts(
+                (),
+                mock_app_config,
+                DockerMode.NONE,
+                shell_args=["-v", specification],
+                audio_args=[],
+                dbus_args=[],
+            )
+
+    @pytest.mark.parametrize("target", ["/proc", "/sys/kernel", "/dev"])
+    def test_validator_rejects_kernel_target_from_internal_mount(
+        self,
+        target: str,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+
+        with pytest.raises(MountSpecificationError, match="not allowed"):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path(target)),),
+                mock_app_config,
+                DockerMode.NONE,
+            )
 
     def test_rejects_exact_compose_target(
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -316,7 +417,7 @@ class TestMountTargetCollisions:
         self._without_runtime_mounts(monkeypatch)
 
         with pytest.raises(
-            MountCollisionError, match=r"conflict path: /home/dev/\.config/claude"
+            MountCollisionError, match=r"conflict path: /home/dev/\.claude"
         ):
             validate_container_mounts(
                 (ContainerMount(tmp_path, Path("/home/dev/.config/claude")),),
@@ -324,7 +425,91 @@ class TestMountTargetCollisions:
                 DockerMode.NONE,
             )
 
-    def test_rejects_active_audio_socket_target(
+    def test_rejects_image_claude_alias_subtree(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/skills",))
+
+        with pytest.raises(
+            MountCollisionError, match=r"conflict path: /home/dev/\.claude/skills"
+        ):
+            validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
+
+    def test_allows_unoccupied_child_of_image_claude_alias(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/plugins",))
+
+        assert mounts[0].target == Path("/home/dev/.claude/plugins")
+        validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "/run/user/1000/pulse/native",
+            "/var/run/user/1000/pulse/native",
+        ],
+    )
+    def test_rejects_active_audio_socket_target_and_alias(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        target: str,
+    ) -> None:
+        pulse_dir = tmp_path / "pulse"
+        pulse_dir.mkdir()
+        pulse_socket = pulse_dir / "native"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(pulse_socket))
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        monkeypatch.setattr(docker_mod, "get_shell_mount_args", MagicMock(return_value=[]))
+
+        try:
+            with pytest.raises(
+                MountCollisionError,
+                match=r"conflict path: /run/user/1000/pulse/native",
+            ):
+                validate_container_mounts(
+                    resolve_container_mounts((f"{tmp_path}:{target}",)),
+                    mock_app_config,
+                    DockerMode.NONE,
+                )
+        finally:
+            server.close()
+
+    @pytest.mark.parametrize(
+        "target",
+        ["/run/user/1000/bus", "/var/run/user/1000/bus"],
+    )
+    def test_rejects_active_dbus_socket_target_and_alias(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        target: str,
+    ) -> None:
+        bus_socket = tmp_path / "bus"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(bus_socket))
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        monkeypatch.setattr(docker_mod, "get_shell_mount_args", MagicMock(return_value=[]))
+
+        try:
+            with pytest.raises(
+                MountCollisionError, match=r"conflict path: /run/user/1000/bus"
+            ):
+                validate_container_mounts(
+                    resolve_container_mounts((f"{tmp_path}:{target}",)),
+                    mock_app_config,
+                    DockerMode.NONE,
+                )
+        finally:
+            server.close()
+
+    def test_rejects_parent_of_active_audio_socket_through_var_run_alias(
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         pulse_dir = tmp_path / "pulse"
@@ -341,28 +526,7 @@ class TestMountTargetCollisions:
                 match=r"conflict path: /run/user/1000/pulse/native",
             ):
                 validate_container_mounts(
-                    (ContainerMount(tmp_path, Path("/run/user/1000/pulse/native")),),
-                    mock_app_config,
-                    DockerMode.NONE,
-                )
-        finally:
-            server.close()
-
-    def test_rejects_active_dbus_socket_target(
-        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        bus_socket = tmp_path / "bus"
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(bus_socket))
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        monkeypatch.setattr(docker_mod, "get_shell_mount_args", MagicMock(return_value=[]))
-
-        try:
-            with pytest.raises(
-                MountCollisionError, match=r"conflict path: /run/user/1000/bus"
-            ):
-                validate_container_mounts(
-                    (ContainerMount(tmp_path, Path("/run/user/1000/bus")),),
+                    resolve_container_mounts((f"{tmp_path}:/var/run",)),
                     mock_app_config,
                     DockerMode.NONE,
                 )
@@ -411,7 +575,7 @@ class TestMountTargetCollisions:
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
 
-        with pytest.raises(MountCollisionError, match=r"conflict path: /var/run/docker\.sock"):
+        with pytest.raises(MountCollisionError, match=r"conflict path: /run/docker\.sock"):
             validate_container_mounts(
                 (ContainerMount(tmp_path, Path("/var/run/docker.sock")),),
                 mock_app_config,
@@ -430,6 +594,24 @@ class TestMountTargetCollisions:
                 DockerMode.DIRECT,
             )
 
+    def test_rejects_ancestor_of_direct_socket_alias(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+
+        with pytest.raises(MountCollisionError, match=r"conflict path: /run/docker\.sock"):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path("/var")),),
+                mock_app_config,
+                DockerMode.DIRECT,
+                shell_args=[],
+                audio_args=[],
+                dbus_args=[],
+            )
+
     def test_static_targets_match_the_dev_compose_volume_anchor(self) -> None:
         compose_lines = (Path(__file__).parents[1] / "docker-compose.yml").read_text().splitlines()
         anchor_start = compose_lines.index("x-common-volumes: &common-volumes")
@@ -442,16 +624,36 @@ class TestMountTargetCollisions:
             if match:
                 targets.append(Path(match.group(1)))
 
+        anchor_lines = compose_lines[anchor_start + 1 : anchor_end]
+        _assert_compose_anchor_uses_short_form(anchor_lines)
         assert "    volumes: *common-volumes" in compose_lines[dev_start:networks_start]
         assert tuple(targets) == docker_mod._COMPOSE_DEV_MOUNT_TARGETS
+
+    def test_compose_anchor_watcher_rejects_reordered_long_form(self) -> None:
+        with pytest.raises(AssertionError):
+            _assert_compose_anchor_uses_short_form(
+                ["    - source: /tmp", "      type: bind", "      target: /mnt"]
+            )
 
     @pytest.mark.parametrize("flags", ["-s", "-sfn", "-snf", "-sf", "-sfT", "--symbolic"])
     def test_dockerfile_symlink_parser_accepts_all_symlink_flag_forms(
         self, flags: str
     ) -> None:
+        assert _parse_dockerfile_symlink_line(f"RUN ln {flags} ~/.claude ~/.config/claude") == [
+            ("~/.claude", "~/.config/claude")
+        ]
+
+    def test_dockerfile_symlink_parser_checks_every_ln_on_a_line(self) -> None:
         assert _parse_dockerfile_symlink_line(
-            f"RUN ln {flags} ~/.claude ~/.config/claude"
-        ) == ("~/.claude", "~/.config/claude")
+            "RUN ln --force --symbolic ~/.claude ~/.config/claude "
+            "&& ln --relative -s /home/dev/.gemini /home/dev/.gemini"
+        ) == [
+            ("~/.claude", "~/.config/claude"),
+            ("/home/dev/.gemini", "/home/dev/.gemini"),
+        ]
+        assert _parse_dockerfile_symlink_line(
+            "RUN ln -s ~/.gemini /tmp/g || ln -s ~/.claude /srv/claude"
+        ) == [("~/.gemini", "/tmp/g"), ("~/.claude", "/srv/claude")]
 
     def test_dockerfile_aliases_of_reserved_paths_are_reserved(
         self, mock_app_config: AppConfig
@@ -471,6 +673,30 @@ class TestMountTargetCollisions:
                 "RUN ln -sfn ~/.config ~/cfg\n",
                 reserved,
             )
+
+    def test_dockerfile_alias_guard_checks_aliases_outside_home(
+        self, mock_app_config: AppConfig
+    ) -> None:
+        reserved = set(docker_mod._reserved_mount_targets(mock_app_config, DockerMode.NONE))
+
+        with pytest.raises(AssertionError, match="alias /srv/claude"):
+            _assert_dockerfile_aliases_are_reserved(
+                "RUN ln -sfn ~/.claude /srv/claude\n",
+                reserved,
+            )
+
+    def test_dockerfile_alias_guard_uses_prefix_reservations(
+        self, mock_app_config: AppConfig
+    ) -> None:
+        reserved = set(docker_mod._reserved_mount_targets(mock_app_config, DockerMode.NONE))
+
+        assert (
+            _assert_dockerfile_aliases_are_reserved(
+                "RUN ln -sfn ~/.claude ~/.config/claude/plugins\n",
+                reserved,
+            )
+            == 1
+        )
 
     def test_dockerfile_alias_guard_rejects_empty_match(self, mock_app_config: AppConfig) -> None:
         reserved = set(docker_mod._reserved_mount_targets(mock_app_config, DockerMode.NONE))
@@ -964,6 +1190,54 @@ class TestComposeRun:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_emits_canonical_alias_target(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        options = ContainerOptions(
+            mounts=(
+                ContainerMount(tmp_path, Path("/home/dev/.config/claude/plugins")),
+            )
+        )
+
+        compose_run(mock_app_config, options, command="echo", interactive=False)
+
+        cmd = mock_run.call_args.args[0]
+        assert f"{tmp_path}:/home/dev/.claude/plugins" in cmd
+        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/.claude/plugins"
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_emits_normalized_direct_mount_target(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        options = ContainerOptions(
+            mounts=(ContainerMount(tmp_path, Path("/home/dev/tmp/../work")),)
+        )
+
+        compose_run(mock_app_config, options, command="echo", interactive=False)
+
+        cmd = mock_run.call_args.args[0]
+        assert f"{tmp_path}:/home/dev/work" in cmd
+        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/work"
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_reuses_dynamic_mount_args_for_validation_and_command(
         self,
         mock_run: MagicMock,
@@ -987,6 +1261,32 @@ class TestComposeRun:
         audio.assert_called_once_with()
         dbus.assert_called_once_with()
         assert shell_args[1] in mock_run.call_args.args[0]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_emits_canonical_runtime_mount_targets(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        shell_args = ["-v", "/host:/home/dev/tmp/../runtime:ro"]
+
+        compose_run(
+            mock_app_config,
+            ContainerOptions(),
+            command="echo",
+            interactive=False,
+            shell_mount_args=shell_args,
+            audio_mount_args=[],
+            dbus_mount_args=[],
+        )
+
+        cmd = mock_run.call_args.args[0]
+        assert "/host:/home/dev/runtime:ro" in cmd
+        assert "/host:/home/dev/tmp/../runtime:ro" not in cmd
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")

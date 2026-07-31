@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from djinn_in_a_box.core.docker import (
     RunResult,
     WorkflowImageCompatibility,
 )
+from djinn_in_a_box.core.exceptions import RuntimeMountSpecificationError
 
 
 @pytest.fixture
@@ -219,6 +221,56 @@ class TestRunCommand:
         assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == (
             ContainerMount(tmp_path, Path("/home/dev/workspace")),
         )
+
+    @pytest.mark.parametrize("mount", ["~nosuchuser/x", "\x00"])
+    def test_run_cli_reports_unresolvable_mount_without_traceback(
+        self, run_mocks: dict[str, Any], mount: str
+    ) -> None:
+        result = CliRunner().invoke(
+            app,
+            ["run", "claude", "test prompt", "--mount", mount],
+        )
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount path cannot be resolved" in result.output
+        run_mocks["run"].assert_not_called()
+
+    def test_run_cli_reports_unresolvable_mount_target_without_traceback(
+        self, run_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        result = CliRunner().invoke(
+            app,
+            ["run", "claude", "test prompt", "--mount", f"{tmp_path}:/work\x00bad"],
+        )
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Mount target cannot contain a NUL byte" in result.output
+        run_mocks["run"].assert_not_called()
+
+    def test_run_cli_labels_runtime_mount_builder_failures(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        run_mocks["run"].side_effect = RuntimeMountSpecificationError("bad builder output")
+
+        result = CliRunner().invoke(app, ["run", "claude", "test prompt"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Internal runtime mount construction failed" in result.output
+
+    def test_run_help_preserves_example_line_continuation(self, run_mocks: dict[str, Any]) -> None:
+        result = CliRunner().invoke(app, ["run", "--help"])
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+
+        assert result.exit_code == 0
+        lines = plain_output.splitlines()
+        example_index = next(
+            index for index, line in enumerate(lines) if "Compare these projects" in line
+        )
+        assert lines[example_index].rstrip().endswith("--here \\")
+        assert "--mount" in lines[example_index + 1]
 
     def test_run_here_alone_resolves_current_directory(
         self,

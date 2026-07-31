@@ -7,6 +7,8 @@ resolving mount paths used in Docker container operations.
 import functools
 from pathlib import Path
 
+from djinn_in_a_box.core.exceptions import MountSpecificationError
+
 CONFIG_DIR: Path = Path.home() / ".config" / "djinn_in_a_box"
 """Configuration directory (~/.config/djinn_in_a_box/)."""
 
@@ -58,7 +60,11 @@ def resolve_mount_path(path: str | Path) -> Path:
     Raises FileNotFoundError or NotADirectoryError on invalid paths.
     """
     path_obj = Path(path) if isinstance(path, str) else path
-    resolved = path_obj.expanduser().resolve()
+    try:
+        resolved = path_obj.expanduser().resolve()
+    except (RuntimeError, ValueError, OSError) as e:
+        msg = f"Mount path cannot be resolved: {path} ({e})"
+        raise MountSpecificationError(msg) from e
 
     # Validate existence
     if not resolved.exists():

@@ -1,10 +1,9 @@
-"""Exception types for Djinn in a Box configuration errors."""
+"""Exception types shared across Djinn's core layers."""
 
 from pathlib import Path
 
 
 class ConfigNotFoundError(FileNotFoundError):
-
     def __init__(self, path: Path) -> None:
         self.path = path
         super().__init__(
@@ -14,3 +13,11 @@ class ConfigNotFoundError(FileNotFoundError):
 
 class ConfigValidationError(ValueError):
     pass
+
+
+class MountSpecificationError(ValueError):
+    """Raised when a ``--mount`` value cannot be resolved or parsed."""
+
+
+class RuntimeMountSpecificationError(RuntimeError):
+    """Raised when an internal runtime mount builder emits invalid arguments."""

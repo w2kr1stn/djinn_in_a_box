@@ -35,11 +35,14 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     DockerMode,
     MountCollisionError,
-    MountSpecificationError,
     get_config_root,
     resolve_container_mounts,
     resolve_docker_mode,
     workflow_image_compatible,
+)
+from djinn_in_a_box.core.exceptions import (
+    MountSpecificationError,
+    RuntimeMountSpecificationError,
 )
 from djinn_in_a_box.core.paths import get_project_root
 
@@ -182,7 +185,7 @@ def run(
         djinn run claude "Build the Docker image" --docker --timeout 300
 
         # Mount the current directory and two additional directories
-        djinn run claude "Compare these projects" --here \
+        djinn run claude "Compare these projects" --here \\
             --mount ~/other-project --mount ~/reference:/home/dev/reference:ro
     """
     try:
@@ -250,6 +253,9 @@ def run(
         raise typer.Exit(1) from None
     except AgentNetworkError as e:
         error(str(e))
+        raise typer.Exit(1) from None
+    except RuntimeMountSpecificationError as e:
+        error(f"Internal runtime mount construction failed: {e}")
         raise typer.Exit(1) from None
     except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
