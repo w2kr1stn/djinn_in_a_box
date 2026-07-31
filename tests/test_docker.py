@@ -1,6 +1,7 @@
 """Tests for djinn_in_a_box.core.docker module."""
 
 import os
+import re
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
@@ -8,11 +9,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, ShellConfig
 from djinn_in_a_box.core.docker import (
+    ContainerMount,
     ContainerOptions,
     DockerMode,
+    MountCollisionError,
+    MountSpecificationError,
     WorkflowImageCompatibility,
     backup_sync_path,
     backup_volume,
@@ -34,10 +39,214 @@ from djinn_in_a_box.core.docker import (
     get_shell_mount_args,
     is_container_running,
     is_sync_archive,
+    parse_mount_spec,
+    resolve_container_mounts,
     restore_sync_path,
     restore_volume,
+    validate_container_mounts,
     workflow_image_compatible,
 )
+
+
+class TestParseMountSpec:
+    """Tests for the public ``SRC[:DST[:ro|rw]]`` mount grammar."""
+
+    @pytest.mark.parametrize(
+        ("specification", "expected"),
+        [
+            ("/host/src", ("/host/src", None, False)),
+            ("/host/src:/container/dst", ("/host/src", Path("/container/dst"), False)),
+            ("/host/src:/container/dst:ro", ("/host/src", Path("/container/dst"), True)),
+            ("/host/src:/container/dst:rw", ("/host/src", Path("/container/dst"), False)),
+            ("/host/src:ro", ("/host/src", None, True)),
+            ("/host/src:rw", ("/host/src", None, False)),
+        ],
+    )
+    def test_parses_each_supported_field_count(
+        self, specification: str, expected: tuple[str, Path | None, bool]
+    ) -> None:
+        assert parse_mount_spec(specification) == expected
+
+    @pytest.mark.parametrize(
+        "specification",
+        ["", "/host/src:/container/dst:ro:extra"],
+    )
+    def test_rejects_invalid_field_counts(self, specification: str) -> None:
+        with pytest.raises(MountSpecificationError, match="mount specification"):
+            parse_mount_spec(specification)
+
+    def test_rejects_relative_target(self) -> None:
+        with pytest.raises(MountSpecificationError, match="absolute container path"):
+            parse_mount_spec("/host/src:relative/path")
+
+    def test_rejects_unknown_mode(self) -> None:
+        with pytest.raises(MountSpecificationError, match="expected 'ro' or 'rw'"):
+            parse_mount_spec("/host/src:/container/dst:read-only")
+
+
+class TestResolveContainerMounts:
+    """Tests for source resolution and deterministic automatic targets."""
+
+    def test_derives_a_nonempty_target_for_root_source(self) -> None:
+        mounts = resolve_container_mounts(("/",))
+
+        assert mounts == (
+            ContainerMount(source=Path("/"), target=Path("/home/dev/mount/root")),
+        )
+
+    def test_distinguishes_duplicate_basenames_with_one_parent(self, tmp_path: Path) -> None:
+        first = tmp_path / "one" / "src"
+        second = tmp_path / "two" / "src"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+
+        mounts = resolve_container_mounts((str(first), str(second)))
+
+        assert [mount.target for mount in mounts] == [
+            Path("/home/dev/mount/src"),
+            Path("/home/dev/mount/two-src"),
+        ]
+
+    def test_explicit_target_is_reserved_before_derived_target(self, tmp_path: Path) -> None:
+        automatic = tmp_path / "customer" / "src"
+        explicit = tmp_path / "other"
+        automatic.mkdir(parents=True)
+        explicit.mkdir()
+
+        mounts = resolve_container_mounts(
+            (str(automatic), f"{explicit}:/home/dev/mount/src")
+        )
+
+        assert [mount.target for mount in mounts] == [
+            Path("/home/dev/mount/customer-src"),
+            Path("/home/dev/mount/src"),
+        ]
+
+    def test_rejects_workspace_as_an_explicit_target(self, tmp_path: Path) -> None:
+        with pytest.raises(MountSpecificationError, match="reserved for --here"):
+            resolve_container_mounts((f"{tmp_path}:/home/dev/workspace",))
+
+
+class TestMountTargetCollisions:
+    """User mount targets may not hide a mount of this ``dev`` invocation."""
+
+    @staticmethod
+    def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(docker_mod, "get_shell_mount_args", lambda _config: [])
+        monkeypatch.setattr(docker_mod, "get_audio_mount_args", lambda: [])
+        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", lambda: [])
+
+    def test_rejects_exact_compose_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mount = ContainerMount(tmp_path, Path("/home/dev/.claude"))
+
+        with pytest.raises(MountCollisionError) as exc_info:
+            validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
+
+        assert str(tmp_path) in str(exc_info.value)
+        assert "/home/dev/.claude" in str(exc_info.value)
+        assert "conflict path: /home/dev/.claude" in str(exc_info.value)
+
+    def test_rejects_parent_of_compose_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mount = ContainerMount(tmp_path, Path("/home/dev"))
+
+        with pytest.raises(MountCollisionError, match=r"conflict path: /home/dev/\.claude"):
+            validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
+
+    def test_allows_child_of_compose_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mount = ContainerMount(tmp_path, Path("/home/dev/projects/scratch"))
+
+        validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
+
+    def test_rejects_reserved_automatic_mount_root(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mount = ContainerMount(tmp_path, Path("/home/dev/mount"))
+
+        with pytest.raises(MountCollisionError, match=r"conflict path: /home/dev/mount"):
+            validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
+
+    def test_rejects_duplicate_user_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        first = ContainerMount(tmp_path / "first", Path("/container/shared"))
+        second = ContainerMount(tmp_path / "second", Path("/container/shared"))
+        first.source.mkdir()
+        second.source.mkdir()
+
+        with pytest.raises(MountCollisionError) as exc_info:
+            validate_container_mounts((first, second), mock_app_config, DockerMode.NONE)
+
+        assert str(first.source) in str(exc_info.value)
+        assert str(second.source) in str(exc_info.value)
+        assert "conflict path: /container/shared" in str(exc_info.value)
+
+    def test_rejects_active_shell_mount_target(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            docker_mod,
+            "get_shell_mount_args",
+            lambda _config: ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"],
+        )
+        monkeypatch.setattr(docker_mod, "get_audio_mount_args", lambda: [])
+        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", lambda: [])
+
+        with pytest.raises(MountCollisionError, match=r"conflict path: /home/dev/\.zshrc\.local"):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path("/home/dev/.zshrc.local")),),
+                mock_app_config,
+                DockerMode.NONE,
+            )
+
+    def test_rejects_docker_socket_in_direct_mode(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+
+        with pytest.raises(MountCollisionError, match=r"conflict path: /var/run/docker\.sock"):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path("/var/run/docker.sock")),),
+                mock_app_config,
+                DockerMode.DIRECT,
+            )
+
+    def test_static_targets_match_the_dev_compose_volume_anchor(self) -> None:
+        compose_lines = (Path(__file__).parents[1] / "docker-compose.yml").read_text().splitlines()
+        anchor_start = compose_lines.index("x-common-volumes: &common-volumes")
+        anchor_end = compose_lines.index("x-common-environment: &common-environment")
+        dev_start = compose_lines.index("  dev:")
+        networks_start = compose_lines.index("networks:")
+        targets: list[Path] = []
+        for line in compose_lines[anchor_start + 1 : anchor_end]:
+            match = re.fullmatch(r"\s*-\s+.*:(/[^:\s]+)(?::(?:ro|rw))?", line)
+            if match:
+                targets.append(Path(match.group(1)))
+
+        assert "    volumes: *common-volumes" in compose_lines[dev_start:networks_start]
+        assert tuple(targets) == docker_mod._COMPOSE_DEV_MOUNT_TARGETS
+
+    def test_dev_service_keeps_its_compose_working_dir(self) -> None:
+        """Without a mount no ``--workdir`` is passed, so this line decides where
+        a plain ``djinn start`` lands. Deleting it would silently move every
+        mount-less start from /home/dev/projects to the image default /home/dev.
+        """
+        compose_lines = (Path(__file__).parents[1] / "docker-compose.yml").read_text().splitlines()
+        dev_start = compose_lines.index("  dev:")
+        networks_start = compose_lines.index("networks:")
+        dev_block = "\n".join(compose_lines[dev_start:networks_start])
+
+        assert "working_dir: /home/dev/projects" in dev_block
 
 
 class TestEnsureNetwork:
@@ -474,6 +683,79 @@ class TestComposeBuild:
 
 class TestComposeRun:
     """Tests for compose_run function."""
+
+    @staticmethod
+    def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(docker_mod, "get_shell_mount_args", lambda _config: [])
+        monkeypatch.setattr(docker_mod, "get_audio_mount_args", lambda: [])
+        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", lambda: [])
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_serializes_all_mounts_and_uses_the_first_target_as_workdir(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        options = ContainerOptions(
+            mounts=(
+                ContainerMount(Path("/host/readonly"), Path("/work/one"), read_only=True),
+                ContainerMount(Path("/host/readwrite"), Path("/work/two")),
+            )
+        )
+
+        compose_run(mock_app_config, options, command="echo", interactive=False)
+
+        cmd = mock_run.call_args.args[0]
+        assert cmd[cmd.index("-v") : cmd.index("-v") + 2] == [
+            "-v",
+            "/host/readonly:/work/one:ro",
+        ]
+        second_mount = cmd.index("-v", cmd.index("-v") + 1)
+        assert cmd[second_mount : second_mount + 2] == ["-v", "/host/readwrite:/work/two"]
+        assert cmd[cmd.index("--workdir") + 1] == "/work/one"
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_omits_workdir_without_mounts(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
+
+        assert "--workdir" not in mock_run.call_args.args[0]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_rejects_mount_collisions_before_starting_compose(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        options = ContainerOptions(
+            mounts=(ContainerMount(Path("/host/source"), Path("/home/dev/.claude")),)
+        )
+
+        with pytest.raises(MountCollisionError):
+            compose_run(mock_app_config, options, command="echo", interactive=False)
+
+        mock_run.assert_not_called()
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")

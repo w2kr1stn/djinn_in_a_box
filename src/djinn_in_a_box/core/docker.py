@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.core.console import warning
-from djinn_in_a_box.core.paths import get_project_root
+from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 
 DJINN_NETWORK: str = "djinn-network"
@@ -31,6 +31,37 @@ _SERVICE_CONTAINER_NAMES: dict[str, str] = {
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
+_MOUNT_ROOT = Path("/home/dev/mount")
+_WORKSPACE_PATH = Path("/home/dev/workspace")
+_COMPOSE_DEV_MOUNT_TARGETS = (
+    Path("/home/dev/.claude"),
+    Path("/home/dev/.gemini"),
+    Path("/home/dev/.codex"),
+    Path("/home/dev/.opencode"),
+    Path("/home/dev/.local/share/opencode"),
+    Path("/home/dev/.config/gh"),
+    Path("/home/dev/.config/age"),
+    Path("/home/dev/.cache/uv"),
+    Path("/home/dev/.cache/djinn-tools"),
+    Path("/home/dev/.vscode-server"),
+    Path("/home/dev/workspaces"),
+    Path("/home/dev/.ssh"),
+    Path("/home/dev/.gitconfig"),
+    Path("/home/dev/.claude_seed"),
+    Path("/home/dev/.claude/skills"),
+    Path("/home/dev/.claude/commands"),
+    Path("/home/dev/.claude/agents"),
+    Path("/home/dev/.claude/context"),
+    Path("/home/dev/.claude/scripts"),
+    Path("/home/dev/.claude/CLAUDE.md"),
+    Path("/home/dev/.claude/AGENTS.md"),
+    Path("/home/dev/.gemini_seed"),
+    Path("/home/dev/.opencode/seed"),
+    Path("/home/dev/.djinn-canonical"),
+    Path("/home/dev/.config/mcp-servers.json"),
+    Path("/home/dev/projects"),
+    Path("/home/dev/sessions"),
+)
 
 
 class DockerMode(Enum):
@@ -60,6 +91,122 @@ def resolve_docker_mode(docker: bool, docker_direct: bool) -> DockerMode:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainerMount:
+    """A host directory mounted at a container destination."""
+
+    source: Path
+    target: Path
+    read_only: bool = False
+
+
+class MountSpecificationError(ValueError):
+    """Raised when a ``--mount`` value does not match Djinn's mount grammar."""
+
+
+class MountCollisionError(ValueError):
+    """Raised when a user mount would hide another container mount."""
+
+
+def parse_mount_spec(specification: str) -> tuple[str, Path | None, bool]:
+    """Parse ``SRC[:DST[:ro|rw]]`` into source, optional target, and mode."""
+    fields = specification.split(":")
+    if not 1 <= len(fields) <= 3:
+        msg = f"Invalid mount specification {specification!r}: expected SRC[:DST[:ro|rw]]"
+        raise MountSpecificationError(msg)
+
+    source = fields[0]
+    if not source:
+        msg = "Invalid mount specification: source path must not be empty"
+        raise MountSpecificationError(msg)
+
+    target: Path | None = None
+    read_only = False
+    if len(fields) >= 2:
+        target_or_mode = fields[1]
+        if target_or_mode in {"ro", "rw"}:
+            read_only = target_or_mode == "ro"
+        else:
+            target = Path(os.path.normpath(target_or_mode))
+            if not target.is_absolute():
+                msg = f"Mount target must be an absolute container path: {target_or_mode!r}"
+                raise MountSpecificationError(msg)
+
+    if len(fields) == 3:
+        if target is None:
+            msg = "Mount target must be an absolute container path when a mode is provided"
+            raise MountSpecificationError(msg)
+        mode = fields[2]
+        if mode not in {"ro", "rw"}:
+            msg = f"Invalid mount mode {mode!r}: expected 'ro' or 'rw'"
+            raise MountSpecificationError(msg)
+        read_only = mode == "ro"
+
+    return source, target, read_only
+
+
+def _derived_mount_target(source: Path, assigned_targets: set[Path]) -> Path:
+    """Choose a stable child of ``/home/dev/mount`` for a target-free mount."""
+    basename = source.name
+    candidate_name = basename
+    candidate = _MOUNT_ROOT / candidate_name
+
+    if not basename or candidate in assigned_targets:
+        parent_name = source.parent.name
+        if parent_name:
+            candidate_name = f"{parent_name}-{basename}" if basename else parent_name
+        elif basename:
+            candidate_name = basename
+        else:
+            candidate_name = "root"
+        candidate = _MOUNT_ROOT / candidate_name
+
+    suffix = 2
+    while candidate in assigned_targets:
+        candidate = _MOUNT_ROOT / f"{candidate_name}-{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def resolve_container_mounts(
+    specifications: tuple[str, ...], *, here: bool = False
+) -> tuple[ContainerMount, ...]:
+    """Resolve sources and assign targets for one start or headless-run invocation."""
+    parsed = [parse_mount_spec(specification) for specification in specifications]
+    if any(target == _WORKSPACE_PATH for _, target, _ in parsed):
+        msg = f"Mount target {_WORKSPACE_PATH} is reserved for --here"
+        raise MountSpecificationError(msg)
+    source_mounts = [
+        (resolve_mount_path(source), target, read_only)
+        for source, target, read_only in parsed
+    ]
+
+    mounts: list[ContainerMount] = []
+    if here:
+        mounts.append(
+            ContainerMount(
+                source=resolve_mount_path(Path.cwd()),
+                target=_WORKSPACE_PATH,
+            )
+        )
+
+    assigned_targets = {target for _, target, _ in source_mounts if target is not None}
+    if here:
+        assigned_targets.add(_WORKSPACE_PATH)
+
+    for source, target, read_only in source_mounts:
+        resolved_target = target
+        if resolved_target is None:
+            resolved_target = _derived_mount_target(source, assigned_targets)
+        assigned_targets.add(resolved_target)
+        mounts.append(
+            ContainerMount(source=source, target=resolved_target, read_only=read_only)
+        )
+
+    return tuple(mounts)
+
+
+@dataclass(frozen=True, slots=True)
 class ContainerOptions:
     """Options for container execution (Docker access, firewall, mounts)."""
 
@@ -69,8 +216,8 @@ class ContainerOptions:
     firewall_enabled: bool = False
     """Enable network firewall (restricts outbound traffic)."""
 
-    mount_path: Path | None = None
-    """Additional workspace mount path (maps to ~/workspace in container)."""
+    mounts: tuple[ContainerMount, ...] = ()
+    """Additional host-directory mounts for this container execution."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +450,52 @@ def get_dbus_mount_args() -> list[str]:
     ]
 
 
+def _mount_targets_from_args(args: list[str]) -> list[Path]:
+    """Extract container targets from the ``-v`` arguments built in this module."""
+    targets: list[Path] = []
+    for index, argument in enumerate(args):
+        if argument != "-v" or index + 1 == len(args):
+            continue
+        specification = args[index + 1]
+        parts = specification.rsplit(":", 2)
+        target = parts[-2] if parts[-1] in {"ro", "rw"} else parts[-1]
+        targets.append(Path(target))
+    return targets
+
+
+def _reserved_mount_targets(config: AppConfig, docker_mode: DockerMode) -> list[Path]:
+    """Return targets occupied by this particular ``dev`` container invocation."""
+    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, _MOUNT_ROOT]
+    targets.extend(_mount_targets_from_args(get_shell_mount_args(config)))
+    targets.extend(_mount_targets_from_args(get_audio_mount_args()))
+    targets.extend(_mount_targets_from_args(get_dbus_mount_args()))
+    if docker_mode is DockerMode.DIRECT:
+        targets.append(Path("/var/run/docker.sock"))
+    return targets
+
+
+def validate_container_mounts(
+    mounts: tuple[ContainerMount, ...],
+    config: AppConfig,
+    docker_mode: DockerMode,
+) -> None:
+    """Reject user targets that equal or are ancestors of an occupied target."""
+    occupied: list[tuple[Path, str]] = [
+        (target, f"reserved mount at {target}")
+        for target in _reserved_mount_targets(config, docker_mode)
+    ]
+
+    for mount in mounts:
+        for target, description in occupied:
+            if mount.target == target or target.is_relative_to(mount.target):
+                msg = (
+                    f"Mount {mount.source} -> {mount.target} conflicts with {description} "
+                    f"(conflict path: {target})"
+                )
+                raise MountCollisionError(msg)
+        occupied.append((mount.target, f"mount {mount.source} -> {mount.target}"))
+
+
 def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) -> RunResult:
     project_root = get_project_root()
     args = ["build"]
@@ -356,11 +549,17 @@ def compose_run(
     for key, value in env_vars.items():
         cmd.extend(["-e", f"{key}={value}"])
 
-    # Workspace mount
-    if options.mount_path is not None:
-        mount_str = f"{options.mount_path}:/home/dev/workspace"
+    validate_container_mounts(options.mounts, config, options.docker_mode)
+
+    for mount in options.mounts:
+        mount_str = f"{mount.source}:{mount.target}"
+        if mount.read_only:
+            mount_str += ":ro"
         cmd.extend(["-v", mount_str])
-        cmd.extend(["--workdir", "/home/dev/workspace"])
+
+    if options.mounts:
+        workdir = options.mounts[0].target
+        cmd.extend(["--workdir", str(workdir)])
 
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)
     cmd.extend(get_shell_mount_args(config))

@@ -192,8 +192,41 @@ class TestRunCommand:
         mock_run = run_mocks["run"]
         mock_run.assert_called_once()
         assert mock_run.call_args.args == ("claude", "test prompt")
+        assert mock_run.call_args.kwargs["mounts"] == ()
         assert mock_run.call_args.kwargs["app_config"] is run_mocks["config"]
         assert callable(mock_run.call_args.kwargs["on_ready"])
+
+    def test_run_passes_each_mount_specification_to_the_runner(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        with pytest.raises(typer.Exit):
+            run(
+                agent="claude",
+                prompt="test prompt",
+                mount=["one", "two:/container/two:ro"],
+            )
+
+        assert run_mocks["run"].call_args.kwargs["mounts"] == (
+            "one",
+            "two:/container/two:ro",
+        )
+
+    def test_run_reports_a_mount_validation_error(
+        self, run_mocks: dict[str, Any]
+    ) -> None:
+        from djinn_in_a_box.commands.agent import run
+
+        run_mocks["run"].side_effect = FileNotFoundError("Mount path does not exist: /missing")
+        with (
+            patch("djinn_in_a_box.commands.agent.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run(agent="claude", prompt="test prompt", mount=["/missing"])
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with("Mount path does not exist: /missing")
 
     def test_run_keeps_checked_config_when_loader_changes_after_bootstrap(
         self, run_mocks: dict[str, Any]

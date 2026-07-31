@@ -13,7 +13,7 @@ from djinn_in_a_box.core.agent_runner import (
     UnknownAgentError,
     run_headless_agent,
 )
-from djinn_in_a_box.core.docker import DockerMode, RunResult
+from djinn_in_a_box.core.docker import ContainerMount, DockerMode, RunResult
 
 
 @pytest.fixture
@@ -74,7 +74,7 @@ def test_run_headless_agent_builds_and_executes_typed_request(
         json_output=True,
         docker_mode=DockerMode.PROXY,
         firewall=True,
-        mount=tmp_path,
+        mounts=(str(tmp_path),),
         timeout=120,
         on_ready=ready.append,
     )
@@ -87,7 +87,9 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     options = compose.call_args.args[1]
     assert options.docker_mode is DockerMode.PROXY
     assert options.firewall_enabled is True
-    assert options.mount_path == tmp_path
+    assert options.mounts == (
+        ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),
+    )
     assert "--model configured-model" in compose.call_args.kwargs["command"]
     assert "--sandbox read-only" in compose.call_args.kwargs["command"]
     assert "--json" in compose.call_args.kwargs["command"]
@@ -107,7 +109,29 @@ def test_run_headless_agent_uses_current_directory_by_default(
     run_headless_agent("codex", "inspect")
 
     options = runner_mocks["compose"].call_args.args[1]
-    assert options.mount_path == tmp_path
+    assert options.mounts == (
+        ContainerMount(tmp_path, Path("/home/dev/workspace")),
+    )
+
+
+def test_run_headless_agent_validates_mount_before_network(
+    app_config: AppConfig,
+    agent_config: AgentConfig,
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing"
+    with (
+        patch("djinn_in_a_box.core.agent_runner.load_config", return_value=app_config),
+        patch(
+            "djinn_in_a_box.core.agent_runner.load_agents",
+            return_value={"codex": agent_config},
+        ),
+        patch("djinn_in_a_box.core.agent_runner.ensure_network") as network,
+        pytest.raises(FileNotFoundError, match=f"Mount path does not exist: {missing}"),
+    ):
+        run_headless_agent("codex", "inspect", mounts=(str(missing),))
+
+    network.assert_not_called()
 
 
 def test_checked_config_snapshot_is_used_without_reload(

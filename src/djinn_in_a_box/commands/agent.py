@@ -33,6 +33,8 @@ from djinn_in_a_box.core.console import (
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     DockerMode,
+    MountCollisionError,
+    MountSpecificationError,
     get_config_root,
     resolve_docker_mode,
     workflow_image_compatible,
@@ -125,14 +127,10 @@ def run(
         typer.Option("--firewall", "-f", help="Enable network firewall"),
     ] = False,
     mount: Annotated[
-        Path | None,
+        list[str] | None,
         typer.Option(
             "--mount",
-            help="Workspace path to mount (default: current directory)",
-            exists=True,
-            file_okay=False,
-            dir_okay=True,
-            resolve_path=True,
+            help="Host directory to mount; repeatable: SRC[:DST[:ro|rw]]",
         ),
     ] = None,
     timeout: Annotated[
@@ -147,8 +145,8 @@ def run(
     to stderr to keep stdout clean for agent output.
 
     By default, the current working directory is mounted as ~/workspace
-    in the container (implicit --here behavior). Use --mount to specify
-    a different directory.
+    in the container (implicit --here behavior). Use repeatable --mount
+    values to mount one or more different directories.
 
     Examples:
 
@@ -201,7 +199,7 @@ def run(
             model=model,
             docker_mode=docker_mode,
             firewall=firewall,
-            mount=mount,
+            mounts=tuple(mount or ()),
             timeout=timeout,
             app_config=checked_config,
             on_ready=lambda workspace: _show_run_status(
@@ -220,6 +218,14 @@ def run(
         console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
     except AgentNetworkError as e:
+        error(str(e))
+        raise typer.Exit(1) from None
+    except (
+        MountSpecificationError,
+        MountCollisionError,
+        FileNotFoundError,
+        NotADirectoryError,
+    ) as e:
         error(str(e))
         raise typer.Exit(1) from None
 

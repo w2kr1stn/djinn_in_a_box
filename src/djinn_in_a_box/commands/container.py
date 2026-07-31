@@ -34,6 +34,8 @@ from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     ContainerOptions,
+    MountCollisionError,
+    MountSpecificationError,
     cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
@@ -51,11 +53,12 @@ from djinn_in_a_box.core.docker import (
     get_shell_mount_args,
     is_container_running,
     network_exists,
+    resolve_container_mounts,
     resolve_docker_mode,
     volume_exists,
 )
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
-from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
+from djinn_in_a_box.core.paths import get_project_root
 
 
 def _sync_build_files(config: AppConfig | None = None) -> None:
@@ -128,8 +131,12 @@ def start(
         typer.Option("--here", help="Mount current directory as ~/workspace"),
     ] = False,
     mount: Annotated[
-        Path | None,
-        typer.Option("--mount", "-m", help="Mount specified path as ~/workspace"),
+        list[str] | None,
+        typer.Option(
+            "--mount",
+            "-m",
+            help="Host directory to mount; repeatable: SRC[:DST[:ro|rw]]",
+        ),
     ] = None,
 ) -> None:
     """Start interactive development shell.
@@ -174,16 +181,11 @@ def start(
         error(f"Failed to create Docker network '{DJINN_NETWORK}'")
         raise typer.Exit(1)
 
-    # Resolve mount path
-    mount_path: Path | None = None
-    if here:
-        mount_path = Path.cwd()
-    elif mount:
-        try:
-            mount_path = resolve_mount_path(mount)
-        except (FileNotFoundError, NotADirectoryError) as e:
-            error(str(e))
-            raise typer.Exit(1) from None
+    try:
+        mounts = resolve_container_mounts(tuple(mount or ()), here=here)
+    except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
+        error(str(e))
+        raise typer.Exit(1) from None
 
     # Print status output (to stderr, matching Bash format)
     banner()
@@ -203,8 +205,13 @@ def start(
     else:
         status_line("Firewall", "Disabled (use --firewall to enable)", "status.disabled")
 
-    if mount_path:
-        status_line("Workspace", str(mount_path), "status.enabled", value_style="path")
+    for resolved_mount in mounts:
+        mode = "ro" if resolved_mount.read_only else "rw"
+        status_line(
+            "Mount",
+            f"{resolved_mount.source} -> {resolved_mount.target} ({mode})",
+            value_style="path",
+        )
 
     # Shell mount status
     shell_args = get_shell_mount_args(config)
@@ -237,11 +244,14 @@ def start(
     options = ContainerOptions(
         docker_mode=docker_mode,
         firewall_enabled=firewall,
-        mount_path=mount_path,
+        mounts=mounts,
     )
 
     try:
         result = compose_run(config, options, interactive=True)
+    except MountCollisionError as e:
+        error(str(e))
+        raise typer.Exit(1) from None
     finally:
         cleanup_docker_proxy(docker_mode, config)
 

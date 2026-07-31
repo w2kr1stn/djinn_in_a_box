@@ -16,6 +16,7 @@ from djinn_in_a_box.core.docker import (
     cleanup_docker_proxy,
     compose_run,
     ensure_network,
+    resolve_container_mounts,
 )
 
 
@@ -69,7 +70,7 @@ def run_headless_agent(
     model: str | None = None,
     docker_mode: DockerMode = DockerMode.NONE,
     firewall: bool = False,
-    mount: Path | None = None,
+    mounts: tuple[str, ...] = (),
     timeout: int | None = None,
     on_ready: Callable[[Path], None] | None = None,
     app_config: AppConfig | None = None,
@@ -82,10 +83,11 @@ def run_headless_agent(
     except KeyError:
         raise UnknownAgentError(agent, tuple(sorted(agent_configs))) from None
 
+    container_mounts = resolve_container_mounts(mounts, here=not mounts)
     if not ensure_network():
         raise AgentNetworkError
 
-    workspace = mount if mount is not None else Path.cwd()
+    workspace = container_mounts[0].source
     if on_ready is not None:
         on_ready(workspace)
 
@@ -98,7 +100,7 @@ def run_headless_agent(
     options = ContainerOptions(
         docker_mode=docker_mode,
         firewall_enabled=firewall,
-        mount_path=workspace,
+        mounts=container_mounts,
     )
 
     try:

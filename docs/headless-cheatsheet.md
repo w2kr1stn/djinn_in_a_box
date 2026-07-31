@@ -95,8 +95,10 @@ djinn run opencode "Plan a cleanup for this module" --model default
 # JSON output for scripting
 djinn run claude "List all TODOs" --model sonnet --json | jq '.result'
 
-# Mount a different workspace directory
-djinn run claude "Analyze this project" --model sonnet --mount ~/other-project
+# Mount two directories; the first target is the workdir and the second is read-only
+djinn run claude "Analyze this project" --model sonnet \
+  --mount ~/other-project:/home/dev/project \
+  --mount ~/reference:/home/dev/reference:ro
 
 # Mount the current working directory implicitly
 djinn run claude "Summarize this repository"
@@ -129,13 +131,19 @@ with the agent's return code.
 | `--model <name>`, `-m <name>` | Model override forwarded to the agent. |
 | `--write`, `-w` | Enable the agent's write/edit mode. |
 | `--json`, `-j` | Request JSON output from the agent. |
-| `--mount <path>` | Mount a workspace directory as `/home/dev/workspace`. Defaults to the current directory. |
+| `--mount SRC[:DST[:ro\|rw]]` | Repeatable host-directory mount. Without `DST`, Djinn derives `/home/dev/mount/<basename>`; append `:ro` for read-only. |
 | `--docker`, `-d` | Enable Docker socket access through the proxy. |
 | `--docker-direct` | Enable direct Docker socket access without the proxy. |
 | `--firewall`, `-f` | Enable the outbound firewall inside the container. |
 | `--timeout <sec>`, `-t <sec>` | Timeout for the headless container run. |
 
 `--docker` and `--docker-direct` are mutually exclusive.
+
+`djinn run` without `--mount` keeps its implicit `--here` behavior: the current
+directory is mounted at `/home/dev/workspace` and is the workdir. With mounts,
+the first mount target is the workdir. For `djinn start`, `--here` is the only
+explicit way to use `/home/dev/workspace`; a target-free mount uses
+`/home/dev/mount/<basename>`.
 
 ---
 

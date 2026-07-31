@@ -18,7 +18,12 @@ from djinn_in_a_box.core.config_workflow import (
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
-from djinn_in_a_box.core.docker import DockerMode, RunResult
+from djinn_in_a_box.core.docker import (
+    ContainerMount,
+    DockerMode,
+    MountCollisionError,
+    RunResult,
+)
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.theme import DJINN_THEME
 
@@ -171,16 +176,73 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(here=True)
         options = start_mocks["run"].call_args[0][1]
-        assert options.mount_path == tmp_path
+        assert options.mounts == (
+            ContainerMount(tmp_path, Path("/home/dev/workspace")),
+        )
 
-    def test_start_with_mount_path(self, start_mocks: dict[str, Any], tmp_path: Path) -> None:
+    def test_start_collects_repeatable_mounts(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        with pytest.raises(typer.Exit):
+            container.start(mount=[str(first), f"{second}:/opt/second:ro"])
+        options = start_mocks["run"].call_args[0][1]
+        assert options.mounts == (
+            ContainerMount(first, Path("/home/dev/mount/first")),
+            ContainerMount(second, Path("/opt/second"), read_only=True),
+        )
+
+    def test_start_lists_each_resolved_mount(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+
         with (
-            patch("djinn_in_a_box.commands.container.resolve_mount_path", return_value=tmp_path),
+            patch("djinn_in_a_box.commands.container.status_line") as status_line,
             pytest.raises(typer.Exit),
         ):
-            container.start(mount=tmp_path)
-        options = start_mocks["run"].call_args[0][1]
-        assert options.mount_path == tmp_path
+            container.start(mount=[str(first), f"{second}:/opt/second:ro"])
+
+        mount_lines = [
+            call.args for call in status_line.call_args_list if call.args[0] == "Mount"
+        ]
+        assert mount_lines == [
+            ("Mount", f"{first} -> /home/dev/mount/first (rw)"),
+            ("Mount", f"{second} -> /opt/second (ro)"),
+        ]
+
+    def test_start_reports_a_mount_collision_from_the_core(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["run"].side_effect = MountCollisionError("mount collision detail")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+        assert "mount collision detail" in start_mocks["err_output"].getvalue()
+        start_mocks["cleanup"].assert_called_once_with(DockerMode.NONE, start_mocks["config"])
+
+    def test_start_uses_the_common_mount_path_validation(
+        self, start_mocks: dict[str, Any], tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "missing"
+
+        with (
+            patch("djinn_in_a_box.commands.container.error") as error,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            container.start(mount=[str(missing)])
+
+        assert exc_info.value.exit_code == 1
+        error.assert_called_once_with(f"Mount path does not exist: {missing}")
+        start_mocks["run"].assert_not_called()
 
     def test_start_exits_on_config_not_found(self, tmp_path: Path) -> None:
         from djinn_in_a_box.core.exceptions import ConfigNotFoundError
