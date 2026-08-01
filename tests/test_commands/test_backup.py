@@ -12,11 +12,15 @@ from unittest.mock import patch
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
+from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import backup as backup_module
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.docker import RunResult
+
+runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
@@ -243,6 +247,70 @@ class TestBackupCommand:
         message = capsys.readouterr().err
         assert "Removed unencrypted backup" in message
         assert old_backup.name in message
+
+    def test_no_encrypt_replaces_previous_encrypted_archive(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        old_backup = backups_dir / "djinn-backup-2026-01-01.tar.gz.age"
+        old_backup.write_bytes(b"age-encryption.org/v1\nold")
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
+                return_value=["djinn-claude-config"],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
+                return_value=[],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.backup_volume", return_value=RunResult(0, "", "")
+            ),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+        ):
+            backup_module.backup(no_encrypt=True)
+
+        assert not old_backup.exists()
+        assert len(list(backups_dir.glob("djinn-backup-*.tar.gz"))) == 1
+        assert not list(backups_dir.glob("djinn-backup-*.tar.gz.age"))
+
+    def test_backup_removes_stale_temp_archives_during_backup(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        stale = backups_dir / ".djinn-backup-orphan"
+        stale.write_bytes(b"stale")
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
+                return_value=["djinn-claude-config"],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
+                return_value=[],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.backup_volume", return_value=RunResult(0, "", "")
+            ),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+        ):
+            backup_module.backup()
+
+        assert not stale.exists()
 
     def test_backup_aborts_on_volume_failure(self, tmp_path: Path) -> None:
         staging_dir = tmp_path / "staging"
@@ -506,6 +574,55 @@ class TestBackupCommand:
         mock_subprocess.run.assert_not_called()
         assert "can contain credentials" in mock_warning.call_args.args[0]
 
+    def test_cli_no_encrypt_without_age_uses_atomic_private_publish(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir(mode=0o775)
+        backups_dir.chmod(0o775)
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+        real_mkstemp = backup_module.tempfile.mkstemp
+        real_replace = backup_module.os.replace
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
+                return_value=["djinn-claude-config"],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
+                return_value=[],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.backup_volume", return_value=RunResult(0, "", "")
+            ),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.shutil.which", return_value=None),
+            patch(
+                "djinn_in_a_box.commands.backup.tempfile.mkstemp", wraps=real_mkstemp
+            ) as mock_mkstemp,
+            patch("djinn_in_a_box.commands.backup.os.replace", wraps=real_replace) as mock_replace,
+        ):
+            result = runner.invoke(app, ["backup", "--no-encrypt"])
+
+        assert result.exit_code == 0, result.output
+        archives = list(backups_dir.glob("djinn-backup-*.tar.gz"))
+        assert len(archives) == 1
+        archive = archives[0]
+        assert backups_dir.stat().st_mode & 0o777 == 0o700
+        assert archive.stat().st_mode & 0o777 == 0o600
+        mock_mkstemp.assert_called_once_with(prefix=".djinn-backup-", dir=backups_dir)
+        mock_replace.assert_called_once()
+        published_temp, published_archive = mock_replace.call_args.args
+        assert Path(published_temp).parent == backups_dir
+        assert Path(published_temp).name.startswith(".djinn-backup-")
+        assert Path(published_archive) == archive
+        assert not list(backups_dir.glob(".djinn-backup-*"))
+
     def test_backup_invokes_age_passphrase_without_a_secret(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
@@ -513,13 +630,13 @@ class TestBackupCommand:
         inner_archive = staging_dir / "djinn-claude-config.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
-        events: list[str] = []
+        events: list[tuple[str, str | None]] = []
 
-        def record_warning_for_invocation(_: str) -> None:
-            events.append("warning")
+        def record_warning_for_invocation(message: str) -> None:
+            events.append(("warning", message))
 
         def run_age(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            events.append("age")
+            events.append(("age", None))
             temp_path = Path(argv[argv.index("-o") + 1])
             temp_path.write_bytes(b"age-encryption.org/v1\n")
             return subprocess.CompletedProcess(argv, 0)
@@ -551,8 +668,22 @@ class TestBackupCommand:
         argv = mock_subprocess.run.call_args.args[0]
         assert argv[:2] == ["age", "--passphrase"]
         assert argv[2] == "-o"
+        assert len(argv) == 5
+        assert Path(argv[3]).parent == backups_dir
+        assert Path(argv[4]).parent == staging_dir
+        assert Path(argv[4]).name.startswith("djinn-backup-")
+        assert Path(argv[4]).name.endswith(".tar.gz")
         assert mock_subprocess.run.call_args.kwargs == {"check": False}
-        assert events.index("warning") < events.index("age")
+        age_index = next(index for index, (kind, _) in enumerate(events) if kind == "age")
+        pre_age_warnings = [
+            message
+            for kind, message in events[:age_index]
+            if kind == "warning" and message is not None
+        ]
+        assert len(pre_age_warnings) == 1
+        warning = pre_age_warnings[0]
+        assert "empty input generates a passphrase shown once" in warning
+        assert "older unencrypted backup is removed" in warning
 
     @pytest.mark.parametrize(
         "age_output",
@@ -717,6 +848,68 @@ class TestBackupCommand:
         assert not list(backups_dir.glob(".djinn-backup-*"))
         assert not list(backups_dir.glob("djinn-backup-*.tar.gz.age"))
 
+    def test_backup_removes_publish_temp_when_age_is_interrupted(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
+                return_value=["djinn-claude-config"],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
+                return_value=[],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.backup_volume", return_value=RunResult(0, "", "")
+            ),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.subprocess") as mock_subprocess,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            mock_subprocess.run.side_effect = KeyboardInterrupt
+            backup_module.backup()
+
+        assert not list(backups_dir.glob(".djinn-backup-*"))
+
+    def test_backup_removes_staging_when_age_is_interrupted(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
+                return_value=["djinn-claude-config"],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
+                return_value=[],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.backup_volume", return_value=RunResult(0, "", "")
+            ),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.subprocess") as mock_subprocess,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            mock_subprocess.run.side_effect = KeyboardInterrupt
+            backup_module.backup()
+
+        assert not staging_dir.exists()
+
 
 class TestRestoreCommand:
     """Tests for the restore command."""
@@ -753,6 +946,36 @@ class TestRestoreCommand:
         assert "age is required to restore" in message
         assert "Install age" in message
         assert "--no-encrypt" not in message
+
+    def test_restore_legacy_archive_works_without_age(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_staging = tmp_path / "inner"
+        inner_staging.mkdir()
+        inner_archive = inner_staging / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+        backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
+        with tarfile.open(backup_file, "w:gz") as outer:
+            outer.add(inner_archive, arcname=inner_archive.name)
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.typer.confirm"),
+            patch("djinn_in_a_box.commands.backup.shutil.which", return_value=None),
+            patch("djinn_in_a_box.commands.backup.subprocess") as mock_subprocess,
+        ):
+            mock_restore.return_value = RunResult(0, "", "")
+            backup_module.restore()
+
+        mock_restore.assert_called_once_with("djinn-claude-config", staging_dir)
+        mock_subprocess.run.assert_not_called()
+        assert not staging_dir.exists()
 
     def test_exits_when_no_backup_found(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"
@@ -1023,6 +1246,74 @@ class TestRestoreCommand:
         mock_restore.assert_not_called()
         assert not staging_dir.exists()
 
+    def test_restore_decryption_exit_failure_precedes_valid_partial_cleartext(
+        self, tmp_path: Path
+    ) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_staging = tmp_path / "inner"
+        inner_staging.mkdir()
+        inner_archive = inner_staging / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+        valid_outer = tmp_path / "valid-outer.tar.gz"
+        with tarfile.open(valid_outer, "w:gz") as outer:
+            outer.add(inner_archive, arcname=inner_archive.name)
+        encrypted_backup = backups_dir / "djinn-backup-2026-03-13.tar.gz.age"
+        encrypted_backup.write_bytes(b"age-encryption.org/v1\nplaceholder")
+
+        def failed_decrypt(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            Path(argv[argv.index("-o") + 1]).write_bytes(valid_outer.read_bytes())
+            return subprocess.CompletedProcess(argv, 1)
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.typer.confirm"),
+            patch("djinn_in_a_box.commands.backup.subprocess") as mock_subprocess,
+            patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            mock_subprocess.run.side_effect = failed_decrypt
+            mock_restore.return_value = RunResult(0, "", "")
+            backup_module.restore()
+
+        assert exc_info.value.exit_code == 1
+        mock_restore.assert_not_called()
+        assert not staging_dir.exists()
+
+    def test_restore_removes_staging_when_age_is_interrupted(self, tmp_path: Path) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        encrypted_backup = backups_dir / "djinn-backup-2026-03-13.tar.gz.age"
+        encrypted_backup.write_bytes(b"age-encryption.org/v1\nplaceholder")
+
+        def interrupted_decrypt(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            Path(argv[argv.index("-o") + 1]).write_bytes(b"partial cleartext")
+            raise KeyboardInterrupt
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.typer.confirm"),
+            patch("djinn_in_a_box.commands.backup.subprocess") as mock_subprocess,
+            patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore_volume,
+            patch("djinn_in_a_box.commands.backup.restore_sync_path") as mock_restore_sync_path,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            mock_subprocess.run.side_effect = interrupted_decrypt
+            backup_module.restore()
+
+        mock_restore_volume.assert_not_called()
+        mock_restore_sync_path.assert_not_called()
+        assert not staging_dir.exists()
+
     def test_restore_without_controlling_terminal_exits_with_recovery_hint(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -1087,6 +1378,25 @@ class TestRestoreCommand:
         message = capsys.readouterr().err
         assert "neither a valid age archive nor a readable gzip tar" in message
         assert "intact backup archive" in message
+
+    def test_restore_three_byte_gzip_has_format_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        (backups_dir / "djinn-backup-2026-03-13.tar.gz").write_bytes(b"\x1f\x8b\x08")
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.typer.confirm"),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module.restore()
+
+        assert exc_info.value.exit_code == 1
+        message = capsys.readouterr().err
+        assert "neither a valid age archive nor a readable gzip tar" in message
 
     def test_age_recipient_round_trip_uses_production_file_orchestration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
