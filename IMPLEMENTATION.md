@@ -777,13 +777,19 @@ Category definitions come from `config/defaults.py`:
 - `SYNC_PATHS["repo-dotfiles"]`: `repo-dotfiles`
 
 `backup()` refuses to run while Djinn containers are active. It stages one
-archive per selected named volume or config-root subdirectory, then writes a
-single dated `djinn-backup-YYYY-MM-DD.tar.gz` under `~/.djinn/backups/` and
-removes older backups.
+archive per selected named volume or config-root subdirectory, then encrypts the
+outer tar with `age --passphrase` into a `0600` temporary file in
+`~/.djinn/backups/` and atomically publishes
+`djinn-backup-YYYY-MM-DD.tar.gz.age`. The backup directory is actively set to
+`0700`; the default flow keeps only the newest archive across encrypted and
+legacy cleartext formats. `--no-encrypt` is the explicit cleartext opt-out and
+uses the same atomic publication path.
 
-`restore()` also refuses to run while containers are active, extracts the newest
-backup archive, restores config-root path archives by filename prefix, and
-restores named volumes by validated volume name.
+`restore()` also refuses to run while containers are active. It identifies an
+age archive from its `age-encryption.org/v1` header, decrypts it into a separate
+restore-staging subdirectory, then extracts the outer tar. Legacy cleartext gzip
+archives remain supported. It restores config-root path archives by filename
+prefix and named volumes by validated volume name.
 
 Cache volumes are intentionally excluded from default backups because they are
 large and rebuildable.

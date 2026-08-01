@@ -74,6 +74,14 @@ By default, `djinn backup` archives existing credential/config-root paths
 volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`). Cache volumes are
 not included by default because they are rebuildable.
 
+Backups are age-encrypted with a passphrase by default and use the filename
+`djinn-backup-YYYY-MM-DD.tar.gz.age`. `age` asks for that passphrase directly at
+the terminal during backup and restore; Djinn does not store it. Move the
+archive by your chosen secure transport and retain the passphrase separately: a
+forgotten passphrase cannot be recovered. Existing cleartext `.tar.gz` backups
+remain restorable. `djinn backup --no-encrypt` is an explicit cleartext opt-out
+for controlled use only.
+
 Stop Djinn containers before backup or restore; the command enforces this.
 
 ## What Not To Sync

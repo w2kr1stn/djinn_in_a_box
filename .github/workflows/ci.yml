@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install shell-test dependencies
-        run: sudo apt-get update && sudo apt-get install -y zsh jq
+        run: sudo apt-get update && sudo apt-get install -y zsh jq age
 
       - name: Set up Python
         uses: actions/setup-python@v6

@@ -514,9 +514,12 @@ model before you store a high-value key such as an `age` identity.
   acts without approval, so a prompt injection reaching that agent can read the
   key. Run `djinn start --firewall` when an agent processes untrusted content, so
   a leaked secret cannot be sent outbound.
-- **Backups are unencrypted.** `djinn backup` writes a plain `tar.gz` under
-  `~/.djinn/backups/` that contains the credential directories. Protect that
-  directory as carefully as the credentials themselves.
+- **Backups are encrypted by default.** `djinn backup` writes an age-encrypted
+  `tar.gz.age` archive under `~/.djinn/backups/`. `age` prompts for the
+  passphrase directly at your terminal; Djinn never receives or stores it.
+  A forgotten passphrase makes that archive unrecoverable. Use `--no-encrypt`
+  only when you explicitly need a cleartext archive, and protect it as
+  carefully as the credentials themselves.
 
 Read [DOCKER-SOCKET-SECURITY.md](DOCKER-SOCKET-SECURITY.md) before enabling
 Docker socket access, which widens this surface further.
@@ -576,10 +579,14 @@ By default, this backs up:
 The archive is written to:
 
 ```text
-~/.djinn/backups/djinn-backup-YYYY-MM-DD.tar.gz
+~/.djinn/backups/djinn-backup-YYYY-MM-DD.tar.gz.age
 ```
 
-Only the newest `djinn-backup-*.tar.gz` archive is kept in that directory.
+`age` prompts twice for a passphrase at your terminal. Keep it safe: Djinn
+cannot recover a forgotten passphrase. Only the newest
+`djinn-backup-*.tar.gz` or `djinn-backup-*.tar.gz.age` archive is kept in that
+directory. Existing cleartext archives remain restorable and are removed after
+a successful new backup.
 
 Restore the newest backup:
 
@@ -588,12 +595,20 @@ djinn restore
 ```
 
 Restore asks for confirmation and overwrites the restored volume and config-root
-directory contents.
+directory contents. For encrypted backups, `age` prompts for the passphrase at
+the terminal before anything is restored.
 
 To back up specific categories:
 
 ```sh
 djinn backup --categories credentials --categories data
+```
+
+To deliberately create a cleartext archive (for example, for a controlled
+one-time migration), use:
+
+```sh
+djinn backup --no-encrypt
 ```
 
 For cross-machine usage, see
