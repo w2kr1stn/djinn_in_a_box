@@ -115,6 +115,13 @@ def _has_age_header(archive_path: Path) -> bool:
         return archive.read(len(_AGE_HEADER)) == _AGE_HEADER
 
 
+def _is_plausible_age_archive(archive_path: Path) -> bool:
+    try:
+        return archive_path.stat().st_size > 0 and _has_age_header(archive_path)
+    except OSError:
+        return False
+
+
 def _has_controlling_terminal() -> bool:
     try:
         with open("/dev/tty", encoding="utf-8"):
@@ -124,9 +131,12 @@ def _has_controlling_terminal() -> bool:
     return True
 
 
-def _require_age() -> None:
+def _require_age(*, restore: bool = False) -> None:
     if shutil.which("age") is None:
-        error("age is required for encrypted backups. Install age or use --no-encrypt.")
+        if restore:
+            error("age is required to restore an encrypted backup. Install age, then retry.")
+        else:
+            error("age is required for encrypted backups. Install age or use --no-encrypt.")
         raise typer.Exit(1)
 
 
@@ -235,7 +245,7 @@ def backup(
                     _age_encrypt_argv(staged_archive, temp_path),
                     check=False,
                 )
-                if result.returncode != 0:
+                if result.returncode != 0 or not _is_plausible_age_archive(temp_path):
                     error("Backup encryption failed; the previous backup is unchanged.")
                     raise typer.Exit(1)
 
@@ -271,6 +281,8 @@ def restore() -> None:
     _guard_no_containers_running()
     config = load_config()
 
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUPS_DIR.chmod(0o700)
     backups = _list_backups()
 
     if not backups:
@@ -286,7 +298,10 @@ def restore() -> None:
         raise typer.Exit(1) from exc
 
     if backup_file.suffix == ".age" and not encrypted:
-        error(f"Backup archive {backup_file.name} ends in .age but lacks an age encryption header.")
+        error(
+            f"Backup archive {backup_file.name} ends in .age but lacks an age encryption header. "
+            "Use an intact age-encrypted archive, then retry."
+        )
         raise typer.Exit(1)
 
     blank()
@@ -303,9 +318,12 @@ def restore() -> None:
     try:
         archive_to_extract = backup_file
         if encrypted:
-            _require_age()
+            _require_age(restore=True)
             if not _has_controlling_terminal():
-                error("A controlling terminal is required for the age passphrase prompt.")
+                error(
+                    "A controlling terminal is required for the age passphrase prompt. "
+                    "Use an interactive terminal to enter the passphrase, then retry."
+                )
                 raise typer.Exit(1)
             decrypt_dir = staging_dir / "decrypted"
             decrypt_dir.mkdir(mode=0o700)
@@ -322,7 +340,10 @@ def restore() -> None:
             with tarfile.open(archive_to_extract, "r:gz") as tar:
                 tar.extractall(path=staging_dir, filter="data")
         except (tarfile.TarError, EOFError, gzip.BadGzipFile, OSError) as exc:
-            error(f"Backup is neither a valid age archive nor a readable gzip tar: {exc}")
+            error(
+                f"Backup is neither a valid age archive nor a readable gzip tar: {exc}. "
+                "Use an intact backup archive, then retry."
+            )
             raise typer.Exit(1) from exc
 
         inner_archives = sorted(staging_dir.glob("*.tar.gz"))

@@ -205,7 +205,9 @@ class TestBackupCommand:
             assert archives[0].read_bytes().startswith(b"age-encryption.org/v1\n")
             assert str(staged_outer) not in added_paths
 
-    def test_backup_replaces_previous(self, tmp_path: Path) -> None:
+    def test_backup_replaces_previous(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
         old_backup = backups_dir / "djinn-backup-2026-01-01.tar.gz"
@@ -237,6 +239,10 @@ class TestBackupCommand:
             assert not old_backup.exists()
             archives = list(backups_dir.glob("djinn-backup-*.tar.gz.age"))
             assert len(archives) == 1
+
+        message = capsys.readouterr().err
+        assert "Removed unencrypted backup" in message
+        assert old_backup.name in message
 
     def test_backup_aborts_on_volume_failure(self, tmp_path: Path) -> None:
         staging_dir = tmp_path / "staging"
@@ -514,6 +520,8 @@ class TestBackupCommand:
 
         def run_age(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             events.append("age")
+            temp_path = Path(argv[argv.index("-o") + 1])
+            temp_path.write_bytes(b"age-encryption.org/v1\n")
             return subprocess.CompletedProcess(argv, 0)
 
         with (
@@ -545,6 +553,59 @@ class TestBackupCommand:
         assert argv[2] == "-o"
         assert mock_subprocess.run.call_args.kwargs == {"check": False}
         assert events.index("warning") < events.index("age")
+
+    @pytest.mark.parametrize(
+        "age_output",
+        [
+            pytest.param(b"", id="zero-byte"),
+            pytest.param(b"not age", id="nonempty-without-header"),
+        ],
+    )
+    def test_zero_byte_age_success_preserves_same_day_previous_archive(
+        self, tmp_path: Path, age_output: bytes
+    ) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        previous = backups_dir / f"djinn-backup-{date_str}.tar.gz.age"
+        previous_bytes = b"age-encryption.org/v1\nknown-good"
+        previous.write_bytes(previous_bytes)
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        with tarfile.open(inner_archive, "w:gz"):
+            pass
+
+        def run_age(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            temp_path = Path(argv[argv.index("-o") + 1])
+            temp_path.write_bytes(age_output)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
+                return_value=["djinn-claude-config"],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
+                return_value=[],
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup.backup_volume", return_value=RunResult(0, "", "")
+            ),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.subprocess") as mock_subprocess,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            mock_subprocess.run.side_effect = run_age
+            backup_module.backup()
+
+        assert exc_info.value.exit_code == 1
+        assert previous.read_bytes() == previous_bytes
+        assert list(backups_dir.glob("djinn-backup-*.tar.gz.age")) == [previous]
+        assert not list(backups_dir.glob(".djinn-backup-*"))
 
     def test_backup_missing_age_explains_the_opt_out(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -611,7 +672,10 @@ class TestBackupCommand:
             backup_module.backup()
 
         assert exc_info.value.exit_code == 1
-        assert "controlling terminal" in capsys.readouterr().err
+        message = capsys.readouterr().err
+        assert "controlling terminal" in message
+        assert "interactive terminal" in message
+        assert "--no-encrypt" in message
         assert not list(backups_dir.glob("djinn-backup-*"))
 
     def test_encryption_failure_preserves_previous_backup_and_cleans_temp(
@@ -663,6 +727,33 @@ class TestRestoreCommand:
                 backup_module.restore()
             assert exc_info.value.exit_code == 1
 
+    def test_restore_missing_age_explains_installation_without_backup_opt_out(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        (backups_dir / "djinn-backup-2026-03-13.tar.gz.age").write_bytes(
+            b"age-encryption.org/v1\nplaceholder"
+        )
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.typer.confirm"),
+            patch("djinn_in_a_box.commands.backup.shutil.which", return_value=None),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module.restore()
+
+        assert exc_info.value.exit_code == 1
+        message = capsys.readouterr().err
+        assert "age is required to restore" in message
+        assert "Install age" in message
+        assert "--no-encrypt" not in message
+
     def test_exits_when_no_backup_found(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
@@ -678,6 +769,8 @@ class TestRestoreCommand:
     def test_restore_restores_volumes(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
+        backups_dir.chmod(0o775)
+        assert backups_dir.stat().st_mode & 0o777 == 0o775
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
@@ -707,6 +800,8 @@ class TestRestoreCommand:
 
             mock_restore.assert_called_once_with("djinn-claude-config", staging_dir)
             mock_subprocess.run.assert_not_called()
+
+        assert backups_dir.stat().st_mode & 0o777 == 0o700
 
     def test_restore_handles_failure(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"
@@ -928,7 +1023,35 @@ class TestRestoreCommand:
         mock_restore.assert_not_called()
         assert not staging_dir.exists()
 
-    def test_restore_rejects_age_name_without_header(self, tmp_path: Path) -> None:
+    def test_restore_without_controlling_terminal_exits_with_recovery_hint(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+        (backups_dir / "djinn-backup-2026-03-13.tar.gz.age").write_bytes(
+            b"age-encryption.org/v1\nplaceholder"
+        )
+
+        with (
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
+            patch("djinn_in_a_box.commands.backup.typer.confirm"),
+            patch("djinn_in_a_box.commands.backup._has_controlling_terminal", return_value=False),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module.restore()
+
+        assert exc_info.value.exit_code == 1
+        message = capsys.readouterr().err
+        assert "controlling terminal" in message
+        assert "interactive terminal" in message
+
+    def test_restore_rejects_age_name_without_header(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
         (backups_dir / "djinn-backup-2026-03-13.tar.gz.age").write_bytes(b"not age")
@@ -943,8 +1066,11 @@ class TestRestoreCommand:
 
         assert exc_info.value.exit_code == 1
         mock_confirm.assert_not_called()
+        assert "intact age-encrypted archive" in capsys.readouterr().err
 
-    def test_restore_invalid_legacy_archive_has_format_error(self, tmp_path: Path) -> None:
+    def test_restore_invalid_legacy_archive_has_format_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
         (backups_dir / "djinn-backup-2026-03-13.tar.gz").write_bytes(b"bad")
@@ -958,6 +1084,9 @@ class TestRestoreCommand:
             backup_module.restore()
 
         assert exc_info.value.exit_code == 1
+        message = capsys.readouterr().err
+        assert "neither a valid age archive nor a readable gzip tar" in message
+        assert "intact backup archive" in message
 
     def test_age_recipient_round_trip_uses_production_file_orchestration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

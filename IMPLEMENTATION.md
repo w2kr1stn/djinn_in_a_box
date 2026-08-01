@@ -878,7 +878,9 @@ djinn backup
   +-- collect selected named volumes
   +-- collect existing config-root paths
   +-- stage per-item tar.gz files
-  +-- write ~/.djinn/backups/djinn-backup-YYYY-MM-DD.tar.gz
+  +-- encrypt and validate the outer tar in a same-directory temp file
+  +-- atomically publish ~/.djinn/backups/djinn-backup-YYYY-MM-DD.tar.gz.age
+  +-- rotate older encrypted and legacy cleartext archives
 ```
 
 Session:
