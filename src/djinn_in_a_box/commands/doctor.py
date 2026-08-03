@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
@@ -22,6 +23,7 @@ import typer
 from rich.table import Table
 from rich.text import Text
 
+from djinn_in_a_box.config.defaults import SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
@@ -56,6 +58,39 @@ class Check:
     status: Status
     detail: str
     remedy: str = ""
+
+
+CREDENTIAL_DIR_MODE = 0o700
+"""Intended mode for credential directories under the config root."""
+
+
+def loose_credential_dirs(config: AppConfig | None) -> list[Path]:
+    """Credential directories that are group- or other-accessible.
+
+    ``ensure_host_env`` creates these with ``mode=0o700``, but ``Path.mkdir``
+    applies a mode only at creation — a config root provisioned before that
+    change keeps the umask default. This finds the drift so ``doctor --fix``
+    can repair it.
+
+    Deliberately narrow, per the safety constraints of the issue: only the
+    names in ``SYNC_PATHS["credentials"]``, only directly under the resolved
+    root, and ``lstat`` rather than ``stat`` so a symlinked name is skipped
+    instead of followed — a redirect is someone's deliberate arrangement, not
+    ours to chmod.
+    """
+    root = get_config_root(config)
+    loose: list[Path] = []
+    for name in SYNC_PATHS.get("credentials", []):
+        path = root / name
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            continue
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            loose.append(path)
+    return loose
 
 
 # -----------------------------------------------------------------------------
@@ -275,6 +310,16 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             )
         )
 
+        loose = loose_credential_dirs(config)
+        checks.append(
+            Check(
+                "Credential dir modes",
+                Status.PASS if not loose else Status.WARN,
+                "0700" if not loose else ", ".join(path.name for path in loose),
+                "" if not loose else "Run `djinn doctor --fix` to tighten them to 0700.",
+            )
+        )
+
     image = daemon and _image_built()
     checks.append(
         Check(
@@ -398,6 +443,18 @@ def _doctor_fix(config: AppConfig) -> bool:
     except OSError as e:
         failed = True
         console.print(f"Could not fix: host environment (check host paths are writable: {e})")
+
+    # After ensure_host_env, so a directory it just created is already tight and
+    # does not show up here. Reported per path: a silent chmod on a credential
+    # store is exactly the kind of change that should be visible.
+    for path in loose_credential_dirs(config):
+        try:
+            path.chmod(CREDENTIAL_DIR_MODE)
+        except OSError as e:
+            failed = True
+            console.print(f"Could not fix: {path} ({e})")
+        else:
+            console.print(f"Fixed: tightened {path} to 0700")
 
     try:
         network_ok = ensure_network()

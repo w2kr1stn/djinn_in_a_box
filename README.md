@@ -505,8 +505,9 @@ model before you store a high-value key such as an `age` identity.
 
 - **Cleartext on the host.** Credential directories under the config root are
   ordinary files guarded by filesystem permissions. Djinn creates new credential
-  directories with mode `0700`. Directories that already exist are not tightened
-  retroactively.
+  directories with mode `0700`. A config root provisioned before that became the
+  default keeps the looser mode until you repair it: `djinn doctor` reports the
+  drift, `djinn doctor --fix` tightens those directories to `0700`.
 - **Readable by every agent in the container.** Each credential is mounted where
   its tool expects it, so the `dev` user — and therefore every coding agent you
   run — can read all of them. An `age` identity is a master decryption key. An

@@ -394,7 +394,11 @@ the Docker daemon does not auto-create missing paths as root-owned directories.
 It creates credential subdirectories from `SYNC_PATHS["credentials"]`,
 `~/.djinn/sessions`, `~/.djinn/backups`, `~/.ssh`, and `~/.gitconfig`.
 Credential subdirectories and `~/.ssh` are created with mode `0700`. The mode
-applies on creation only; directories that already exist are left unchanged.
+applies on creation only; directories that already exist are left unchanged by
+`ensure_host_env`. `djinn doctor` reports such drift as a `Credential dir modes`
+row, and `djinn doctor --fix` tightens the affected directories — only names from
+`SYNC_PATHS["credentials"]`, only directly under the config root, and skipping
+symlinked names rather than following them.
 
 ## Host-Side Seeding
 
