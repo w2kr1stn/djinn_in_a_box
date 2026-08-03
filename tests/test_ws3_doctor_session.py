@@ -426,13 +426,17 @@ def test_doctor_fix_tightens_loose_credential_dirs_and_is_idempotent(
 
     first = runner.invoke(app, ["doctor", "--fix"])
 
+    # Rich wraps to the terminal width, and a long tmp_path splits the directory
+    # name across lines -- 80 columns in CI, wider locally. Compare against the
+    # unwrapped text so the assertion does not depend on the environment.
+    unwrapped = first.output.replace("\n", "")
     assert first.exit_code == 0, first.output
-    assert "tightened" in first.output
-    assert "claude" in first.output
+    assert "tightened" in unwrapped
+    assert "claude" in unwrapped
     assert (root / "claude").stat().st_mode & 0o777 == 0o700
     assert (root / "not-a-credential-dir").stat().st_mode & 0o777 == 0o777
 
     second = runner.invoke(app, ["doctor", "--fix"])
 
     assert second.exit_code == 0, second.output
-    assert "tightened" not in second.output
+    assert "tightened" not in second.output.replace("\n", "")
