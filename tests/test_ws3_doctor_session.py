@@ -326,3 +326,113 @@ def test_session_create_traversal_project_exits_without_creating_outside(
         assert result.exit_code == 1
         assert "Invalid project name" in result.output
         assert not outside.exists()
+
+
+def _credential_root(tmp_path: Path) -> tuple[Path, AppConfig]:
+    """A config root with one loose, one tight, and two decoys."""
+    root = tmp_path / "config-root"
+    root.mkdir()
+    # chmod after mkdir: mkdir's mode is masked by the umask, so 0o777 would
+    # silently become 0o755 and the decoy would not be the wide-open case.
+    (root / "claude").mkdir()
+    (root / "claude").chmod(0o755)
+    (root / "gh").mkdir()
+    (root / "gh").chmod(0o700)
+    (root / "not-a-credential-dir").mkdir()
+    (root / "not-a-credential-dir").chmod(0o777)
+    return root, AppConfig(code_dir=tmp_path, config_root=root)
+
+
+def test_loose_credential_dirs_finds_only_group_or_other_accessible(tmp_path: Path) -> None:
+    """Would fail if the mode test dropped the 0o077 mask and flagged every dir."""
+    root, config = _credential_root(tmp_path)
+
+    loose = doctor_mod.loose_credential_dirs(config)
+
+    assert [path.name for path in loose] == ["claude"]
+    assert (root / "gh").stat().st_mode & 0o077 == 0
+
+
+def test_loose_credential_dirs_leaves_a_stricter_mode_alone(tmp_path: Path) -> None:
+    """The test is "group or other bits set", not "differs from 0700". A
+    directory at 0500 is stricter than required; treating it as drift would
+    *loosen* it. Would fail if the 0o077 mask became a `!= 0o700` comparison.
+    """
+    root, config = _credential_root(tmp_path)
+    (root / "codex").mkdir()
+    (root / "codex").chmod(0o500)
+
+    loose = doctor_mod.loose_credential_dirs(config)
+
+    assert "codex" not in [path.name for path in loose]
+
+
+def test_loose_credential_dirs_skips_a_symlinked_name(tmp_path: Path) -> None:
+    """lstat, not stat: a redirected credential name is someone's deliberate
+    arrangement. Would fail if the check followed the link and chmod'd its target.
+    """
+    root, config = _credential_root(tmp_path)
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o755)
+    (root / "codex").symlink_to(target)
+
+    loose = doctor_mod.loose_credential_dirs(config)
+
+    assert "codex" not in [path.name for path in loose]
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_loose_credential_dirs_ignores_files_and_unlisted_names(tmp_path: Path) -> None:
+    """Only SYNC_PATHS["credentials"] names, and only directories."""
+    root, config = _credential_root(tmp_path)
+    (root / "gemini").write_text("a file, not a directory")
+
+    loose = doctor_mod.loose_credential_dirs(config)
+
+    names = [path.name for path in loose]
+    assert "gemini" not in names
+    assert "not-a-credential-dir" not in names
+
+
+def test_doctor_warns_about_loose_credential_dirs_and_names_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root, config = _credential_root(tmp_path)
+    monkeypatch.setattr("djinn_in_a_box.config.loader.load_config", lambda: config)
+    monkeypatch.setattr(doctor_mod, "get_config_root", lambda _config=None: root)
+
+    checks = doctor_mod.run_checks(config, None)
+
+    row = next(check for check in checks if check.name == "Credential dir modes")
+    assert row.status is doctor_mod.Status.WARN
+    assert "claude" in row.detail
+    assert "--fix" in row.remedy
+
+
+def test_doctor_fix_tightens_loose_credential_dirs_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The acceptance criterion in full: tighten, report, and change nothing on
+    a second run -- while leaving an unlisted directory alone.
+    """
+    root, config = _credential_root(tmp_path)
+    monkeypatch.setattr("djinn_in_a_box.config.loader.load_config", lambda: config)
+    monkeypatch.setattr(doctor_mod, "get_config_root", lambda _config=None: root)
+    monkeypatch.setattr(doctor_mod, "run_checks", MagicMock(return_value=[]))
+    monkeypatch.setattr(doctor_mod, "ensure_host_env", MagicMock())
+    monkeypatch.setattr(doctor_mod, "seed_config", MagicMock(return_value=[]))
+    monkeypatch.setattr(doctor_mod, "ensure_network", MagicMock(return_value=True))
+    monkeypatch.setattr(doctor_mod, "get_project_root", lambda: tmp_path)
+
+    first = runner.invoke(app, ["doctor", "--fix"])
+
+    assert first.exit_code == 0, first.output
+    assert "tightened" in first.output
+    assert "claude" in first.output
+    assert (root / "claude").stat().st_mode & 0o777 == 0o700
+    assert (root / "not-a-credential-dir").stat().st_mode & 0o777 == 0o777
+
+    second = runner.invoke(app, ["doctor", "--fix"])
+
+    assert second.exit_code == 0, second.output
+    assert "tightened" not in second.output
