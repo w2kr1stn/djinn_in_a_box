@@ -794,6 +794,10 @@ def enter() -> None:
         raise typer.Exit(1)
 
     containers = get_running_containers("djinn")
+    if containers is None:
+        error("Could not determine whether a Djinn container is running.")
+        err_console.print("Restore Docker access, then retry.")
+        raise typer.Exit(1)
     if not containers:
         error("No running Djinn container found.")
         err_console.print("Start one with: djinn start")

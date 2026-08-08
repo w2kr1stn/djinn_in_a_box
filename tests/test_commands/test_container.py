@@ -2,6 +2,7 @@
 
 import io
 import re
+import subprocess
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -1004,6 +1005,26 @@ class TestEnterCommand:
                 container.enter()
 
             assert exc_info.value.exit_code == 1
+
+    def test_enter_refuses_an_unknown_container_state(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("djinn_in_a_box.commands.container.sys") as mock_sys,
+            patch(
+                "djinn_in_a_box.core.docker.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["docker", "ps"], 1, stdout="", stderr="daemon unavailable"
+                ),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            mock_sys.stdin.isatty.return_value = True
+            container.enter()
+
+        assert exc_info.value.exit_code == 1
+        output = capsys.readouterr().err
+        assert "Could not determine whether a Djinn container is running." in output
 
     def test_enter_opens_shell(self) -> None:
         """Test enter opens zsh shell in running container."""
