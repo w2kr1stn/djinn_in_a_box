@@ -441,9 +441,11 @@ class TestStatusCommand:
 class TestCleanDefaultCommand:
     """Tests for the clean default behavior."""
 
-    def test_clean_default_runs_compose_down(self) -> None:
+    def test_clean_default_runs_compose_down(self, mock_home: Path) -> None:
         """Test clean without subcommand runs compose down."""
         from typer import Context
+
+        assert mock_home.is_dir()
 
         with patch("djinn_in_a_box.commands.container.compose_down") as mock_down:
             mock_down.return_value = RunResult(returncode=0)

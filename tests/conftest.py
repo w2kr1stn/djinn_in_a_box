@@ -49,6 +49,7 @@ def mock_app_config(tmp_path: Path) -> AppConfig:
     projects_dir.mkdir()
     return AppConfig(
         code_dir=projects_dir,
+        config_root=tmp_path / "config",
         resources=ResourceLimits(),
         shell=ShellConfig(),
     )
