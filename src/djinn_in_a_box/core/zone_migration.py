@@ -113,6 +113,8 @@ def reconcile_zone_assignments(
             None,
         )
         if source is None:
+            if path_has_content(destination):
+                _harden_published_directories(destination)
             _remove_empty_source_directories(roots, assignment, destination)
             continue
         moves.append(
@@ -270,6 +272,9 @@ def _copy_then_publish(
             before_publish()
         os.replace(staged_tree, destination)
         _harden_published_directories(destination)
+        if not _trees_match(source, destination):
+            msg = f"Zone migration source changed during publish: {source}"
+            raise ZoneConfigurationError(msg)
         shutil.rmtree(source)
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)

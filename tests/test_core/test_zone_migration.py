@@ -154,6 +154,81 @@ def test_cross_filesystem_copy_failure_retains_source_for_resume(
     assert not source.exists()
 
 
+def test_cross_filesystem_publish_change_preserves_both_trees(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    (source / "state.json").write_text("copied before publish")
+    target = roots.local_root / "claude" / "jobs"
+    original_replace = zone_migration.os.replace
+    before_publish_calls = 0
+
+    def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
+        if Path(source_path) == source:
+            raise OSError(errno.EXDEV, "Cross-device link")
+        original_replace(source_path, destination_path)
+
+    def write_after_verification() -> None:
+        nonlocal before_publish_calls
+        before_publish_calls += 1
+        if before_publish_calls == 2:
+            (source / "written-during-publish.json").write_text("must not be deleted")
+
+    monkeypatch.setattr(zone_migration.os, "replace", replace_with_exdev)
+
+    with pytest.raises(ZoneConfigurationError, match="changed during publish"):
+        reconcile_zone_assignments(zone_config, before_publish=write_after_verification)
+
+    assert (source / "state.json").read_text() == "copied before publish"
+    assert (source / "written-during-publish.json").read_text() == "must not be deleted"
+    assert (target / "state.json").read_text() == "copied before publish"
+    assert not (target / "written-during-publish.json").exists()
+
+
+def test_retry_rehardens_a_published_destination_after_hardening_failure(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    source.chmod(0o755)
+    nested.chmod(0o755)
+    (nested / "state.json").write_text("repair on retry")
+    target = roots.local_root / "claude" / "jobs"
+    original_chmod = zone_migration.os.chmod
+    target_chmod_calls = 0
+
+    def fail_post_publish_hardening(
+        path: Path,
+        mode: int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        nonlocal target_chmod_calls
+        if path == target:
+            target_chmod_calls += 1
+            if target_chmod_calls == 2:
+                raise OSError("hardening interrupted")
+        original_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(zone_migration.os, "chmod", fail_post_publish_hardening)
+
+    with pytest.raises(OSError, match="hardening interrupted"):
+        reconcile_zone_assignments(zone_config)
+
+    assert not source.exists()
+    assert (target / "nested").stat().st_mode & 0o777 == 0o755
+
+    resumed = reconcile_zone_assignments(zone_config)
+
+    assert resumed.moves == ()
+    assert stat.S_IMODE((target / "nested").stat().st_mode) == 0o700
+
+
 def test_collision_preserves_every_assigned_tree_without_moving_anything(
     zone_config: AppConfig,
 ) -> None:
