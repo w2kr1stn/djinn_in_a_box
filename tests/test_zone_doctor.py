@@ -4,11 +4,13 @@ from pathlib import Path
 
 import pytest
 
+import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.commands import doctor as doctor_mod
 from djinn_in_a_box.config import zones as zones_mod
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import load_zone_assignments
 from djinn_in_a_box.core.docker import ensure_zone_roots, resolve_zone_roots
+from djinn_in_a_box.core.zone_migration import reconcile_zone_assignments
 
 
 @pytest.fixture
@@ -101,3 +103,51 @@ def test_doctor_reports_large_direct_files_and_loose_zone_permissions(
     assert large.status is doctor_mod.Status.WARN
     assert str(large_file) in large.detail
     assert roots.shared_root in loose
+
+
+def test_doctor_reports_skipped_shipped_default_and_names_conflicting_file(
+    zone_config: AppConfig,
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    conflict = roots.config_root / "claude" / "plugins"
+    conflict.parent.mkdir(parents=True)
+    conflict.write_text("not a directory")
+
+    checks = doctor_mod.run_checks(zone_config)
+
+    row = _check_named(checks, "Skipped shipped zone defaults")
+    assert row.status is doctor_mod.Status.WARN
+    assert "claude/plugins/cache" in row.detail
+    assert str(conflict) in row.detail
+    assert str(conflict) in row.remedy
+    assert "move or remove" in row.remedy.lower()
+
+
+def test_legacy_sync_root_is_detected_after_host_provisions_the_new_root(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_mod.Path, "home", lambda: zone_config.config_root.parent)
+    legacy_agent = zone_config.config_root.parent / ".djinn" / "sync" / "claude"
+    legacy_agent.mkdir(parents=True)
+    (legacy_agent / ".credentials.json").write_text("legacy credential")
+    monkeypatch.setattr(docker_mod, "get_project_root", lambda: zone_config.config_root.parent)
+
+    docker_mod.ensure_host_env(zone_config)
+
+    assert doctor_mod._old_sync_root_present(zone_config) is True
+
+
+def test_legacy_sync_root_is_not_reported_after_its_content_moves_to_a_zone(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_mod.Path, "home", lambda: zone_config.config_root.parent)
+    legacy_projects = zone_config.config_root.parent / ".djinn" / "sync" / "claude" / "projects"
+    legacy_projects.mkdir(parents=True)
+    (legacy_projects / "legacy.jsonl").write_text("legacy transcript")
+    current_projects = zone_config.config_root / "claude" / "projects"
+    current_projects.mkdir(parents=True)
+    (current_projects / "legacy.jsonl").write_text("legacy transcript")
+
+    reconcile_zone_assignments(zone_config)
+
+    assert doctor_mod._old_sync_root_present(zone_config) is False
