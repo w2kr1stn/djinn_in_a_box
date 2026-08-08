@@ -2312,3 +2312,40 @@ class TestComposeUpDetached:
         compose_up_detached(mock_app_config, ContainerOptions())
 
         assert mock_run.call_args.kwargs["env"]["DJINN_DETACHED"] == "true"
+class TestRunningContainerProbeFailure:
+    """A failed probe must stay distinguishable from 'no containers running'.
+
+    `_guard_no_containers_running` refuses on ``None`` and proceeds on ``[]``, so
+    collapsing the two here would let a migration rename a directory a live
+    container is using — with both commands reporting success.
+    """
+
+    def test_a_failed_docker_call_yields_none_not_an_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
+
+        monkeypatch.setattr(docker_mod.subprocess, "run", failing_run)
+
+        assert docker_mod.get_running_containers() is None
+
+    def test_a_missing_docker_binary_yields_none_not_an_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def missing_binary(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(docker_mod.subprocess, "run", missing_binary)
+
+        assert docker_mod.get_running_containers() is None
+
+    def test_a_successful_call_with_no_output_yields_an_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def empty_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(docker_mod.subprocess, "run", empty_run)
+
+        assert docker_mod.get_running_containers() == []
