@@ -17,6 +17,8 @@ from djinn_in_a_box.core.config_lock import (
     config_directory_lock,
 )
 
+_PROCESS_WAIT_SECONDS = 5
+
 
 def _hold_lock_until_terminated(config_dir: Path, ready: Connection) -> None:
     with config_directory_lock(config_dir, exclusive=True):
@@ -45,6 +47,16 @@ def _probe_nonblocking_lock(config_dir: Path, *, exclusive: bool, result: Connec
         result.close()
 
 
+def _attempt_nonblocking_config_lock(config_dir: Path, result: Connection) -> None:
+    try:
+        with config_directory_lock(config_dir, exclusive=False, blocking=False):
+            result.send("acquired")
+    except ConfigDirectoryLockBusyError:
+        result.send("busy")
+    finally:
+        result.close()
+
+
 def _can_acquire_nonblocking_lock(config_dir: Path, *, exclusive: bool) -> bool:
     context = multiprocessing.get_context("spawn")
     received, sent = context.Pipe(duplex=False)
@@ -55,14 +67,41 @@ def _can_acquire_nonblocking_lock(config_dir: Path, *, exclusive: bool) -> bool:
     probe.start()
     sent.close()
     try:
-        probe.join()
+        probe.join(_PROCESS_WAIT_SECONDS)
+        assert not probe.is_alive(), "non-blocking lock probe exceeded its wait bound"
         assert probe.exitcode == 0
         return received.recv()
     finally:
         received.close()
         if probe.is_alive():
             probe.terminate()
-        probe.join()
+        probe.join(_PROCESS_WAIT_SECONDS)
+        probe.close()
+
+
+def _nonblocking_config_lock_status(config_dir: Path) -> str:
+    context = multiprocessing.get_context("spawn")
+    received, sent = context.Pipe(duplex=False)
+    probe = context.Process(
+        target=_attempt_nonblocking_config_lock,
+        kwargs={"config_dir": config_dir, "result": sent},
+    )
+    probe.start()
+    sent.close()
+    try:
+        assert received.poll(_PROCESS_WAIT_SECONDS), (
+            "non-blocking lock acquisition exceeded its wait bound"
+        )
+        status = received.recv()
+        probe.join(_PROCESS_WAIT_SECONDS)
+        assert not probe.is_alive(), "non-blocking lock probe did not exit"
+        assert probe.exitcode == 0
+        return status
+    finally:
+        received.close()
+        if probe.is_alive():
+            probe.terminate()
+        probe.join(_PROCESS_WAIT_SECONDS)
         probe.close()
 
 
@@ -99,12 +138,8 @@ def test_nonblocking_lock_reports_a_held_lock_without_waiting(tmp_path: Path) ->
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
-    with (
-        config_directory_lock(config_dir, exclusive=True),
-        pytest.raises(ConfigDirectoryLockBusyError),
-        config_directory_lock(config_dir, exclusive=False, blocking=False),
-    ):
-        pass
+    with config_directory_lock(config_dir, exclusive=True):
+        assert _nonblocking_config_lock_status(config_dir) == "busy"
 
 
 def test_killed_lock_holder_does_not_block_the_next_command(tmp_path: Path) -> None:
@@ -119,10 +154,10 @@ def test_killed_lock_holder_does_not_block_the_next_command(tmp_path: Path) -> N
     holder.start()
     sent.close()
     try:
-        assert received.poll(10)
+        assert received.poll(_PROCESS_WAIT_SECONDS)
         received.recv()
         holder.terminate()
-        holder.join(10)
+        holder.join(_PROCESS_WAIT_SECONDS)
         assert holder.exitcode is not None
         with config_directory_lock(config_dir, exclusive=True, blocking=False):
             pass
@@ -130,7 +165,7 @@ def test_killed_lock_holder_does_not_block_the_next_command(tmp_path: Path) -> N
         received.close()
         if holder.is_alive():
             holder.terminate()
-        holder.join()
+        holder.join(_PROCESS_WAIT_SECONDS)
         holder.close()
 
 

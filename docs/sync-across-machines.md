@@ -10,9 +10,17 @@ Sync these deliberately:
 
 - The repo itself: clone or pull it with Git on `host-a` and `host-b`.
 - The app config directory: `~/.config/djinn_in_a_box/`.
-- Your configured credential/config root, usually `~/.djinn/config/`.
+- Your configured credential/config root, usually `~/.djinn/config/`. This is
+  the credential/config zone that Djinn backs up.
+- Its shared sibling, usually `~/.djinn/config.shared/`, when you want
+  transcripts on both machines. Djinn does not back this zone up.
 - The repo-local `config/` directory if you want the same local seed overlays,
   agent settings, and MCP registry files on both hosts.
+
+Do not mirror the local sibling, usually `~/.djinn/config.local/`. It holds
+rebuildable caches and scratch and is intentionally host-local. If you use
+explicit `shared_root` or `local_root` values, apply the same policy to those
+paths instead of the derived siblings.
 
 `~/.config/djinn_in_a_box/config.toml` may contain host-specific paths. If
 `code_dir` differs between machines, keep separate copies or edit it after sync
@@ -40,7 +48,10 @@ djinn build
 ```
 
 Then configure your file synchronizer to mirror the local config paths listed
-above.
+above. Before the first `djinn migrate-zones`, add the shared root to that set
+or pause synchronization. The migration moves data out of the config root, so a
+synchronizer otherwise sees source deletions and can propagate them before the
+shared copy is protected.
 
 ## Second Host
 
@@ -69,10 +80,11 @@ djinn backup
 djinn restore
 ```
 
-By default, `djinn backup` archives existing credential/config-root paths
+By default, `djinn backup` archives the config-zone credential/config-root paths
 (`claude`, `gemini`, `codex`, `opencode`, `gh`, `age`), `repo-dotfiles`, and data
-volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`). Cache volumes are
-not included by default because they are rebuildable.
+volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`). It does not archive
+the shared transcript zone or the local cache/scratch zone. Cache volumes are not
+included by default because they are rebuildable.
 
 Backups are age-encrypted with a passphrase by default and use the filename
 `djinn-backup-YYYY-MM-DD.tar.gz.age`. `age` asks for that passphrase directly at
@@ -87,6 +99,6 @@ Stop Djinn containers before backup or restore; the command enforces this.
 ## What Not To Sync
 
 Do not sync live containers, Docker volume directories, Unix sockets, PID files,
-or runtime cache directories. Do not run a file synchronizer against Docker's
-internal storage. Use `djinn clean`, `djinn backup`, and `djinn restore` for
-Djinn-managed runtime state.
+or the local zone's runtime cache directories. Do not run a file synchronizer
+against Docker's internal storage. Use `djinn clean`, `djinn backup`, and
+`djinn restore` for Djinn-managed runtime state.

@@ -530,6 +530,41 @@ def get_dbus_mount_args() -> list[str]:
     ]
 
 
+def get_zone_overlay_mount_args(config: AppConfig) -> list[str]:
+    """Build bind-mount arguments for existing zone directories."""
+    args, _ = _zone_overlay_mount_args_and_targets(config)
+    return args
+
+
+def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], tuple[Path, ...]]:
+    """Return overlay arguments and every configured overlay target.
+
+    The targets are returned independently of source existence: a user mount at
+    an assigned target would otherwise be reported as applied and then silently
+    hidden when a later migration creates the overlay source.
+    """
+    # ``config.zones`` imports root resolution from this module, so retain this
+    # import at the runtime boundary rather than creating an import cycle.
+    from djinn_in_a_box.config.zones import ZONE_CONTAINER_TARGETS, load_zone_assignments
+
+    roots = resolve_zone_roots(config)
+    assignments = load_zone_assignments(config)
+    args: list[str] = []
+    targets: list[Path] = []
+    zone_roots = {"local": roots.local_root, "shared": roots.shared_root}
+    for agent, target_root in ZONE_CONTAINER_TARGETS.items():
+        for zone in ("local", "shared"):
+            for relative_path in assignments.by_agent[agent][zone]:
+                target = target_root / relative_path
+                targets.append(target)
+                source = zone_roots[zone] / agent / relative_path
+                # An empty directory is the completed-migration marker. It must
+                # overlay just like populated data; only a missing source skips.
+                if source.is_dir():
+                    args.extend(["-v", f"{source}:{target}"])
+    return args, tuple(targets)
+
+
 def _mount_targets_from_args(args: list[str]) -> list[Path]:
     """Extract container targets from volume arguments built in this module."""
     targets: list[Path] = []
@@ -613,9 +648,12 @@ def _reserved_mount_targets(
     shell_args: list[str] | None = None,
     audio_args: list[str] | None = None,
     dbus_args: list[str] | None = None,
+    zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> list[Path]:
     """Return targets occupied by this particular ``dev`` container invocation."""
-    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, _MOUNT_ROOT]
+    if zone_overlay_targets is None:
+        _, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, *zone_overlay_targets, _MOUNT_ROOT]
     if docker_mode is DockerMode.DIRECT:
         targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     if shell_args is None:
@@ -652,6 +690,7 @@ def validate_container_mounts(
     shell_args: list[str] | None = None,
     audio_args: list[str] | None = None,
     dbus_args: list[str] | None = None,
+    zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> None:
     """Reject user targets that equal or are ancestors of an occupied target."""
     normalized_mounts = tuple(
@@ -665,6 +704,7 @@ def validate_container_mounts(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        zone_overlay_targets=zone_overlay_targets,
     )
     occupied: list[tuple[Path, str, Path]] = []
     for target in reserved_targets:
@@ -817,6 +857,7 @@ def compose_run(
     dbus_args = _canonicalize_runtime_mount_args(
         get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
     )
+    zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     validate_container_mounts(
         mounts,
         config,
@@ -824,6 +865,7 @@ def compose_run(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        zone_overlay_targets=zone_overlay_targets,
     )
 
     for mount in mounts:
@@ -838,6 +880,7 @@ def compose_run(
         cmd.extend(["--workdir", str(workdir)])
 
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)
+    cmd.extend(zone_overlay_args)
     cmd.extend(shell_args)
     cmd.extend(audio_args)
     cmd.extend(dbus_args)

@@ -735,21 +735,22 @@ def clean_all(
         typer.Option("--force", "-f", help="Skip confirmation prompt"),
     ] = False,
 ) -> None:
-    """Remove EVERYTHING: containers, volumes, sync path contents, and network.
+    """Remove containers, volumes, config-zone sync paths, and network.
 
     This is a destructive operation that removes:
     - All djinn containers
     - All djinn named volumes (cache, data)
-    - All contents of sync paths under $DJINN_CONFIG_ROOT — if you mirror them
-      across machines the deletion will propagate.
+    - Contents of config-zone sync paths under $DJINN_CONFIG_ROOT — if you
+      mirror them across machines the deletion will propagate. Shared and local
+      zone data are not removed.
     - The djinn-network
 
     """
     if not force:
         confirm = typer.confirm(
-            "This will delete ALL containers, volumes, sync path contents, and the "
-            "network. If you mirror sync paths across machines the deletion will "
-            "propagate. Continue?",
+            "This will delete ALL containers, volumes, config-zone sync path contents, "
+            "and the network. Shared and local zone data are not removed. If you mirror "
+            "config-zone paths across machines the deletion will propagate. Continue?",
             default=False,
         )
         if not confirm:
