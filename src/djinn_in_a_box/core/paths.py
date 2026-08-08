@@ -18,6 +18,9 @@ CONFIG_FILE: Path = CONFIG_DIR / "config.toml"
 AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 """Agent definitions file path (optional user override)."""
 
+ZONES_FILE: Path = CONFIG_DIR / "zones.toml"
+"""Zone assignment overrides (optional user configuration)."""
+
 BACKUPS_DIR: Path = Path.home() / ".djinn" / "backups"
 """Backup directory for volume archives (~/.djinn/backups/)."""
 

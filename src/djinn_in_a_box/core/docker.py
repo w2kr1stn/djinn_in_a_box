@@ -20,6 +20,7 @@ from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
     MountSpecificationError,
     RuntimeMountSpecificationError,
+    ZoneRootValidationError,
 )
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
@@ -73,6 +74,14 @@ _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/projects"),
     Path("/home/dev/sessions"),
 )
+
+
+def repo_owned_submount_targets(agent_root: Path) -> tuple[Path, ...]:
+    return tuple(
+        target
+        for target in _COMPOSE_DEV_MOUNT_TARGETS
+        if target != agent_root and target.is_relative_to(agent_root)
+    )
 
 
 def _resolve_image_aliases(target: Path) -> Path:
@@ -938,6 +947,43 @@ def get_config_root(config: AppConfig | None = None) -> Path:
     return Path.home() / ".djinn" / "config"
 
 
+@dataclass(frozen=True)
+class ZoneRoots:
+    config_root: Path
+    shared_root: Path
+    local_root: Path
+
+
+def resolve_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
+    config_root = get_config_root(config)
+    shared_root = (
+        config.shared_root
+        if config is not None and config.shared_root is not None
+        else Path(f"{config_root}.shared")
+    )
+    local_root = (
+        config.local_root
+        if config is not None and config.local_root is not None
+        else Path(f"{config_root}.local")
+    )
+    roots = ZoneRoots(config_root, shared_root, local_root)
+    root_paths = (roots.config_root, roots.shared_root, roots.local_root)
+    for index, root in enumerate(root_paths):
+        for other in root_paths[index + 1 :]:
+            if root == other or root.is_relative_to(other) or other.is_relative_to(root):
+                msg = f"Zone roots must be distinct and not nested: {root} and {other}"
+                raise ZoneRootValidationError(msg)
+    return roots
+
+
+def ensure_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
+    roots = resolve_zone_roots(config)
+    for root in (roots.config_root, roots.shared_root, roots.local_root):
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
+    return roots
+
+
 def workflow_image_compatible(
     image: str = _WORKFLOW_IMAGE,
 ) -> WorkflowImageCompatibility:
@@ -1004,11 +1050,14 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     is a host-side input read by ``_sync_build_files`` (a no-op when absent), not a
     compose bind-mount, so it cannot trigger the root-owned-mount footgun.
     """
-    root = get_config_root(config)
+    roots = ensure_zone_roots(config)
+    root = roots.config_root
     for name in SYNC_PATHS.get("credentials", []):
         # 0700: credential stores hold secrets (OAuth tokens, age identities).
         # Applies on creation only, matching the ~/.ssh precedent below.
-        (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / name
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.chmod(0o700)
 
     claude_root = get_project_root() / "config" / "claude"
     companion = claude_root / "AGENTS.md"

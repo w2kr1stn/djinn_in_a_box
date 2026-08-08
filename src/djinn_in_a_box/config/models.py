@@ -172,6 +172,12 @@ class AppConfig(BaseModel):
     config_root: Path = Field(default_factory=lambda: Path.home() / ".djinn" / "config")
     """Root for config/credential bind-mounts (DJINN_CONFIG_ROOT). Local, per-host."""
 
+    shared_root: Path | None = None
+    """Optional root for mirrorable, non-backed-up agent data."""
+
+    local_root: Path | None = None
+    """Optional root for host-local, rebuildable agent data."""
+
     resources: ResourceLimits = Field(default_factory=ResourceLimits)
     """Docker resource limits and reservations."""
 
@@ -206,5 +212,13 @@ class AppConfig(BaseModel):
     @field_validator("config_root", mode="before")
     @classmethod
     def expand_config_root(cls, value: str | Path) -> Path:
+        path = Path(value) if isinstance(value, str) else value
+        return path.expanduser().resolve()
+
+    @field_validator("shared_root", "local_root", mode="before")
+    @classmethod
+    def expand_optional_zone_root(cls, value: str | Path | None) -> Path | None:
+        if value is None:
+            return None
         path = Path(value) if isinstance(value, str) else value
         return path.expanduser().resolve()
