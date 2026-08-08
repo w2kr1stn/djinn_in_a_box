@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import stat
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import load_zone_assignments
 from djinn_in_a_box.core import zone_migration
 from djinn_in_a_box.core.docker import resolve_zone_roots
+from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.zone_migration import (
     adopt_archive_collision,
     reconcile_zone_assignments,
@@ -81,6 +83,40 @@ def test_cross_filesystem_migration_stages_on_destination_filesystem(
     assert (target / "state.json").read_text() == "copy me"
 
 
+@pytest.mark.parametrize("cross_filesystem", (False, True))
+def test_migration_hardens_every_published_directory_without_following_symlinks(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch, cross_filesystem: bool
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    source.chmod(0o755)
+    nested.chmod(0o755)
+    outside = source.parent / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    (source / "outside-link").symlink_to(outside, target_is_directory=True)
+    target = roots.local_root / "claude" / "jobs"
+
+    if cross_filesystem:
+        original_replace = zone_migration.os.replace
+
+        def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
+            if Path(source_path) == source:
+                raise OSError(errno.EXDEV, "Cross-device link")
+            original_replace(source_path, destination_path)
+
+        monkeypatch.setattr(zone_migration.os, "replace", replace_with_exdev)
+
+    reconcile_zone_assignments(zone_config)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert stat.S_IMODE((target / "nested").stat().st_mode) == 0o700
+    assert (target / "outside-link").is_symlink()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
 def test_cross_filesystem_copy_failure_retains_source_for_resume(
     zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -139,6 +175,25 @@ def test_collision_preserves_every_assigned_tree_without_moving_anything(
     assert (config_jobs / "config.txt").read_text() == "config"
     assert (local_jobs / "local.txt").read_text() == "local"
     assert (unrelated / "would-have-moved.txt").read_text() == "keep"
+
+
+def test_migration_rejects_a_symlinked_destination_before_moving_data(
+    zone_config: AppConfig,
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    (source / "state.json").write_text("keep local")
+    outside = source.parent / "outside"
+    outside.mkdir()
+    roots.local_root.mkdir()
+    (roots.local_root / "claude").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ZoneConfigurationError, match="symlinked"):
+        reconcile_zone_assignments(zone_config)
+
+    assert (source / "state.json").read_text() == "keep local"
+    assert not (outside / "jobs").exists()
 
 
 def test_reconciliation_moves_data_from_a_previous_zone_after_reassignment(

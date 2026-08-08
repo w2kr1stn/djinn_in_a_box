@@ -11,7 +11,7 @@ from djinn_in_a_box.commands import agent, backup, container, doctor
 from djinn_in_a_box.commands.zone_gate import GatedCommand, zone_command_gate
 from djinn_in_a_box.config import zones as zones_module
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.config.zones import load_zone_assignments
+from djinn_in_a_box.config.zones import ZoneConfigurationError, load_zone_assignments
 from djinn_in_a_box.core.config_lock import (
     ConfigDirectoryLockBusyError,
     config_directory_lock,
@@ -39,7 +39,7 @@ def _write_collision(config: AppConfig) -> None:
     source = roots.config_root / "claude" / "jobs"
     target = roots.local_root / "claude" / "jobs"
     source.mkdir(parents=True)
-    target.mkdir(parents=True)
+    target.mkdir(parents=True, exist_ok=True)
     (source / "config.json").write_text("config")
     (target / "zone.json").write_text("zone")
 
@@ -107,7 +107,7 @@ def test_each_gate_condition_prints_its_own_remedy(zone_config: AppConfig) -> No
     roots = ensure_zone_roots(zone_config)
     source = roots.config_root / "claude" / "jobs"
     target = roots.local_root / "claude" / "jobs"
-    target.mkdir(parents=True)
+    target.mkdir(parents=True, exist_ok=True)
     (target / "zone.json").write_text("zone")
     assert source.is_dir()
     with (
@@ -149,6 +149,36 @@ def test_missing_local_root_is_treated_as_no_migration_in_progress(zone_config: 
         pass
 
     assert roots.local_root.is_dir()
+
+
+def test_launch_gate_creates_every_missing_zone_target(zone_config: AppConfig) -> None:
+    roots = resolve_zone_roots(zone_config)
+
+    with zone_command_gate(zone_config, "start"):
+        assignments = load_zone_assignments(zone_config)
+        zone_roots = {"local": roots.local_root, "shared": roots.shared_root}
+        for agent, by_zone in assignments.by_agent.items():
+            for zone in ("local", "shared"):
+                for relative_path in by_zone[zone]:
+                    assert (zone_roots[zone] / agent / relative_path).is_dir()
+
+
+@pytest.mark.parametrize("source_kind", ("regular", "symlink"))
+def test_launch_gate_rejects_a_non_directory_zone_source(
+    zone_config: AppConfig, source_kind: str
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.local_root / "claude" / "jobs"
+    source.parent.mkdir(parents=True)
+    if source_kind == "regular":
+        source.write_text("not a directory")
+    else:
+        outside = roots.local_root / "outside"
+        outside.mkdir()
+        source.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ZoneConfigurationError), zone_command_gate(zone_config, "start"):
+        pass
 
 
 @pytest.mark.parametrize(

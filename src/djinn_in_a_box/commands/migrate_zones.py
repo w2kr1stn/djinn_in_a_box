@@ -18,6 +18,10 @@ from djinn_in_a_box.core.zone_migration import reconcile_zone_assignments
 
 def _guard_no_containers_running() -> None:
     running = get_running_containers()
+    if running is None:
+        error("Could not determine whether Djinn containers are running.")
+        error("Restore Docker access before migrating zones, then retry.")
+        raise typer.Exit(1)
     if running:
         error(f"Containers are running: {', '.join(running)}")
         error("Stop all containers before migrating zones (djinn clean)")

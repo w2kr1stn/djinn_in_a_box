@@ -23,6 +23,7 @@ from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
     MountSpecificationError,
     RuntimeMountSpecificationError,
+    ZoneConfigurationError,
     ZoneRootValidationError,
 )
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
@@ -343,16 +344,16 @@ def _decode_timeout_output(
     return stdout, stderr
 
 
-def _docker_list(cmd: list[str]) -> list[str]:
+def _docker_list(cmd: list[str]) -> list[str] | None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         warning("Docker is not installed")
-        return []
+        return None
     if result.returncode != 0:
         stderr_msg = result.stderr.strip() if result.stderr else f"exit code {result.returncode}"
         warning(f"Docker command failed: {stderr_msg}")
-        return []
+        return None
     if not result.stdout.strip():
         return []
     return [line for line in result.stdout.strip().split("\n") if line]
@@ -560,6 +561,9 @@ def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], 
                 source = zone_roots[zone] / agent / relative_path
                 # An empty directory is the completed-migration marker. It must
                 # overlay just like populated data; only a missing source skips.
+                if source.is_symlink() or (source.exists() and not source.is_dir()):
+                    msg = f"Zone overlay source is not a directory: {source}"
+                    raise ZoneConfigurationError(msg)
                 if source.is_dir():
                     args.extend(["-v", f"{source}:{target}"])
     return args, tuple(targets)
@@ -1166,10 +1170,10 @@ def cleanup_docker_proxy(docker_mode: DockerMode, config: AppConfig | None = Non
 
 def is_container_running(name: str) -> bool:
     names = _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"])
-    return name in names
+    return names is not None and name in names
 
 
-def get_running_containers(prefix: str = "djinn") -> list[str]:
+def get_running_containers(prefix: str = "djinn") -> list[str] | None:
     return _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"])
 
 

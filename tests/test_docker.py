@@ -15,6 +15,7 @@ import djinn_in_a_box.config.zones as zones_mod
 import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, ShellConfig
+from djinn_in_a_box.config.zones import ZoneAssignments, ZoneName
 from djinn_in_a_box.core.docker import (
     ContainerMount,
     ContainerOptions,
@@ -54,6 +55,7 @@ from djinn_in_a_box.core.docker import (
     validate_container_mounts,
     workflow_image_compatible,
 )
+from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 
 
 def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
@@ -1100,15 +1102,16 @@ class TestGetRunningContainers:
             stdout="djinn\ndjinn-docker-proxy\n",
         )
         containers = get_running_containers()
+        assert containers is not None
         assert "djinn" in containers
         assert "djinn-docker-proxy" in containers
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_returns_empty_list_on_error(self, mock_run: MagicMock) -> None:
-        """Test returns empty list on command failure."""
+    def test_returns_unknown_on_error(self, mock_run: MagicMock) -> None:
+        """A failed probe must stay distinct from an empty container list."""
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         containers = get_running_containers()
-        assert containers == []
+        assert containers is None
 
 
 class TestDeleteVolumes:
@@ -1227,6 +1230,35 @@ class TestComposeRun:
         monkeypatch.setattr(zones_mod, "ZONES_FILE", tmp_path / "zones.toml")
 
         assert get_zone_overlay_mount_args(mock_app_config) == []
+
+    @pytest.mark.parametrize("source_kind", ("regular", "symlink"))
+    def test_rejects_non_directory_zone_source_after_assignment_resolution(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        source_kind: str,
+    ) -> None:
+        source = Path(f"{mock_app_config.config_root}.local") / "claude" / "jobs"
+        source.parent.mkdir(parents=True)
+        if source_kind == "regular":
+            source.write_text("not a directory")
+        else:
+            outside = source.parent / "outside"
+            outside.mkdir()
+            source.symlink_to(outside, target_is_directory=True)
+        by_agent: dict[str, dict[ZoneName, tuple[Path, ...]]] = {
+            agent: {"local": (), "shared": ()} for agent in zones_mod.ZONE_CONTAINER_TARGETS
+        }
+        by_agent["claude"]["local"] = (Path("jobs"),)
+        assignments = ZoneAssignments(by_agent, ())
+
+        def load_assignments(_config: AppConfig | None = None) -> ZoneAssignments:
+            return assignments
+
+        monkeypatch.setattr(zones_mod, "load_zone_assignments", load_assignments)
+
+        with pytest.raises(ZoneConfigurationError, match="not a directory"):
+            get_zone_overlay_mount_args(mock_app_config)
 
     def test_rejects_mount_at_a_reserved_zone_overlay_target(
         self,
