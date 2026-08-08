@@ -39,6 +39,57 @@ SYNC_PATHS: Final[dict[str, list[str]]] = {
 machines by the user)."""
 
 
+DEFAULT_ZONES: Final[dict[str, dict[str, list[str]]]] = {
+    "claude": {
+        "local": [
+            "jobs",
+            "cache",
+            "file-history",
+            "ide",
+            "paste-cache",
+            "session-env",
+            "shell-snapshots",
+            "tasks",
+            "telemetry",
+            "work",
+            "sessions",
+            "daemon",
+            "plugins/marketplaces",
+            "plugins/cache",
+        ],
+        "shared": ["projects", "transcripts"],
+    },
+    "codex": {
+        "local": [
+            ".tmp",
+            "tmp",
+            "cache",
+            "log",
+            "mcp-oauth-locks",
+            "shell_snapshots",
+            "plugins/cache",
+        ],
+        "shared": ["sessions"],
+    },
+    "opencode": {
+        "local": ["node_modules", "native"],
+        "shared": [],
+    },
+    "gemini": {
+        "local": ["tmp"],
+        "shared": ["history"],
+    },
+    "gh": {
+        "local": [],
+        "shared": [],
+    },
+    "age": {
+        "local": [],
+        "shared": [],
+    },
+}
+
+
 DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
     "claude": AgentConfig(
         binary="claude",

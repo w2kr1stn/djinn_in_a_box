@@ -159,6 +159,8 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
             "code_dir": data.pop("code_dir"),
             "timezone": data.pop("timezone"),
             "config_root": data.pop("config_root"),
+            **({"shared_root": data.pop("shared_root")} if "shared_root" in data else {}),
+            **({"local_root": data.pop("local_root")} if "local_root" in data else {}),
         },
         **data,
     }
