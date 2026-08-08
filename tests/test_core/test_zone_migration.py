@@ -196,6 +196,25 @@ def test_migration_rejects_a_symlinked_destination_before_moving_data(
     assert not (outside / "jobs").exists()
 
 
+def test_reassignment_rejects_a_symlinked_previous_zone_source(
+    zone_config: AppConfig,
+) -> None:
+    zones_module.ZONES_FILE.write_text('[zones.claude]\nshared = ["newdir/cache"]\n')
+    roots = resolve_zone_roots(zone_config)
+    outside = roots.local_root / "outside"
+    previous_source = outside / "cache"
+    previous_source.mkdir(parents=True)
+    (previous_source / "state.json").write_text("must stay outside")
+    (roots.local_root / "claude").mkdir(parents=True)
+    (roots.local_root / "claude" / "newdir").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ZoneConfigurationError, match="symlinked"):
+        reconcile_zone_assignments(zone_config)
+
+    assert (previous_source / "state.json").read_text() == "must stay outside"
+    assert not (roots.shared_root / "claude" / "newdir" / "cache").exists()
+
+
 def test_reconciliation_moves_data_from_a_previous_zone_after_reassignment(
     zone_config: AppConfig,
 ) -> None:

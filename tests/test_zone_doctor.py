@@ -151,3 +151,23 @@ def test_legacy_sync_root_is_not_reported_after_its_content_moves_to_a_zone(
     reconcile_zone_assignments(zone_config)
 
     assert doctor_mod._old_sync_root_present(zone_config) is False
+
+
+def test_doctor_warns_when_an_assigned_path_cannot_be_inspected(
+    zone_config: AppConfig,
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    (source / "state.json").write_text("unreadable")
+    agent_root = source.parent
+    agent_root.chmod(0o000)
+
+    try:
+        checks = doctor_mod.run_checks(zone_config)
+    finally:
+        agent_root.chmod(0o700)
+
+    row = _check_named(checks, "Zone configuration")
+    assert row.status is doctor_mod.Status.WARN
+    assert "Cannot inspect zone path" in row.detail

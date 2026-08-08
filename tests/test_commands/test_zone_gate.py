@@ -181,6 +181,24 @@ def test_launch_gate_rejects_a_non_directory_zone_source(
         pass
 
 
+def test_launch_gate_refuses_an_unreadable_assigned_path(zone_config: AppConfig) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    (source / "state.json").write_text("unreadable")
+    agent_root = source.parent
+    agent_root.chmod(0o000)
+
+    try:
+        with (
+            pytest.raises(ZoneConfigurationError, match="Cannot inspect zone path"),
+            zone_command_gate(zone_config, "start"),
+        ):
+            pass
+    finally:
+        agent_root.chmod(0o700)
+
+
 @pytest.mark.parametrize(
     "entrypoint",
     ("start", "run", "backup", "restore", "clean"),
