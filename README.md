@@ -521,6 +521,18 @@ model before you store a high-value key such as an `age` identity.
   A forgotten passphrase makes that archive unrecoverable. Use `--no-encrypt`
   only when you explicitly need a cleartext archive, and protect it as
   carefully as the credentials themselves.
+- **Zones separate credentials from agent data.** The config root is the
+  credential/config zone: Djinn backs it up and you may mirror it. Its sibling
+  `<config-root>.shared` holds transcript directories: Djinn does not archive
+  it, so add it to your own backup and, when desired, cross-machine mirror.
+  `<config-root>.local` holds caches and scratch: Djinn neither archives nor
+  mirrors it. Run `djinn migrate-zones` only after adding the shared root to
+  mirroring or pausing mirroring; the move appears as deletions from the config
+  root to a synchronizer.
+- **Transcript retention belongs to the agent.** Djinn never deletes
+  agent-owned transcript data. For Claude Code, configure its native
+  `cleanupPeriodDays` setting or use `claude project purge`; use the equivalent
+  native setting or command for other agents.
 
 Read [DOCKER-SOCKET-SECURITY.md](DOCKER-SOCKET-SECURITY.md) before enabling
 Docker socket access, which widens this surface further.
@@ -662,7 +674,8 @@ djinn clean volumes djinn-uv-cache
 `djinn clean volumes NAME` refuses names that do not start with `djinn-`.
 
 Remove containers, managed named volumes, config-root sync-path contents, and the
-Docker network:
+Docker network. This does not remove zone data in `<config-root>.shared` or
+`<config-root>.local`:
 
 ```sh
 djinn clean all

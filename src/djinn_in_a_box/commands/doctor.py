@@ -17,27 +17,34 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 import typer
 from rich.table import Table
 from rich.text import Text
 
-from djinn_in_a_box.config.defaults import SYNC_PATHS
+from djinn_in_a_box.config.defaults import KNOWN_CONFIG_ROOT_ENTRIES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.config.zones import ZoneAssignment, ZoneAssignments, load_zone_assignments
 from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
+    ZoneRoots,
     ensure_host_env,
     ensure_network,
     get_config_root,
     get_dbus_mount_args,
     network_exists,
+    resolve_zone_roots,
 )
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
+from djinn_in_a_box.core.zone_migration import (
+    find_unmigrated_assignments,
+    find_zone_collisions,
+)
 
 _IMAGE: str = "djinn-in-a-box:latest"
 
@@ -63,25 +70,47 @@ class Check:
 CREDENTIAL_DIR_MODE = 0o700
 """Intended mode for credential directories under the config root."""
 
+LARGE_NON_OVERLAYABLE_FILE_BYTES: Final = 10 * 1024 * 1024
+"""Report individual config-zone files at least this large."""
 
-def loose_credential_dirs(config: AppConfig | None) -> list[Path]:
-    """Credential directories that are group- or other-accessible.
+
+def loose_credential_dirs(
+    config: AppConfig | None,
+    assignments: ZoneAssignments | None = None,
+) -> list[Path]:
+    """Managed credential and zone directories that are group- or other-accessible.
 
     ``ensure_host_env`` creates these with ``mode=0o700``, but ``Path.mkdir``
     applies a mode only at creation — a config root provisioned before that
     change keeps the umask default. This finds the drift so ``doctor --fix``
     can repair it.
 
-    Deliberately narrow, per the safety constraints of the issue: only the
-    names in ``SYNC_PATHS["credentials"]``, only directly under the resolved
-    root, and ``lstat`` rather than ``stat`` so a symlinked name is skipped
+    The audit includes zone roots and the agent/assignment directories Djinn
+    creates beneath them. It still uses ``lstat`` so a symlinked name is skipped
     instead of followed — a redirect is someone's deliberate arrangement, not
     ours to chmod.
     """
-    root = get_config_root(config)
+    roots = resolve_zone_roots(config)
+    candidates: list[Path] = [roots.config_root, roots.shared_root, roots.local_root]
+    candidates.extend(roots.config_root / name for name in SYNC_PATHS.get("credentials", []))
+    if assignments is not None:
+        zone_roots = {"local": roots.local_root, "shared": roots.shared_root}
+        for agent, by_zone in assignments.by_agent.items():
+            for zone in ("local", "shared"):
+                root = zone_roots[zone]
+                for relative_path in by_zone[zone]:
+                    current = root / agent
+                    candidates.append(current)
+                    for part in relative_path.parts:
+                        current /= part
+                        candidates.append(current)
+
     loose: list[Path] = []
-    for name in SYNC_PATHS.get("credentials", []):
-        path = root / name
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
         try:
             info = path.lstat()
         except OSError:
@@ -211,6 +240,145 @@ def _config_workflow_check(config: AppConfig | None) -> Check:
     )
 
 
+def _format_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    value = float(size)
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} PiB"
+
+
+def _path_size_bytes(path: Path) -> int:
+    """Return a path's size without following symlinks; unreadable entries count as zero."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return 0
+    if stat.S_ISREG(info.st_mode):
+        return info.st_size
+    if not stat.S_ISDIR(info.st_mode):
+        return 0
+    total = 0
+    try:
+        children = tuple(path.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        total += _path_size_bytes(child)
+    return total
+
+
+def _zone_drift_entries(config: AppConfig, assignments: ZoneAssignments) -> tuple[Path, ...]:
+    roots = resolve_zone_roots(config)
+    drift: list[Path] = []
+    for agent, by_zone in assignments.by_agent.items():
+        agent_root = roots.config_root / agent
+        if not agent_root.is_dir() or agent_root.is_symlink():
+            continue
+        accounted = set(KNOWN_CONFIG_ROOT_ENTRIES[agent])
+        for zone in ("local", "shared"):
+            accounted.update(path.parts[0] for path in by_zone[zone])
+        try:
+            children = tuple(agent_root.iterdir())
+        except OSError:
+            continue
+        drift.extend(child for child in children if child.name not in accounted)
+    return tuple(drift)
+
+
+def _large_non_overlayable_files(config: AppConfig) -> tuple[Path, ...]:
+    root = get_config_root(config)
+    large_files: list[Path] = []
+    for agent in KNOWN_CONFIG_ROOT_ENTRIES:
+        agent_root = root / agent
+        if not agent_root.is_dir() or agent_root.is_symlink():
+            continue
+        try:
+            children = tuple(agent_root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            try:
+                info = child.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size >= LARGE_NON_OVERLAYABLE_FILE_BYTES:
+                large_files.append(child)
+    return tuple(large_files)
+
+
+def _unmigrated_detail(roots: ZoneRoots, assignment: ZoneAssignment) -> str:
+    path = roots.config_root / assignment.agent / assignment.relative_path
+    return f"{assignment.agent}/{assignment.relative_path} ({_format_size(_path_size_bytes(path))})"
+
+
+def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> list[Check]:
+    roots = resolve_zone_roots(config)
+    unmigrated = find_unmigrated_assignments(assignments, roots)
+    unmigrated_details = "; ".join(
+        _unmigrated_detail(roots, assignment) for assignment in unmigrated
+    )
+    checks = [
+        Check(
+            "Unmigrated zone assignments",
+            Status.WARN if unmigrated else Status.PASS,
+            unmigrated_details if unmigrated else "none",
+            "Run `djinn migrate-zones` to move the assigned paths." if unmigrated else "",
+        )
+    ]
+
+    collisions = find_zone_collisions(assignments, roots)
+    collision_details = "; ".join(
+        ", ".join(
+            f"{path} ({_format_size(_path_size_bytes(path))})" for path in collision.populated_paths
+        )
+        for collision in collisions
+    )
+    checks.append(
+        Check(
+            "Unresolved zone collisions",
+            Status.WARN if collisions else Status.PASS,
+            collision_details if collisions else "none",
+            "Keep the config-root copy, keep the zone copy, or merge the trees by hand."
+            if collisions
+            else "",
+        )
+    )
+
+    drift = _zone_drift_entries(config, assignments)
+    checks.append(
+        Check(
+            "Zone drift",
+            Status.WARN if drift else Status.PASS,
+            ", ".join(str(path) for path in drift) if drift else "none",
+            (
+                "Review these agent-root entries; add directory assignments in zones.toml "
+                "when appropriate."
+            )
+            if drift
+            else "",
+        )
+    )
+
+    large_files = _large_non_overlayable_files(config)
+    checks.append(
+        Check(
+            "Large non-overlayable files",
+            Status.WARN if large_files else Status.PASS,
+            ", ".join(f"{path} ({_format_size(_path_size_bytes(path))})" for path in large_files)
+            if large_files
+            else "none",
+            "Review or remove these config-zone files; Djinn only overlays directories."
+            if large_files
+            else "",
+        )
+    )
+    return checks
+
+
 # -----------------------------------------------------------------------------
 # Check assembly
 # -----------------------------------------------------------------------------
@@ -310,15 +478,27 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             )
         )
 
-        loose = loose_credential_dirs(config)
-        checks.append(
-            Check(
-                "Credential dir modes",
-                Status.PASS if not loose else Status.WARN,
-                "0700" if not loose else ", ".join(path.name for path in loose),
-                "" if not loose else "Run `djinn doctor --fix` to tighten them to 0700.",
+        try:
+            assignments = load_zone_assignments(config)
+            loose = loose_credential_dirs(config, assignments)
+            checks.append(
+                Check(
+                    "Credential and zone dir modes",
+                    Status.PASS if not loose else Status.WARN,
+                    "0700" if not loose else ", ".join(str(path) for path in loose),
+                    "" if not loose else "Run `djinn doctor --fix` to tighten them to 0700.",
+                )
             )
-        )
+            checks.extend(_zone_diagnostic_checks(config, assignments))
+        except (ConfigValidationError, OSError) as exc:
+            checks.append(
+                Check(
+                    "Zone configuration",
+                    Status.WARN,
+                    str(exc),
+                    "Fix the zone roots or zones.toml, then re-run `djinn doctor`.",
+                )
+            )
 
     image = daemon and _image_built()
     checks.append(
@@ -447,7 +627,13 @@ def _doctor_fix(config: AppConfig) -> bool:
     # After ensure_host_env, so a directory it just created is already tight and
     # does not show up here. Reported per path: a silent chmod on a credential
     # store is exactly the kind of change that should be visible.
-    for path in loose_credential_dirs(config):
+    try:
+        assignments = load_zone_assignments(config)
+    except ConfigValidationError as exc:
+        failed = True
+        console.print(f"Could not fix: zone directory modes ({exc})")
+        assignments = None
+    for path in loose_credential_dirs(config, assignments):
         try:
             path.chmod(CREDENTIAL_DIR_MODE)
         except OSError as e:

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import djinn_in_a_box.config.zones as zones_mod
 import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, ShellConfig
@@ -39,6 +40,7 @@ from djinn_in_a_box.core.docker import (
     get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
+    get_zone_overlay_mount_args,
     is_container_running,
     is_sync_archive,
     parse_mount_spec,
@@ -440,9 +442,9 @@ class TestMountTargetCollisions:
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
-        mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/plugins",))
+        mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/custom",))
 
-        assert mounts[0].target == Path("/home/dev/.claude/plugins")
+        assert mounts[0].target == Path("/home/dev/.claude/custom")
         validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
 
     @pytest.mark.parametrize(
@@ -1190,6 +1192,61 @@ class TestComposeRun:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_emits_empty_zone_sources_without_using_them_as_workdir(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty source is a migrated overlay, not an omitted mount or workdir."""
+        self._without_runtime_mounts(monkeypatch)
+        zones_file = mock_app_config.config_root.parent / "zones.toml"
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        empty_source = Path(f"{mock_app_config.config_root}.shared") / "claude" / "projects"
+        empty_source.mkdir(parents=True)
+
+        overlay_args = get_zone_overlay_mount_args(mock_app_config)
+        compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
+
+        expected = f"{empty_source}:/home/dev/.claude/projects"
+        assert expected in overlay_args
+        cmd = mock_run.call_args.args[0]
+        assert expected in cmd
+        assert "--workdir" not in cmd
+
+    def test_skips_zone_overlay_when_its_source_is_missing(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", tmp_path / "zones.toml")
+
+        assert get_zone_overlay_mount_args(mock_app_config) == []
+
+    def test_rejects_mount_at_a_reserved_zone_overlay_target(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        zones_file = tmp_path / "zones.toml"
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+
+        with pytest.raises(
+            MountCollisionError, match=r"reserved mount at /home/dev/\.claude/projects"
+        ):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path("/home/dev/.claude/projects")),),
+                mock_app_config,
+                DockerMode.NONE,
+                shell_args=[],
+                audio_args=[],
+                dbus_args=[],
+            )
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_emits_canonical_alias_target(
         self,
         mock_run: MagicMock,
@@ -1202,16 +1259,14 @@ class TestComposeRun:
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         options = ContainerOptions(
-            mounts=(
-                ContainerMount(tmp_path, Path("/home/dev/.config/claude/plugins")),
-            )
+            mounts=(ContainerMount(tmp_path, Path("/home/dev/.config/claude/custom")),)
         )
 
         compose_run(mock_app_config, options, command="echo", interactive=False)
 
         cmd = mock_run.call_args.args[0]
-        assert f"{tmp_path}:/home/dev/.claude/plugins" in cmd
-        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/.claude/plugins"
+        assert f"{tmp_path}:/home/dev/.claude/custom" in cmd
+        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/.claude/custom"
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")

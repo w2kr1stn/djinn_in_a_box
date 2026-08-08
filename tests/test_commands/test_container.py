@@ -34,6 +34,8 @@ from djinn_in_a_box.core.exceptions import (
 )
 from djinn_in_a_box.core.theme import DJINN_THEME
 
+runner = CliRunner()
+
 
 class TestBuildCommand:
     """Tests for the build command."""
@@ -715,8 +717,19 @@ class TestCleanAllCommand:
 
     def test_clean_all_requires_confirmation(self) -> None:
         """Test clean all requires user confirmation."""
-        with patch("typer.confirm", return_value=False), pytest.raises(typer.Exit):
+        with (
+            patch("typer.confirm", return_value=False) as confirm,
+            pytest.raises(typer.Exit),
+        ):
             container.clean_all()
+        assert "Shared and local zone data are not removed" in confirm.call_args.args[0]
+
+    def test_clean_all_help_excludes_zone_data(self) -> None:
+        result = runner.invoke(app, ["clean", "all", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "Shared and local" in result.output
+        assert "not removed" in result.output
 
     def test_clean_all_with_force_skips_confirmation(self, mock_app_config: AppConfig) -> None:
         """Test clean all --force skips confirmation and clears both volumes and sync paths."""

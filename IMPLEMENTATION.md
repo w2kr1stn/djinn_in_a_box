@@ -193,6 +193,10 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 - `timezone: str`: IANA timezone, default `UTC`
 - `config_root: Path`: local credential/config bind-mount root, default
   `~/.djinn/config`
+- `shared_root: Path | None`: optional mirrorable, non-backed-up zone root;
+  defaults to `<config_root>.shared`
+- `local_root: Path | None`: optional host-local, non-backed-up zone root;
+  defaults to `<config_root>.local`
 - `resources: ResourceLimits`
 - `shell: ShellConfig`
 - `config_sync: ConfigSyncConfig`
@@ -392,13 +396,12 @@ variable is left to inherited host environment or Compose defaults.
 `ensure_host_env(config)` provisions bind-mount sources before Compose runs, so
 the Docker daemon does not auto-create missing paths as root-owned directories.
 It creates credential subdirectories from `SYNC_PATHS["credentials"]`,
-`~/.djinn/sessions`, `~/.djinn/backups`, `~/.ssh`, and `~/.gitconfig`.
-Credential subdirectories and `~/.ssh` are created with mode `0700`. The mode
-applies on creation only; directories that already exist are left unchanged by
-`ensure_host_env`. `djinn doctor` reports such drift as a `Credential dir modes`
-row, and `djinn doctor --fix` tightens the affected directories — only names from
-`SYNC_PATHS["credentials"]`, only directly under the config root, and skipping
-symlinked names rather than following them.
+`~/.djinn/sessions`, `~/.djinn/backups`, `~/.ssh`, and `~/.gitconfig`. The three
+zone roots, credential subdirectories, and zone directories created by migration
+are mode `0700`. The mode applies on creation only; directories that already
+exist are left unchanged by `ensure_host_env`. `djinn doctor` reports credential
+and managed-zone permission drift, and `djinn doctor --fix` tightens those
+directories while skipping symlinked names rather than following them.
 
 ## Host-Side Seeding
 
@@ -601,15 +604,25 @@ The same module owns the repeatable user-mount contract:
   `/home/dev/mount/<basename>`. A duplicate basename first receives one parent
   component (`parent-basename`), then a numeric suffix (`-2`, `-3`, ...).
 - `validate_container_mounts()` checks the targets actually occupied by this
-  `dev` invocation, including Compose, image-alias, runtime, Direct-socket, and
-  user mounts. Equal targets and user targets that are ancestors of an occupied
-  target raise `MountCollisionError`; child targets remain valid.
+  `dev` invocation, including Compose, image-alias, runtime, Direct-socket,
+  zone-overlay, and user mounts. Equal targets and user targets that are
+  ancestors of an occupied target raise `MountCollisionError`; child targets
+  remain valid except that assigned zone targets are reserved too.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
   `MountCollisionError` reports the two involved mounts and the conflict path.
 
 When a mount exists, `compose_run()` uses the first mount target as
 `--workdir`. With no mount it omits `--workdir`, so the Compose service's
 `working_dir: /home/dev/projects` remains effective.
+
+`config/zones.py` resolves the additive shipped and user `zones.toml`
+assignments. `compose_run()` turns each existing zone source directory into an
+additional `-v` argument over the config-zone bind mount; an empty source is
+still mounted because it records a completed migration. These overlays are kept
+outside `ContainerOptions.mounts`, so they cannot change the user mount that
+supplies `--workdir`. `migrate-zones` owns the explicit, locked data move and
+creates empty zone targets; `doctor` reports unmigrated paths, collisions, drift,
+permission drift, and large direct files that cannot safely be overlaid.
 
 ## Image Build
 
@@ -657,7 +670,8 @@ backed by named volumes.
 - `clean_volumes()`: lists or deletes named volume categories and clears
   config-root sync paths by category.
 - `clean_all()`: stops containers, deletes all known named volumes, clears all
-  sync paths, and deletes the network.
+  config-zone sync paths, and deletes the network. It does not clear shared or
+  local zone data.
 - `audit()`: prints Docker proxy logs.
 - `update()`: runs `scripts/update-agents.sh`.
 - `enter()`: opens a zsh shell in the first running Djinn container.

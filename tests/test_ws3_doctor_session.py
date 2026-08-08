@@ -332,6 +332,7 @@ def _credential_root(tmp_path: Path) -> tuple[Path, AppConfig]:
     """A config root with one loose, one tight, and two decoys."""
     root = tmp_path / "config-root"
     root.mkdir()
+    root.chmod(0o700)
     # chmod after mkdir: mkdir's mode is masked by the umask, so 0o777 would
     # silently become 0o755 and the decoy would not be the wide-open case.
     (root / "claude").mkdir()
@@ -399,11 +400,15 @@ def test_doctor_warns_about_loose_credential_dirs_and_names_them(
 ) -> None:
     root, config = _credential_root(tmp_path)
     monkeypatch.setattr("djinn_in_a_box.config.loader.load_config", lambda: config)
-    monkeypatch.setattr(doctor_mod, "get_config_root", lambda _config=None: root)
+
+    def fixed_root(_config: AppConfig | None = None) -> Path:
+        return root
+
+    monkeypatch.setattr(doctor_mod, "get_config_root", fixed_root)
 
     checks = doctor_mod.run_checks(config, None)
 
-    row = next(check for check in checks if check.name == "Credential dir modes")
+    row = next(check for check in checks if check.name == "Credential and zone dir modes")
     assert row.status is doctor_mod.Status.WARN
     assert "claude" in row.detail
     assert "--fix" in row.remedy
@@ -417,7 +422,11 @@ def test_doctor_fix_tightens_loose_credential_dirs_and_is_idempotent(
     """
     root, config = _credential_root(tmp_path)
     monkeypatch.setattr("djinn_in_a_box.config.loader.load_config", lambda: config)
-    monkeypatch.setattr(doctor_mod, "get_config_root", lambda _config=None: root)
+
+    def fixed_root(_config: AppConfig | None = None) -> Path:
+        return root
+
+    monkeypatch.setattr(doctor_mod, "get_config_root", fixed_root)
     monkeypatch.setattr(doctor_mod, "run_checks", MagicMock(return_value=[]))
     monkeypatch.setattr(doctor_mod, "ensure_host_env", MagicMock())
     monkeypatch.setattr(doctor_mod, "seed_config", MagicMock(return_value=[]))
