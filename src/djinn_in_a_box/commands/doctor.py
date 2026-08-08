@@ -164,29 +164,47 @@ def _docker_mcp_ok() -> bool:
 
 
 def _old_sync_root_present(config: AppConfig | None) -> bool:
-    """True if a populated legacy ~/.djinn/sync exists while the new root is empty.
+    """True if a legacy agent has content absent from every current zone.
 
     Covers the no-migration rename: the user's old credentials live under the
     legacy root and would be silently orphaned otherwise.
     """
     legacy = Path.home() / ".djinn" / "sync"
     try:
-        legacy_populated = legacy.is_dir() and any(legacy.iterdir())
+        if not legacy.is_dir():
+            return False
     except OSError:
         # An unreadable (e.g. root-owned) legacy dir is itself the strongest signal
         # the migration hint is needed — degrade to "present", never raise. A
         # diagnostic must not crash on the condition it exists to diagnose.
         return True
-    if not legacy_populated:
-        return False
 
-    new_root = get_config_root(config)
-    try:
-        return not new_root.is_dir() or not any(new_root.iterdir())
-    except OSError:
-        # A new-root access problem is not a legacy-migration signal — don't emit
-        # the misleading "mv ~/.djinn/sync" remedy for it.
-        return False
+    roots = resolve_zone_roots(config)
+    current_roots = (roots.config_root, roots.shared_root, roots.local_root)
+    for agent in SYNC_PATHS["credentials"]:
+        legacy_agent = legacy / agent
+        try:
+            legacy_entries = tuple(legacy_agent.iterdir()) if legacy_agent.is_dir() else ()
+        except OSError:
+            return True
+        for legacy_entry in legacy_entries:
+            try:
+                present = any(
+                    _path_has_content(root / agent / legacy_entry.name) for root in current_roots
+                )
+            except OSError:
+                # A new-root access problem is not a legacy-migration signal — don't emit
+                # the misleading migration remedy for it.
+                return False
+            if not present:
+                return True
+    return False
+
+
+def _path_has_content(path: Path) -> bool:
+    if path.is_symlink() or path.is_file():
+        return True
+    return path.is_dir() and any(path.iterdir())
 
 
 def _seed_target_has_expected_type(path: Path, kind: str) -> bool:
@@ -315,6 +333,15 @@ def _unmigrated_detail(roots: ZoneRoots, assignment: ZoneAssignment) -> str:
     return f"{assignment.agent}/{assignment.relative_path} ({_format_size(_path_size_bytes(path))})"
 
 
+def _skipped_default_detail(roots: ZoneRoots, assignment: ZoneAssignment) -> tuple[str, Path]:
+    path = roots.config_root / assignment.agent
+    for part in assignment.relative_path.parts:
+        path /= part
+        if path.is_file():
+            break
+    return f"{assignment.agent}/{assignment.relative_path} (blocked by {path})", path
+
+
 def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> list[Check]:
     roots = resolve_zone_roots(config)
     unmigrated = find_unmigrated_assignments(assignments, roots)
@@ -329,6 +356,21 @@ def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> 
             "Run `djinn migrate-zones` to move the assigned paths." if unmigrated else "",
         )
     ]
+
+    skipped_defaults = tuple(
+        _skipped_default_detail(roots, assignment) for assignment in assignments.skipped_defaults
+    )
+    skipped_paths = ", ".join(str(path) for _, path in skipped_defaults)
+    checks.append(
+        Check(
+            "Skipped shipped zone defaults",
+            Status.WARN if skipped_defaults else Status.PASS,
+            "; ".join(detail for detail, _ in skipped_defaults) if skipped_defaults else "none",
+            f"Move or remove the conflicting regular file: {skipped_paths}."
+            if skipped_defaults
+            else "",
+        )
+    )
 
     collisions = find_zone_collisions(assignments, roots)
     collision_details = "; ".join(
@@ -535,9 +577,10 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             Check(
                 "Legacy sync root",
                 Status.WARN,
-                "~/.djinn/sync is populated but the new config root is empty",
-                "Move it once: `mv ~/.djinn/sync ~/.djinn/config` "
-                "(DJINN_SYNC_ROOT was renamed to DJINN_CONFIG_ROOT).",
+                "~/.djinn/sync has agent content absent from the current zone roots",
+                "Merge each agent entry into its matching current root; do not move the whole "
+                "legacy root into an existing config root (DJINN_SYNC_ROOT was renamed to "
+                "DJINN_CONFIG_ROOT).",
             )
         )
 
