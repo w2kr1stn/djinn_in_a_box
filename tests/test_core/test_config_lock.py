@@ -4,18 +4,28 @@ import errno
 import fcntl
 import multiprocessing
 import os
+import threading
 from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
 
 from djinn_in_a_box.core import config_lock
-from djinn_in_a_box.core.config_lock import ConfigDirectoryLockError, config_directory_lock
+from djinn_in_a_box.core.config_lock import (
+    ConfigDirectoryLockBusyError,
+    ConfigDirectoryLockError,
+    config_directory_lock,
+)
 
 
-def _probe_nonblocking_lock(
-    config_dir: Path, *, exclusive: bool, result: Connection
-) -> None:
+def _hold_lock_until_terminated(config_dir: Path, ready: Connection) -> None:
+    with config_directory_lock(config_dir, exclusive=True):
+        ready.send(None)
+        ready.close()
+        threading.Event().wait()
+
+
+def _probe_nonblocking_lock(config_dir: Path, *, exclusive: bool, result: Connection) -> None:
     """Report whether this process can acquire the directory lock immediately."""
     descriptor = os.open(config_dir, os.O_RDONLY | os.O_DIRECTORY)
     acquired = False
@@ -85,6 +95,45 @@ def test_config_directory_lock_allows_second_shared_holder(tmp_path: Path) -> No
         assert _can_acquire_nonblocking_lock(config_dir, exclusive=False)
 
 
+def test_nonblocking_lock_reports_a_held_lock_without_waiting(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    with (
+        config_directory_lock(config_dir, exclusive=True),
+        pytest.raises(ConfigDirectoryLockBusyError),
+        config_directory_lock(config_dir, exclusive=False, blocking=False),
+    ):
+        pass
+
+
+def test_killed_lock_holder_does_not_block_the_next_command(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    context = multiprocessing.get_context("spawn")
+    received, sent = context.Pipe(duplex=False)
+    holder = context.Process(
+        target=_hold_lock_until_terminated,
+        kwargs={"config_dir": config_dir, "ready": sent},
+    )
+    holder.start()
+    sent.close()
+    try:
+        assert received.poll(10)
+        received.recv()
+        holder.terminate()
+        holder.join(10)
+        assert holder.exitcode is not None
+        with config_directory_lock(config_dir, exclusive=True, blocking=False):
+            pass
+    finally:
+        received.close()
+        if holder.is_alive():
+            holder.terminate()
+        holder.join()
+        holder.close()
+
+
 def test_config_directory_lock_wraps_acquisition_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -96,8 +145,9 @@ def test_config_directory_lock_wraps_acquisition_failure(
 
     monkeypatch.setattr(config_lock.fcntl, "flock", fail_acquisition)
 
-    with pytest.raises(ConfigDirectoryLockError) as exc_info, config_directory_lock(
-        config_dir, exclusive=True
+    with (
+        pytest.raises(ConfigDirectoryLockError) as exc_info,
+        config_directory_lock(config_dir, exclusive=True),
     ):
         pass
 
@@ -129,8 +179,9 @@ def test_config_directory_lock_wraps_unlock_failure_and_closes_descriptor(
     monkeypatch.setattr(config_lock.os, "open", record_descriptor)
     monkeypatch.setattr(config_lock.fcntl, "flock", fail_unlock)
 
-    with pytest.raises(ConfigDirectoryLockError) as exc_info, config_directory_lock(
-        config_dir, exclusive=True
+    with (
+        pytest.raises(ConfigDirectoryLockError) as exc_info,
+        config_directory_lock(config_dir, exclusive=True),
     ):
         pass
 

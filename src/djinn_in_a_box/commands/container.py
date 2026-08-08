@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Callable
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ParamSpec, TypeIs, TypeVar, cast
 
 import typer
 from rich.table import Table
 
 from djinn_in_a_box.commands.doctor import preflight
+from djinn_in_a_box.commands.zone_gate import GatedCommand, zone_command_gate
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
@@ -67,6 +71,53 @@ from djinn_in_a_box.core.exceptions import (
 )
 from djinn_in_a_box.core.paths import get_project_root
 
+P = ParamSpec("P")
+R = TypeVar("R")
+_NO_GATED_CONFIG = object()
+_gated_config: ContextVar[object] = ContextVar("gated_config", default=_NO_GATED_CONFIG)
+
+
+def _is_app_config(value: object) -> TypeIs[AppConfig]:
+    return isinstance(value, AppConfig)
+
+
+def _active_config() -> AppConfig:
+    config = _gated_config.get()
+    if config is _NO_GATED_CONFIG:
+        return load_config()
+    return cast(AppConfig, config)
+
+
+def _active_optional_config() -> AppConfig | None:
+    config = _gated_config.get()
+    if config is _NO_GATED_CONFIG:
+        return _load_optional_config()
+    return cast(AppConfig | None, config)
+
+
+def _zone_gated(
+    command: GatedCommand, *, optional_config: bool = False
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        @wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            candidate: object = _load_optional_config() if optional_config else load_config()
+            token = _gated_config.set(candidate)
+            try:
+                if candidate is None:
+                    with zone_command_gate(None, command):
+                        return func(*args, **kwargs)
+                if not _is_app_config(candidate):
+                    return func(*args, **kwargs)
+                with zone_command_gate(candidate, command):
+                    return func(*args, **kwargs)
+            finally:
+                _gated_config.reset(token)
+
+        return wrapper
+
+    return decorator
+
 
 def _sync_build_files(config: AppConfig | None = None) -> None:
     """Copy build-time files from sync dir into the repo (both are gitignored).
@@ -120,6 +171,7 @@ def build(
 
 
 @handle_config_errors
+@_zone_gated("start")
 def start(
     docker: Annotated[
         bool,
@@ -187,7 +239,7 @@ def start(
         err_console.print("Attach to it with: djinn enter")
         raise typer.Exit(1)
 
-    config = load_config()
+    config = _active_config()
     preflight(config, provision_host=False)
 
     config_root = get_config_root(config)
@@ -519,6 +571,7 @@ clean_app = typer.Typer(
 
 
 @clean_app.callback(invoke_without_command=True)
+@_zone_gated("clean", optional_config=True)
 def clean_default(ctx: typer.Context) -> None:
     """Remove containers only (default action when no subcommand given).
 
@@ -543,6 +596,7 @@ def clean_default(ctx: typer.Context) -> None:
 
 
 @clean_app.command("volumes")
+@_zone_gated("clean", optional_config=True)
 def clean_volumes(
     credentials: Annotated[
         bool,
@@ -614,7 +668,7 @@ def clean_volumes(
         selected.append("data")
 
     if not selected:
-        config = _load_optional_config()
+        config = _active_optional_config()
         rule("Volumes by category")
         blank()
         volume_entries = _list_existing_volumes()
@@ -635,7 +689,7 @@ def clean_volumes(
         )
         return
 
-    config = _load_optional_config()
+    config = _active_optional_config()
     sync_selected = [c for c in selected if c in SYNC_PATHS]
     if sync_selected and not force:
         warning(
@@ -674,6 +728,7 @@ def clean_volumes(
 
 
 @clean_app.command("all")
+@_zone_gated("clean", optional_config=True)
 def clean_all(
     force: Annotated[
         bool,
@@ -701,7 +756,7 @@ def clean_all(
             info("Aborted.")
             raise typer.Exit(0)
 
-    config = _load_optional_config()
+    config = _active_optional_config()
 
     info("Stopping and removing containers...")
     down_result = compose_down()

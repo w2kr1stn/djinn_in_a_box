@@ -13,6 +13,10 @@ class ConfigDirectoryLockError(OSError):
     """A config-directory lock operation failed."""
 
 
+class ConfigDirectoryLockBusyError(ConfigDirectoryLockError):
+    """A non-blocking config-directory lock could not be acquired."""
+
+
 def _lock_error(config_dir: Path, error: OSError) -> ConfigDirectoryLockError:
     return ConfigDirectoryLockError(
         "Configuration directory lock failed at "
@@ -21,7 +25,9 @@ def _lock_error(config_dir: Path, error: OSError) -> ConfigDirectoryLockError:
 
 
 @contextmanager
-def config_directory_lock(config_dir: Path, *, exclusive: bool) -> Iterator[int]:
+def config_directory_lock(
+    config_dir: Path, *, exclusive: bool, blocking: bool = True
+) -> Iterator[int]:
     try:
         descriptor = os.open(config_dir, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as error:
@@ -29,8 +35,14 @@ def config_directory_lock(config_dir: Path, *, exclusive: bool) -> Iterator[int]
     locked = False
     try:
         operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        if not blocking:
+            operation |= fcntl.LOCK_NB
         try:
             fcntl.flock(descriptor, operation)
+        except BlockingIOError as error:
+            raise ConfigDirectoryLockBusyError(
+                f"Configuration directory lock is held at {config_dir}"
+            ) from error
         except OSError as error:
             raise _lock_error(config_dir, error) from error
         locked = True
