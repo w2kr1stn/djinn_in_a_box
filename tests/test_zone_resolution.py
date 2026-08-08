@@ -274,6 +274,18 @@ def test_zone_assignments_reject_symlinked_components(tmp_path: Path) -> None:
         load_zone_assignments(config, path=zones_file)
 
 
+def test_zone_assignments_reject_symlinked_destination_components(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    roots = resolve_zone_roots(config)
+    roots.local_root.mkdir()
+    (roots.local_root / "claude").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ZoneConfigurationError, match="symlinked"):
+        load_zone_assignments(config)
+
+
 def test_zone_assignments_reject_a_user_path_that_is_a_regular_file(tmp_path: Path) -> None:
     config = _config(tmp_path)
     file_path = config.config_root / "gh" / "hosts.yml"

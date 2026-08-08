@@ -139,8 +139,9 @@ def _validate_assignment(
         )
         raise ZoneConfigurationError(msg)
 
-    source = roots.config_root / agent
-    has_symlink, has_file = _source_has_symlink_or_file(source, relative_path)
+    source = roots.config_root
+    source_path = Path(agent) / relative_path
+    has_symlink, has_file = _source_has_symlink_or_file(source, source_path)
     if has_symlink:
         msg = (
             f"Zone assignment for {agent}.{candidate.zone} has a symlinked component: "
@@ -152,6 +153,24 @@ def _validate_assignment(
             return None
         msg = (
             f"Zone assignment for {agent}.{candidate.zone} resolves to a regular file: "
+            f"{candidate.raw_path!r}"
+        )
+        raise ZoneConfigurationError(msg)
+
+    destination_root = roots.local_root if candidate.zone == "local" else roots.shared_root
+    destination_symlink, destination_file = _source_has_symlink_or_file(
+        destination_root,
+        source_path,
+    )
+    if destination_symlink:
+        msg = (
+            f"Zone assignment for {agent}.{candidate.zone} has a symlinked destination "
+            f"component: {candidate.raw_path!r}"
+        )
+        raise ZoneConfigurationError(msg)
+    if destination_file:
+        msg = (
+            f"Zone assignment for {agent}.{candidate.zone} has a destination regular file: "
             f"{candidate.raw_path!r}"
         )
         raise ZoneConfigurationError(msg)

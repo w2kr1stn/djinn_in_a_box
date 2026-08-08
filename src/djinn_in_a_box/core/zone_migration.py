@@ -6,6 +6,7 @@ import errno
 import filecmp
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -178,12 +179,25 @@ def _assignment_paths(roots: ZoneRoots, assignment: ZoneAssignment) -> tuple[Pat
 
 
 def _ensure_directory(root: Path, path: Path) -> None:
-    root.chmod(0o700)
+    _ensure_private_directory(root)
     current = root
     for part in path.relative_to(root).parts:
         current /= part
-        current.mkdir(exist_ok=True, mode=0o700)
-        current.chmod(0o700)
+        _ensure_private_directory(current)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        msg = f"Zone directory is not a directory: {path}"
+        raise ZoneConfigurationError(msg)
+    path.mkdir(exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def ensure_zone_targets(assignments: ZoneAssignments, roots: ZoneRoots) -> None:
+    for assignment in _iter_assignments(assignments):
+        destination = _zone_path(roots, assignment.zone, assignment)
+        _ensure_directory(_zone_root(roots, assignment.zone), destination)
 
 
 def _remove_empty_source_directories(
@@ -215,6 +229,7 @@ def _move_directory(source: Path, destination: Path, before_publish: BeforePubli
             raise
         _copy_then_publish(source, destination, before_publish)
         return True
+    _harden_published_directories(destination)
     return False
 
 
@@ -231,6 +246,7 @@ def _copy_then_publish(
         if before_publish is not None:
             before_publish()
         os.replace(staged_tree, destination)
+        _harden_published_directories(destination)
         shutil.rmtree(source)
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
@@ -260,6 +276,20 @@ def _trees_match(source: Path, copied: Path) -> bool:
         ):
             return False
     return True
+
+
+def _harden_published_directories(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        msg = f"Published zone path is not a directory: {path}"
+        raise ZoneConfigurationError(msg)
+    os.chmod(path, 0o700, follow_symlinks=False)
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                _harden_published_directories(Path(entry.path))
 
 
 def _timestamped_sibling(path: Path) -> Path:

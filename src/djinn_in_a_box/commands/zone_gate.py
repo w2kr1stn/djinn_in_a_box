@@ -18,6 +18,7 @@ from djinn_in_a_box.core.config_lock import (
 from djinn_in_a_box.core.console import error
 from djinn_in_a_box.core.docker import ensure_zone_roots
 from djinn_in_a_box.core.zone_migration import (
+    ensure_zone_targets,
     find_unmigrated_assignments,
     find_zone_collisions,
 )
@@ -31,6 +32,8 @@ def zone_command_gate(config: AppConfig | None, command: GatedCommand) -> Iterat
     try:
         with config_directory_lock(roots.local_root, exclusive=False, blocking=False):
             assignments = load_zone_assignments(config)
+            if command in {"start", "run"}:
+                ensure_zone_targets(assignments, roots)
             collisions = find_zone_collisions(assignments, roots)
             if collisions:
                 _refuse_collision(collisions[0].populated_paths, collisions[0].destination)

@@ -117,6 +117,7 @@ class TestInitCommand:
         # when color output is forced (FORCE_COLOR) — never assert across them.
         assert "mcpgateway start" in combined
         assert "# MCP tools — not required" in combined
+        assert combined.index("djinn migrate-zones") < combined.index("djinn start")
 
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / ".config" / "djinn_in_a_box"

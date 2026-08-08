@@ -74,6 +74,34 @@ def test_migrate_zones_rechecks_containers_before_publish(
     assert (source / "state.json").read_text() == "do not move"
 
 
+@pytest.mark.parametrize("probe_states", ((None,), ([], None)))
+def test_migrate_zones_refuses_an_unknown_container_state(
+    zone_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_states: tuple[list[str] | None, ...],
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    (source / "state.json").write_text("do not move")
+    probes = iter(probe_states)
+
+    def unknown_or_empty_containers() -> list[str] | None:
+        return next(probes, probe_states[-1])
+
+    monkeypatch.setattr(migration_command, "load_config", lambda: zone_config)
+    monkeypatch.setattr(migration_command, "get_running_containers", unknown_or_empty_containers)
+
+    with (
+        patch("djinn_in_a_box.commands.migrate_zones.typer.confirm", return_value=True),
+        pytest.raises(typer.Exit) as exc_info,
+    ):
+        migration_command.migrate_zones()
+
+    assert exc_info.value.exit_code == 1
+    assert (source / "state.json").read_text() == "do not move"
+
+
 def test_migrate_zones_collision_moves_nothing(
     zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
