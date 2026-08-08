@@ -43,11 +43,22 @@ class ZoneReconciliation:
 
 
 def path_has_content(path: Path) -> bool:
-    if path.is_symlink() or path.is_file():
-        return True
-    if not path.is_dir():
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
         return False
-    return next(path.iterdir(), None) is not None
+    except OSError as error:
+        msg = f"Cannot inspect zone path {path}: {error}"
+        raise ZoneConfigurationError(msg) from error
+    if stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode):
+        return True
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    try:
+        return next(path.iterdir(), None) is not None
+    except OSError as error:
+        msg = f"Cannot inspect zone path {path}: {error}"
+        raise ZoneConfigurationError(msg) from error
 
 
 def find_unmigrated_assignments(
@@ -171,11 +182,23 @@ def _zone_root(roots: ZoneRoots, zone: str) -> Path:
 
 def _assignment_paths(roots: ZoneRoots, assignment: ZoneAssignment) -> tuple[Path, ...]:
     suffix = Path(assignment.agent) / assignment.relative_path
-    return (
-        roots.config_root / suffix,
-        roots.shared_root / suffix,
-        roots.local_root / suffix,
-    )
+    roots_by_zone = (roots.config_root, roots.shared_root, roots.local_root)
+    paths = tuple(root / suffix for root in roots_by_zone)
+    for root, path in zip(roots_by_zone, paths, strict=True):
+        _reject_symlinked_components(root, path)
+    return paths
+
+
+def _reject_symlinked_components(root: Path, path: Path) -> None:
+    current = root
+    if current.is_symlink():
+        msg = f"Zone migration source has a symlinked component: {current}"
+        raise ZoneConfigurationError(msg)
+    for part in path.relative_to(root).parts:
+        current /= part
+        if current.is_symlink():
+            msg = f"Zone migration source has a symlinked component: {current}"
+            raise ZoneConfigurationError(msg)
 
 
 def _ensure_directory(root: Path, path: Path) -> None:
