@@ -534,8 +534,9 @@ SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
   instance: an interactive zsh without a TTY reads EOF and returns immediately,
   so PID 1 exits 0 and the container disappears with an empty log — the very
   signature this work started from. The class has several entrances, and the
-  background-start guard cannot see them all, because it keys on stdin while
-  `docker compose run` selects `-T` from the client's *stdout*. Since nobody can
+  background-start guard deliberately does not cover them all: it refuses only
+  the shapes that can actually storm (stdout on a background terminal), leaving
+  the genuinely TTY-less ones to be handled here. Since nobody can
   use PID 1's shell without a terminal anyway, while `djinn enter` brings its own
   TTY through `docker exec`, staying up is strictly better than dying silently.
   The reverse-sync on `docker stop` works unchanged in that state.
@@ -704,16 +705,16 @@ backed by named volumes.
   observed surviving 45+ minutes under continuous SIGTTOU. What the storm does is
   flood Docker's event ring buffer (hence the missing logs) and stop the host-side
   compose client, after which `--rm` reaps the container.
-  `is_background_process_group()` compares `os.tcgetpgrp(fd)` against
-  `os.getpgrp()` for **each of stdin, stdout and stderr**, and returns True as
-  soon as any of them is a terminal whose foreground group is not ours. Checking
-  stdout is not optional: Compose picks TTY allocation from the *client's stdout*,
-  so `djinn start < /dev/null &` still gets a terminal and still storms, while a
-  stdin-only test would wave it through. Redirecting every stream
-  (`< /dev/null > log 2>&1`) is genuinely safe, because Compose then allocates no
-  TTY. `setsid` is likewise not blocked — with no controlling terminal the kernel
-  raises no SIGTTOU. Headless runs pass `-T`, allocate no TTY, and are never
-  blocked.
+  `is_background_process_group()` compares `os.tcgetpgrp(stdout)` against
+  `os.getpgrp()` — **stdout, and only stdout**, because that is what Compose keys
+  on: it derives `noTty` from `!dockerCli.Out().IsTerminal()` and allocates a TTY
+  only when stdout is a terminal. Consequently `djinn start < /dev/null &` is
+  refused (stdout is still the terminal, so a TTY is allocated and the storm is
+  possible), while `djinn start > log &` is allowed (no TTY, nothing calls
+  `tcsetattr`, nothing to storm). Checking stdin or stderr as well would refuse
+  that second, safe shape. `setsid` is likewise not blocked — with no controlling
+  terminal the kernel raises no SIGTTOU. Headless runs pass `-T`, allocate no TTY,
+  and are never blocked.
 
   Not blocked is not the same as supported, and the guard is deliberately not the
   only defence: any shape that ends with no TTY inside the container is handled on

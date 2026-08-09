@@ -1878,6 +1878,19 @@ class TestBackgroundProcessGroupGuard:
         self._stdin_state(monkeypatch, isatty=True, foreground=False, tty_fds=frozenset({1, 2}))
         assert is_background_process_group()
 
+    def test_allows_a_background_start_with_stdout_redirected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`djinn start > log &` is safe and must not be refused.
+
+        Compose derives `noTty` from stdout alone, so a redirected stdout means no
+        TTY is allocated and nothing calls tcsetattr — whatever stdin and stderr
+        are attached to. Refusing this would block a working shape, and the
+        entrypoint's no-TTY branch already covers the container side of it.
+        """
+        self._stdin_state(monkeypatch, isatty=True, foreground=False, tty_fds=frozenset({0, 2}))
+        assert not is_background_process_group()
+
     def test_ignores_non_tty_streams(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`< /dev/null > log 2>&1` leaves no terminal at all, so nothing can storm."""
         self._stdin_state(monkeypatch, isatty=False, foreground=False)

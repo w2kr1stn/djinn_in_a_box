@@ -715,28 +715,26 @@ def is_background_process_group() -> bool:
     ``djinn start ... &`` is precisely that shape: ``&`` puts the process group in
     the background while a standard stream stays attached to the terminal.
 
-    All three standard streams are checked, and stdout is not optional: Compose
-    decides TTY allocation from the *client's stdout*, so
-    ``djinn start < /dev/null &`` keeps a terminal on stdout, gets a TTY, and
-    storms — while a stdin-only test would call it safe. Redirecting *every*
-    stream (``> log 2>&1 < /dev/null``) genuinely cannot storm, because Compose
-    then allocates no TTY at all.
+    Keyed on **stdout**, and neither stdin nor stderr, because that is exactly what
+    Compose keys on: it derives ``noTty`` from ``!dockerCli.Out().IsTerminal()``
+    and allocates a TTY only when stdout is a terminal. So
+    ``djinn start < /dev/null &`` still storms (stdout is the terminal), while
+    ``djinn start > log &`` cannot (no TTY is allocated, nothing calls
+    ``tcsetattr``) — and refusing the latter would block a safe shape that the
+    entrypoint's no-TTY branch handles perfectly well.
 
-    Returns False when no standard stream is a TTY (pipes, ``< /dev/null`` with
-    output redirected, pytest's capture) or when there is no controlling terminal
-    (``setsid``): with no terminal there is no foreground group to be outside of,
-    and no SIGTTOU can be raised.
+    Returns False when stdout is not a TTY (redirected, a pipe, pytest's capture)
+    or when there is no controlling terminal (``setsid``): with no allocated TTY
+    there is nothing to raise SIGTTOU.
     """
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        try:
-            fd = stream.fileno()
-            if os.isatty(fd) and os.tcgetpgrp(fd) != os.getpgrp():
-                return True
-        except (AttributeError, ValueError, OSError):
-            # This stream is unusable (closed, replaced, or no controlling
-            # terminal). It cannot raise SIGTTOU, so it cannot decide the answer.
-            continue
-    return False
+    try:
+        fd = sys.stdout.fileno()
+        if not os.isatty(fd):
+            return False
+        return os.tcgetpgrp(fd) != os.getpgrp()
+    except (AttributeError, ValueError, OSError):
+        # No usable stdout (closed, replaced, or no controlling terminal).
+        return False
 
 
 def compose_run(

@@ -313,7 +313,7 @@ class TestStartCommand:
         assert "not running after start" in start_mocks["err_output"].getvalue()
         assert "docker logs djinn" in capsys.readouterr().err
 
-    def test_start_prints_captured_docker_output_verbatim(
+    def test_start_keeps_bracketed_docker_tokens(
         self, start_mocks: dict[str, Any]
     ) -> None:
         """Rich markup would eat the bracketed BuildKit tags that locate a failure."""

@@ -27,8 +27,11 @@ Versioning before and after the first stable release.
   background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
   signal into the container, producing tens of events per second and flooding
   Docker's event ring buffer. `djinn start` now fails with an explanation and
-  points at `--detach` or a foreground start. Non-TTY stdin, absent controlling
-  terminals, and headless `-T` runs are unaffected.
+  points at `--detach` or a foreground start. The check keys on stdout, which is
+  what Compose derives TTY allocation from, so `djinn start > log &` stays allowed
+  (no TTY is allocated, so nothing can storm) while `djinn start < /dev/null &` is
+  refused. Absent controlling terminals (`setsid`) and headless `-T` runs are
+  unaffected.
 - The entrypoint no longer exits when it has no terminal. An interactive shell
   cannot run without one — zsh reads EOF and returns immediately, which used to
   take the container down with exit code 0 and an empty log. Since
