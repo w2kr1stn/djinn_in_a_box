@@ -647,7 +647,22 @@ backed by named volumes.
   which use `/home/dev/mount/<basename>` with parent and numeric collision
   fallbacks. The command rejects source errors and mount collisions before
   calling `compose_run()`, then prints one source-to-target mode line per mount
-  in the `Environment`/`Container` output.
+  in the `Environment`/`Container` output. With `--detach` it calls
+  `compose_up_detached()` instead, skips `cleanup_docker_proxy()` (the container
+  outlives the process, so its proxy has to stay up), and refuses up front when a
+  Djinn container is already running, because `up` collides with the fixed
+  `container_name`.
+- Background-start guard: `compose_run()` refuses an interactive start from a
+  background process group. `docker compose run` allocates a TTY and calls
+  `tcsetattr()` on it; from the background that raises SIGTTOU unconditionally
+  (the `tostop` flag gates background *writes*, not attribute changes), Compose
+  forwards the signal into the container, and container PID 1 installs no SIGTTOU
+  handler. `djinn start ... &` is exactly that shape and produces a signal storm
+  of tens of events per second, which also floods Docker's event ring buffer.
+  `is_background_process_group()` compares `os.tcgetpgrp(stdin)` against
+  `os.getpgrp()` and returns False when stdin is not a TTY or there is no
+  controlling terminal, so `< /dev/null`, pipes, and `setsid` stay allowed.
+  Headless runs pass `-T`, allocate no TTY, and are never blocked.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with

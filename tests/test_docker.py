@@ -1,5 +1,6 @@
 """Tests for djinn_in_a_box.core.docker module."""
 
+import json
 import os
 import re
 import socket
@@ -28,6 +29,7 @@ from djinn_in_a_box.core.docker import (
     clear_sync_path,
     compose_build,
     compose_run,
+    compose_up_detached,
     delete_volumes,
     ensure_network,
     extract_sync_path_name,
@@ -39,6 +41,7 @@ from djinn_in_a_box.core.docker import (
     get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
+    is_background_process_group,
     is_container_running,
     is_sync_archive,
     parse_mount_spec,
@@ -1792,3 +1795,215 @@ class TestRestoreVolume:
         result = restore_volume("nonexistent", tmp_path)
         assert not result.success
         assert "Archive not found" in result.stderr
+
+
+class TestBackgroundProcessGroupGuard:
+    """``djinn start ... &`` must fail fast instead of storming the container.
+
+    A backgrounded TTY-attached compose client turns every terminal-attribute
+    call into SIGTTOU, which Compose forwards into the container until PID 1 —
+    which installs no handler for it — stops. The guard refuses that shape.
+    """
+
+    @staticmethod
+    def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
+        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
+        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
+
+    @staticmethod
+    def _stdin_state(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        isatty: bool,
+        foreground: bool = True,
+        no_controlling_terminal: bool = False,
+    ) -> None:
+        class _Stdin:
+            def fileno(self) -> int:
+                return 0
+
+        def _tcgetpgrp(_fd: int) -> int:
+            if no_controlling_terminal:
+                raise OSError("no controlling terminal")
+            return 4242 if foreground else 9999
+
+        def _isatty(_fd: int) -> bool:
+            return isatty
+
+        def _getpgrp() -> int:
+            return 4242
+
+        monkeypatch.setattr(docker_mod.sys, "stdin", _Stdin())
+        monkeypatch.setattr(docker_mod.os, "isatty", _isatty)
+        monkeypatch.setattr(docker_mod.os, "getpgrp", _getpgrp)
+        monkeypatch.setattr(docker_mod.os, "tcgetpgrp", _tcgetpgrp)
+
+    def test_detects_background_process_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stdin_state(monkeypatch, isatty=True, foreground=False)
+        assert is_background_process_group()
+
+    def test_accepts_foreground_process_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stdin_state(monkeypatch, isatty=True, foreground=True)
+        assert not is_background_process_group()
+
+    def test_ignores_non_tty_stdin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`< /dev/null` detaches stdin from the terminal, so no SIGTTOU is possible."""
+        self._stdin_state(monkeypatch, isatty=False, foreground=False)
+        assert not is_background_process_group()
+
+    def test_ignores_missing_controlling_terminal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`setsid` leaves no controlling terminal, so the kernel raises no SIGTTOU."""
+        self._stdin_state(monkeypatch, isatty=True, no_controlling_terminal=True)
+        assert not is_background_process_group()
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_interactive_run_refuses_from_background(
+        self,
+        mock_run: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._stdin_state(monkeypatch, isatty=True, foreground=False)
+
+        result = compose_run(mock_app_config, ContainerOptions(), interactive=True)
+
+        assert result.returncode == 1
+        assert "SIGTTOU" in result.stderr
+        assert "--detach" in result.stderr
+        mock_run.assert_not_called()
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_headless_run_is_unaffected(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Headless runs pass ``-T``, allocate no TTY, and need no guard."""
+        self._without_runtime_mounts(monkeypatch)
+        self._stdin_state(monkeypatch, isatty=True, foreground=False)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
+
+        mock_run.assert_called_once()
+
+
+class TestVolumeSpecsFromMountArgs:
+    """``up`` takes no ``-v`` flags, so specs are lifted out of the run-style args."""
+
+    def test_extracts_specs_after_volume_flags(self) -> None:
+        assert docker_mod._volume_specs_from_mount_args(
+            ["-v", "/a:/b", "-v", "/c:/d:ro"]
+        ) == ["/a:/b", "/c:/d:ro"]
+
+    def test_ignores_unrelated_arguments(self) -> None:
+        assert docker_mod._volume_specs_from_mount_args(["--rm", "-e", "X=1"]) == []
+
+    def test_ignores_volume_flag_without_specification(self) -> None:
+        assert docker_mod._volume_specs_from_mount_args(["-v"]) == []
+
+
+class TestComposeUpDetached:
+    """Detached start uses ``up -d``, leaving no TTY client to be backgrounded."""
+
+    @staticmethod
+    def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
+        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
+        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_issues_up_detached_for_the_service(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        compose_up_detached(mock_app_config, ContainerOptions())
+
+        cmd = mock_run.call_args.args[0]
+        assert cmd[:2] == ["docker", "compose"]
+        assert cmd[-3:] == ["up", "-d", "dev"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_hands_dynamic_mounts_over_as_an_override_file(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        payload: dict[str, object] = {}
+        seen_paths: list[Path] = []
+
+        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
+            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            seen_paths.append(override)
+            payload.update(json.loads(override.read_text()))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _read_override
+        options = ContainerOptions(
+            mounts=(ContainerMount(tmp_path, Path("/work"), read_only=True),)
+        )
+
+        compose_up_detached(mock_app_config, options)
+
+        service = payload["services"]["dev"]  # type: ignore[index]
+        assert service["volumes"] == [f"{tmp_path}:/work:ro"]
+        assert service["working_dir"] == "/work"
+        # The override is Compose's only view of these mounts; it must not outlive the call.
+        assert not seen_paths[0].exists()
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_omits_the_override_when_nothing_is_dynamic(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        compose_up_detached(mock_app_config, ContainerOptions())
+
+        cmd = mock_run.call_args.args[0]
+        assert not any("djinn-detach-" in arg for arg in cmd)
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_carries_the_firewall_flag_through_compose_interpolation(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``up`` has no ``-e``, so ENABLE_FIREWALL must ride the host environment."""
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        compose_up_detached(mock_app_config, ContainerOptions(firewall_enabled=True))
+
+        assert mock_run.call_args.kwargs["env"]["ENABLE_FIREWALL"] == "true"

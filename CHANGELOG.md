@@ -9,6 +9,18 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- `djinn start --detach` starts the container with `docker compose up -d` and
+  returns, leaving no Compose client attached; attach afterwards with
+  `djinn enter`. The detached path keeps the `--docker` proxy running, refuses to
+  start when a Djinn container already exists, and passes the dynamic mounts to
+  Compose through a generated override file.
+- Guard against starting an interactive container from a background process
+  group. `djinn start ... &` left a TTY-attached Compose client in the
+  background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
+  signal into the container, producing tens of events per second and flooding
+  Docker's event ring buffer. `djinn start` now fails with an explanation and
+  points at `--detach`, a foreground start, or `setsid`. Non-TTY stdin, absent
+  controlling terminals, and headless `-T` runs are unaffected.
 - Persistent `age` encryption identity store: `${DJINN_CONFIG_ROOT}/age` is
   provisioned as a credential directory and bind-mounted at `~/.config/age`, so
   `age` keys survive container restarts and are captured by `djinn backup`

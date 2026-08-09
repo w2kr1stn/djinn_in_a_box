@@ -98,6 +98,10 @@ class TestStartCommand:
                 "djinn_in_a_box.commands.container.ensure_network", return_value=True
             ) as mock_network,
             patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.container.compose_up_detached") as mock_detached,
+            patch(
+                "djinn_in_a_box.commands.container.is_container_running", return_value=False
+            ) as mock_running,
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
@@ -119,9 +123,12 @@ class TestStartCommand:
             mock_config.shell.skip_mounts = False
             mock_load.return_value = mock_config
             mock_run.return_value = RunResult(returncode=0)
+            mock_detached.return_value = RunResult(returncode=0)
             yield {
                 "load": mock_load,
                 "run": mock_run,
+                "detached": mock_detached,
+                "running": mock_running,
                 "cleanup": mock_cleanup,
                 "config": mock_config,
                 "banner": mock_banner,
@@ -176,6 +183,44 @@ class TestStartCommand:
             container.start(firewall=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.firewall_enabled is True
+
+    def test_start_detached_uses_up_instead_of_a_foreground_client(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        """The point of --detach: no compose client is left attached to a TTY."""
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 0
+        start_mocks["detached"].assert_called_once()
+        start_mocks["run"].assert_not_called()
+
+    def test_start_detached_keeps_the_docker_proxy_alive(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        """A detached container outlives this process, so its proxy must survive too."""
+        with pytest.raises(typer.Exit):
+            container.start(docker=True, detach=True)
+
+        start_mocks["cleanup"].assert_not_called()
+
+    def test_start_detached_refuses_when_a_container_already_runs(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["running"].return_value = True
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 1
+        start_mocks["detached"].assert_not_called()
+        start_mocks["run"].assert_not_called()
+
+    def test_start_detached_says_how_to_attach(self, start_mocks: dict[str, Any]) -> None:
+        with pytest.raises(typer.Exit):
+            container.start(detach=True)
+
+        assert "djinn enter" in start_mocks["err_output"].getvalue()
 
     def test_start_passes_each_precomputed_runtime_mount_list(
         self, start_mocks: dict[str, Any]

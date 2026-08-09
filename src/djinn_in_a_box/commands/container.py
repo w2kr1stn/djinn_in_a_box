@@ -40,6 +40,7 @@ from djinn_in_a_box.core.docker import (
     compose_build,
     compose_down,
     compose_run,
+    compose_up_detached,
     delete_network,
     delete_volume,
     delete_volumes,
@@ -143,6 +144,13 @@ def start(
             help="Host directory to mount; repeatable: SRC[:DST[:ro|rw]]",
         ),
     ] = None,
+    detach: Annotated[
+        bool,
+        typer.Option(
+            "--detach",
+            help="Start in the background and return; attach later with `djinn enter`",
+        ),
+    ] = False,
 ) -> None:
     """Start interactive development shell.
 
@@ -150,11 +158,19 @@ def start(
     The container has access to the configured projects directory
     and optionally Docker socket access and firewall restrictions.
 
+    Use --detach to leave the container running in the background. Do NOT
+    background the foreground form with `&`: that keeps a TTY-attached Compose
+    client in a background process group, which storms the container with
+    SIGTTOU until it dies. `djinn start` refuses that shape rather than let it
+    happen. A detached container still persists its settings: the entrypoint
+    traps the SIGTERM from `docker stop` and reverse-syncs before exiting.
+
     Examples:
         djinn start                         # Basic interactive shell
         djinn start --docker                # With Docker access (proxy)
         djinn start --docker-direct         # With Docker access (direct)
         djinn start --here                  # Mount cwd as workspace
+        djinn start --detach --docker-direct  # Background; then `djinn enter`
         djinn start -d -f --here            # Full options
     """
     try:
@@ -162,6 +178,12 @@ def start(
     except ValueError as e:
         error(str(e))
         raise typer.Exit(1) from None
+
+    # `up -d` collides with the fixed container_name; say so before doing work.
+    if detach and is_container_running("djinn"):
+        error("A Djinn container is already running.")
+        err_console.print("Attach to it with: djinn enter")
+        raise typer.Exit(1)
 
     config = load_config()
     preflight(config, provision_host=False)
@@ -254,14 +276,23 @@ def start(
     )
 
     try:
-        result = compose_run(
-            config,
-            options,
-            interactive=True,
-            shell_mount_args=shell_args,
-            audio_mount_args=audio_args,
-            dbus_mount_args=dbus_args,
-        )
+        if detach:
+            result = compose_up_detached(
+                config,
+                options,
+                shell_mount_args=shell_args,
+                audio_mount_args=audio_args,
+                dbus_mount_args=dbus_args,
+            )
+        else:
+            result = compose_run(
+                config,
+                options,
+                interactive=True,
+                shell_mount_args=shell_args,
+                audio_mount_args=audio_args,
+                dbus_mount_args=dbus_args,
+            )
     except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
         raise typer.Exit(1) from None
@@ -269,10 +300,19 @@ def start(
         error(f"Internal runtime mount construction failed: {e}")
         raise typer.Exit(1) from None
     finally:
-        cleanup_docker_proxy(docker_mode, config)
+        # A detached container outlives this process, so the proxy it talks to has
+        # to stay up. Only the foreground path owns the proxy's lifetime.
+        if not detach:
+            cleanup_docker_proxy(docker_mode, config)
 
     if result.stderr:
         err_console.print(result.stderr, end="")
+
+    if detach and result.success:
+        blank()
+        success("Container started in the background.")
+        info("Attach with: djinn enter")
+        info("Stop with:   djinn clean")
 
     raise typer.Exit(result.returncode)
 
