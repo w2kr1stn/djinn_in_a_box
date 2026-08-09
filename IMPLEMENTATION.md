@@ -513,10 +513,21 @@ SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
   is nothing to flush first;
 - runs the shell as a background job and `wait`s on it. As a foreground command
   it would defer every trap until it returned, which under `docker stop` never
-  happens — the traps would be dead code. Job control is off in this
-  non-interactive script, so the shell starts inside PID 1's process group and
-  keeps the terminal's foreground group until it claims the terminal itself;
-  interactive behaviour (job control, Ctrl+C) is unchanged.
+  happens — the traps would be dead code. Backgrounding costs the shell its
+  stdin, and that is the subtle part: with job control off, a background job's
+  fd 0 is reassigned to `/dev/null` *before* any explicit redirection is applied.
+  zsh would then not be interactive at all — it reads EOF and exits within
+  milliseconds, taking the container with it. The entrypoint therefore duplicates
+  fd 0 first (`exec 3<&0`) and hands it back explicitly (`<&3`, plus `3<&-` to
+  keep the spare descriptor out of the child). `<&0` cannot do this: by the time
+  it is evaluated, fd 0 is already `/dev/null`. With stdin restored, the shell
+  claims its own process group and the terminal as usual, and interactive
+  behaviour (job control, Ctrl+C) is unchanged.
+
+  The container passes no arguments (`ENTRYPOINT` with no `CMD`, no compose
+  `command:`), so `tests/test_entrypoint_shutdown.py` covers that exact shape on
+  a real pty: a shell launched with `-c <cmd>` never needs a terminal and would
+  hide the regression entirely.
 
 Shell-side startup output is sectioned through `scripts/output-lib.sh`:
 `Seed & Config`, `MCP`, `Tools`, and `Security`. `mcp-register.sh` captures

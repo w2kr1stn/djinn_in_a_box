@@ -124,6 +124,16 @@ class TestStartCommand:
             mock_load.return_value = mock_config
             mock_run.return_value = RunResult(returncode=0)
             mock_detached.return_value = RunResult(returncode=0)
+            # `is_container_running` is consulted twice on the detached path: the
+            # collision guard before starting (nothing there yet) and the liveness
+            # check afterwards (the container is up).
+            running_calls = {"count": 0}
+
+            def _running(_name: str) -> bool:
+                running_calls["count"] += 1
+                return running_calls["count"] > 1
+
+            mock_running.side_effect = _running
             yield {
                 "load": mock_load,
                 "run": mock_run,
@@ -207,6 +217,7 @@ class TestStartCommand:
     def test_start_detached_refuses_when_a_container_already_runs(
         self, start_mocks: dict[str, Any]
     ) -> None:
+        start_mocks["running"].side_effect = None
         start_mocks["running"].return_value = True
 
         with pytest.raises(typer.Exit) as exc_info:
@@ -215,6 +226,37 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         start_mocks["detached"].assert_not_called()
         start_mocks["run"].assert_not_called()
+
+    def test_start_detached_reports_a_container_that_died_on_startup(
+        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`up -d` exits 0 once the container is created — it observes nothing after."""
+        start_mocks["running"].side_effect = None
+        start_mocks["running"].return_value = False
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 1
+        # Both reach stderr in production; the fixture patches console.err_console,
+        # so error() lands in err_output while the direct err_console.print does not.
+        assert "exited immediately" in start_mocks["err_output"].getvalue()
+        assert "docker logs djinn" in capsys.readouterr().err
+
+    def test_start_prints_captured_docker_output_verbatim(
+        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Rich markup would eat the bracketed BuildKit tags that locate a failure."""
+        start_mocks["detached"].return_value = RunResult(
+            returncode=1, stderr="#8 [dev 3/25] RUN apt-get update\n#1 [internal] load metadata\n"
+        )
+
+        with pytest.raises(typer.Exit):
+            container.start(detach=True)
+
+        captured = capsys.readouterr().err
+        assert "[dev 3/25]" in captured
+        assert "[internal]" in captured
 
     def test_start_detached_says_how_to_attach(self, start_mocks: dict[str, Any]) -> None:
         with pytest.raises(typer.Exit):

@@ -11,10 +11,13 @@ helpers stubbed, so the control flow under test is the shipped one.
 from __future__ import annotations
 
 import os
+import pty
+import select
 import shutil
 import signal
 import subprocess
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -64,6 +67,60 @@ def _sync_lines(tmp_path: Path) -> list[str]:
     if not log.exists():
         return []
     return [line for line in log.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _read_until(fd: int, needle: bytes, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    buffer = b""
+    while time.monotonic() < deadline:
+        if not select.select([fd], [], [], 0.2)[0]:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:  # pragma: no cover - pty closed by the child dying
+            break
+        if not chunk:
+            break
+        buffer += chunk
+        if needle in buffer:
+            return True
+    return False
+
+
+@requires_zsh
+def test_interactive_shell_survives_with_no_arguments(tmp_path: Path) -> None:
+    """The container passes NO arguments — the shape the other tests never reach.
+
+    `ENTRYPOINT ["/home/dev/entrypoint.sh"]` sets no CMD and no compose file sets
+    `command:`, so `"$@"` is empty and the shell must be interactive on its own.
+    Backgrounding it reassigns stdin to /dev/null unless the descriptor is handed
+    over explicitly; zsh is then non-interactive, reads EOF and exits within
+    milliseconds, taking the container with it. Passing `-c <cmd>` (as the tests
+    below do) hides this entirely, because such a shell never needs a terminal.
+    """
+    harness = _harness(tmp_path)
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover - the child never returns
+        try:
+            os.execv("/bin/zsh", ["/bin/zsh", str(harness)])
+        finally:
+            os._exit(127)
+
+    try:
+        time.sleep(1.0)
+        assert os.waitpid(pid, os.WNOHANG) == (0, 0), (
+            "the shell exited instead of staying up — stdin was not handed over"
+        )
+        os.write(fd, b"echo PROBE_$((6*7))\n")
+        assert _read_until(fd, b"PROBE_42", timeout=5.0), (
+            "the shell did not evaluate input — it is alive but not interactive"
+        )
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        with suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+        os.close(fd)
 
 
 @requires_zsh

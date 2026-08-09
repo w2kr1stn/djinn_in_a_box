@@ -12,8 +12,15 @@ Versioning before and after the first stable release.
 - `djinn start --detach` starts the container with `docker compose up -d` and
   returns, leaving no Compose client attached; attach afterwards with
   `djinn enter`. The detached path keeps the `--docker` proxy running, refuses to
-  start when a Djinn container already exists, and passes the dynamic mounts to
-  Compose through a generated override file.
+  start when a Djinn container is already running, and passes the dynamic mounts
+  to Compose through a generated override file — including the `-e` half of the
+  audio/D-Bus pairs, without which the sockets are mounted but `PULSE_SERVER`
+  and `DBUS_SESSION_BUS_ADDRESS` are unset and every client fails to find them.
+  Because `up -d` exits 0 as soon as the container is created and says nothing
+  about what the entrypoint did next, the command verifies the container is
+  actually running before reporting success, and points at `docker logs djinn`
+  when it is not. Captured Docker output is printed verbatim rather than through
+  Rich markup, which would silently delete the bracketed BuildKit stage tags.
 - Guard against starting an interactive container from a background process
   group. `djinn start ... &` left a TTY-attached Compose client in the
   background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
@@ -61,7 +68,12 @@ Versioning before and after the first stable release.
   PID 1 with every in-session settings change unpersisted. The sync now lives in
   an idempotent `persist_session_state()` reached from both the normal exit and a
   TERM/INT trap, and the shell runs as a waited-on background job so the trap can
-  fire at all. Interactive behaviour (job control, Ctrl+C) is unchanged.
+  fire at all — a foreground command defers every trap until it returns, which
+  under `docker stop` never happens. Backgrounding would also reassign the
+  shell's stdin to `/dev/null` (job control is off, and that reassignment happens
+  before explicit redirections), leaving zsh non-interactive so it reads EOF and
+  exits at once; the entrypoint therefore duplicates fd 0 beforehand and hands it
+  back explicitly. Interactive behaviour (job control, Ctrl+C) is unchanged.
 - `djinn clean` now removes the containers it reports as removed. Compose treats
   containers created by `compose run` as one-off and skips them on a plain
   `down`, which is how `djinn start` and `djinn run` create the dev container —

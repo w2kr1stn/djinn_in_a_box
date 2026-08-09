@@ -252,18 +252,26 @@ trap '_djinn_on_termination_signal 2' INT
 
 # The shell runs as a background job so that `wait` stays interruptible. As a
 # foreground command it would defer every trap until it returned — which under
-# `docker stop` never happens, so the traps above would be dead code. Job
-# control is off in this non-interactive script, so the shell starts in PID 1's
-# process group and keeps the terminal's foreground group until it claims the
-# terminal itself.
+# `docker stop` never happens, so the traps above would be dead code.
+#
+# stdin must be handed over explicitly. With job control off (the default for a
+# non-interactive script) a background job's stdin is reassigned to /dev/null
+# BEFORE any explicit redirection is applied. zsh would then not be a terminal,
+# would not be interactive, would read EOF immediately and exit 0 — killing the
+# container milliseconds after start. `<&3` from a descriptor duplicated
+# beforehand is what restores it; `<&0` cannot, because by the time it is
+# evaluated fd 0 is already /dev/null. `3<&-` keeps the spare descriptor out of
+# the child.
 #
 # Fence set -e around the interactive shell: a non-zero shell exit must NOT abort
 # the script before EXIT_CODE capture + reverse-sync (else settings persistence is silently skipped).
 set +e
-/bin/zsh "$@" &
+exec 3<&0
+/bin/zsh "$@" <&3 3<&- &
 DJINN_SHELL_PID=$!
 wait "$DJINN_SHELL_PID"
 EXIT_CODE=$?
+exec 3<&-
 set -e
 
 persist_session_state

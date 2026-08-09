@@ -1909,6 +1909,14 @@ class TestVolumeSpecsFromMountArgs:
     def test_ignores_volume_flag_without_specification(self) -> None:
         assert docker_mod._volume_specs_from_mount_args(["-v"]) == []
 
+    def test_extracts_env_pairs(self) -> None:
+        assert docker_mod._env_pairs_from_mount_args(
+            ["-v", "/a:/b", "-e", "PULSE_SERVER=unix:/run/pulse", "-e", "EMPTY="]
+        ) == {"PULSE_SERVER": "unix:/run/pulse", "EMPTY": ""}
+
+    def test_env_pairs_ignore_unrelated_arguments(self) -> None:
+        assert docker_mod._env_pairs_from_mount_args(["-v", "/a:/b", "--rm"]) == {}
+
 
 class TestComposeUpDetached:
     """Detached start uses ``up -d``, leaving no TTY client to be backgrounded."""
@@ -1989,6 +1997,82 @@ class TestComposeUpDetached:
 
         cmd = mock_run.call_args.args[0]
         assert not any("djinn-detach-" in arg for arg in cmd)
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_carries_the_env_half_of_the_runtime_mount_pairs(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """A mounted socket is useless without the variable that points at it.
+
+        Deliberately does not stub the runtime mount builders: passing real
+        `-v`/`-e` pairs is the input class that exposes a dropped `-e` half.
+        """
+        mock_root.return_value = Path("/project")
+        payload: dict[str, object] = {}
+
+        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
+            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            payload.update(json.loads(override.read_text()))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _read_override
+
+        compose_up_detached(
+            mock_app_config,
+            ContainerOptions(),
+            shell_mount_args=[],
+            audio_mount_args=[
+                "-v", "/run/user/1000/pulse/native:/run/user/1000/pulse/native",
+                "-e", "PULSE_SERVER=unix:/run/user/1000/pulse/native",
+            ],
+            dbus_mount_args=[
+                "-v", "/run/user/1000/bus:/run/user/1000/bus:ro",
+                "-e", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+            ],
+        )
+
+        service = payload["services"]["dev"]  # type: ignore[index]
+        assert service["environment"] == {
+            "PULSE_SERVER": "unix:/run/user/1000/pulse/native",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        }
+        assert "/run/user/1000/pulse/native:/run/user/1000/pulse/native" in service["volumes"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_explicit_env_overrides_the_derived_pairs(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        payload: dict[str, object] = {}
+
+        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
+            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            payload.update(json.loads(override.read_text()))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _read_override
+
+        compose_up_detached(
+            mock_app_config,
+            ContainerOptions(),
+            env={"PULSE_SERVER": "explicit"},
+            audio_mount_args=["-v", "/host:/sock", "-e", "PULSE_SERVER=derived"],
+            shell_mount_args=[],
+            dbus_mount_args=[],
+        )
+
+        service = payload["services"]["dev"]  # type: ignore[index]
+        assert service["environment"]["PULSE_SERVER"] == "explicit"
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")

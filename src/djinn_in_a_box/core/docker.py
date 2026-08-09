@@ -893,6 +893,27 @@ def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
     return specs
 
 
+def _env_pairs_from_mount_args(args: list[str]) -> dict[str, str]:
+    """Pull the ``KEY=VALUE`` pairs out of a ``["-e", pair, ...]`` list.
+
+    The runtime mount builders emit a socket *and* the variable that points at
+    it — ``get_audio_mount_args`` pairs its bind with ``PULSE_SERVER``, and
+    ``get_dbus_mount_args`` with ``DBUS_SESSION_BUS_ADDRESS``. Keeping only the
+    ``-v`` half mounts the socket and leaves every client unable to find it, so
+    the detached path has to carry these across too.
+    """
+    pairs: dict[str, str] = {}
+    expecting_pair = False
+    for arg in args:
+        if expecting_pair:
+            key, _, value = arg.partition("=")
+            pairs[key] = value
+            expecting_pair = False
+        elif arg == "-e":
+            expecting_pair = True
+    return pairs
+
+
 def compose_up_detached(
     config: AppConfig,
     options: ContainerOptions,
@@ -953,15 +974,19 @@ def compose_up_detached(
         if mount.read_only:
             spec += ":ro"
         volume_specs.append(spec)
-    volume_specs.extend(_volume_specs_from_mount_args([*shell_args, *audio_args, *dbus_args]))
+    runtime_args = [*shell_args, *audio_args, *dbus_args]
+    volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
+    # The `-e` half of those same pairs has to ride along, or the sockets are
+    # mounted but unreachable. Explicit `env` wins over the derived values.
+    environment = {**_env_pairs_from_mount_args(runtime_args), **(env or {})}
 
     service_override: dict[str, object] = {}
     if volume_specs:
         service_override["volumes"] = volume_specs
     if mounts:
         service_override["working_dir"] = str(mounts[0].target)
-    if env:
-        service_override["environment"] = dict(env)
+    if environment:
+        service_override["environment"] = environment
 
     override_path: Path | None = None
     try:
