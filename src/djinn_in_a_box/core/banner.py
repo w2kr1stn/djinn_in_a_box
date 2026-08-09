@@ -60,12 +60,19 @@ def banner() -> None:
 
 def _render_banner(console: Console) -> None:
     mode = _mode_for_console(console)
+    if mode is _BannerMode.PLAIN:
+        _render_plain(console)
+        return
+
+    # The graphical modes lead with a blank line, the same spacing convention
+    # rule() follows: flush against the shell prompt, the logo's top row reads
+    # as clipped. Plain mode stays exactly one line — it exists for NO_COLOR,
+    # dumb, and non-UTF-8 terminals, where extra whitespace is noise.
+    console.print()
     if mode is _BannerMode.FULL:
         _render_full(console)
-    elif mode is _BannerMode.WORDMARK:
-        _render_wordmark(console)
     else:
-        _render_plain(console)
+        _render_wordmark(console)
 
 
 def _mode_for_console(console: Console) -> _BannerMode:

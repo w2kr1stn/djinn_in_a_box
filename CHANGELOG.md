@@ -39,6 +39,9 @@ Versioning before and after the first stable release.
   `Seed & Config`, `MCP`, `Tools`, and `Security` sections.
 - Propagated `NO_COLOR` and terminal width into Compose startup so container
   shell output follows host plain-output and wrapping behavior.
+- The startup banner leads with a blank line, so the djinn's top row no longer
+  reads as clipped against the shell prompt. Plain mode (NO_COLOR, dumb, or
+  non-UTF-8 terminals) still renders exactly one line.
 
 ### Removed
 

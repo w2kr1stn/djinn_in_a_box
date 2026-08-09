@@ -51,6 +51,22 @@ def _has_braille(value: str) -> bool:
     return any("\u2800" <= char <= "\u28ff" for char in value)
 
 
+@pytest.mark.parametrize("width", [80, 40])
+def test_graphical_banner_leads_with_a_blank_line(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """Flush against the shell prompt, the logo's top row reads as a clipped turban.
+
+    Both graphical modes need it (80 renders full, 40 degrades to wordmark);
+    plain mode stays one line, which the plain-mode tests below pin down.
+    """
+    console, output = _recording_console(width=width)
+
+    rendered = _render(monkeypatch, console, output)
+
+    assert rendered.startswith("\n")
+
+
 def test_full_banner_contains_braille_and_wordmark(monkeypatch: pytest.MonkeyPatch) -> None:
     console, output = _recording_console(width=80)
 
