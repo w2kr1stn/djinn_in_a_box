@@ -333,6 +333,12 @@ def _copy_then_publish(
             before_publish()
         os.replace(staged_tree, destination)
         _harden_published_directories(destination)
+        if not _trees_match(migrating_source, destination):
+            msg = (
+                "Zone migration post-publish verification failed between "
+                f"{migrating_source} and {destination}"
+            )
+            raise ZoneConfigurationError(msg)
         shutil.rmtree(migrating_source)
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import stat
 from pathlib import Path
 
@@ -236,6 +237,71 @@ def test_cross_filesystem_migration_blocks_a_write_to_the_original_path_before_c
     assert not aside.exists()
     assert (target / "state.json").read_text() == "copied before publish"
     assert not (target / "written-during-publish.json").exists()
+
+
+def test_cross_filesystem_migration_preserves_a_preexisting_fd_write_after_publish(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    state = source / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("verified before write\n")
+    target = roots.local_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
+    descriptor = os.open(state, os.O_WRONLY | os.O_APPEND)
+    original_replace = zone_migration.os.replace
+
+    def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
+        if Path(source_path) == source and Path(destination_path) == target:
+            raise OSError(errno.EXDEV, "Cross-device link")
+        if Path(destination_path) == target:
+            assert Path(source_path).name == "tree"
+            os.write(descriptor, b"written through preexisting fd\n")
+            os.fsync(descriptor)
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(zone_migration.os, "replace", replace_with_exdev)
+
+    try:
+        with pytest.raises(ZoneConfigurationError) as error:
+            reconcile_zone_assignments(zone_config)
+    finally:
+        os.close(descriptor)
+
+    assert str(aside) in str(error.value)
+    assert str(target) in str(error.value)
+    assert (aside / "state.json").read_text() == (
+        "verified before write\nwritten through preexisting fd\n"
+    )
+    assert (target / "state.json").read_text() == "verified before write\n"
+
+    result = reconcile_zone_assignments(zone_config)
+
+    assert result.moves == ()
+    assert len(result.collisions) == 1
+    assert result.collisions[0].populated_paths == (target, aside)
+
+
+def test_published_aside_is_recovered_when_it_matches_the_destination(
+    zone_config: AppConfig,
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
+    target = roots.local_root / "claude" / "jobs"
+    aside.mkdir(parents=True)
+    target.mkdir(parents=True)
+    (aside / "state.json").write_text("published before crash")
+    (target / "state.json").write_text("published before crash")
+
+    result = reconcile_zone_assignments(zone_config)
+
+    assert len(result.moves) == 1
+    assert result.moves[0].source == aside
+    assert result.collisions == ()
+    assert not aside.exists()
+    assert (target / "state.json").read_text() == "published before crash"
 
 
 def test_retry_rehardens_a_published_destination_after_hardening_failure(
