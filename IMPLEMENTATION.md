@@ -472,7 +472,7 @@ publication.
   baseline wins for the owned `SessionStart`, `PreToolUse`, and `Stop` hook
   fragments; neighboring settings remain overlay-controlled.
 - `reverse_sync_file(volume_file, seed_file)`: best-effort copy from container
-  state back to writable seed mounts on shell exit.
+  state back to writable seed mounts at shutdown (shell exit or SIGTERM).
 - `reverse_sync_claude_settings(volume_file, seed_file)`: persists the personal
   Claude overlay after removing only those three managed hook fragments.
 
@@ -494,9 +494,29 @@ container start
   +-- source mcp-register.sh and register MCP servers
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
-  +-- run interactive zsh
-  +-- reverse-sync selected settings files on exit
+  +-- run interactive zsh as a background job, waited on by PID 1
+  +-- reverse-sync selected settings files on shell exit OR on SIGTERM
 ```
+
+Both shutdown paths reach the reverse-sync, which matters because a detached
+container (`djinn start --detach`) never exits its shell — `docker stop` sends
+SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
+
+- collects the reverse-sync calls in `persist_session_state()`, guarded by
+  `_DJINN_STATE_PERSISTED` so the signal path and the normal path cannot both
+  run it;
+- traps TERM and INT into `_djinn_on_termination_signal`, which persists
+  immediately and exits `128 + signal`. It deliberately does not signal the
+  shell and wait for it: an interactive zsh ignores SIGTERM, so waiting would
+  burn the whole `docker stop` grace period and end in SIGKILL having persisted
+  nothing. The agent CLIs write settings as they change, not on exit, so there
+  is nothing to flush first;
+- runs the shell as a background job and `wait`s on it. As a foreground command
+  it would defer every trap until it returned, which under `docker stop` never
+  happens — the traps would be dead code. Job control is off in this
+  non-interactive script, so the shell starts inside PID 1's process group and
+  keeps the terminal's foreground group until it claims the terminal itself;
+  interactive behaviour (job control, Ctrl+C) is unchanged.
 
 Shell-side startup output is sectioned through `scripts/output-lib.sh`:
 `Seed & Config`, `MCP`, `Tools`, and `Security`. `mcp-register.sh` captures
@@ -884,8 +904,8 @@ entrypoint.sh
   +-- MCP: register MCP servers and box third-party CLI output
   +-- Tools: install optional tools
   +-- Security: summarize firewall, Docker access, and MCP gateway state
-  +-- run interactive shell
-  +-- reverse-sync selected settings on exit
+  +-- run interactive shell as a background job
+  +-- reverse-sync selected settings on shell exit or on SIGTERM
 ```
 
 Backup:

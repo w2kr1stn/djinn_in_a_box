@@ -52,6 +52,13 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Settings are no longer lost when the container is stopped rather than exited.
+  `entrypoint.sh` ran its reverse-sync only after the interactive shell returned,
+  so `docker stop` — the only shutdown a detached container ever gets — killed
+  PID 1 with every in-session settings change unpersisted. The sync now lives in
+  an idempotent `persist_session_state()` reached from both the normal exit and a
+  TERM/INT trap, and the shell runs as a waited-on background job so the trap can
+  fire at all. Interactive behaviour (job control, Ctrl+C) is unchanged.
 - `djinn clean` now removes the containers it reports as removed. Compose treats
   containers created by `compose run` as one-off and skips them on a plain
   `down`, which is how `djinn start` and `djinn run` create the dev container —

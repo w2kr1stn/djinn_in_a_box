@@ -213,22 +213,58 @@ echo "" >&2
 # =============================================================================
 # Interactive Shell (reverse-sync settings on exit)
 # =============================================================================
+# Settings persistence has to survive BOTH ways this container ends: the
+# interactive shell exiting normally, and SIGTERM from `docker stop` — the only
+# way a detached container (`djinn start --detach`) is ever shut down. Without
+# the signal path, every detached session would silently lose its settings.
+
+_DJINN_STATE_PERSISTED=0
+
+persist_session_state() {
+    # Idempotent: the signal path and the normal path must never both run this.
+    [[ "$_DJINN_STATE_PERSISTED" == "1" ]] && return 0
+    _DJINN_STATE_PERSISTED=1
+
+    # Persist claude.json state into volume for next container start
+    reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.json"
+    # → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
+    reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"
+    reverse_sync_file "$HOME/.gemini/settings.json"          "$HOME/.gemini_seed/settings.json"
+    if ! python3 "$SETTINGS_COPY_HELPER" \
+        --copy-settings "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
+        --missing-ok >&2; then
+        ui_warn "could not persist OpenCode personal settings"
+    fi
+}
+
+_djinn_on_termination_signal() {
+    # Persist right away rather than signalling the shell and waiting for it: an
+    # interactive zsh ignores SIGTERM, so waiting would burn the entire
+    # `docker stop` grace period and end in SIGKILL with nothing persisted. The
+    # agent CLIs write their settings as they change, not on exit, so there is
+    # nothing to flush first.
+    persist_session_state
+    exit $((128 + $1))
+}
+
+trap '_djinn_on_termination_signal 15' TERM
+trap '_djinn_on_termination_signal 2' INT
+
+# The shell runs as a background job so that `wait` stays interruptible. As a
+# foreground command it would defer every trap until it returned — which under
+# `docker stop` never happens, so the traps above would be dead code. Job
+# control is off in this non-interactive script, so the shell starts in PID 1's
+# process group and keeps the terminal's foreground group until it claims the
+# terminal itself.
+#
 # Fence set -e around the interactive shell: a non-zero shell exit must NOT abort
 # the script before EXIT_CODE capture + reverse-sync (else settings persistence is silently skipped).
 set +e
-/bin/zsh "$@"
+/bin/zsh "$@" &
+DJINN_SHELL_PID=$!
+wait "$DJINN_SHELL_PID"
 EXIT_CODE=$?
 set -e
 
-# Persist claude.json state into volume for next container start
-reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.json"
-# → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
-reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"
-reverse_sync_file "$HOME/.gemini/settings.json"          "$HOME/.gemini_seed/settings.json"
-if ! python3 "$SETTINGS_COPY_HELPER" \
-    --copy-settings "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
-    --missing-ok >&2; then
-    ui_warn "could not persist OpenCode personal settings"
-fi
-
+persist_session_state
 exit $EXIT_CODE
