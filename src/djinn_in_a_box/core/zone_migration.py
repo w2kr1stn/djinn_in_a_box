@@ -14,7 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.config.zones import ZoneAssignment, ZoneAssignments, load_zone_assignments
+from djinn_in_a_box.config.zones import (
+    MIGRATING_ZONE_PREFIX,
+    ZoneAssignment,
+    ZoneAssignments,
+    load_zone_assignments,
+)
 from djinn_in_a_box.core.docker import ZoneRoots, ensure_zone_roots, resolve_zone_roots
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 
@@ -68,6 +73,12 @@ def find_unmigrated_assignments(
         assignment
         for assignment in _iter_assignments(assignments)
         if path_has_content(roots.config_root / assignment.agent / assignment.relative_path)
+        or any(
+            path_has_content(aside)
+            for aside in _migration_asides(
+                roots, assignment, _zone_path(roots, assignment.zone, assignment)
+            )
+        )
     )
 
 
@@ -78,8 +89,15 @@ def find_zone_collisions(
     for assignment in _iter_assignments(assignments):
         destination = _zone_path(roots, assignment.zone, assignment)
         populated_paths = tuple(
-            path for path in _assignment_paths(roots, assignment) if path_has_content(path)
+            path
+            for path in (
+                *_assignment_paths(roots, assignment),
+                *_migration_asides(roots, assignment, destination),
+            )
+            if path_has_content(path)
         )
+        if _is_recoverable_published_aside(populated_paths, destination):
+            continue
         if len(populated_paths) > 1:
             collisions.append(ZoneCollision(assignment, destination, populated_paths))
     return tuple(collisions)
@@ -104,18 +122,16 @@ def reconcile_zone_assignments(
             continue
         destination = _zone_path(roots, assignment.zone, assignment)
         _ensure_directory(_zone_root(roots, assignment.zone), destination)
-        source = next(
-            (
-                path
-                for path in _assignment_paths(roots, assignment)
-                if path != destination and path_has_content(path)
-            ),
-            None,
-        )
+        source = _migration_source(roots, assignment, destination)
         if source is None:
             if path_has_content(destination):
                 _harden_published_directories(destination)
             _remove_empty_source_directories(roots, assignment, destination)
+            continue
+        if _is_migration_aside(source) and path_has_content(destination):
+            _harden_published_directories(destination)
+            shutil.rmtree(source)
+            moves.append(ZoneMove(assignment, source, destination, True))
             continue
         moves.append(
             ZoneMove(
@@ -191,6 +207,50 @@ def _assignment_paths(roots: ZoneRoots, assignment: ZoneAssignment) -> tuple[Pat
     return paths
 
 
+def _migration_source(
+    roots: ZoneRoots, assignment: ZoneAssignment, destination: Path
+) -> Path | None:
+    source_paths = tuple(
+        path for path in _assignment_paths(roots, assignment) if path != destination
+    )
+    for path in (*source_paths, *(_migration_aside(path) for path in source_paths)):
+        if path_has_content(path):
+            return path
+    return None
+
+
+def _migration_asides(
+    roots: ZoneRoots, assignment: ZoneAssignment, destination: Path
+) -> tuple[Path, ...]:
+    return tuple(
+        _migration_aside(path)
+        for path in _assignment_paths(roots, assignment)
+        if path != destination
+    )
+
+
+def _migration_aside(source: Path) -> Path:
+    return source.with_name(f"{MIGRATING_ZONE_PREFIX}{source.name}")
+
+
+def _is_migration_aside(path: Path) -> bool:
+    return path.name.startswith(MIGRATING_ZONE_PREFIX)
+
+
+def _is_recoverable_published_aside(populated_paths: tuple[Path, ...], destination: Path) -> bool:
+    if len(populated_paths) != 2 or destination not in populated_paths:
+        return False
+    aside = next(path for path in populated_paths if path != destination)
+    return (
+        _is_migration_aside(aside)
+        and aside.is_dir()
+        and not aside.is_symlink()
+        and destination.is_dir()
+        and not destination.is_symlink()
+        and _trees_match(aside, destination)
+    )
+
+
 def _reject_symlinked_components(root: Path, path: Path) -> None:
     current = root
     if current.is_symlink():
@@ -261,23 +321,32 @@ def _move_directory(source: Path, destination: Path, before_publish: BeforePubli
 def _copy_then_publish(
     source: Path, destination: Path, before_publish: BeforePublish | None
 ) -> None:
+    migrating_source = _rename_source_aside(source)
     staging_parent = Path(tempfile.mkdtemp(prefix=".djinn-zone-migrate-", dir=destination.parent))
     staged_tree = staging_parent / "tree"
     try:
-        shutil.copytree(source, staged_tree, symlinks=True)
-        if not _trees_match(source, staged_tree):
-            msg = f"Zone migration verification failed for {source}"
+        shutil.copytree(migrating_source, staged_tree, symlinks=True)
+        if not _trees_match(migrating_source, staged_tree):
+            msg = f"Zone migration verification failed for {migrating_source}"
             raise ZoneConfigurationError(msg)
         if before_publish is not None:
             before_publish()
         os.replace(staged_tree, destination)
         _harden_published_directories(destination)
-        if not _trees_match(source, destination):
-            msg = f"Zone migration source changed during publish: {source}"
-            raise ZoneConfigurationError(msg)
-        shutil.rmtree(source)
+        shutil.rmtree(migrating_source)
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
+
+
+def _rename_source_aside(source: Path) -> Path:
+    if _is_migration_aside(source):
+        return source
+    aside = _migration_aside(source)
+    if aside.exists() or aside.is_symlink():
+        msg = f"Zone migration reserved source already exists: {aside}"
+        raise ZoneConfigurationError(msg)
+    os.replace(source, aside)
+    return aside
 
 
 def _trees_match(source: Path, copied: Path) -> bool:

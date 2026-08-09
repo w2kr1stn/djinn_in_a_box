@@ -86,6 +86,22 @@ def test_drift_accounts_for_intermediate_assignment_segments(zone_config: AppCon
     assert str(agent_root / "plugins") not in row.detail
 
 
+def test_drift_ignores_a_reserved_migration_aside(zone_config: AppConfig) -> None:
+    roots = resolve_zone_roots(zone_config)
+    agent_root = roots.config_root / "claude"
+    aside = agent_root / ".djinn-migrating-jobs"
+    aside.mkdir(parents=True)
+    unexpected = agent_root / "new-agent-directory"
+    unexpected.mkdir()
+
+    checks = doctor_mod.run_checks(zone_config)
+
+    row = _check_named(checks, "Zone drift")
+    assert row.status is doctor_mod.Status.WARN
+    assert str(unexpected) in row.detail
+    assert str(aside) not in row.detail
+
+
 def test_doctor_reports_large_direct_files_and_loose_zone_permissions(
     zone_config: AppConfig,
 ) -> None:

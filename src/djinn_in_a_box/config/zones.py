@@ -22,6 +22,8 @@ from djinn_in_a_box.core.paths import ZONES_FILE
 
 type ZoneName = Literal["local", "shared"]
 _ZONE_NAMES: Final[tuple[ZoneName, ...]] = ("local", "shared")
+MIGRATING_ZONE_PREFIX: Final[str] = ".djinn-migrating-"
+"""Reserved directory prefix for an in-progress cross-filesystem migration."""
 
 ZONE_CONTAINER_TARGETS: Final[dict[str, Path]] = {
     "claude": Path("/home/dev/.claude"),
@@ -99,6 +101,9 @@ def _validate_relative_path(agent: str, zone: ZoneName, raw_path: str) -> Path:
         raise ZoneConfigurationError(msg)
     if not raw_path or any(part in {"", ".", ".."} for part in parts):
         msg = f"Zone assignment for {agent}.{zone} contains an invalid path component: {raw_path!r}"
+        raise ZoneConfigurationError(msg)
+    if any(part.startswith(MIGRATING_ZONE_PREFIX) for part in parts):
+        msg = f"Zone assignment for {agent}.{zone} uses a reserved migration path: {raw_path!r}"
         raise ZoneConfigurationError(msg)
     return path
 
