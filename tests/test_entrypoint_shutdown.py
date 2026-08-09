@@ -54,10 +54,11 @@ def _harness(tmp_path: Path) -> Path:
         'OPENCODE_PERSISTENT_SETTINGS="/dev/null"\n'
         'reverse_sync_file() { echo "file:$1" >> "$SYNC_LOG"; }\n'
         'reverse_sync_claude_settings() { echo "claude:$1" >> "$SYNC_LOG"; }\n'
-        # Echoed rather than silenced: the no-TTY path reports through these, and
-        # a stub that swallows them would hide whether it reported at all.
-        'ui_warn() { echo "[warn] $*" >&2; }\n'
-        'ui_item() { echo "[item] $*" >&2; }\n'
+        # The real UI library, not stubs. Variadic `$*` stubs accept any arity and
+        # would hide an arity or `set -u` violation in the section under test —
+        # which is exactly how a one-argument `ui_item` call reached production and
+        # survived a full review round.
+        f'source "{ROOT / "scripts" / "output-lib.sh"}"\n'
         "\n" + _shutdown_section(),
         encoding="utf-8",
     )

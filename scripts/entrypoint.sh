@@ -278,7 +278,7 @@ if [[ $# -eq 0 && ! -t 0 ]]; then
     # shell without a terminal anyway, while `djinn enter` (docker exec, which
     # brings its own TTY) works perfectly against a live container.
     ui_warn "No TTY available — not starting an interactive shell."
-    ui_item "The container stays up; attach with: djinn enter"
+    ui_info "The container stays up; attach with: djinn enter"
     sleep infinity &
     DJINN_SHELL_PID=$!
 else

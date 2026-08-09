@@ -698,9 +698,12 @@ backed by named volumes.
   background process group. `docker compose run` allocates a TTY and calls
   `tcsetattr()` on it; from the background that raises SIGTTOU unconditionally
   (the `tostop` flag gates background *writes*, not attribute changes), Compose
-  forwards the signal into the container, and container PID 1 installs no SIGTTOU
-  handler. `djinn start ... &` is exactly that shape and produces a signal storm
-  of tens of events per second, which also floods Docker's event ring buffer.
+  forwards the signals into the container. `djinn start ... &` is exactly that
+  shape and produces tens of events per second. Container PID 1 is not what dies —
+  namespace init discards a signal it has no handler for, and a container was
+  observed surviving 45+ minutes under continuous SIGTTOU. What the storm does is
+  flood Docker's event ring buffer (hence the missing logs) and stop the host-side
+  compose client, after which `--rm` reaps the container.
   `is_background_process_group()` compares `os.tcgetpgrp(stdin)` against
   `os.getpgrp()` and returns False when stdin is not a TTY or there is no
   controlling terminal, so `< /dev/null`, pipes, and `setsid` are not blocked.

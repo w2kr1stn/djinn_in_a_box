@@ -707,8 +707,10 @@ def is_background_process_group() -> bool:
     Compose allocates a TTY and calls ``tcsetattr()`` on it. From a *background*
     process group that raises SIGTTOU unconditionally — the ``tostop`` terminal
     flag gates background *writes*, not terminal-attribute changes — and Compose
-    forwards the signal into the container. Container PID 1 installs no SIGTTOU
-    handler, so the default action (stop) applies and the container dies silently.
+    forwards the signals into the container by the tens per second. Container PID 1
+    survives them — namespace init discards a signal it has no handler for — but the
+    storm floods Docker's event ring buffer and stops the *host-side* compose client,
+    and once that client is gone ``--rm`` reaps the container: no exit code, no log.
 
     ``djinn start ... &`` is precisely that shape: ``&`` puts the process group in
     the background while stdin stays attached to the terminal.
@@ -929,7 +931,8 @@ def compose_up_detached(
     This path exists because ``compose run`` keeps a host-side foreground client
     attached to a TTY for as long as the container lives. Backgrounding that
     client (``djinn start ... &``) turns every terminal-attribute call into a
-    SIGTTOU that Compose forwards into the container, stopping PID 1 — see
+    SIGTTOU storm that ends with the host-side client stopped and ``--rm`` reaping
+    the container — see
     ``is_background_process_group``. ``up -d`` leaves no client behind at all.
 
     ``run`` accepts per-invocation ``-v``/``--workdir``/``-e`` flags; ``up`` does

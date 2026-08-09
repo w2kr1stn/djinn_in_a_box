@@ -1802,7 +1802,8 @@ class TestBackgroundProcessGroupGuard:
 
     A backgrounded TTY-attached compose client turns every terminal-attribute
     call into SIGTTOU, which Compose forwards into the container until PID 1 —
-    which installs no handler for it — stops. The guard refuses that shape.
+    which floods Docker's event ring buffer and stops the host-side compose client,
+    after which `--rm` reaps the container. The guard refuses that shape.
     """
 
     @staticmethod

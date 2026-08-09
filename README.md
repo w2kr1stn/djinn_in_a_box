@@ -27,7 +27,8 @@ Djinn gives you one repeatable container image and several ways to use it:
   the background with `djinn start --detach` and attach to it later with
   `djinn enter`. Do not background the interactive form with `&`: that leaves a
   TTY-attached Compose client in a background process group, which storms the
-  container with SIGTTOU until it dies. `djinn start` refuses that shape.
+  container with SIGTTOU until its host-side client is stopped and `--rm` reaps
+  it. `djinn start` refuses that shape.
 - Run a one-shot agent prompt with `djinn run`.
 - Attach another shell to a running container with `djinn enter`.
 - Keep reusable session workspaces under `~/.djinn/sessions/` with

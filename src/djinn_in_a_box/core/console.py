@@ -54,8 +54,12 @@ def print_captured(text: str, *, err: bool = True, end: str = "") -> None:
     Rich consumes anything shaped like a tag, and Docker's `[internal]`, `[auth]`
     and `[dev 3/25]` stage markers are exactly that — the part that locates a
     failing build step, deleted without a trace. ``soft_wrap`` additionally stops
-    long paths from being hard-wrapped mid-token, so what is printed is what the
-    subprocess wrote.
+    long paths from being hard-wrapped mid-token.
+
+    Not byte-exact, and deliberately not claimed to be: Rich still strips control
+    characters — including the ``\\r`` that redraw-in-place progress output relies
+    on — and expands tabs. Writing to ``target.file`` would be the fix if verbatim
+    ever becomes the requirement.
     """
     target = err_console if err else console
     target.print(text, end=end, markup=False, highlight=False, soft_wrap=True)
