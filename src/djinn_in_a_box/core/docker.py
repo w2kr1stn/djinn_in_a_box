@@ -713,20 +713,30 @@ def is_background_process_group() -> bool:
     and once that client is gone ``--rm`` reaps the container: no exit code, no log.
 
     ``djinn start ... &`` is precisely that shape: ``&`` puts the process group in
-    the background while stdin stays attached to the terminal.
+    the background while a standard stream stays attached to the terminal.
 
-    Returns False when stdin is not a TTY (``< /dev/null``, a pipe, pytest's
-    capture): with no terminal there is no foreground group to be outside of, and
-    no SIGTTOU can be raised.
+    All three standard streams are checked, and stdout is not optional: Compose
+    decides TTY allocation from the *client's stdout*, so
+    ``djinn start < /dev/null &`` keeps a terminal on stdout, gets a TTY, and
+    storms — while a stdin-only test would call it safe. Redirecting *every*
+    stream (``> log 2>&1 < /dev/null``) genuinely cannot storm, because Compose
+    then allocates no TTY at all.
+
+    Returns False when no standard stream is a TTY (pipes, ``< /dev/null`` with
+    output redirected, pytest's capture) or when there is no controlling terminal
+    (``setsid``): with no terminal there is no foreground group to be outside of,
+    and no SIGTTOU can be raised.
     """
-    try:
-        fd = sys.stdin.fileno()
-        if not os.isatty(fd):
-            return False
-        return os.tcgetpgrp(fd) != os.getpgrp()
-    except (AttributeError, ValueError, OSError):
-        # No usable stdin (closed, replaced, or no controlling terminal).
-        return False
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            fd = stream.fileno()
+            if os.isatty(fd) and os.tcgetpgrp(fd) != os.getpgrp():
+                return True
+        except (AttributeError, ValueError, OSError):
+            # This stream is unusable (closed, replaced, or no controlling
+            # terminal). It cannot raise SIGTTOU, so it cannot decide the answer.
+            continue
+    return False
 
 
 def compose_run(

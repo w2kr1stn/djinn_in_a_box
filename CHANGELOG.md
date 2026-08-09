@@ -19,8 +19,9 @@ Versioning before and after the first stable release.
   Because `up -d` exits 0 as soon as the container is created and says nothing
   about what the entrypoint did next, the command verifies the container is
   actually running before reporting success, and points at `docker logs djinn`
-  when it is not. Captured Docker output is printed verbatim rather than through
-  Rich markup, which would silently delete the bracketed BuildKit stage tags.
+  when it is not. Captured Docker output is printed without markup interpretation
+  rather than through Rich's parser, which would silently delete the bracketed
+  BuildKit stage tags.
 - Guard against starting an interactive container from a background process
   group. `djinn start ... &` left a TTY-attached Compose client in the
   background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
@@ -70,11 +71,16 @@ Versioning before and after the first stable release.
 ### Fixed
 
 - Captured Docker output is no longer mangled by Rich. Every command that echoes
-  a subprocess's stdout/stderr now routes through `print_captured()`, which
-  disables markup, highlighting and re-wrapping. Previously Rich consumed
-  anything shaped like a tag, so `djinn build`'s BuildKit log lost exactly the
-  `[internal]` / `[dev 3/25]` stage markers that locate a failing step, and long
-  paths were hard-wrapped mid-token.
+  a subprocess's stdout/stderr as its own output — `build`, `start`, `clean`,
+  `run`, `session`, `mcp` — now routes through `print_captured()`, which disables
+  markup, highlighting and re-wrapping. Previously Rich consumed anything shaped
+  like a tag, so `djinn build`'s BuildKit log lost exactly the `[internal]` /
+  `[dev 3/25]` stage markers that locate a failing step, and long paths were
+  hard-wrapped mid-token. Note two limits: `backup`/`restore` still embed Docker's
+  stderr inside a formatted `error(...)` line, where it stays subject to markup;
+  and `print_captured` is not byte-verbatim — Rich still strips control characters
+  (including the `\r` that redraw-in-place progress output relies on) and expands
+  tabs.
 - `djinn start --detach` no longer implies a readiness it cannot verify. `up -d`
   returns as soon as the container is created, while seeding runs for roughly
   another 30 seconds, so the check confirms only that the container did not die

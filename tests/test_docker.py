@@ -1801,9 +1801,10 @@ class TestBackgroundProcessGroupGuard:
     """``djinn start ... &`` must fail fast instead of storming the container.
 
     A backgrounded TTY-attached compose client turns every terminal-attribute
-    call into SIGTTOU, which Compose forwards into the container until PID 1 —
-    which floods Docker's event ring buffer and stops the host-side compose client,
-    after which `--rm` reaps the container. The guard refuses that shape.
+    call into SIGTTOU. Container PID 1 survives those — namespace init discards a
+    signal it has no handler for — but the storm floods Docker's event ring buffer
+    and stops the host-side compose client, after which `--rm` reaps the
+    container. The guard refuses that shape.
     """
 
     @staticmethod
@@ -1819,23 +1820,40 @@ class TestBackgroundProcessGroupGuard:
         isatty: bool,
         foreground: bool = True,
         no_controlling_terminal: bool = False,
+        tty_fds: frozenset[int] | None = None,
     ) -> None:
-        class _Stdin:
+        """Drive all three standard streams.
+
+        ``tty_fds`` overrides ``isatty`` per descriptor (0=stdin, 1=stdout,
+        2=stderr) so the streams can disagree — which is the whole point, because
+        Compose picks its TTY from stdout while the storm needs any terminal.
+        """
+
+        class _Stream:
+            def __init__(self, fd: int) -> None:
+                self._fd = fd
+
             def fileno(self) -> int:
-                return 0
+                return self._fd
+
+            def isatty(self) -> bool:
+                # `_host_terminal_width()` asks the stream directly, not os.isatty.
+                return _isatty(self._fd)
 
         def _tcgetpgrp(_fd: int) -> int:
             if no_controlling_terminal:
                 raise OSError("no controlling terminal")
             return 4242 if foreground else 9999
 
-        def _isatty(_fd: int) -> bool:
-            return isatty
+        def _isatty(fd: int) -> bool:
+            return isatty if tty_fds is None else fd in tty_fds
 
         def _getpgrp() -> int:
             return 4242
 
-        monkeypatch.setattr(docker_mod.sys, "stdin", _Stdin())
+        monkeypatch.setattr(docker_mod.sys, "stdin", _Stream(0))
+        monkeypatch.setattr(docker_mod.sys, "stdout", _Stream(1))
+        monkeypatch.setattr(docker_mod.sys, "stderr", _Stream(2))
         monkeypatch.setattr(docker_mod.os, "isatty", _isatty)
         monkeypatch.setattr(docker_mod.os, "getpgrp", _getpgrp)
         monkeypatch.setattr(docker_mod.os, "tcgetpgrp", _tcgetpgrp)
@@ -1848,8 +1866,20 @@ class TestBackgroundProcessGroupGuard:
         self._stdin_state(monkeypatch, isatty=True, foreground=True)
         assert not is_background_process_group()
 
-    def test_ignores_non_tty_stdin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`< /dev/null` detaches stdin from the terminal, so no SIGTTOU is possible."""
+    def test_detects_background_when_only_stdout_is_a_terminal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`djinn start < /dev/null &` — the shape a stdin-only guard waves through.
+
+        Compose selects TTY allocation from the *client's stdout*, so redirecting
+        only stdin still yields a terminal, a background process group, and the
+        storm. The entrypoint's no-TTY fallback does not help here: a TTY exists.
+        """
+        self._stdin_state(monkeypatch, isatty=True, foreground=False, tty_fds=frozenset({1, 2}))
+        assert is_background_process_group()
+
+    def test_ignores_non_tty_streams(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`< /dev/null > log 2>&1` leaves no terminal at all, so nothing can storm."""
         self._stdin_state(monkeypatch, isatty=False, foreground=False)
         assert not is_background_process_group()
 

@@ -704,17 +704,21 @@ backed by named volumes.
   observed surviving 45+ minutes under continuous SIGTTOU. What the storm does is
   flood Docker's event ring buffer (hence the missing logs) and stop the host-side
   compose client, after which `--rm` reaps the container.
-  `is_background_process_group()` compares `os.tcgetpgrp(stdin)` against
-  `os.getpgrp()` and returns False when stdin is not a TTY or there is no
-  controlling terminal, so `< /dev/null`, pipes, and `setsid` are not blocked.
-  Headless runs pass `-T`, allocate no TTY, and are never blocked.
+  `is_background_process_group()` compares `os.tcgetpgrp(fd)` against
+  `os.getpgrp()` for **each of stdin, stdout and stderr**, and returns True as
+  soon as any of them is a terminal whose foreground group is not ours. Checking
+  stdout is not optional: Compose picks TTY allocation from the *client's stdout*,
+  so `djinn start < /dev/null &` still gets a terminal and still storms, while a
+  stdin-only test would wave it through. Redirecting every stream
+  (`< /dev/null > log 2>&1`) is genuinely safe, because Compose then allocates no
+  TTY. `setsid` is likewise not blocked — with no controlling terminal the kernel
+  raises no SIGTTOU. Headless runs pass `-T`, allocate no TTY, and are never
+  blocked.
 
-  Not blocked is not the same as recommended, and the guard is deliberately not
-  the only defence. It keys on **stdin**, while Compose decides TTY allocation
-  from the **client's stdout** — so `setsid djinn start … > log 2>&1 &` slips
-  past it and yields a container with no TTY at all. That is why the entrypoint
-  closes the class on its own side (see *Container-Side Seed and Merge*): with no
-  terminal it keeps the container up instead of exiting. `--detach` remains the
+  Not blocked is not the same as supported, and the guard is deliberately not the
+  only defence: any shape that ends with no TTY inside the container is handled on
+  the container side instead (see *Container-Side Seed and Merge*), where the
+  entrypoint keeps the container up rather than exiting. `--detach` remains the
   supported way to background a session.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
