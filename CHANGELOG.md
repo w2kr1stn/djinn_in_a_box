@@ -26,8 +26,15 @@ Versioning before and after the first stable release.
   background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
   signal into the container, producing tens of events per second and flooding
   Docker's event ring buffer. `djinn start` now fails with an explanation and
-  points at `--detach`, a foreground start, or `setsid`. Non-TTY stdin, absent
-  controlling terminals, and headless `-T` runs are unaffected.
+  points at `--detach` or a foreground start. Non-TTY stdin, absent controlling
+  terminals, and headless `-T` runs are unaffected.
+- The entrypoint no longer exits when it has no terminal. An interactive shell
+  cannot run without one — zsh reads EOF and returns immediately, which used to
+  take the container down with exit code 0 and an empty log. Since
+  `docker compose run` picks `-T` from the *client's stdout*, redirecting output
+  was enough to trigger that, whatever stdin did. The container now stays up and
+  says why, so `djinn enter` (which brings its own TTY) still works, and a later
+  `docker stop` still reaches the reverse-sync.
 - Persistent `age` encryption identity store: `${DJINN_CONFIG_ROOT}/age` is
   provisioned as a credential directory and bind-mounted at `~/.config/age`, so
   `age` keys survive container restarts and are captured by `djinn backup`

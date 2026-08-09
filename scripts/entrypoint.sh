@@ -266,12 +266,29 @@ trap '_djinn_on_termination_signal 2' INT
 # Fence set -e around the interactive shell: a non-zero shell exit must NOT abort
 # the script before EXIT_CODE capture + reverse-sync (else settings persistence is silently skipped).
 set +e
-exec 3<&0
-/bin/zsh "$@" <&3 3<&- &
-DJINN_SHELL_PID=$!
+if [[ $# -eq 0 && ! -t 0 ]]; then
+    # An interactive shell was requested but there is no terminal to drive it, so
+    # zsh would read EOF and exit within milliseconds — PID 1 would follow and the
+    # container would vanish with exit code 0 and nothing in its log. That is the
+    # whole failure class this guard closes, and it has more entrances than it
+    # looks: `docker compose run` picks `-T` from the *client's stdout*, so merely
+    # redirecting output is enough to land here, no matter what stdin does.
+    #
+    # Staying alive is strictly better than dying silently: nobody can use PID 1's
+    # shell without a terminal anyway, while `djinn enter` (docker exec, which
+    # brings its own TTY) works perfectly against a live container.
+    ui_warn "No TTY available — not starting an interactive shell."
+    ui_item "The container stays up; attach with: djinn enter"
+    sleep infinity &
+    DJINN_SHELL_PID=$!
+else
+    exec 3<&0
+    /bin/zsh "$@" <&3 3<&- &
+    DJINN_SHELL_PID=$!
+    exec 3<&-
+fi
 wait "$DJINN_SHELL_PID"
 EXIT_CODE=$?
-exec 3<&-
 set -e
 
 persist_session_state

@@ -689,14 +689,14 @@ BACKGROUND_START_ERROR = (
     "Refusing to start an interactive container from a background process group.\n"
     "\n"
     "`docker compose run` allocates a TTY, and every terminal-attribute call from the\n"
-    "background raises SIGTTOU. Compose forwards that signal to the container, and PID 1\n"
-    "installs no SIGTTOU handler, so its default action (stop) takes the container down —\n"
-    "no exit code, no log, while the retry loop emits tens of signals per second.\n"
+    "background raises SIGTTOU. Compose forwards those signals into the container by the\n"
+    "tens per second, which floods Docker's event ring buffer and stops the host-side\n"
+    "compose client — and once that client is gone, `--rm` reaps the container. No exit\n"
+    "code, no log.\n"
     "\n"
     "`djinn start ... &` is exactly this shape. Use one of:\n"
     "  djinn start --detach ...        (no TTY client at all; then `djinn enter`)\n"
     "  djinn start ...                 (foreground, e.g. in its own tmux window)\n"
-    "  setsid djinn start ... < /dev/null > ~/djinn.log 2>&1 &\n"
 )
 
 

@@ -529,6 +529,17 @@ SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
   a real pty: a shell launched with `-c <cmd>` never needs a terminal and would
   hide the regression entirely.
 
+- refuses to start an interactive shell when there is no terminal at all, and
+  keeps the container alive instead. This closes a whole class rather than one
+  instance: an interactive zsh without a TTY reads EOF and returns immediately,
+  so PID 1 exits 0 and the container disappears with an empty log — the very
+  signature this work started from. The class has several entrances, and the
+  background-start guard cannot see them all, because it keys on stdin while
+  `docker compose run` selects `-T` from the client's *stdout*. Since nobody can
+  use PID 1's shell without a terminal anyway, while `djinn enter` brings its own
+  TTY through `docker exec`, staying up is strictly better than dying silently.
+  The reverse-sync on `docker stop` works unchanged in that state.
+
 Shell-side startup output is sectioned through `scripts/output-lib.sh`:
 `Seed & Config`, `MCP`, `Tools`, and `Security`. `mcp-register.sh` captures
 third-party CLI output from MCP add/remove commands and passes non-empty output
@@ -692,8 +703,16 @@ backed by named volumes.
   of tens of events per second, which also floods Docker's event ring buffer.
   `is_background_process_group()` compares `os.tcgetpgrp(stdin)` against
   `os.getpgrp()` and returns False when stdin is not a TTY or there is no
-  controlling terminal, so `< /dev/null`, pipes, and `setsid` stay allowed.
+  controlling terminal, so `< /dev/null`, pipes, and `setsid` are not blocked.
   Headless runs pass `-T`, allocate no TTY, and are never blocked.
+
+  Not blocked is not the same as recommended, and the guard is deliberately not
+  the only defence. It keys on **stdin**, while Compose decides TTY allocation
+  from the **client's stdout** — so `setsid djinn start … > log 2>&1 &` slips
+  past it and yields a container with no TTY at all. That is why the entrypoint
+  closes the class on its own side (see *Container-Side Seed and Merge*): with no
+  terminal it keeps the container up instead of exiting. `--detach` remains the
+  supported way to background a session.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with

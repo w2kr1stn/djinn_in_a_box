@@ -54,7 +54,10 @@ def _harness(tmp_path: Path) -> Path:
         'OPENCODE_PERSISTENT_SETTINGS="/dev/null"\n'
         'reverse_sync_file() { echo "file:$1" >> "$SYNC_LOG"; }\n'
         'reverse_sync_claude_settings() { echo "claude:$1" >> "$SYNC_LOG"; }\n'
-        "ui_warn() { :; }\n"
+        # Echoed rather than silenced: the no-TTY path reports through these, and
+        # a stub that swallows them would hide whether it reported at all.
+        'ui_warn() { echo "[warn] $*" >&2; }\n'
+        'ui_item() { echo "[item] $*" >&2; }\n'
         "\n" + _shutdown_section(),
         encoding="utf-8",
     )
@@ -121,6 +124,41 @@ def test_interactive_shell_survives_with_no_arguments(tmp_path: Path) -> None:
         with suppress(ChildProcessError):
             os.waitpid(pid, 0)
         os.close(fd)
+
+
+@requires_zsh
+def test_without_a_tty_the_container_stays_up_instead_of_exiting(tmp_path: Path) -> None:
+    """No terminal must not mean instant death — that is the whole failure class.
+
+    `docker compose run` selects `-T` from the *client's* stdout, so merely
+    redirecting output produces a container without a TTY, whatever stdin does.
+    An interactive shell cannot run there, but `djinn enter` (docker exec, which
+    brings its own TTY) can — so PID 1 stays up and says why, and a later
+    `docker stop` still reaches the reverse-sync.
+    """
+    harness = _harness(tmp_path)
+    sink_path = tmp_path / "output.log"
+    with sink_path.open("w+") as sink:
+        process = subprocess.Popen(
+            [str(harness)],
+            stdin=subprocess.DEVNULL,
+            stdout=sink,
+            stderr=sink,
+            start_new_session=True,
+        )
+        try:
+            time.sleep(1.0)
+            assert process.poll() is None, "entrypoint exited instead of staying up"
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            assert process.wait(timeout=15) == 128 + signal.SIGTERM
+        finally:
+            if process.poll() is None:  # pragma: no cover - only on regression
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                process.wait(timeout=5)
+        sink.seek(0)
+        assert "No TTY available" in sink.read()
+
+    assert len(_sync_lines(tmp_path)) == 3
 
 
 @requires_zsh
