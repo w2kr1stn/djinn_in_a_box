@@ -73,6 +73,16 @@ def _sync_lines(tmp_path: Path) -> list[str]:
     return [line for line in log.read_text(encoding="utf-8").splitlines() if line]
 
 
+def _probe_until_answered(fd: int, deadline: float) -> bool:
+    """Write a probe until the shell answers it, or the deadline passes."""
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        os.write(fd, b"echo PROBE_$((6*7))\n")
+        if _read_until(fd, b"PROBE_42", timeout=1.0):
+            return True
+    return False
+
+
 def _read_until(fd: int, needle: bytes, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     buffer = b""
@@ -115,8 +125,11 @@ def test_interactive_shell_survives_with_no_arguments(tmp_path: Path) -> None:
         assert os.waitpid(pid, os.WNOHANG) == (0, 0), (
             "the shell exited instead of staying up — stdin was not handed over"
         )
-        os.write(fd, b"echo PROBE_$((6*7))\n")
-        assert _read_until(fd, b"PROBE_42", timeout=5.0), (
+        # Retry the probe rather than writing once: on a loaded or low-core runner
+        # zsh's line editor may not have finished initialising after the warm-up,
+        # and its startup tcsetattr flushes anything already typed. Retrying keeps
+        # the assertion identical while removing a load-dependent false red.
+        assert _probe_until_answered(fd, deadline=15.0), (
             "the shell did not evaluate input — it is alive but not interactive"
         )
     finally:
@@ -147,14 +160,21 @@ def test_without_a_tty_the_container_stays_up_instead_of_exiting(tmp_path: Path)
             stderr=sink,
             start_new_session=True,
         )
+        group = os.getpgid(process.pid)
         try:
             time.sleep(1.0)
             assert process.poll() is None, "entrypoint exited instead of staying up"
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            # PID 1 only — `docker stop` does not signal the process group. Sending
+            # to the group would also hit the keeper directly, so a foreground
+            # keeper (the regression `& `+`wait` exists to prevent) would still
+            # look fine.
+            os.kill(process.pid, signal.SIGTERM)
             assert process.wait(timeout=15) == 128 + signal.SIGTERM
         finally:
+            # The keeper is orphaned once PID 1 exits; reap the whole group.
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(group, signal.SIGKILL)
             if process.poll() is None:  # pragma: no cover - only on regression
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                 process.wait(timeout=5)
         sink.seek(0)
         assert "No TTY available" in sink.read()
@@ -247,7 +267,15 @@ def test_sigterm_persists_state_before_exiting(tmp_path: Path) -> None:
 
 @requires_zsh
 def test_sigterm_persists_state_only_once(tmp_path: Path) -> None:
-    """Repeated signals must not re-run the sync — the guard flag is load-bearing."""
+    """Repeated SIGTERMs must not double-write the sync.
+
+    What this does NOT pin, deliberately: zsh blocks a signal while its own
+    handler runs, so same-signal re-entry cannot happen whether or not
+    `_DJINN_STATE_PERSISTED` exists — deleting the flag leaves this green. The
+    flag actually guards the *cross-signal* case (TERM then INT), a known
+    accepted residual of this change, and asserting today's behaviour there
+    would freeze a defect rather than prevent one.
+    """
     process = subprocess.Popen(
         [str(_harness(tmp_path)), "-c", "sleep 60"],
         stdout=subprocess.PIPE,

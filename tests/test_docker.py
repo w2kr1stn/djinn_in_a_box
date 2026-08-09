@@ -2001,6 +2001,31 @@ class TestComposeUpDetached:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_rejects_a_colliding_mount_like_the_foreground_path(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both paths must refuse the same mounts — a divergence is silent damage.
+
+        Without this the detached path would happily bind over `/home/dev/.claude`
+        (or `/proc`) while the identical foreground invocation refuses.
+        """
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        options = ContainerOptions(
+            mounts=(ContainerMount(Path("/host/data"), Path("/home/dev/.claude")),)
+        )
+
+        with pytest.raises(MountCollisionError):
+            compose_up_detached(mock_app_config, options)
+
+        mock_run.assert_not_called()
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_carries_the_env_half_of_the_runtime_mount_pairs(
         self,
         mock_run: MagicMock,

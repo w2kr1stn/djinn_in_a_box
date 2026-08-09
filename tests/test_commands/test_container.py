@@ -53,6 +53,32 @@ class TestBuildCommand:
 
             assert exc_info.value.exit_code == 1
 
+    def test_build_failure_keeps_the_buildkit_stage_tags(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`djinn build` is the command that emits bracketed BuildKit tags.
+
+        Rich reads them as markup and deletes them, taking with it the one token
+        that says which stage failed.
+        """
+        with (
+            patch("djinn_in_a_box.commands.container.load_config"),
+            patch("djinn_in_a_box.commands.container.preflight"),
+            patch("djinn_in_a_box.commands.container._sync_build_files"),
+            patch("djinn_in_a_box.commands.container.compose_build") as mock_build,
+        ):
+            mock_build.return_value = RunResult(
+                returncode=1,
+                stderr="#8 [dev 3/25] RUN apt-get update\n#1 [internal] load metadata\n",
+            )
+
+            with pytest.raises(typer.Exit):
+                container.build()
+
+        captured = capsys.readouterr().err
+        assert "[dev 3/25]" in captured
+        assert "[internal]" in captured
+
     def test_sync_build_files_uses_config_root_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
