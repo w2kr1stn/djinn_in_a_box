@@ -162,6 +162,51 @@ def test_without_a_tty_the_container_stays_up_instead_of_exiting(tmp_path: Path)
 
 
 @requires_zsh
+def test_sigterm_persists_with_an_interactive_shell_running(tmp_path: Path) -> None:
+    """The shape `docker stop` actually meets: PID 1 with a live interactive zsh.
+
+    The SIGTERM tests below drive `-c sleep 60`, whose shell is non-interactive and
+    therefore *does* die on SIGTERM — exactly the property the entrypoint's comment
+    says an interactive shell lacks. A trap rewritten to signal the shell and wait
+    for it would pass those tests and hang here until the grace period expired,
+    losing every setting.
+    """
+    harness = _harness(tmp_path)
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover - the child never returns
+        try:
+            os.execv("/bin/zsh", ["/bin/zsh", str(harness)])
+        finally:
+            os._exit(127)
+
+    try:
+        time.sleep(1.0)
+        assert os.waitpid(pid, os.WNOHANG) == (0, 0), "the interactive shell never came up"
+
+        os.kill(pid, signal.SIGTERM)  # docker stop signals PID 1 only
+        status: int | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            reaped, raw_status = os.waitpid(pid, os.WNOHANG)
+            if reaped:
+                status = raw_status
+                break
+            time.sleep(0.1)
+
+        assert status is not None, "PID 1 did not exit within the grace period"
+        assert os.WIFEXITED(status), "PID 1 was killed rather than exiting through the trap"
+        assert os.WEXITSTATUS(status) == 128 + signal.SIGTERM
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        with suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+        os.close(fd)  # hangs up the orphaned shell still holding the pty
+
+    assert len(_sync_lines(tmp_path)) == 3
+
+
+@requires_zsh
 def test_normal_shell_exit_persists_state_and_keeps_the_exit_code(tmp_path: Path) -> None:
     result = subprocess.run(
         [str(_harness(tmp_path)), "-c", "exit 7"],

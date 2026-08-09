@@ -14,7 +14,7 @@ from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
     prepare_config_workflow,
 )
-from djinn_in_a_box.core.console import console, err_console, error, warning
+from djinn_in_a_box.core.console import err_console, error, print_captured, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility, get_config_root
 from djinn_in_a_box.core.paths import get_project_root
@@ -178,9 +178,9 @@ def session(
                 target=target,
             )
             if result.stdout:
-                console.print(result.stdout, end="")
+                print_captured(result.stdout, err=False)
             if result.stderr:
-                err_console.print(result.stderr, end="")
+                print_captured(result.stderr)
         else:
             # Interactive mode
             if not sys.stdin.isatty():
@@ -193,7 +193,7 @@ def session(
                 target=target,
             )
             if result.stderr:
-                err_console.print(result.stderr, end="")
+                print_captured(result.stderr)
     except ValueError as e:
         error(str(e))
         raise typer.Exit(1) from None

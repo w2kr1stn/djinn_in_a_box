@@ -26,6 +26,7 @@ from djinn_in_a_box.core.console import (
     err_console,
     error,
     info,
+    print_captured,
     rule,
     status_line,
     warning,
@@ -262,10 +263,10 @@ def run(
         raise typer.Exit(1) from None
 
     if result.stdout:
-        console.print(result.stdout, end="")
+        print_captured(result.stdout, err=False)
 
     if result.stderr:
-        err_console.print(result.stderr, end="")
+        print_captured(result.stderr)
 
     raise typer.Exit(result.returncode)
 

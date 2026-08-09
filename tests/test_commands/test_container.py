@@ -205,6 +205,50 @@ class TestStartCommand:
         start_mocks["detached"].assert_called_once()
         start_mocks["run"].assert_not_called()
 
+    def test_start_detached_forwards_every_argument(self, start_mocks: dict[str, Any]) -> None:
+        """`assert_called_once` alone lets --here/--firewall/mounts be dropped silently.
+
+        That is how the audio regression reached production: the override handling
+        was pinned, the delivery of the arguments to it was not.
+        """
+        shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
+        audio_args = ["-v", "/host/pulse:/run/pulse", "-e", "PULSE_SERVER=unix:/run/pulse"]
+        dbus_args = ["-v", "/host/bus:/run/bus:ro"]
+        with (
+            patch(
+                "djinn_in_a_box.commands.container.get_shell_mount_args", return_value=shell_args
+            ),
+            patch(
+                "djinn_in_a_box.commands.container.get_audio_mount_args", return_value=audio_args
+            ),
+            patch("djinn_in_a_box.commands.container.get_dbus_mount_args", return_value=dbus_args),
+            patch(
+                "djinn_in_a_box.commands.container.resolve_container_mounts",
+                return_value=(ContainerMount(Path("/host/here"), Path("/home/dev/workspace")),),
+            ),
+            pytest.raises(typer.Exit),
+        ):
+            container.start(detach=True, firewall=True, here=True)
+
+        options = start_mocks["detached"].call_args[0][1]
+        kwargs = start_mocks["detached"].call_args.kwargs
+        assert options.firewall_enabled is True
+        assert options.mounts[0].target == Path("/home/dev/workspace")
+        assert kwargs["shell_mount_args"] == shell_args
+        assert kwargs["audio_mount_args"] == audio_args
+        assert kwargs["dbus_mount_args"] == dbus_args
+
+    def test_start_detached_stays_silent_when_up_failed(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["detached"].return_value = RunResult(returncode=1, stderr="boom\n")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 1
+        assert "started in the background" not in start_mocks["err_output"].getvalue()
+
     def test_start_detached_keeps_the_docker_proxy_alive(
         self, start_mocks: dict[str, Any]
     ) -> None:
@@ -240,11 +284,11 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         # Both reach stderr in production; the fixture patches console.err_console,
         # so error() lands in err_output while the direct err_console.print does not.
-        assert "exited immediately" in start_mocks["err_output"].getvalue()
+        assert "not running after start" in start_mocks["err_output"].getvalue()
         assert "docker logs djinn" in capsys.readouterr().err
 
     def test_start_prints_captured_docker_output_verbatim(
-        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+        self, start_mocks: dict[str, Any]
     ) -> None:
         """Rich markup would eat the bracketed BuildKit tags that locate a failure."""
         start_mocks["detached"].return_value = RunResult(
@@ -254,7 +298,7 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(detach=True)
 
-        captured = capsys.readouterr().err
+        captured = start_mocks["err_output"].getvalue()
         assert "[dev 3/25]" in captured
         assert "[internal]" in captured
 
@@ -407,16 +451,14 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         assert "Internal runtime mount construction failed" in start_mocks["err_output"].getvalue()
 
-    def test_start_prints_compose_stderr(
-        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_start_prints_compose_stderr(self, start_mocks: dict[str, Any]) -> None:
         start_mocks["run"].return_value = RunResult(returncode=127, stderr="docker missing\n")
 
         with pytest.raises(typer.Exit) as exc_info:
             container.start()
 
         assert exc_info.value.exit_code == 127
-        assert "docker missing" in capsys.readouterr().err
+        assert "docker missing" in start_mocks["err_output"].getvalue()
 
     def test_start_uses_the_common_mount_path_validation(
         self, start_mocks: dict[str, Any], tmp_path: Path

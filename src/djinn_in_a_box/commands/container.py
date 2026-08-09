@@ -25,6 +25,7 @@ from djinn_in_a_box.core.console import (
     err_console,
     error,
     info,
+    print_captured,
     rule,
     status_line,
     success,
@@ -114,7 +115,7 @@ def build(
     else:
         error(f"Build failed with exit code {result.returncode}")
         if result.stderr:
-            err_console.print(result.stderr)
+            print_captured(result.stderr)
         raise typer.Exit(result.returncode)
 
 
@@ -309,19 +310,21 @@ def start(
         # Captured Docker output is data, not markup. Rich would silently delete
         # every bracketed token — `[internal]`, `[auth]`, `[dev 3/25]` — which is
         # exactly the part that locates a failing build step.
-        err_console.print(result.stderr, end="", markup=False, highlight=False)
+        print_captured(result.stderr)
 
     if detach and result.success:
-        # `up -d` exits 0 once the container is created; it observes nothing that
-        # happens afterwards, and the dev service has no healthcheck. Without this
-        # an entrypoint abort still prints a green checkmark and the user is sent
-        # to `djinn enter`, which then reports no container and no reason.
+        # `up -d` exits 0 the moment the container is created and observes nothing
+        # afterwards; the dev service has no healthcheck. This catches a container
+        # that is already gone, and nothing more — seeding runs for ~30s after
+        # this point, so an abort in that window is invisible from here. Hence
+        # "started", never "ready", and a pointer at the log rather than a claim.
         if not is_container_running("djinn"):
-            error("Container exited immediately after starting.")
+            error("Container is not running after start.")
             err_console.print("Inspect the cause with: docker logs djinn")
             raise typer.Exit(1)
         blank()
         success("Container started in the background.")
+        info("Initialization runs for ~30s; follow it with: docker logs -f djinn")
         info("Attach with: djinn enter")
         info("Stop with:   djinn clean")
 
@@ -534,7 +537,7 @@ def clean_default(ctx: typer.Context) -> None:
         else:
             error(f"Failed to remove containers (exit code: {result.returncode})")
             if result.stderr:
-                err_console.print(result.stderr)
+                print_captured(result.stderr)
             raise typer.Exit(result.returncode)
 
 

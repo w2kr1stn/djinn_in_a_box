@@ -69,6 +69,18 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Captured Docker output is no longer mangled by Rich. Every command that echoes
+  a subprocess's stdout/stderr now routes through `print_captured()`, which
+  disables markup, highlighting and re-wrapping. Previously Rich consumed
+  anything shaped like a tag, so `djinn build`'s BuildKit log lost exactly the
+  `[internal]` / `[dev 3/25]` stage markers that locate a failing step, and long
+  paths were hard-wrapped mid-token.
+- `djinn start --detach` no longer implies a readiness it cannot verify. `up -d`
+  returns as soon as the container is created, while seeding runs for roughly
+  another 30 seconds, so the check confirms only that the container did not die
+  immediately; the message now says "started", points at `docker logs -f djinn`
+  for the initialization, and reports an unverified container as "not running"
+  rather than asserting it exited.
 - Settings are no longer lost when the container is stopped rather than exited.
   `entrypoint.sh` ran its reverse-sync only after the interactive shell returned,
   so `docker stop` — the only shutdown a detached container ever gets — killed
