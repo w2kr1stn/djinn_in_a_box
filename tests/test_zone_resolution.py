@@ -260,6 +260,14 @@ def test_zone_assignments_reject_absolute_and_traversal_paths(tmp_path: Path, pa
         load_zone_assignments(_config(tmp_path), path=zones_file)
 
 
+def test_zone_assignments_reject_reserved_migration_paths(tmp_path: Path) -> None:
+    zones_file = tmp_path / "zones.toml"
+    zones_file.write_text('[zones.claude]\nlocal = [".djinn-migrating-jobs"]\n')
+
+    with pytest.raises(ZoneConfigurationError, match="reserved migration path"):
+        load_zone_assignments(_config(tmp_path), path=zones_file)
+
+
 def test_zone_assignments_reject_symlinked_components(tmp_path: Path) -> None:
     config = _config(tmp_path)
     target = tmp_path / "outside"

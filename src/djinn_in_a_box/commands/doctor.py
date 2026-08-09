@@ -25,7 +25,12 @@ from rich.text import Text
 
 from djinn_in_a_box.config.defaults import KNOWN_CONFIG_ROOT_ENTRIES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.config.zones import ZoneAssignment, ZoneAssignments, load_zone_assignments
+from djinn_in_a_box.config.zones import (
+    MIGRATING_ZONE_PREFIX,
+    ZoneAssignment,
+    ZoneAssignments,
+    load_zone_assignments,
+)
 from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.docker import (
@@ -303,7 +308,11 @@ def _zone_drift_entries(config: AppConfig, assignments: ZoneAssignments) -> tupl
             children = tuple(agent_root.iterdir())
         except OSError:
             continue
-        drift.extend(child for child in children if child.name not in accounted)
+        drift.extend(
+            child
+            for child in children
+            if child.name not in accounted and not child.name.startswith(MIGRATING_ZONE_PREFIX)
+        )
     return tuple(drift)
 
 

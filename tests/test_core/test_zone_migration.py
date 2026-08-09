@@ -53,12 +53,13 @@ def test_cross_filesystem_migration_stages_on_destination_filesystem(
     source.mkdir(parents=True)
     (source / "state.json").write_text("copy me")
     target = roots.local_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
     original_replace = zone_migration.os.replace
     original_mkdtemp = zone_migration.tempfile.mkdtemp
     staging_dirs: list[Path] = []
 
     def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
-        if Path(source_path) == source:
+        if Path(source_path) == source and Path(destination_path) == target:
             raise OSError(errno.EXDEV, "Cross-device link")
         original_replace(source_path, destination_path)
 
@@ -80,7 +81,47 @@ def test_cross_filesystem_migration_stages_on_destination_filesystem(
     assert result.moves[0].copied_across_filesystems
     assert staging_dirs == [target.parent]
     assert not source.exists()
+    assert not aside.exists()
     assert (target / "state.json").read_text() == "copy me"
+
+
+def test_cross_filesystem_migration_renames_source_aside_before_copy(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    (source / "state.json").write_text("move me")
+    target = roots.local_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
+    original_replace = zone_migration.os.replace
+    original_copytree = zone_migration.shutil.copytree
+    copied_sources: list[Path] = []
+
+    def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
+        if Path(source_path) == source and Path(destination_path) == target:
+            raise OSError(errno.EXDEV, "Cross-device link")
+        original_replace(source_path, destination_path)
+
+    def observe_copytree(
+        source_path: str | Path,
+        destination_path: str | Path,
+        *,
+        symlinks: bool = False,
+    ) -> str | Path:
+        copied_sources.append(Path(source_path))
+        assert not source.exists()
+        return original_copytree(source_path, destination_path, symlinks=symlinks)
+
+    monkeypatch.setattr(zone_migration.os, "replace", replace_with_exdev)
+    monkeypatch.setattr(zone_migration.shutil, "copytree", observe_copytree)
+
+    reconcile_zone_assignments(zone_config)
+
+    assert copied_sources == [aside]
+    assert not source.exists()
+    assert not aside.exists()
+    assert (target / "state.json").read_text() == "move me"
 
 
 @pytest.mark.parametrize("cross_filesystem", (False, True))
@@ -103,7 +144,7 @@ def test_migration_hardens_every_published_directory_without_following_symlinks(
         original_replace = zone_migration.os.replace
 
         def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
-            if Path(source_path) == source:
+            if Path(source_path) == source and Path(destination_path) == target:
                 raise OSError(errno.EXDEV, "Cross-device link")
             original_replace(source_path, destination_path)
 
@@ -117,7 +158,7 @@ def test_migration_hardens_every_published_directory_without_following_symlinks(
     assert stat.S_IMODE(outside.stat().st_mode) == 0o755
 
 
-def test_cross_filesystem_copy_failure_retains_source_for_resume(
+def test_cross_filesystem_copy_failure_resumes_from_the_renamed_aside(
     zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     roots = resolve_zone_roots(zone_config)
@@ -125,11 +166,12 @@ def test_cross_filesystem_copy_failure_retains_source_for_resume(
     source.mkdir(parents=True)
     (source / "state.json").write_text("still here")
     target = roots.local_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
     original_replace = zone_migration.os.replace
     original_copytree = zone_migration.shutil.copytree
 
     def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
-        if Path(source_path) == source:
+        if Path(destination_path) == target and Path(source_path) in {source, aside}:
             raise OSError(errno.EXDEV, "Cross-device link")
         original_replace(source_path, destination_path)
 
@@ -142,7 +184,8 @@ def test_cross_filesystem_copy_failure_retains_source_for_resume(
     with pytest.raises(OSError, match="copy interrupted"):
         reconcile_zone_assignments(zone_config)
 
-    assert (source / "state.json").read_text() == "still here"
+    assert not source.exists()
+    assert (aside / "state.json").read_text() == "still here"
     assert target.is_dir()
     assert not any(target.iterdir())
 
@@ -150,11 +193,14 @@ def test_cross_filesystem_copy_failure_retains_source_for_resume(
     resumed = reconcile_zone_assignments(zone_config)
 
     assert len(resumed.moves) == 1
+    assert resumed.moves[0].source == aside
+    assert resumed.moves[0].copied_across_filesystems
     assert (target / "state.json").read_text() == "still here"
     assert not source.exists()
+    assert not aside.exists()
 
 
-def test_cross_filesystem_publish_change_preserves_both_trees(
+def test_cross_filesystem_migration_blocks_a_write_to_the_original_path_before_cleanup(
     zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     roots = resolve_zone_roots(zone_config)
@@ -162,27 +208,32 @@ def test_cross_filesystem_publish_change_preserves_both_trees(
     source.mkdir(parents=True)
     (source / "state.json").write_text("copied before publish")
     target = roots.local_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
     original_replace = zone_migration.os.replace
-    before_publish_calls = 0
+    original_rmtree = zone_migration.shutil.rmtree
+    cleanup_paths: list[Path] = []
 
     def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
-        if Path(source_path) == source:
+        if Path(source_path) == source and Path(destination_path) == target:
             raise OSError(errno.EXDEV, "Cross-device link")
         original_replace(source_path, destination_path)
 
-    def write_after_verification() -> None:
-        nonlocal before_publish_calls
-        before_publish_calls += 1
-        if before_publish_calls == 2:
-            (source / "written-during-publish.json").write_text("must not be deleted")
+    def inject_write_before_cleanup(path: str | Path, ignore_errors: bool = False) -> None:
+        if Path(path) == aside:
+            cleanup_paths.append(Path(path))
+            with pytest.raises(FileNotFoundError):
+                (source / "written-during-publish.json").write_text("cannot reach source")
+        original_rmtree(path, ignore_errors=ignore_errors)
 
     monkeypatch.setattr(zone_migration.os, "replace", replace_with_exdev)
+    monkeypatch.setattr(zone_migration.shutil, "rmtree", inject_write_before_cleanup)
 
-    with pytest.raises(ZoneConfigurationError, match="changed during publish"):
-        reconcile_zone_assignments(zone_config, before_publish=write_after_verification)
+    result = reconcile_zone_assignments(zone_config)
 
-    assert (source / "state.json").read_text() == "copied before publish"
-    assert (source / "written-during-publish.json").read_text() == "must not be deleted"
+    assert len(result.moves) == 1
+    assert cleanup_paths == [aside]
+    assert not source.exists()
+    assert not aside.exists()
     assert (target / "state.json").read_text() == "copied before publish"
     assert not (target / "written-during-publish.json").exists()
 
