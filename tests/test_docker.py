@@ -28,6 +28,7 @@ from djinn_in_a_box.core.docker import (
     cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
+    compose_down,
     compose_run,
     compose_up_detached,
     delete_volumes,
@@ -1937,6 +1938,48 @@ class TestBackgroundProcessGroupGuard:
         compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
 
         mock_run.assert_called_once()
+
+
+class TestSelfTeardownGuard:
+    """`compose down` must never reap the container it is running inside.
+
+    The docker socket is mounted, so any process in the container can do this to
+    itself. It is not hypothetical: a mutation test that disabled an unrelated
+    guard let `clean_all` through to a real teardown, and `compose down` selects
+    by the project name pinned in docker-compose.yml — so it killed the live
+    session from a throwaway copy of the repo.
+    """
+
+    @staticmethod
+    def _inside(monkeypatch: pytest.MonkeyPatch, *, dockerenv: bool, hostname: str) -> None:
+        monkeypatch.setattr(docker_mod.Path, "exists", lambda self: dockerenv)
+        monkeypatch.setattr(docker_mod.socket, "gethostname", lambda: hostname)
+
+    def test_detects_its_own_container(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._inside(monkeypatch, dockerenv=True, hostname="djinn")
+        assert docker_mod.is_own_container("djinn")
+
+    def test_ignores_a_different_container(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._inside(monkeypatch, dockerenv=True, hostname="some-other-box")
+        assert not docker_mod.is_own_container("djinn")
+
+    def test_ignores_the_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No /.dockerenv means we are on the host, where teardown is the point."""
+        self._inside(monkeypatch, dockerenv=False, hostname="djinn")
+        assert not docker_mod.is_own_container("djinn")
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_compose_down_refuses_from_inside(
+        self, mock_run: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(docker_mod, "is_own_container", lambda _name: True)
+
+        result = compose_down()
+
+        assert result.returncode == 1
+        assert "Refusing to tear down" in result.stderr
+        assert "djinn clean" in result.stderr
+        mock_run.assert_not_called()
 
 
 class TestVolumeSpecsFromMountArgs:

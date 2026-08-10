@@ -99,19 +99,25 @@ class TestComposeEnvBridge:
         compose_build(mock_app_config)
         self._assert_guarded(self._env_of(mock_run), mock_app_config)
 
+    # Teardown from the host: the self-teardown guard is not what this pins, and
+    # the suite may well be running inside the container it would refuse to reap.
+    @patch("djinn_in_a_box.core.docker.is_own_container", return_value=False)
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_compose_down(
-        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
+        self, mock_run: MagicMock, _root: MagicMock, _own: MagicMock, mock_app_config: AppConfig
     ) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)
         self._assert_guarded(self._env_of(mock_run), mock_app_config)
 
+    # Teardown from the host: the self-teardown guard is not what this pins, and
+    # the suite may well be running inside the container it would refuse to reap.
+    @patch("djinn_in_a_box.core.docker.is_own_container", return_value=False)
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_compose_down_removes_orphans(
-        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
+        self, mock_run: MagicMock, _root: MagicMock, _own: MagicMock, mock_app_config: AppConfig
     ) -> None:
         """Teardown must reap one-off containers and undeclared project containers.
 

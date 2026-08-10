@@ -73,6 +73,14 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `compose down` now refuses to reap the container it is running inside. The
+  docker socket is mounted into the dev container, and `docker-compose.yml` pins
+  the project name, so a teardown started from *any* copy of the repo — including
+  a throwaway one — selects the live session's container. That is not theoretical:
+  a mutation test that disabled an unrelated guard let `clean_all` run through to
+  a real teardown and killed the container it was executing in. Teardown from the
+  host is unaffected; from inside, the command explains itself and points at
+  `djinn clean`.
 - A detached container no longer dies when its unused PID-1 shell receives EOF.
   `up -d` gives the container a TTY (the compose file sets `tty: true`) that
   nobody is attached to, and an interactive shell there made the whole session
