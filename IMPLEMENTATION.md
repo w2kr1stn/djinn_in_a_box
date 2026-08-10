@@ -713,9 +713,12 @@ backed by named volumes.
   forwards the signals into the container. `djinn start ... &` is exactly that
   shape and produces tens of events per second. Container PID 1 is not what dies —
   namespace init discards a signal it has no handler for, and a container was
-  observed surviving 45+ minutes under continuous SIGTTOU. What the storm does is
-  flood Docker's event ring buffer (hence the missing logs) and stop the host-side
-  compose client, after which `--rm` reaps the container.
+  observed surviving 45+ minutes under continuous SIGTTOU. What the storm reliably
+  does is load the host and overflow Docker's event ring buffer — which is why the
+  early crashes left no records at all, and why the first usable post-mortem only
+  arrived once the storm was gone. Whether it also ends the container is unproven;
+  the plausible path is the host-side compose client being stopped, after which
+  `--rm` reaps it.
   `is_background_process_group()` compares `os.tcgetpgrp(stdout)` against
   `os.getpgrp()` — **stdout, and only stdout**, because that is what Compose keys
   on: it derives `noTty` from `!dockerCli.Out().IsTerminal()` and allocates a TTY

@@ -162,9 +162,9 @@ def start(
     Use --detach to leave the container running in the background. Do NOT
     background the foreground form with `&`: that keeps a TTY-attached Compose
     client in a background process group, which storms the container with
-    SIGTTOU until its host-side client is stopped and `--rm` reaps it. `djinn start`
-    refuses that shape rather than let it
-    happen. A detached container still persists its settings: the entrypoint
+    SIGTTOU. That floods Docker's event ring buffer, so anything else that goes wrong
+    in the container stops being diagnosable. `djinn start` refuses that shape rather
+    than let it happen. A detached container still persists its settings: the entrypoint
     traps the SIGTERM from `docker stop` and reverse-syncs before exiting.
 
     Examples:

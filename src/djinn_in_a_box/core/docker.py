@@ -691,9 +691,9 @@ BACKGROUND_START_ERROR = (
     "\n"
     "`docker compose run` allocates a TTY, and every terminal-attribute call from the\n"
     "background raises SIGTTOU. Compose forwards those signals into the container by the\n"
-    "tens per second, which floods Docker's event ring buffer and stops the host-side\n"
-    "compose client — and once that client is gone, `--rm` reaps the container. No exit\n"
-    "code, no log.\n"
+    "tens per second. Two effects are measured: the host carries the load, and Docker's\n"
+    "event ring buffer overflows continuously — which erases the very records you would\n"
+    "need to diagnose anything else going wrong in that container.\n"
     "\n"
     "`djinn start ... &` is exactly this shape. Use one of:\n"
     "  djinn start --detach ...        (no TTY client at all; then `djinn enter`)\n"
@@ -709,9 +709,12 @@ def is_background_process_group() -> bool:
     process group that raises SIGTTOU unconditionally — the ``tostop`` terminal
     flag gates background *writes*, not terminal-attribute changes — and Compose
     forwards the signals into the container by the tens per second. Container PID 1
-    survives them — namespace init discards a signal it has no handler for — but the
-    storm floods Docker's event ring buffer and stops the *host-side* compose client,
-    and once that client is gone ``--rm`` reaps the container: no exit code, no log.
+    survives them — namespace init discards a signal it has no handler for. What the
+    storm reliably costs is host load and Docker's event ring buffer, which overflows
+    continuously and takes the diagnostic record with it. Whether it also ends the
+    container is unproven: the plausible path is SIGTTOU stopping the *host-side*
+    compose client, after which ``--rm`` reaps it, but that was never observed
+    directly.
 
     ``djinn start ... &`` is precisely that shape: ``&`` puts the process group in
     the background while a standard stream stays attached to the terminal.
