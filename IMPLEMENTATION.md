@@ -735,7 +735,13 @@ backed by named volumes.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with
-  `compose_down(config=None)`, using best-effort placeholders. `compose_down`
+  `compose_down(config=None)`, using best-effort placeholders. `compose_down()`
+  refuses outright when the container it would reap is the one the process runs
+  in (`is_own_container()`: `/.dockerenv` plus a hostname match against
+  `container_name`). Compose selects by the pinned project name, so a teardown
+  from any copy of the repo — a test sandbox, an agent's scratch checkout — would
+  otherwise destroy the live session, and the socket is mounted so anything in the
+  container can trigger it. Teardown from the host is unaffected. `compose_down`
   passes `--remove-orphans`, without which Compose skips the one-off containers
   that `start` and `run` create and also leaves a proxy from `--docker` behind.
 - `clean_volumes()`: lists or deletes named volume categories and clears

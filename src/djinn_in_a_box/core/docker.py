@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1027,6 +1028,36 @@ def compose_up_detached(
             override_path.unlink(missing_ok=True)
 
 
+SELF_TEARDOWN_ERROR = (
+    "Refusing to tear down the container this process is running inside.\n"
+    "\n"
+    "`docker compose down` selects by project name, which docker-compose.yml pins to\n"
+    "`djinn-in-a-box` — so it reaps the running dev container no matter which copy of\n"
+    "the repo it runs from, including a throwaway one. With the docker socket mounted,\n"
+    "anything in here can do that to itself: a test, an agent, a stray command.\n"
+    "\n"
+    "Run teardown from the host instead:\n"
+    "  djinn clean\n"
+)
+
+
+def is_own_container(name: str) -> bool:
+    """True when ``name`` is the container this process is running inside.
+
+    Cheap and deliberately conservative: ``/.dockerenv`` plus a hostname match,
+    because the compose file sets ``container_name`` and ``hostname`` to the same
+    value. A renamed container falls through and is not protected — best-effort is
+    the right trade here, since the alternative costs a Docker round-trip on every
+    teardown.
+    """
+    try:
+        if not Path("/.dockerenv").exists():
+            return False
+        return socket.gethostname() == name
+    except OSError:
+        return False
+
+
 def compose_down(config: AppConfig | None = None) -> RunResult:
     """Stop and remove the project's containers.
 
@@ -1042,7 +1073,13 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
     declare — a proxy left by ``--docker``, or a service dropped in an upgrade.
     Those two are transient; the one-off case is permanent. Do not drop the flag
     on the reasoning that ``cleanup_docker_proxy`` already covers the proxy.
+
+    Refuses outright when the container it would reap is the one this process runs
+    in — that is always self-destruction, never intent.
     """
+    if is_own_container(_SERVICE_CONTAINER_NAMES.get("dev", "djinn")):
+        return RunResult(returncode=1, stderr=SELF_TEARDOWN_ERROR)
+
     project_root = get_project_root()
     compose_files = get_compose_files()
     return _run_compose(
