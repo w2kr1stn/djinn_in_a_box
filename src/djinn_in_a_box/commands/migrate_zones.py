@@ -33,9 +33,9 @@ def migrate_zones() -> None:
     """Move assigned agent paths out of the backed-up config root."""
     config = load_config()
     roots = ensure_zone_roots(config)
+    _guard_no_containers_running()
     try:
         with config_directory_lock(roots.local_root, exclusive=True, blocking=False):
-            _guard_no_containers_running()
             assignments = load_zone_assignments(config)
             typer.confirm(
                 "Migration removes paths from the config root, which your mirroring layer "

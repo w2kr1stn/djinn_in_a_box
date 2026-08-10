@@ -5,6 +5,7 @@ import os
 import re
 import socket
 import subprocess
+import tarfile
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -60,6 +61,63 @@ from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 
 def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
     return []
+
+
+def _deny_empty_placeholder_removal(
+    monkeypatch: pytest.MonkeyPatch, placeholder: Path
+) -> None:
+    original_rmdir = docker_mod.os.rmdir
+
+    def deny_placeholder_removal(path: str, *, dir_fd: int | None = None) -> None:
+        if Path(path).name == placeholder.name:
+            raise PermissionError("Docker-owned mount placeholder")
+        original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(docker_mod.os, "rmdir", deny_placeholder_removal)
+
+
+def test_clear_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_path = tmp_path / "claude"
+    placeholder = sync_path / "plugins" / "marketplaces"
+    placeholder.mkdir(parents=True)
+    removable = sync_path / "credentials.json"
+    removable.write_text("remove me")
+    _deny_empty_placeholder_removal(monkeypatch, placeholder)
+
+    assert clear_sync_path(sync_path) is True
+    assert placeholder.is_dir()
+    assert not removable.exists()
+
+
+def test_restore_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "config"
+    sync_path = config_root / "claude"
+    placeholder = sync_path / "plugins" / "marketplaces"
+    placeholder.mkdir(parents=True)
+    stale = sync_path / "stale.json"
+    stale.write_text("remove me")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    restored = tmp_path / "restored.json"
+    restored.write_text("restore me")
+    archive = staging / "djinn-sync-claude.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        output.add(restored, arcname=restored.name)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    config = AppConfig(code_dir=projects, config_root=config_root)
+    _deny_empty_placeholder_removal(monkeypatch, placeholder)
+
+    result = restore_sync_path("claude", staging, config)
+
+    assert result.success
+    assert placeholder.is_dir()
+    assert not stale.exists()
+    assert (sync_path / restored.name).read_text() == "restore me"
 
 
 def _parse_dockerfile_symlink_line(line: str) -> list[tuple[str, str]]:

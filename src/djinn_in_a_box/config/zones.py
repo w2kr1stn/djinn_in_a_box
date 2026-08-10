@@ -148,6 +148,8 @@ def _validate_assignment(
     source_path = Path(agent) / relative_path
     has_symlink, has_file = _source_has_symlink_or_file(source, source_path)
     if has_symlink:
+        if candidate.is_default:
+            return None
         msg = (
             f"Zone assignment for {agent}.{candidate.zone} has a symlinked component: "
             f"{candidate.raw_path!r}"

@@ -316,28 +316,28 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
         return _build_config(config, code_dir=code_dir)
     if key == "general.timezone":
         return _build_config(config, timezone=value)
-    if key == "general.config_root":
-        config_root = Path(value).expanduser()
-        if config_root != config.config_root:
-            updated = _build_config(config, config_root=config_root)
-            old_roots = resolve_zone_roots(config)
-            new_roots = resolve_zone_roots(updated)
+    if key in {"general.config_root", "general.shared_root", "general.local_root"}:
+        if key == "general.config_root":
+            updated = _build_config(config, config_root=Path(value).expanduser())
+        else:
+            normalized = value.strip().lower()
+            root = None if normalized in {"", "none", "null"} else Path(value).expanduser()
+            if key == "general.shared_root":
+                updated = _build_config(config, shared_root=root)
+            else:
+                updated = _build_config(config, local_root=root)
+        old_roots = resolve_zone_roots(config)
+        new_roots = resolve_zone_roots(updated)
+        if old_roots != new_roots:
             warning(
                 "Existing credentials/config remain at "
                 f"config={old_roots.config_root}, shared={old_roots.shared_root}, "
                 f"local={old_roots.local_root}; new roots are "
                 f"config={new_roots.config_root}, shared={new_roots.shared_root}, "
                 f"local={new_roots.local_root}. Zone data does not follow. "
-                f"New empty directories will be provisioned at {new_roots.config_root}."
+                "New empty directories will be provisioned at the configured roots."
             )
-            return updated
-        return _build_config(config, config_root=config_root)
-    if key in {"general.shared_root", "general.local_root"}:
-        normalized = value.strip().lower()
-        root = None if normalized in {"", "none", "null"} else Path(value).expanduser()
-        if key == "general.shared_root":
-            return _build_config(config, shared_root=root)
-        return _build_config(config, local_root=root)
+        return updated
     if key == "resources.cpu_limit":
         resources = ResourceLimits(
             cpu_limit=_parse_int_config_value(key, value),

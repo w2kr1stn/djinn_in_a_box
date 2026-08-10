@@ -20,6 +20,7 @@ from djinn_in_a_box.config.zones import (
 from djinn_in_a_box.core.docker import (
     build_compose_env,
     ensure_host_env,
+    ensure_zone_roots,
     get_config_root,
     resolve_zone_roots,
 )
@@ -203,6 +204,31 @@ def test_host_provisioning_creates_zone_roots_and_agent_roots_with_0700_mode(
         assert stat.S_IMODE((roots.config_root / agent).stat().st_mode) == 0o700
 
 
+def test_ensure_zone_roots_rejects_a_derived_symlink_without_chmodding_its_target(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    shared_target = tmp_path / "large-disk"
+    shared_target.mkdir()
+    shared_target.chmod(0o755)
+    Path(f"{config.config_root}.shared").symlink_to(shared_target, target_is_directory=True)
+
+    with pytest.raises(ZoneRootValidationError, match="symlink"):
+        ensure_zone_roots(config)
+
+    assert stat.S_IMODE(shared_target.stat().st_mode) == 0o755
+
+
+def test_ensure_zone_roots_translates_a_regular_file_to_a_named_zone_error(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.config_root.write_text("not a directory")
+
+    with pytest.raises(ZoneRootValidationError, match="not a directory"):
+        ensure_zone_roots(config)
+
+
 def test_zone_assignments_merge_defaults_for_every_container_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -318,6 +344,56 @@ def test_regular_file_at_a_default_assignment_is_skipped(tmp_path: Path) -> None
 
     assert Path("jobs") not in assignments.by_agent["claude"]["local"]
     assert assignments.skipped_defaults[0].relative_path == Path("jobs")
+
+
+def test_symlinked_component_at_a_default_assignment_is_skipped(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    plugins = config.config_root / "claude" / "plugins"
+    plugins.parent.mkdir(parents=True)
+    plugins.symlink_to(outside, target_is_directory=True)
+    zones_file = tmp_path / "zones.toml"
+    zones_file.touch()
+
+    assignments = load_zone_assignments(config, path=zones_file)
+
+    assert Path("plugins/marketplaces") not in assignments.by_agent["claude"]["local"]
+    assert any(
+        skipped.relative_path == Path("plugins/marketplaces")
+        for skipped in assignments.skipped_defaults
+    )
+
+
+@pytest.mark.parametrize("key", ("general.shared_root", "general.local_root"))
+def test_config_set_rejects_nested_zone_roots_before_saving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config = _config(tmp_path)
+    save_config(config, config_file)
+    monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+
+    result = runner.invoke(app, ["config", "set", key, str(config.config_root / "nested")])
+
+    assert result.exit_code == 1
+    assert load_config(config_file).shared_root is None
+    assert load_config(config_file).local_root is None
+
+
+@pytest.mark.parametrize("key", ("general.shared_root", "general.local_root"))
+def test_config_set_warns_that_moved_zone_data_is_not_relocated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config = _config(tmp_path)
+    save_config(config, config_file)
+    monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+
+    result = runner.invoke(app, ["config", "set", key, str(tmp_path / "moved-zone")])
+
+    assert result.exit_code == 0
+    assert "Zone data does not follow" in result.output
 
 
 @pytest.mark.parametrize(

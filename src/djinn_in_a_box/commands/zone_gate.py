@@ -27,10 +27,12 @@ type GatedCommand = Literal["start", "run", "backup", "restore", "clean"]
 
 
 @contextmanager
-def zone_command_gate(config: AppConfig | None, command: GatedCommand) -> Iterator[None]:
+def zone_command_gate(
+    config: AppConfig | None, command: GatedCommand, *, exclusive: bool = False
+) -> Iterator[None]:
     roots = ensure_zone_roots(config)
     try:
-        with config_directory_lock(roots.local_root, exclusive=False, blocking=False):
+        with config_directory_lock(roots.local_root, exclusive=exclusive, blocking=False):
             assignments = load_zone_assignments(config)
             if command in {"start", "run"}:
                 ensure_zone_targets(assignments, roots)

@@ -571,6 +571,7 @@ clean_app = typer.Typer(
 
 
 @clean_app.callback(invoke_without_command=True)
+@handle_config_errors
 @_zone_gated("clean", optional_config=True)
 def clean_default(ctx: typer.Context) -> None:
     """Remove containers only (default action when no subcommand given).
@@ -596,6 +597,7 @@ def clean_default(ctx: typer.Context) -> None:
 
 
 @clean_app.command("volumes")
+@handle_config_errors
 @_zone_gated("clean", optional_config=True)
 def clean_volumes(
     credentials: Annotated[
@@ -728,6 +730,7 @@ def clean_volumes(
 
 
 @clean_app.command("all")
+@handle_config_errors
 @_zone_gated("clean", optional_config=True)
 def clean_all(
     force: Annotated[

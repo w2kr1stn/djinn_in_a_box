@@ -141,6 +141,31 @@ def test_command_passing_the_gate_holds_a_shared_lock_against_migration(
         pass
 
 
+def test_exclusive_restore_gate_blocks_clean_during_reconciliation(
+    zone_config: AppConfig,
+) -> None:
+    with (
+        zone_command_gate(zone_config, "restore", exclusive=True),
+        pytest.raises(typer.Exit) as exc_info,
+        zone_command_gate(zone_config, "clean"),
+    ):
+        pass
+
+    assert exc_info.value.exit_code == 1
+
+
+def test_launch_gate_refuses_data_left_in_a_previous_zone(zone_config: AppConfig) -> None:
+    roots = resolve_zone_roots(zone_config)
+    previous_zone = roots.local_root / "claude" / "projects"
+    previous_zone.mkdir(parents=True)
+    (previous_zone / "session.jsonl").write_text("move to shared")
+
+    with pytest.raises(typer.Exit) as exc_info, zone_command_gate(zone_config, "start"):
+        pass
+
+    assert exc_info.value.exit_code == 1
+
+
 def test_missing_local_root_is_treated_as_no_migration_in_progress(zone_config: AppConfig) -> None:
     roots = resolve_zone_roots(zone_config)
     assert not roots.local_root.exists()
