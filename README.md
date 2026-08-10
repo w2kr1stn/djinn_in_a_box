@@ -23,7 +23,12 @@ They stay local unless you choose to back them up or mirror them.
 
 Djinn gives you one repeatable container image and several ways to use it:
 
-- Open an interactive shell with `djinn start`.
+- Open an interactive shell with `djinn start`, or leave the container running in
+  the background with `djinn start --detach` and attach to it later with
+  `djinn enter`. Do not background the interactive form with `&`: that leaves a
+  TTY-attached Compose client in a background process group, which storms the
+  container with SIGTTOU until its host-side client is stopped and `--rm` reaps
+  it. `djinn start` refuses that shape.
 - Run a one-shot agent prompt with `djinn run`.
 - Attach another shell to a running container with `djinn enter`.
 - Keep reusable session workspaces under `~/.djinn/sessions/` with
@@ -393,7 +398,7 @@ value overrides `default_model` for that invocation.
 
 | Command | Container behavior | Workspace behavior | Main use |
 | --- | --- | --- | --- |
-| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit | Starts in `/home/dev/projects` without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell |
+| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |

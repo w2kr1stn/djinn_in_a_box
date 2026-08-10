@@ -472,7 +472,7 @@ publication.
   baseline wins for the owned `SessionStart`, `PreToolUse`, and `Stop` hook
   fragments; neighboring settings remain overlay-controlled.
 - `reverse_sync_file(volume_file, seed_file)`: best-effort copy from container
-  state back to writable seed mounts on shell exit.
+  state back to writable seed mounts at shutdown (shell exit or SIGTERM).
 - `reverse_sync_claude_settings(volume_file, seed_file)`: persists the personal
   Claude overlay after removing only those three managed hook fragments.
 
@@ -494,9 +494,52 @@ container start
   +-- source mcp-register.sh and register MCP servers
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
-  +-- run interactive zsh
-  +-- reverse-sync selected settings files on exit
+  +-- run interactive zsh as a background job, waited on by PID 1
+  +-- reverse-sync selected settings files on shell exit OR on SIGTERM
 ```
+
+Both shutdown paths reach the reverse-sync, which matters because a detached
+container (`djinn start --detach`) never exits its shell — `docker stop` sends
+SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
+
+- collects the reverse-sync calls in `persist_session_state()`, guarded by
+  `_DJINN_STATE_PERSISTED` so the signal path and the normal path cannot both
+  run it;
+- traps TERM and INT into `_djinn_on_termination_signal`, which persists
+  immediately and exits `128 + signal`. It deliberately does not signal the
+  shell and wait for it: an interactive zsh ignores SIGTERM, so waiting would
+  burn the whole `docker stop` grace period and end in SIGKILL having persisted
+  nothing. The agent CLIs write settings as they change, not on exit, so there
+  is nothing to flush first;
+- runs the shell as a background job and `wait`s on it. As a foreground command
+  it would defer every trap until it returned, which under `docker stop` never
+  happens — the traps would be dead code. Backgrounding costs the shell its
+  stdin, and that is the subtle part: with job control off, a background job's
+  fd 0 is reassigned to `/dev/null` *before* any explicit redirection is applied.
+  zsh would then not be interactive at all — it reads EOF and exits within
+  milliseconds, taking the container with it. The entrypoint therefore duplicates
+  fd 0 first (`exec 3<&0`) and hands it back explicitly (`<&3`, plus `3<&-` to
+  keep the spare descriptor out of the child). `<&0` cannot do this: by the time
+  it is evaluated, fd 0 is already `/dev/null`. With stdin restored, the shell
+  claims its own process group and the terminal as usual, and interactive
+  behaviour (job control, Ctrl+C) is unchanged.
+
+  The container passes no arguments (`ENTRYPOINT` with no `CMD`, no compose
+  `command:`), so `tests/test_entrypoint_shutdown.py` covers that exact shape on
+  a real pty: a shell launched with `-c <cmd>` never needs a terminal and would
+  hide the regression entirely.
+
+- refuses to start an interactive shell when there is no terminal at all, and
+  keeps the container alive instead. This closes a whole class rather than one
+  instance: an interactive zsh without a TTY reads EOF and returns immediately,
+  so PID 1 exits 0 and the container disappears with an empty log — the very
+  signature this work started from. The class has several entrances, and the
+  background-start guard deliberately does not cover them all: it refuses only
+  the shapes that can actually storm (stdout on a background terminal), leaving
+  the genuinely TTY-less ones to be handled here. Since nobody can
+  use PID 1's shell without a terminal anyway, while `djinn enter` brings its own
+  TTY through `docker exec`, staying up is strictly better than dying silently.
+  The reverse-sync on `docker stop` works unchanged in that state.
 
 Shell-side startup output is sectioned through `scripts/output-lib.sh`:
 `Seed & Config`, `MCP`, `Tools`, and `Security`. `mcp-register.sh` captures
@@ -647,7 +690,37 @@ backed by named volumes.
   which use `/home/dev/mount/<basename>` with parent and numeric collision
   fallbacks. The command rejects source errors and mount collisions before
   calling `compose_run()`, then prints one source-to-target mode line per mount
-  in the `Environment`/`Container` output.
+  in the `Environment`/`Container` output. With `--detach` it calls
+  `compose_up_detached()` instead, skips `cleanup_docker_proxy()` (the container
+  outlives the process, so its proxy has to stay up), and refuses up front when a
+  Djinn container is already running, because `up` collides with the fixed
+  `container_name`.
+- Background-start guard: `compose_run()` refuses an interactive start from a
+  background process group. `docker compose run` allocates a TTY and calls
+  `tcsetattr()` on it; from the background that raises SIGTTOU unconditionally
+  (the `tostop` flag gates background *writes*, not attribute changes), Compose
+  forwards the signals into the container. `djinn start ... &` is exactly that
+  shape and produces tens of events per second. Container PID 1 is not what dies —
+  namespace init discards a signal it has no handler for, and a container was
+  observed surviving 45+ minutes under continuous SIGTTOU. What the storm does is
+  flood Docker's event ring buffer (hence the missing logs) and stop the host-side
+  compose client, after which `--rm` reaps the container.
+  `is_background_process_group()` compares `os.tcgetpgrp(stdout)` against
+  `os.getpgrp()` — **stdout, and only stdout**, because that is what Compose keys
+  on: it derives `noTty` from `!dockerCli.Out().IsTerminal()` and allocates a TTY
+  only when stdout is a terminal. Consequently `djinn start < /dev/null &` is
+  refused (stdout is still the terminal, so a TTY is allocated and the storm is
+  possible), while `djinn start > log &` is allowed (no TTY, nothing calls
+  `tcsetattr`, nothing to storm). Checking stdin or stderr as well would refuse
+  that second, safe shape. `setsid` is likewise not blocked — with no controlling
+  terminal the kernel raises no SIGTTOU. Headless runs pass `-T`, allocate no TTY,
+  and are never blocked.
+
+  Not blocked is not the same as supported, and the guard is deliberately not the
+  only defence: any shape that ends with no TTY inside the container is handled on
+  the container side instead (see *Container-Side Seed and Merge*), where the
+  entrypoint keeps the container up rather than exiting. `--detach` remains the
+  supported way to background a session.
 - `status()`: reports config, containers, known volumes, config-root paths,
   networks, Docker proxy, and MCP Gateway status.
 - `clean_default()`: `djinn clean` stops and removes containers with
@@ -869,8 +942,8 @@ entrypoint.sh
   +-- MCP: register MCP servers and box third-party CLI output
   +-- Tools: install optional tools
   +-- Security: summarize firewall, Docker access, and MCP gateway state
-  +-- run interactive shell
-  +-- reverse-sync selected settings on exit
+  +-- run interactive shell as a background job
+  +-- reverse-sync selected settings on shell exit or on SIGTERM
 ```
 
 Backup:

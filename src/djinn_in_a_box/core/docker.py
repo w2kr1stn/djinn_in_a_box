@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -427,14 +429,27 @@ def _compose_host_env(config: AppConfig | None) -> dict[str, str]:
     return {**os.environ, **build_compose_env(config)}
 
 
-def _run_compose(args: list[str], *, config: AppConfig | None, cwd: Path) -> RunResult:
+def _run_compose(
+    args: list[str],
+    *,
+    config: AppConfig | None,
+    cwd: Path,
+    extra_env: dict[str, str] | None = None,
+) -> RunResult:
     """Single choke-point for *captured* ``docker compose`` calls.
 
     Every captured compose invocation routes through here so the host
     interpolation env is always injected. (The interactive/headless path in
     ``compose_run`` is the only other sanctioned compose site.)
+
+    ``extra_env`` carries values a subcommand cannot pass as a flag — ``up`` has
+    no per-invocation ``-e`` — and is layered on top of the host bridge, never
+    replacing it.
     """
-    return _run_captured(["docker", "compose", *args], cwd=cwd, env=_compose_host_env(config))
+    env = _compose_host_env(config)
+    if extra_env:
+        env.update(extra_env)
+    return _run_captured(["docker", "compose", *args], cwd=cwd, env=env)
 
 
 def get_shell_mount_args(config: AppConfig) -> list[str]:
@@ -670,6 +685,58 @@ def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) ->
     return _run_compose(args, config=config, cwd=project_root)
 
 
+BACKGROUND_START_ERROR = (
+    "Refusing to start an interactive container from a background process group.\n"
+    "\n"
+    "`docker compose run` allocates a TTY, and every terminal-attribute call from the\n"
+    "background raises SIGTTOU. Compose forwards those signals into the container by the\n"
+    "tens per second, which floods Docker's event ring buffer and stops the host-side\n"
+    "compose client — and once that client is gone, `--rm` reaps the container. No exit\n"
+    "code, no log.\n"
+    "\n"
+    "`djinn start ... &` is exactly this shape. Use one of:\n"
+    "  djinn start --detach ...        (no TTY client at all; then `djinn enter`)\n"
+    "  djinn start ...                 (foreground, e.g. in its own tmux window)\n"
+)
+
+
+def is_background_process_group() -> bool:
+    """True when this process is not in the terminal's foreground process group.
+
+    Load-bearing for interactive ``compose run``, and the reason is easy to miss:
+    Compose allocates a TTY and calls ``tcsetattr()`` on it. From a *background*
+    process group that raises SIGTTOU unconditionally — the ``tostop`` terminal
+    flag gates background *writes*, not terminal-attribute changes — and Compose
+    forwards the signals into the container by the tens per second. Container PID 1
+    survives them — namespace init discards a signal it has no handler for — but the
+    storm floods Docker's event ring buffer and stops the *host-side* compose client,
+    and once that client is gone ``--rm`` reaps the container: no exit code, no log.
+
+    ``djinn start ... &`` is precisely that shape: ``&`` puts the process group in
+    the background while a standard stream stays attached to the terminal.
+
+    Keyed on **stdout**, and neither stdin nor stderr, because that is exactly what
+    Compose keys on: it derives ``noTty`` from ``!dockerCli.Out().IsTerminal()``
+    and allocates a TTY only when stdout is a terminal. So
+    ``djinn start < /dev/null &`` still storms (stdout is the terminal), while
+    ``djinn start > log &`` cannot (no TTY is allocated, nothing calls
+    ``tcsetattr``) — and refusing the latter would block a safe shape that the
+    entrypoint's no-TTY branch handles perfectly well.
+
+    Returns False when stdout is not a TTY (redirected, a pipe, pytest's capture)
+    or when there is no controlling terminal (``setsid``): with no allocated TTY
+    there is nothing to raise SIGTTOU.
+    """
+    try:
+        fd = sys.stdout.fileno()
+        if not os.isatty(fd):
+            return False
+        return os.tcgetpgrp(fd) != os.getpgrp()
+    except (AttributeError, ValueError, OSError):
+        # No usable stdout (closed, replaced, or no controlling terminal).
+        return False
+
+
 def compose_run(
     config: AppConfig,
     options: ContainerOptions,
@@ -694,6 +761,12 @@ def compose_run(
         service: Compose service name (default: dev).
         timeout: Timeout in seconds (headless only). Returns exit code 124 on timeout.
     """
+    # Fail before allocating a TTY: a background start would otherwise degenerate
+    # into a SIGTTOU storm that kills the container. Headless runs pass -T and are
+    # unaffected.
+    if interactive and is_background_process_group():
+        return RunResult(returncode=1, stderr=BACKGROUND_START_ERROR)
+
     project_root = get_project_root()
 
     # Build compose command
@@ -815,6 +888,138 @@ def compose_run(
             stdout="",
             stderr=f"Permission denied: {e}",
         )
+
+
+def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
+    """Pull the ``src:dst[:mode]`` specs out of a ``["-v", spec, ...]`` list."""
+    specs: list[str] = []
+    expecting_spec = False
+    for arg in args:
+        if expecting_spec:
+            specs.append(arg)
+            expecting_spec = False
+        elif arg == "-v":
+            expecting_spec = True
+    return specs
+
+
+def _env_pairs_from_mount_args(args: list[str]) -> dict[str, str]:
+    """Pull the ``KEY=VALUE`` pairs out of a ``["-e", pair, ...]`` list.
+
+    The runtime mount builders emit a socket *and* the variable that points at
+    it — ``get_audio_mount_args`` pairs its bind with ``PULSE_SERVER``, and
+    ``get_dbus_mount_args`` with ``DBUS_SESSION_BUS_ADDRESS``. Keeping only the
+    ``-v`` half mounts the socket and leaves every client unable to find it, so
+    the detached path has to carry these across too.
+    """
+    pairs: dict[str, str] = {}
+    expecting_pair = False
+    for arg in args:
+        if expecting_pair:
+            key, _, value = arg.partition("=")
+            pairs[key] = value
+            expecting_pair = False
+        elif arg == "-e":
+            expecting_pair = True
+    return pairs
+
+
+def compose_up_detached(
+    config: AppConfig,
+    options: ContainerOptions,
+    *,
+    env: dict[str, str] | None = None,
+    service: str = "dev",
+    shell_mount_args: list[str] | None = None,
+    audio_mount_args: list[str] | None = None,
+    dbus_mount_args: list[str] | None = None,
+) -> RunResult:
+    """Start the container in the background via ``docker compose up -d``.
+
+    This path exists because ``compose run`` keeps a host-side foreground client
+    attached to a TTY for as long as the container lives. Backgrounding that
+    client (``djinn start ... &``) turns every terminal-attribute call into a
+    SIGTTOU storm that ends with the host-side client stopped and ``--rm`` reaping
+    the container — see
+    ``is_background_process_group``. ``up -d`` leaves no client behind at all.
+
+    ``run`` accepts per-invocation ``-v``/``--workdir``/``-e`` flags; ``up`` does
+    not, so the same dynamic mounts reach Compose as a generated override file.
+    It is written as JSON — valid YAML, so this needs no YAML dependency — and
+    carries only absolute paths, which keeps it independent of Compose's
+    project-directory resolution.
+
+    The container keeps the TTY declared by ``tty``/``stdin_open`` in the compose
+    file, so the interactive zsh ending the entrypoint stays alive with nothing
+    attached. Attach afterwards with ``djinn enter``.
+    """
+    project_root = get_project_root()
+    compose_files = get_compose_files(options.docker_mode)
+
+    mounts = tuple(
+        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        for mount in options.mounts
+    )
+    shell_args = _canonicalize_runtime_mount_args(
+        get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
+    )
+    audio_args = _canonicalize_runtime_mount_args(
+        get_audio_mount_args() if audio_mount_args is None else audio_mount_args
+    )
+    dbus_args = _canonicalize_runtime_mount_args(
+        get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
+    )
+    validate_container_mounts(
+        mounts,
+        config,
+        options.docker_mode,
+        shell_args=shell_args,
+        audio_args=audio_args,
+        dbus_args=dbus_args,
+    )
+
+    volume_specs: list[str] = []
+    for mount in mounts:
+        mount_target = _resolve_image_aliases(mount.target)
+        spec = f"{mount.source}:{mount_target}"
+        if mount.read_only:
+            spec += ":ro"
+        volume_specs.append(spec)
+    runtime_args = [*shell_args, *audio_args, *dbus_args]
+    volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
+    # The `-e` half of those same pairs has to ride along, or the sockets are
+    # mounted but unreachable. Explicit `env` wins over the derived values.
+    environment = {**_env_pairs_from_mount_args(runtime_args), **(env or {})}
+
+    service_override: dict[str, object] = {}
+    if volume_specs:
+        service_override["volumes"] = volume_specs
+    if mounts:
+        service_override["working_dir"] = str(mounts[0].target)
+    if environment:
+        service_override["environment"] = environment
+
+    override_path: Path | None = None
+    try:
+        args = [*compose_files]
+        if service_override:
+            handle_fd, override_name = tempfile.mkstemp(prefix="djinn-detach-", suffix=".yml")
+            override_path = Path(override_name)
+            with os.fdopen(handle_fd, "w") as handle:
+                json.dump({"services": {service: service_override}}, handle)
+            args.extend(["-f", str(override_path)])
+        args.extend(["up", "-d", service])
+        # ENABLE_FIREWALL rides the compose file's ${ENABLE_FIREWALL:-false}
+        # interpolation, because `up` has no per-invocation `-e` flag to carry it.
+        return _run_compose(
+            args,
+            config=config,
+            cwd=project_root,
+            extra_env={"ENABLE_FIREWALL": str(options.firewall_enabled).lower()},
+        )
+    finally:
+        if override_path is not None:
+            override_path.unlink(missing_ok=True)
 
 
 def compose_down(config: AppConfig | None = None) -> RunResult:

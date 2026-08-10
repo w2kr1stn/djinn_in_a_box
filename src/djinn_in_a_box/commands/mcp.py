@@ -11,10 +11,10 @@ from typing import Annotated
 import typer
 
 from djinn_in_a_box.core.console import (
-    console,
     err_console,
     error,
     info,
+    print_captured,
     rule,
     status_line,
     success,
@@ -151,7 +151,7 @@ def status() -> None:
             check=False,
         )
         if result.stdout.strip():
-            err_console.print(result.stdout.strip())
+            print_captured(result.stdout.strip(), end="\n")
 
         rule("Enabled Servers")
         result = subprocess.run(
@@ -161,7 +161,7 @@ def status() -> None:
             check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
-            err_console.print(result.stdout.strip())
+            print_captured(result.stdout.strip(), end="\n")
         else:
             err_console.print("  (none)")
 
@@ -264,7 +264,7 @@ def servers() -> None:
     )
 
     if result.returncode == 0 and result.stdout.strip():
-        console.print(result.stdout.strip())
+        print_captured(result.stdout.strip(), err=False, end="\n")
     else:
         err_console.print("No servers enabled or gateway not running")
 
@@ -287,7 +287,7 @@ def catalog() -> None:
         err_console.print("Initialize catalog first: docker mcp catalog init")
         err_console.print("Or browse online: https://hub.docker.com/search?q=mcp%2F")
     else:
-        console.print(result.stdout.strip())
+        print_captured(result.stdout.strip(), err=False, end="\n")
 
 
 def test() -> None:

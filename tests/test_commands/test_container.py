@@ -53,6 +53,32 @@ class TestBuildCommand:
 
             assert exc_info.value.exit_code == 1
 
+    def test_build_failure_keeps_the_buildkit_stage_tags(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`djinn build` is the command that emits bracketed BuildKit tags.
+
+        Rich reads them as markup and deletes them, taking with it the one token
+        that says which stage failed.
+        """
+        with (
+            patch("djinn_in_a_box.commands.container.load_config"),
+            patch("djinn_in_a_box.commands.container.preflight"),
+            patch("djinn_in_a_box.commands.container._sync_build_files"),
+            patch("djinn_in_a_box.commands.container.compose_build") as mock_build,
+        ):
+            mock_build.return_value = RunResult(
+                returncode=1,
+                stderr="#8 [dev 3/25] RUN apt-get update\n#1 [internal] load metadata\n",
+            )
+
+            with pytest.raises(typer.Exit):
+                container.build()
+
+        captured = capsys.readouterr().err
+        assert "[dev 3/25]" in captured
+        assert "[internal]" in captured
+
     def test_sync_build_files_uses_config_root_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -98,6 +124,10 @@ class TestStartCommand:
                 "djinn_in_a_box.commands.container.ensure_network", return_value=True
             ) as mock_network,
             patch("djinn_in_a_box.commands.container.compose_run") as mock_run,
+            patch("djinn_in_a_box.commands.container.compose_up_detached") as mock_detached,
+            patch(
+                "djinn_in_a_box.commands.container.is_container_running", return_value=False
+            ) as mock_running,
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
@@ -119,9 +149,22 @@ class TestStartCommand:
             mock_config.shell.skip_mounts = False
             mock_load.return_value = mock_config
             mock_run.return_value = RunResult(returncode=0)
+            mock_detached.return_value = RunResult(returncode=0)
+            # `is_container_running` is consulted twice on the detached path: the
+            # collision guard before starting (nothing there yet) and the liveness
+            # check afterwards (the container is up).
+            running_calls = {"count": 0}
+
+            def _running(_name: str) -> bool:
+                running_calls["count"] += 1
+                return running_calls["count"] > 1
+
+            mock_running.side_effect = _running
             yield {
                 "load": mock_load,
                 "run": mock_run,
+                "detached": mock_detached,
+                "running": mock_running,
                 "cleanup": mock_cleanup,
                 "config": mock_config,
                 "banner": mock_banner,
@@ -176,6 +219,120 @@ class TestStartCommand:
             container.start(firewall=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.firewall_enabled is True
+
+    def test_start_detached_uses_up_instead_of_a_foreground_client(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        """The point of --detach: no compose client is left attached to a TTY."""
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 0
+        start_mocks["detached"].assert_called_once()
+        start_mocks["run"].assert_not_called()
+
+    def test_start_detached_forwards_every_argument(self, start_mocks: dict[str, Any]) -> None:
+        """`assert_called_once` alone lets --here/--firewall/mounts be dropped silently.
+
+        That is how the audio regression reached production: the override handling
+        was pinned, the delivery of the arguments to it was not.
+        """
+        shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
+        audio_args = ["-v", "/host/pulse:/run/pulse", "-e", "PULSE_SERVER=unix:/run/pulse"]
+        dbus_args = ["-v", "/host/bus:/run/bus:ro"]
+        with (
+            patch(
+                "djinn_in_a_box.commands.container.get_shell_mount_args", return_value=shell_args
+            ),
+            patch(
+                "djinn_in_a_box.commands.container.get_audio_mount_args", return_value=audio_args
+            ),
+            patch("djinn_in_a_box.commands.container.get_dbus_mount_args", return_value=dbus_args),
+            patch(
+                "djinn_in_a_box.commands.container.resolve_container_mounts",
+                return_value=(ContainerMount(Path("/host/here"), Path("/home/dev/workspace")),),
+            ),
+            pytest.raises(typer.Exit),
+        ):
+            container.start(detach=True, firewall=True, here=True)
+
+        options = start_mocks["detached"].call_args[0][1]
+        kwargs = start_mocks["detached"].call_args.kwargs
+        assert options.firewall_enabled is True
+        assert options.mounts[0].target == Path("/home/dev/workspace")
+        assert kwargs["shell_mount_args"] == shell_args
+        assert kwargs["audio_mount_args"] == audio_args
+        assert kwargs["dbus_mount_args"] == dbus_args
+
+    def test_start_detached_stays_silent_when_up_failed(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["detached"].return_value = RunResult(returncode=1, stderr="boom\n")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 1
+        assert "started in the background" not in start_mocks["err_output"].getvalue()
+
+    def test_start_detached_keeps_the_docker_proxy_alive(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        """A detached container outlives this process, so its proxy must survive too."""
+        with pytest.raises(typer.Exit):
+            container.start(docker=True, detach=True)
+
+        start_mocks["cleanup"].assert_not_called()
+
+    def test_start_detached_refuses_when_a_container_already_runs(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        start_mocks["running"].side_effect = None
+        start_mocks["running"].return_value = True
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 1
+        start_mocks["detached"].assert_not_called()
+        start_mocks["run"].assert_not_called()
+
+    def test_start_detached_reports_a_container_that_died_on_startup(
+        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`up -d` exits 0 once the container is created — it observes nothing after."""
+        start_mocks["running"].side_effect = None
+        start_mocks["running"].return_value = False
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start(detach=True)
+
+        assert exc_info.value.exit_code == 1
+        # Both reach stderr in production; the fixture patches console.err_console,
+        # so error() lands in err_output while the direct err_console.print does not.
+        assert "not running after start" in start_mocks["err_output"].getvalue()
+        assert "docker logs djinn" in capsys.readouterr().err
+
+    def test_start_keeps_bracketed_docker_tokens(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        """Rich markup would eat the bracketed BuildKit tags that locate a failure."""
+        start_mocks["detached"].return_value = RunResult(
+            returncode=1, stderr="#8 [dev 3/25] RUN apt-get update\n#1 [internal] load metadata\n"
+        )
+
+        with pytest.raises(typer.Exit):
+            container.start(detach=True)
+
+        captured = start_mocks["err_output"].getvalue()
+        assert "[dev 3/25]" in captured
+        assert "[internal]" in captured
+
+    def test_start_detached_says_how_to_attach(self, start_mocks: dict[str, Any]) -> None:
+        with pytest.raises(typer.Exit):
+            container.start(detach=True)
+
+        assert "djinn enter" in start_mocks["err_output"].getvalue()
 
     def test_start_passes_each_precomputed_runtime_mount_list(
         self, start_mocks: dict[str, Any]
@@ -320,16 +477,14 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         assert "Internal runtime mount construction failed" in start_mocks["err_output"].getvalue()
 
-    def test_start_prints_compose_stderr(
-        self, start_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_start_prints_compose_stderr(self, start_mocks: dict[str, Any]) -> None:
         start_mocks["run"].return_value = RunResult(returncode=127, stderr="docker missing\n")
 
         with pytest.raises(typer.Exit) as exc_info:
             container.start()
 
         assert exc_info.value.exit_code == 127
-        assert "docker missing" in capsys.readouterr().err
+        assert "docker missing" in start_mocks["err_output"].getvalue()
 
     def test_start_uses_the_common_mount_path_validation(
         self, start_mocks: dict[str, Any], tmp_path: Path

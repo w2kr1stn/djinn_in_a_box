@@ -9,6 +9,36 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- `djinn start --detach` starts the container with `docker compose up -d` and
+  returns, leaving no Compose client attached; attach afterwards with
+  `djinn enter`. The detached path keeps the `--docker` proxy running, refuses to
+  start when a Djinn container is already running, and passes the dynamic mounts
+  to Compose through a generated override file — including the `-e` half of the
+  audio/D-Bus pairs, without which the sockets are mounted but `PULSE_SERVER`
+  and `DBUS_SESSION_BUS_ADDRESS` are unset and every client fails to find them.
+  Because `up -d` exits 0 as soon as the container is created and says nothing
+  about what the entrypoint did next, the command verifies the container is
+  actually running before reporting success, and points at `docker logs djinn`
+  when it is not. Captured Docker output is printed without markup interpretation
+  rather than through Rich's parser, which would silently delete the bracketed
+  BuildKit stage tags.
+- Guard against starting an interactive container from a background process
+  group. `djinn start ... &` left a TTY-attached Compose client in the
+  background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
+  signal into the container, producing tens of events per second and flooding
+  Docker's event ring buffer. `djinn start` now fails with an explanation and
+  points at `--detach` or a foreground start. The check keys on stdout, which is
+  what Compose derives TTY allocation from, so `djinn start > log &` stays allowed
+  (no TTY is allocated, so nothing can storm) while `djinn start < /dev/null &` is
+  refused. Absent controlling terminals (`setsid`) and headless `-T` runs are
+  unaffected.
+- The entrypoint no longer exits when it has no terminal. An interactive shell
+  cannot run without one — zsh reads EOF and returns immediately, which used to
+  take the container down with exit code 0 and an empty log. Since
+  `docker compose run` picks `-T` from the *client's stdout*, redirecting output
+  was enough to trigger that, whatever stdin did. The container now stays up and
+  says why, so `djinn enter` (which brings its own TTY) still works, and a later
+  `docker stop` still reaches the reverse-sync.
 - Persistent `age` encryption identity store: `${DJINN_CONFIG_ROOT}/age` is
   provisioned as a credential directory and bind-mounted at `~/.config/age`, so
   `age` keys survive container restarts and are captured by `djinn backup`
@@ -27,6 +57,9 @@ Versioning before and after the first stable release.
   `Seed & Config`, `MCP`, `Tools`, and `Security` sections.
 - Propagated `NO_COLOR` and terminal width into Compose startup so container
   shell output follows host plain-output and wrapping behavior.
+- The startup banner leads with a blank line, so the djinn's top row no longer
+  reads as clipped against the shell prompt. Plain mode (NO_COLOR, dumb, or
+  non-UTF-8 terminals) still renders exactly one line.
 
 ### Removed
 
@@ -40,6 +73,35 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Captured Docker output is no longer mangled by Rich. Every command that echoes
+  a subprocess's stdout/stderr as its own output — `build`, `start`, `clean`,
+  `run`, `session`, `mcp` — now routes through `print_captured()`, which disables
+  markup, highlighting and re-wrapping. Previously Rich consumed anything shaped
+  like a tag, so `djinn build`'s BuildKit log lost exactly the `[internal]` /
+  `[dev 3/25]` stage markers that locate a failing step, and long paths were
+  hard-wrapped mid-token. Note two limits: `backup`/`restore` still embed Docker's
+  stderr inside a formatted `error(...)` line, where it stays subject to markup;
+  and `print_captured` is not byte-verbatim — Rich still strips control characters
+  (including the `\r` that redraw-in-place progress output relies on) and expands
+  tabs.
+- `djinn start --detach` no longer implies a readiness it cannot verify. `up -d`
+  returns as soon as the container is created, while seeding runs for roughly
+  another 30 seconds, so the check confirms only that the container did not die
+  immediately; the message now says "started", points at `docker logs -f djinn`
+  for the initialization, and reports an unverified container as "not running"
+  rather than asserting it exited.
+- Settings are no longer lost when the container is stopped rather than exited.
+  `entrypoint.sh` ran its reverse-sync only after the interactive shell returned,
+  so `docker stop` — the only shutdown a detached container ever gets — killed
+  PID 1 with every in-session settings change unpersisted. The sync now lives in
+  an idempotent `persist_session_state()` reached from both the normal exit and a
+  TERM/INT trap, and the shell runs as a waited-on background job so the trap can
+  fire at all — a foreground command defers every trap until it returns, which
+  under `docker stop` never happens. Backgrounding would also reassign the
+  shell's stdin to `/dev/null` (job control is off, and that reassignment happens
+  before explicit redirections), leaving zsh non-interactive so it reads EOF and
+  exits at once; the entrypoint therefore duplicates fd 0 beforehand and hands it
+  back explicitly. Interactive behaviour (job control, Ctrl+C) is unchanged.
 - `djinn clean` now removes the containers it reports as removed. Compose treats
   containers created by `compose run` as one-off and skips them on a plain
   `down`, which is how `djinn start` and `djinn run` create the dev container —

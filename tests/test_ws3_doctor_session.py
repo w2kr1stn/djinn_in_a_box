@@ -306,7 +306,11 @@ def test_session_interactive_failure_prints_stderr(tmp_path: Path) -> None:
             session_mod.session(project="testproj")
 
         assert exc_info.value.exit_code == 127
-        mock_err_print.assert_any_call("Agent binary not found: claude\n", end="")
+        # Asserts the text reaches stderr, not how print_captured spells its kwargs.
+        assert any(
+            call.args and "Agent binary not found: claude" in str(call.args[0])
+            for call in mock_err_print.call_args_list
+        )
         mock_instance.run_interactive.assert_called_once()
 
 
