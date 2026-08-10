@@ -1803,9 +1803,9 @@ class TestBackgroundProcessGroupGuard:
 
     A backgrounded TTY-attached compose client turns every terminal-attribute
     call into SIGTTOU. Container PID 1 survives those — namespace init discards a
-    signal it has no handler for — but the storm floods Docker's event ring buffer
-    and stops the host-side compose client, after which `--rm` reaps the
-    container. The guard refuses that shape.
+    signal it has no handler for — but the storm costs host load and overflows
+    Docker's event ring buffer, erasing the diagnostic record. Whether it also ends
+    the container was never established. The guard refuses that shape.
     """
 
     @staticmethod

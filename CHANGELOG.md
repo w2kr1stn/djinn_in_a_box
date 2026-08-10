@@ -25,8 +25,10 @@ Versioning before and after the first stable release.
 - Guard against starting an interactive container from a background process
   group. `djinn start ... &` left a TTY-attached Compose client in the
   background, where every `tcsetattr()` raises SIGTTOU; Compose forwarded the
-  signal into the container, producing tens of events per second and flooding
-  Docker's event ring buffer. `djinn start` now fails with an explanation and
+  signal into the container, producing tens of events per second. Two effects
+  were measured: host load, and a continuously overflowing Docker event ring
+  buffer — which is why the early container deaths left no diagnostic record at
+  all. Whether the storm also ended the container was never established. `djinn start` now fails with an explanation and
   points at `--detach` or a foreground start. The check keys on stdout, which is
   what Compose derives TTY allocation from, so `djinn start > log &` stays allowed
   (no TTY is allocated, so nothing can storm) while `djinn start < /dev/null &` is
