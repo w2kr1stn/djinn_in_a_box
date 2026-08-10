@@ -48,6 +48,10 @@ def _harness(tmp_path: Path) -> Path:
     script.write_text(
         "#!/bin/zsh\n"
         "set -euo pipefail\n"
+        # Never inherit DJINN_DETACHED: djinn's own detached container exports it,
+        # so running this suite inside one would flip the very branch under test.
+        # Each test declares what it wants through DJINN_TEST_DETACHED instead.
+        'DJINN_DETACHED="${DJINN_TEST_DETACHED:-}"\n'
         f'SYNC_LOG="{log}"\n'
         f'SETTINGS_COPY_HELPER="{helper}"\n'
         'OPENCODE_RUNTIME_SETTINGS="/dev/null"\n'
@@ -197,7 +201,7 @@ def test_detached_uses_the_keeper_even_though_a_tty_exists(tmp_path: Path) -> No
     pid, fd = pty.fork()
     if pid == 0:  # pragma: no cover - the child never returns
         try:
-            os.environ["DJINN_DETACHED"] = "true"
+            os.environ["DJINN_TEST_DETACHED"] = "true"
             os.execv("/bin/zsh", ["/bin/zsh", str(harness)])
         finally:
             os._exit(127)
