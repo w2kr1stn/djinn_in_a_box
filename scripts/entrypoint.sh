@@ -266,19 +266,28 @@ trap '_djinn_on_termination_signal 2' INT
 # Fence set -e around the interactive shell: a non-zero shell exit must NOT abort
 # the script before EXIT_CODE capture + reverse-sync (else settings persistence is silently skipped).
 set +e
-if [[ $# -eq 0 && ! -t 0 ]]; then
-    # An interactive shell was requested but there is no terminal to drive it, so
-    # zsh would read EOF and exit within milliseconds — PID 1 would follow and the
-    # container would vanish with exit code 0 and nothing in its log. That is the
-    # whole failure class this guard closes, and it has more entrances than it
-    # looks: `docker compose run` picks `-T` from the *client's stdout*, so merely
-    # redirecting output is enough to land here, no matter what stdin does.
+if [[ $# -eq 0 ]] && { [[ "${DJINN_DETACHED:-}" == "true" ]] || [[ ! -t 0 ]]; }; then
+    # Two shapes end up here, and neither wants an interactive shell as PID 1.
     #
-    # Staying alive is strictly better than dying silently: nobody can use PID 1's
-    # shell without a terminal anyway, while `djinn enter` (docker exec, which
-    # brings its own TTY) works perfectly against a live container.
-    ui_warn "No TTY available — not starting an interactive shell."
-    ui_info "The container stays up; attach with: djinn enter"
+    # 1. No terminal at all: zsh would read EOF and exit within milliseconds, PID 1
+    #    would follow, and the container would vanish with exit code 0 and nothing
+    #    in its log. `docker compose run` picks `-T` from the *client's stdout*, so
+    #    merely redirecting output is enough to land here.
+    # 2. Detached (`djinn start --detach`): a TTY exists, but nobody is on it.
+    #    Consumers attach with `djinn enter`, which brings its own TTY via
+    #    docker exec. Leaving an unused interactive shell as PID 1 makes the whole
+    #    session hostage to that terminal — one EOF on it, from a stray attach, a
+    #    closed pty master, or a Ctrl-D, and the container is gone with exit 0.
+    #
+    # Either way a keeper is strictly better: it cannot be ended by anything
+    # happening on a terminal, and `docker stop` still reaches the reverse-sync
+    # through the trap below.
+    if [[ "${DJINN_DETACHED:-}" == "true" ]]; then
+        ui_info "Detached container — PID 1 holds it open; attach with: djinn enter"
+    else
+        ui_warn "No TTY available — not starting an interactive shell."
+        ui_info "The container stays up; attach with: djinn enter"
+    fi
     sleep infinity &
     DJINN_SHELL_PID=$!
 else

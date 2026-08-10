@@ -2160,3 +2160,25 @@ class TestComposeUpDetached:
         compose_up_detached(mock_app_config, ContainerOptions(firewall_enabled=True))
 
         assert mock_run.call_args.kwargs["env"]["ENABLE_FIREWALL"] == "true"
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_marks_the_container_as_detached(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The entrypoint needs to know nobody will use PID 1's shell.
+
+        Rides the same compose interpolation as ENABLE_FIREWALL rather than the
+        mount override, so the override stays purely about mounts.
+        """
+        self._without_runtime_mounts(monkeypatch)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        compose_up_detached(mock_app_config, ContainerOptions())
+
+        assert mock_run.call_args.kwargs["env"]["DJINN_DETACHED"] == "true"

@@ -1015,7 +1015,12 @@ def compose_up_detached(
             args,
             config=config,
             cwd=project_root,
-            extra_env={"ENABLE_FIREWALL": str(options.firewall_enabled).lower()},
+            extra_env={
+                "ENABLE_FIREWALL": str(options.firewall_enabled).lower(),
+                # Tells the entrypoint nobody will ever use PID 1's shell here:
+                # consumers attach with `djinn enter`, which brings its own TTY.
+                "DJINN_DETACHED": "true",
+            },
         )
     finally:
         if override_path is not None:

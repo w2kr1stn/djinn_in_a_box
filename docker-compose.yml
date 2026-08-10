@@ -97,6 +97,7 @@ services:
       <<: *common-environment
       MCP_GATEWAY_URL: http://mcp-gateway:8811/
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
+      DJINN_DETACHED: ${DJINN_DETACHED:-false}
     extra_hosts:
       # Expose the host (for MCP servers running as host services, e.g. a local MCP server)
       - "host.docker.internal:host-gateway"

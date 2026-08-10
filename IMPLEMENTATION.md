@@ -529,9 +529,10 @@ SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
   a real pty: a shell launched with `-c <cmd>` never needs a terminal and would
   hide the regression entirely.
 
-- refuses to start an interactive shell when there is no terminal at all, and
-  keeps the container alive instead. This closes a whole class rather than one
-  instance: an interactive zsh without a TTY reads EOF and returns immediately,
+- refuses to start an interactive shell in two cases — no terminal at all, or
+  `DJINN_DETACHED=true` — and keeps the container alive with a `sleep infinity`
+  keeper instead. This closes a whole class rather than one instance: an
+  interactive zsh without a TTY reads EOF and returns immediately,
   so PID 1 exits 0 and the container disappears with an empty log — the very
   signature this work started from. The class has several entrances, and the
   background-start guard deliberately does not cover them all: it refuses only
@@ -540,6 +541,16 @@ SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
   use PID 1's shell without a terminal anyway, while `djinn enter` brings its own
   TTY through `docker exec`, staying up is strictly better than dying silently.
   The reverse-sync on `docker stop` works unchanged in that state.
+
+  The detached case needs the flag because it is invisible from inside: the
+  compose file sets `tty: true`, so a terminal *does* exist under `up -d` — there
+  is simply nobody on it. An unused interactive shell as PID 1 makes the session
+  hostage to that terminal, since any EOF on it (a stray attach, a closed pty
+  master, a Ctrl-D) ends the shell with 0 and takes the container down with no
+  signal and no error to point at. `compose_up_detached()` therefore exports
+  `DJINN_DETACHED=true` through the same compose interpolation `ENABLE_FIREWALL`
+  uses (`${DJINN_DETACHED:-false}` in `docker-compose.yml`), leaving the generated
+  override purely about mounts. Every other path sees `false`.
 
 Shell-side startup output is sectioned through `scripts/output-lib.sh`:
 `Seed & Config`, `MCP`, `Tools`, and `Security`. `mcp-register.sh` captures
