@@ -461,6 +461,46 @@ class TestCleanDefaultCommand:
 
             mock_down.assert_called_once()
 
+    @pytest.mark.parametrize("entrypoint", ("default", "volumes", "all"))
+    def test_clean_entrypoints_render_invalid_zone_roots_as_cli_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str
+    ) -> None:
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        config_root = tmp_path / "config"
+        config_root.write_text("not a directory")
+        config = AppConfig(code_dir=projects, config_root=config_root)
+        monkeypatch.setattr(container, "load_config", lambda: config)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            if entrypoint == "default":
+                context = MagicMock()
+                context.invoked_subcommand = None
+                container.clean_default(context)
+            elif entrypoint == "volumes":
+                container.clean_volumes(force=True)
+            else:
+                container.clean_all(force=True)
+
+        assert exc_info.value.exit_code == 1
+
+
+class TestZoneRootErrors:
+    def test_start_renders_a_regular_file_zone_root_as_a_cli_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        config_root = tmp_path / "config"
+        config_root.write_text("not a directory")
+        config = AppConfig(code_dir=projects, config_root=config_root)
+        monkeypatch.setattr(container, "load_config", lambda: config)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
+
 
 class TestCleanVolumesCommand:
     """Tests for the clean volumes command."""

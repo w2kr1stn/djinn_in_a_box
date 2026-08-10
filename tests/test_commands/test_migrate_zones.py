@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tarfile
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from djinn_in_a_box.commands import backup as backup_command
 from djinn_in_a_box.commands import migrate_zones as migration_command
 from djinn_in_a_box.config import zones as zones_module
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.config_lock import config_directory_lock
 from djinn_in_a_box.core.docker import RunResult, resolve_zone_roots
 
 
@@ -72,6 +74,36 @@ def test_migrate_zones_rechecks_containers_before_publish(
 
     assert exc_info.value.exit_code == 1
     assert (source / "state.json").read_text() == "do not move"
+
+
+def test_migrate_zones_reports_running_containers_before_a_shared_gate_lock(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    roots.local_root.mkdir(parents=True)
+    monkeypatch.setattr(migration_command, "load_config", lambda: zone_config)
+    monkeypatch.setattr(migration_command, "get_running_containers", lambda: ["djinn"])
+
+    with (
+        config_directory_lock(roots.local_root, exclusive=False),
+        pytest.raises(typer.Exit) as exc_info,
+    ):
+        migration_command.migrate_zones()
+
+    assert exc_info.value.exit_code == 1
+    assert "Containers are running: djinn" in capsys.readouterr().err
+
+
+def test_migrate_zones_pins_an_exclusive_lock_at_the_call_site() -> None:
+    source = inspect.getsource(migration_command.migrate_zones)
+
+    assert "config_directory_lock(roots.local_root, exclusive=True, blocking=False)" in source
+
+
+def test_restore_pins_an_exclusive_zone_gate_at_the_call_site() -> None:
+    source = inspect.getsource(backup_command.restore)
+
+    assert '_zone_gated("restore", exclusive=True)' in source
 
 
 @pytest.mark.parametrize("probe_states", ((None,), ([], None)))

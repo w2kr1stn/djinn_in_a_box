@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import (
@@ -72,13 +73,12 @@ def find_unmigrated_assignments(
     return tuple(
         assignment
         for assignment in _iter_assignments(assignments)
-        if path_has_content(roots.config_root / assignment.agent / assignment.relative_path)
-        or any(
-            path_has_content(aside)
-            for aside in _migration_asides(
-                roots, assignment, _zone_path(roots, assignment.zone, assignment)
-            )
+        if _migration_source(
+            roots,
+            assignment,
+            _zone_path(roots, assignment.zone, assignment),
         )
+        is not None
     )
 
 
@@ -295,7 +295,11 @@ def _remove_empty_source_directories(
             and not path.is_symlink()
             and not path_has_content(path)
         ):
-            path.rmdir()
+            try:
+                path.rmdir()
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EBUSY, errno.EPERM, None}:
+                    raise
 
 
 def _move_directory(source: Path, destination: Path, before_publish: BeforePublish | None) -> bool:
@@ -325,7 +329,16 @@ def _copy_then_publish(
     staging_parent = Path(tempfile.mkdtemp(prefix=".djinn-zone-migrate-", dir=destination.parent))
     staged_tree = staging_parent / "tree"
     try:
-        shutil.copytree(migrating_source, staged_tree, symlinks=True)
+        try:
+            shutil.copytree(migrating_source, staged_tree, symlinks=True)
+        except shutil.Error as error:
+            entry = _copy_error_entry(error, migrating_source)
+            msg = (
+                f"Zone migration could not copy {entry}; the source remains preserved at "
+                f"{migrating_source}. Remove or relocate the unsupported or unreadable "
+                "entry, then retry."
+            )
+            raise ZoneConfigurationError(msg) from error
         if not _trees_match(migrating_source, staged_tree):
             msg = f"Zone migration verification failed for {migrating_source}"
             raise ZoneConfigurationError(msg)
@@ -342,6 +355,19 @@ def _copy_then_publish(
         shutil.rmtree(migrating_source)
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
+
+
+def _copy_error_entry(error: shutil.Error, migrating_source: Path) -> Path:
+    if not error.args:
+        return migrating_source
+    details = error.args[0]
+    if not isinstance(details, list) or not details:
+        return migrating_source
+    first = cast(object, details[0])
+    if not isinstance(first, tuple) or not first:
+        return migrating_source
+    source = cast(object, first[0])
+    return Path(source) if isinstance(source, str) else migrating_source
 
 
 def _rename_source_aside(source: Path) -> Path:

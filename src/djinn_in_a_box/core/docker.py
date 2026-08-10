@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -1026,9 +1028,35 @@ def resolve_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
 def ensure_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
     roots = resolve_zone_roots(config)
     for root in (roots.config_root, roots.shared_root, roots.local_root):
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        root.chmod(0o700)
+        _ensure_zone_root(root)
     return roots
+
+
+def _ensure_zone_root(root: Path) -> None:
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        try:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            info = root.lstat()
+        except OSError as error:
+            msg = f"Cannot create zone root {root}: {error}"
+            raise ZoneRootValidationError(msg) from error
+    except OSError as error:
+        msg = f"Cannot inspect zone root {root}: {error}"
+        raise ZoneRootValidationError(msg) from error
+
+    if stat.S_ISLNK(info.st_mode):
+        msg = f"Zone root must not be a symlink: {root}"
+        raise ZoneRootValidationError(msg)
+    if not stat.S_ISDIR(info.st_mode):
+        msg = f"Zone root is not a directory: {root}"
+        raise ZoneRootValidationError(msg)
+    try:
+        root.chmod(0o700)
+    except OSError as error:
+        msg = f"Cannot secure zone root {root}: {error}"
+        raise ZoneRootValidationError(msg) from error
 
 
 def workflow_image_compatible(
@@ -1176,10 +1204,25 @@ def clear_sync_path(path: Path) -> bool:
 
 def _clear_directory_contents(path: Path) -> None:
     for item in path.iterdir():
-        if item.is_dir() and not item.is_symlink():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
+        _remove_sync_path_item(item)
+
+
+def _remove_sync_path_item(path: Path) -> bool:
+    if path.is_dir() and not path.is_symlink():
+        for child in path.iterdir():
+            if not _remove_sync_path_item(child):
+                return False
+        try:
+            path.rmdir()
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EBUSY, errno.EPERM, None}:
+                raise
+            if next(path.iterdir(), None) is None:
+                return False
+            raise
+        return True
+    path.unlink()
+    return True
 
 
 def is_sync_archive(archive_name: str) -> bool:

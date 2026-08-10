@@ -439,6 +439,61 @@ def test_empty_source_is_removed_while_populated_target_is_retained(zone_config:
     assert (populated_target / "state.json").read_text() == "already migrated"
 
 
+def test_migration_keeps_an_empty_nonremovable_mount_placeholder(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    placeholder = roots.config_root / "claude" / "plugins" / "marketplaces"
+    target = roots.local_root / "claude" / "plugins" / "marketplaces"
+    placeholder.mkdir(parents=True)
+    target.mkdir(parents=True)
+    original_rmdir = Path.rmdir
+
+    def deny_placeholder_removal(path: Path) -> None:
+        if path == placeholder:
+            raise PermissionError("Docker-owned mount placeholder")
+        original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", deny_placeholder_removal)
+
+    result = reconcile_zone_assignments(zone_config)
+
+    assert result.moves == ()
+    assert placeholder.is_dir()
+    assert target.is_dir()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable on this platform")
+def test_cross_filesystem_migration_names_an_unsupported_entry_and_preserves_the_aside(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    source = roots.config_root / "claude" / "jobs"
+    source.mkdir(parents=True)
+    fifo = source / "agent.pipe"
+    os.mkfifo(fifo)
+    target = roots.local_root / "claude" / "jobs"
+    aside = source.with_name(".djinn-migrating-jobs")
+    original_replace = zone_migration.os.replace
+
+    def replace_with_exdev(source_path: str | Path, destination_path: str | Path) -> None:
+        if Path(source_path) == source and Path(destination_path) == target:
+            raise OSError(errno.EXDEV, "Cross-device link")
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(zone_migration.os, "replace", replace_with_exdev)
+
+    with pytest.raises(ZoneConfigurationError) as error:
+        reconcile_zone_assignments(zone_config)
+
+    assert str(aside / fifo.name) in str(error.value)
+    assert str(aside) in str(error.value)
+    assert not source.exists()
+    assert (aside / fifo.name).exists()
+    assert target.is_dir()
+    assert not any(target.iterdir())
+
+
 def test_archive_adoption_moves_the_displaced_zone_tree_aside(zone_config: AppConfig) -> None:
     roots = resolve_zone_roots(zone_config)
     archive_copy = roots.config_root / "claude" / "projects"

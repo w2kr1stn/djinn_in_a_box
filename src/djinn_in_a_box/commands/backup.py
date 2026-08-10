@@ -55,14 +55,16 @@ _AGE_HEADER = b"age-encryption.org/v1"
 _BACKUP_GLOBS = ("djinn-backup-*.tar.gz", "djinn-backup-*.tar.gz.age")
 
 
-def _zone_gated(command: GatedCommand) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def _zone_gated(
+    command: GatedCommand, *, exclusive: bool = False
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             config = load_config()
             token = _gated_config.set(config)
             try:
-                with zone_command_gate(config, command):
+                with zone_command_gate(config, command, exclusive=exclusive):
                     return func(*args, **kwargs)
             finally:
                 _gated_config.reset(token)
@@ -327,7 +329,7 @@ def backup(
 
 
 @handle_config_errors
-@_zone_gated("restore")
+@_zone_gated("restore", exclusive=True)
 def restore() -> None:
     """Restore Docker volumes and sync paths from a backup archive.
 
