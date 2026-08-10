@@ -6,16 +6,20 @@ import gzip
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 
+from djinn_in_a_box.commands.zone_gate import GatedCommand, zone_command_gate
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
@@ -29,10 +33,20 @@ from djinn_in_a_box.core.docker import (
     get_existing_volumes_by_category,
     get_running_containers,
     is_sync_archive,
+    resolve_zone_roots,
     restore_sync_path,
     restore_volume,
 )
+from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.paths import BACKUPS_DIR
+from djinn_in_a_box.core.zone_migration import (
+    adopt_archive_collision,
+    reconcile_zone_assignments,
+)
+
+P = ParamSpec("P")
+R = TypeVar("R")
+_gated_config: ContextVar[AppConfig | None] = ContextVar("gated_config", default=None)
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
 DEFAULT_CATEGORIES: list[str] = ["credentials", "repo-dotfiles", "data"]
@@ -41,8 +55,50 @@ _AGE_HEADER = b"age-encryption.org/v1"
 _BACKUP_GLOBS = ("djinn-backup-*.tar.gz", "djinn-backup-*.tar.gz.age")
 
 
+def _zone_gated(
+    command: GatedCommand, *, exclusive: bool = False
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        @wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            config = load_config()
+            token = _gated_config.set(config)
+            try:
+                with zone_command_gate(config, command, exclusive=exclusive):
+                    return func(*args, **kwargs)
+            finally:
+                _gated_config.reset(token)
+
+        return wrapper
+
+    return decorator
+
+
+def _active_config() -> AppConfig:
+    config = _gated_config.get()
+    return load_config() if config is None else config
+
+
+def _harden_restored_sync_directories(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        msg = f"Restored sync path is not a directory: {path}"
+        raise ZoneConfigurationError(msg)
+    os.chmod(path, 0o700, follow_symlinks=False)
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                _harden_restored_sync_directories(Path(entry.path))
+
+
 def _guard_no_containers_running() -> None:
     running = get_running_containers()
+    if running is None:
+        error("Could not determine whether Djinn containers are running.")
+        error("Restore Docker access before backup/restore, then retry.")
+        raise typer.Exit(1)
     if running:
         error(f"Containers are running: {', '.join(running)}")
         error("Stop all containers before backup/restore (djinn clean)")
@@ -141,6 +197,7 @@ def _require_age(*, restore: bool = False) -> None:
 
 
 @handle_config_errors
+@_zone_gated("backup")
 def backup(
     categories: Annotated[
         list[str] | None,
@@ -166,7 +223,7 @@ def backup(
     """
     _guard_no_containers_running()
 
-    config = load_config()
+    config = _active_config()
     selected = categories or DEFAULT_CATEGORIES
     volumes, sync_paths = _collect_items(selected, config)
 
@@ -272,6 +329,7 @@ def backup(
 
 
 @handle_config_errors
+@_zone_gated("restore", exclusive=True)
 def restore() -> None:
     """Restore Docker volumes and sync paths from a backup archive.
 
@@ -279,7 +337,7 @@ def restore() -> None:
     volumes and sync paths. Existing contents are overwritten.
     """
     _guard_no_containers_running()
-    config = load_config()
+    config = _active_config()
 
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.chmod(0o700)
@@ -354,11 +412,18 @@ def restore() -> None:
 
         failed = False
         for archive in inner_archives:
+            hardening_error: OSError | None = None
             if is_sync_archive(archive.name):
                 path_name = extract_sync_path_name(archive.name)
                 label = f"sync/{path_name}"
                 info(f"  {label}")
                 result = restore_sync_path(path_name, staging_dir, config)
+                try:
+                    _harden_restored_sync_directories(
+                        resolve_zone_roots(config).config_root / path_name
+                    )
+                except OSError as exc:
+                    hardening_error = exc
             else:
                 vol_name = archive.name.removesuffix(".tar.gz")
                 if not _VOLUME_NAME_RE.fullmatch(vol_name):
@@ -369,11 +434,41 @@ def restore() -> None:
                 info(f"  {label}")
                 result = restore_volume(vol_name, staging_dir)
 
-            if result.success:
+            if result.success and hardening_error is None:
                 success(f"  {label}")
             else:
-                error(f"  {label}: {result.stderr.strip()}")
+                detail = result.stderr.strip()
+                if hardening_error is not None:
+                    hardened_detail = f"failed to secure restored sync directory: {hardening_error}"
+                    detail = f"{detail}; {hardened_detail}" if detail else hardened_detail
+                error(f"  {label}: {detail}")
                 failed = True
+
+        if not failed:
+            reconciliation = reconcile_zone_assignments(config, stop_on_collision=False)
+            for collision in reconciliation.collisions:
+                config_path = (
+                    resolve_zone_roots(config).config_root
+                    / collision.assignment.agent
+                    / collision.assignment.relative_path
+                )
+                if typer.confirm(
+                    "The restored archive and zone both contain "
+                    f"{collision.assignment.agent}/{collision.assignment.relative_path}. "
+                    "Keep the archive copy and move the existing zone tree aside?",
+                    default=False,
+                ):
+                    displaced = adopt_archive_collision(collision, config)
+                    warning(
+                        "Moved the existing zone tree aside at "
+                        f"{displaced}; restored archive data now lives at "
+                        f"{collision.destination}."
+                    )
+                else:
+                    warning(
+                        "Zone collision preserved between "
+                        f"{config_path} and {collision.destination}."
+                    )
 
         blank()
         if failed:

@@ -2,6 +2,7 @@
 
 import io
 import re
+import subprocess
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,8 @@ from djinn_in_a_box.core.exceptions import (
     RuntimeMountSpecificationError,
 )
 from djinn_in_a_box.core.theme import DJINN_THEME
+
+runner = CliRunner()
 
 
 class TestBuildCommand:
@@ -596,9 +599,11 @@ class TestStatusCommand:
 class TestCleanDefaultCommand:
     """Tests for the clean default behavior."""
 
-    def test_clean_default_runs_compose_down(self) -> None:
+    def test_clean_default_runs_compose_down(self, mock_home: Path) -> None:
         """Test clean without subcommand runs compose down."""
         from typer import Context
+
+        assert mock_home.is_dir()
 
         with patch("djinn_in_a_box.commands.container.compose_down") as mock_down:
             mock_down.return_value = RunResult(returncode=0)
@@ -610,6 +615,46 @@ class TestCleanDefaultCommand:
             container.clean_default(mock_ctx)
 
             mock_down.assert_called_once()
+
+    @pytest.mark.parametrize("entrypoint", ("default", "volumes", "all"))
+    def test_clean_entrypoints_render_invalid_zone_roots_as_cli_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str
+    ) -> None:
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        config_root = tmp_path / "config"
+        config_root.write_text("not a directory")
+        config = AppConfig(code_dir=projects, config_root=config_root)
+        monkeypatch.setattr(container, "load_config", lambda: config)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            if entrypoint == "default":
+                context = MagicMock()
+                context.invoked_subcommand = None
+                container.clean_default(context)
+            elif entrypoint == "volumes":
+                container.clean_volumes(force=True)
+            else:
+                container.clean_all(force=True)
+
+        assert exc_info.value.exit_code == 1
+
+
+class TestZoneRootErrors:
+    def test_start_renders_a_regular_file_zone_root_as_a_cli_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        config_root = tmp_path / "config"
+        config_root.write_text("not a directory")
+        config = AppConfig(code_dir=projects, config_root=config_root)
+        monkeypatch.setattr(container, "load_config", lambda: config)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 1
 
 
 class TestCleanVolumesCommand:
@@ -868,8 +913,19 @@ class TestCleanAllCommand:
 
     def test_clean_all_requires_confirmation(self) -> None:
         """Test clean all requires user confirmation."""
-        with patch("typer.confirm", return_value=False), pytest.raises(typer.Exit):
+        with (
+            patch("typer.confirm", return_value=False) as confirm,
+            pytest.raises(typer.Exit),
+        ):
             container.clean_all()
+        assert "Shared and local zone data are not removed" in confirm.call_args.args[0]
+
+    def test_clean_all_help_excludes_zone_data(self) -> None:
+        result = runner.invoke(app, ["clean", "all", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "Shared and local" in result.output
+        assert "not removed" in result.output
 
     def test_clean_all_with_force_skips_confirmation(self, mock_app_config: AppConfig) -> None:
         """Test clean all --force skips confirmation and clears both volumes and sync paths."""
@@ -1144,6 +1200,26 @@ class TestEnterCommand:
                 container.enter()
 
             assert exc_info.value.exit_code == 1
+
+    def test_enter_refuses_an_unknown_container_state(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("djinn_in_a_box.commands.container.sys") as mock_sys,
+            patch(
+                "djinn_in_a_box.core.docker.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["docker", "ps"], 1, stdout="", stderr="daemon unavailable"
+                ),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            mock_sys.stdin.isatty.return_value = True
+            container.enter()
+
+        assert exc_info.value.exit_code == 1
+        output = capsys.readouterr().err
+        assert "Could not determine whether a Djinn container is running." in output
 
     def test_enter_opens_shell(self) -> None:
         """Test enter opens zsh shell in running container."""

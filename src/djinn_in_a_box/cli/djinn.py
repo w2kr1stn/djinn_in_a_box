@@ -28,6 +28,7 @@ from djinn_in_a_box.commands.container import (
     update,
 )
 from djinn_in_a_box.commands.doctor import doctor
+from djinn_in_a_box.commands.migrate_zones import migrate_zones
 from djinn_in_a_box.commands.session import session
 
 app = typer.Typer(
@@ -89,6 +90,7 @@ app.command()(build)
 app.command()(start)
 app.command()(status)
 app.command()(doctor)
+app.command("migrate-zones")(migrate_zones)
 app.command()(audit)
 app.command()(update)
 app.command()(enter)

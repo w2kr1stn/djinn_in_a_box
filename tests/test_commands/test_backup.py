@@ -56,6 +56,20 @@ class TestGuardNoContainersRunning:
         with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]):
             backup_module._guard_no_containers_running()
 
+    def test_refuses_an_unknown_container_state_from_the_docker_probe(self) -> None:
+        with (
+            patch(
+                "djinn_in_a_box.core.docker.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["docker", "ps"], 1, stdout="", stderr="daemon unavailable"
+                ),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module._guard_no_containers_running()
+
+        assert exc_info.value.exit_code == 1
+
     def test_exits_when_containers_running(self) -> None:
         with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=["djinn"]):
             with pytest.raises(typer.Exit) as exc_info:
@@ -137,6 +151,24 @@ class TestCollectItems:
 
 class TestBackupCommand:
     """Tests for the backup command."""
+
+    def test_backup_refuses_unknown_container_state_from_the_docker_probe(self) -> None:
+        with (
+            patch(
+                "djinn_in_a_box.core.docker.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["docker", "ps"], 1, stdout="", stderr="daemon unavailable"
+                ),
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup._collect_items",
+                side_effect=AssertionError("backup proceeded after an unknown Docker state"),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module.backup()
+
+        assert exc_info.value.exit_code == 1
 
     def test_aborts_when_containers_running(self) -> None:
         with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=["djinn"]):
@@ -914,6 +946,24 @@ class TestBackupCommand:
 class TestRestoreCommand:
     """Tests for the restore command."""
 
+    def test_restore_refuses_unknown_container_state_from_the_docker_probe(self) -> None:
+        with (
+            patch(
+                "djinn_in_a_box.core.docker.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["docker", "ps"], 1, stdout="", stderr="daemon unavailable"
+                ),
+            ),
+            patch(
+                "djinn_in_a_box.commands.backup._list_backups",
+                side_effect=AssertionError("restore proceeded after an unknown Docker state"),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module.restore()
+
+        assert exc_info.value.exit_code == 1
+
     def test_aborts_when_containers_running(self) -> None:
         with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=["djinn"]):
             with pytest.raises(typer.Exit) as exc_info:
@@ -1178,6 +1228,84 @@ class TestRestoreCommand:
             backup_module.restore()
 
         assert (configured_root / "claude" / "token.txt").read_text() == "secret\n"
+
+    def test_restore_rehardens_sync_target_after_extracting_legacy_archive(
+        self, tmp_path: Path
+    ) -> None:
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        config = AppConfig(code_dir=code_dir, config_root=tmp_path / "config")
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir(mode=0o755)
+        outside.chmod(0o755)
+        inner_archives: list[Path] = []
+        for name in ("claude", "codex"):
+            legacy_target = tmp_path / f"legacy-{name}"
+            legacy_target.mkdir(mode=0o755)
+            legacy_target.chmod(0o755)
+            (legacy_target / "credentials.json").write_text("secret\n")
+            nested = legacy_target / "nested"
+            nested.mkdir(mode=0o755)
+            nested.chmod(0o755)
+            (nested / "session.jsonl").write_text("history\n")
+            if name == "claude":
+                (legacy_target / "outside-link").symlink_to(outside, target_is_directory=True)
+            inner_archive = tmp_path / f"djinn-sync-{name}.tar.gz"
+            with tarfile.open(inner_archive, "w:gz") as inner:
+                inner.add(legacy_target, arcname=".")
+            inner_archives.append(inner_archive)
+        backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
+        with tarfile.open(backup_file, "w:gz") as outer:
+            for inner_archive in inner_archives:
+                outer.add(inner_archive, arcname=inner_archive.name)
+
+        with (
+            patch("djinn_in_a_box.commands.backup.load_config", return_value=config),
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.typer.confirm", return_value=True),
+        ):
+            backup_module.restore()
+
+        for name in ("claude", "codex"):
+            assert (config.config_root / name).stat().st_mode & 0o777 == 0o700
+            assert (config.config_root / name / "nested").stat().st_mode & 0o777 == 0o700
+        assert outside.stat().st_mode & 0o777 == 0o755
+
+    def test_restore_rehardens_a_partially_extracted_sync_target(self, tmp_path: Path) -> None:
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        config = AppConfig(code_dir=code_dir, config_root=tmp_path / "config")
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        legacy_claude = tmp_path / "legacy-claude"
+        nested = legacy_claude / "nested"
+        nested.mkdir(parents=True, mode=0o755)
+        legacy_claude.chmod(0o755)
+        nested.chmod(0o755)
+        (nested / "session.jsonl").write_text("history\n")
+        inner_archive = tmp_path / "djinn-sync-claude.tar.gz"
+        with tarfile.open(inner_archive, "w:gz") as inner:
+            inner.add(legacy_claude, arcname=".")
+        inner_archive.write_bytes(inner_archive.read_bytes()[:-8])
+        backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
+        with tarfile.open(backup_file, "w:gz") as outer:
+            outer.add(inner_archive, arcname=inner_archive.name)
+
+        with (
+            patch("djinn_in_a_box.commands.backup.load_config", return_value=config),
+            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
+            patch("djinn_in_a_box.commands.backup.typer.confirm", return_value=True),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            backup_module.restore()
+
+        assert exc_info.value.exit_code == 1
+        assert (config.config_root / "claude").stat().st_mode & 0o777 == 0o700
+        assert (config.config_root / "claude" / "nested").stat().st_mode & 0o777 == 0o700
 
     def test_restore_decrypts_age_archive_before_restoring(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"

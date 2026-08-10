@@ -5,15 +5,18 @@ import os
 import re
 import socket
 import subprocess
+import tarfile
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import djinn_in_a_box.config.zones as zones_mod
 import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, ShellConfig
+from djinn_in_a_box.config.zones import ZoneAssignments, ZoneName
 from djinn_in_a_box.core.docker import (
     ContainerMount,
     ContainerOptions,
@@ -42,6 +45,7 @@ from djinn_in_a_box.core.docker import (
     get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
+    get_zone_overlay_mount_args,
     is_background_process_group,
     is_container_running,
     is_sync_archive,
@@ -52,10 +56,68 @@ from djinn_in_a_box.core.docker import (
     validate_container_mounts,
     workflow_image_compatible,
 )
+from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 
 
 def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
     return []
+
+
+def _deny_empty_placeholder_removal(
+    monkeypatch: pytest.MonkeyPatch, placeholder: Path
+) -> None:
+    original_rmdir = docker_mod.os.rmdir
+
+    def deny_placeholder_removal(path: str, *, dir_fd: int | None = None) -> None:
+        if Path(path).name == placeholder.name:
+            raise PermissionError("Docker-owned mount placeholder")
+        original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(docker_mod.os, "rmdir", deny_placeholder_removal)
+
+
+def test_clear_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_path = tmp_path / "claude"
+    placeholder = sync_path / "plugins" / "marketplaces"
+    placeholder.mkdir(parents=True)
+    removable = sync_path / "credentials.json"
+    removable.write_text("remove me")
+    _deny_empty_placeholder_removal(monkeypatch, placeholder)
+
+    assert clear_sync_path(sync_path) is True
+    assert placeholder.is_dir()
+    assert not removable.exists()
+
+
+def test_restore_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "config"
+    sync_path = config_root / "claude"
+    placeholder = sync_path / "plugins" / "marketplaces"
+    placeholder.mkdir(parents=True)
+    stale = sync_path / "stale.json"
+    stale.write_text("remove me")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    restored = tmp_path / "restored.json"
+    restored.write_text("restore me")
+    archive = staging / "djinn-sync-claude.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        output.add(restored, arcname=restored.name)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    config = AppConfig(code_dir=projects, config_root=config_root)
+    _deny_empty_placeholder_removal(monkeypatch, placeholder)
+
+    result = restore_sync_path("claude", staging, config)
+
+    assert result.success
+    assert placeholder.is_dir()
+    assert not stale.exists()
+    assert (sync_path / restored.name).read_text() == "restore me"
 
 
 def _parse_dockerfile_symlink_line(line: str) -> list[tuple[str, str]]:
@@ -444,9 +506,9 @@ class TestMountTargetCollisions:
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
-        mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/plugins",))
+        mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/custom",))
 
-        assert mounts[0].target == Path("/home/dev/.claude/plugins")
+        assert mounts[0].target == Path("/home/dev/.claude/custom")
         validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
 
     @pytest.mark.parametrize(
@@ -1098,15 +1160,16 @@ class TestGetRunningContainers:
             stdout="djinn\ndjinn-docker-proxy\n",
         )
         containers = get_running_containers()
+        assert containers is not None
         assert "djinn" in containers
         assert "djinn-docker-proxy" in containers
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_returns_empty_list_on_error(self, mock_run: MagicMock) -> None:
-        """Test returns empty list on command failure."""
+    def test_returns_unknown_on_error(self, mock_run: MagicMock) -> None:
+        """A failed probe must stay distinct from an empty container list."""
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         containers = get_running_containers()
-        assert containers == []
+        assert containers is None
 
 
 class TestDeleteVolumes:
@@ -1194,6 +1257,90 @@ class TestComposeRun:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_emits_empty_zone_sources_without_using_them_as_workdir(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty source is a migrated overlay, not an omitted mount or workdir."""
+        self._without_runtime_mounts(monkeypatch)
+        zones_file = mock_app_config.config_root.parent / "zones.toml"
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+        mock_root.return_value = Path("/project")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        empty_source = Path(f"{mock_app_config.config_root}.shared") / "claude" / "projects"
+        empty_source.mkdir(parents=True)
+
+        overlay_args = get_zone_overlay_mount_args(mock_app_config)
+        compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
+
+        expected = f"{empty_source}:/home/dev/.claude/projects"
+        assert expected in overlay_args
+        cmd = mock_run.call_args.args[0]
+        assert expected in cmd
+        assert "--workdir" not in cmd
+
+    def test_skips_zone_overlay_when_its_source_is_missing(
+        self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", tmp_path / "zones.toml")
+
+        assert get_zone_overlay_mount_args(mock_app_config) == []
+
+    @pytest.mark.parametrize("source_kind", ("regular", "symlink"))
+    def test_rejects_non_directory_zone_source_after_assignment_resolution(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        source_kind: str,
+    ) -> None:
+        source = Path(f"{mock_app_config.config_root}.local") / "claude" / "jobs"
+        source.parent.mkdir(parents=True)
+        if source_kind == "regular":
+            source.write_text("not a directory")
+        else:
+            outside = source.parent / "outside"
+            outside.mkdir()
+            source.symlink_to(outside, target_is_directory=True)
+        by_agent: dict[str, dict[ZoneName, tuple[Path, ...]]] = {
+            agent: {"local": (), "shared": ()} for agent in zones_mod.ZONE_CONTAINER_TARGETS
+        }
+        by_agent["claude"]["local"] = (Path("jobs"),)
+        assignments = ZoneAssignments(by_agent, ())
+
+        def load_assignments(_config: AppConfig | None = None) -> ZoneAssignments:
+            return assignments
+
+        monkeypatch.setattr(zones_mod, "load_zone_assignments", load_assignments)
+
+        with pytest.raises(ZoneConfigurationError, match="not a directory"):
+            get_zone_overlay_mount_args(mock_app_config)
+
+    def test_rejects_mount_at_a_reserved_zone_overlay_target(
+        self,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        zones_file = tmp_path / "zones.toml"
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+
+        with pytest.raises(
+            MountCollisionError, match=r"reserved mount at /home/dev/\.claude/projects"
+        ):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, Path("/home/dev/.claude/projects")),),
+                mock_app_config,
+                DockerMode.NONE,
+                shell_args=[],
+                audio_args=[],
+                dbus_args=[],
+            )
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_emits_canonical_alias_target(
         self,
         mock_run: MagicMock,
@@ -1206,16 +1353,14 @@ class TestComposeRun:
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         options = ContainerOptions(
-            mounts=(
-                ContainerMount(tmp_path, Path("/home/dev/.config/claude/plugins")),
-            )
+            mounts=(ContainerMount(tmp_path, Path("/home/dev/.config/claude/custom")),)
         )
 
         compose_run(mock_app_config, options, command="echo", interactive=False)
 
         cmd = mock_run.call_args.args[0]
-        assert f"{tmp_path}:/home/dev/.claude/plugins" in cmd
-        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/.claude/plugins"
+        assert f"{tmp_path}:/home/dev/.claude/custom" in cmd
+        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/.claude/custom"
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -2225,3 +2370,40 @@ class TestComposeUpDetached:
         compose_up_detached(mock_app_config, ContainerOptions())
 
         assert mock_run.call_args.kwargs["env"]["DJINN_DETACHED"] == "true"
+class TestRunningContainerProbeFailure:
+    """A failed probe must stay distinguishable from 'no containers running'.
+
+    `_guard_no_containers_running` refuses on ``None`` and proceeds on ``[]``, so
+    collapsing the two here would let a migration rename a directory a live
+    container is using — with both commands reporting success.
+    """
+
+    def test_a_failed_docker_call_yields_none_not_an_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
+
+        monkeypatch.setattr(docker_mod.subprocess, "run", failing_run)
+
+        assert docker_mod.get_running_containers() is None
+
+    def test_a_missing_docker_binary_yields_none_not_an_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def missing_binary(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(docker_mod.subprocess, "run", missing_binary)
+
+        assert docker_mod.get_running_containers() is None
+
+    def test_a_successful_call_with_no_output_yields_an_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def empty_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(docker_mod.subprocess, "run", empty_run)
+
+        assert docker_mod.get_running_containers() == []

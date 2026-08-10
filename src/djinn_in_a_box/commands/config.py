@@ -36,7 +36,7 @@ from djinn_in_a_box.core.config_sync import (
 )
 from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
-from djinn_in_a_box.core.docker import ensure_host_env
+from djinn_in_a_box.core.docker import ensure_host_env, resolve_zone_roots
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.hostinfo import detect_timezone, suggest_resources
 from djinn_in_a_box.core.paths import CONFIG_DIR, CONFIG_FILE, get_project_root
@@ -46,6 +46,8 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "general.code_dir",
     "general.timezone",
     "general.config_root",
+    "general.shared_root",
+    "general.local_root",
     "resources.cpu_limit",
     "resources.memory_limit",
     "resources.cpu_reservation",
@@ -55,6 +57,13 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "config_sync.source",
 )
 _LOCK_PROBLEM_IDENTIFIER = "canonical-lock-failed"
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
 
 
 def _print_config_table(
@@ -233,9 +242,12 @@ def init_config(
 
     rule("Next steps")
     console.print("  [muted]1.[/muted] djinn build    [muted]# Build the Docker image[/muted]")
-    console.print("  [muted]2.[/muted] djinn start    [muted]# Start development shell[/muted]")
     console.print(
-        "  [muted]3.[/muted] (optional) mcpgateway start   "
+        "  [muted]2.[/muted] djinn migrate-zones    [muted]# Create zone overlays[/muted]"
+    )
+    console.print("  [muted]3.[/muted] djinn start    [muted]# Start development shell[/muted]")
+    console.print(
+        "  [muted]4.[/muted] (optional) mcpgateway start   "
         "[muted]# MCP tools — not required[/muted]"
     )
     blank()
@@ -275,6 +287,8 @@ def _build_config(
     code_dir: Path | None = None,
     timezone: str | None = None,
     config_root: Path | None = None,
+    shared_root: Path | None | _Unset = _UNSET,
+    local_root: Path | None | _Unset = _UNSET,
     resources: ResourceLimits | None = None,
     shell: ShellConfig | None = None,
     config_sync: ConfigSyncConfig | None = None,
@@ -283,6 +297,8 @@ def _build_config(
         code_dir=config.code_dir if code_dir is None else code_dir,
         timezone=config.timezone if timezone is None else timezone,
         config_root=config.config_root if config_root is None else config_root,
+        shared_root=config.shared_root if isinstance(shared_root, _Unset) else shared_root,
+        local_root=config.local_root if isinstance(local_root, _Unset) else local_root,
         resources=config.resources if resources is None else resources,
         shell=config.shell if shell is None else shell,
         config_sync=config.config_sync if config_sync is None else config_sync,
@@ -300,14 +316,28 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
         return _build_config(config, code_dir=code_dir)
     if key == "general.timezone":
         return _build_config(config, timezone=value)
-    if key == "general.config_root":
-        config_root = Path(value).expanduser()
-        if config_root != config.config_root:
+    if key in {"general.config_root", "general.shared_root", "general.local_root"}:
+        if key == "general.config_root":
+            updated = _build_config(config, config_root=Path(value).expanduser())
+        else:
+            normalized = value.strip().lower()
+            root = None if normalized in {"", "none", "null"} else Path(value).expanduser()
+            if key == "general.shared_root":
+                updated = _build_config(config, shared_root=root)
+            else:
+                updated = _build_config(config, local_root=root)
+        old_roots = resolve_zone_roots(config)
+        new_roots = resolve_zone_roots(updated)
+        if old_roots != new_roots:
             warning(
-                f"Existing credentials/config remain at {config.config_root}; "
-                f"new empty directories will be provisioned at {config_root}."
+                "Existing credentials/config remain at "
+                f"config={old_roots.config_root}, shared={old_roots.shared_root}, "
+                f"local={old_roots.local_root}; new roots are "
+                f"config={new_roots.config_root}, shared={new_roots.shared_root}, "
+                f"local={new_roots.local_root}. Zone data does not follow. "
+                "New empty directories will be provisioned at the configured roots."
             )
-        return _build_config(config, config_root=config_root)
+        return updated
     if key == "resources.cpu_limit":
         resources = ResourceLimits(
             cpu_limit=_parse_int_config_value(key, value),
@@ -369,6 +399,10 @@ def _format_config_value(config: AppConfig, key: str) -> str:
         return config.timezone
     if key == "general.config_root":
         return str(config.config_root)
+    if key == "general.shared_root":
+        return "derived" if config.shared_root is None else str(config.shared_root)
+    if key == "general.local_root":
+        return "derived" if config.local_root is None else str(config.local_root)
     if key == "resources.cpu_limit":
         return str(config.resources.cpu_limit)
     if key == "resources.memory_limit":
@@ -491,6 +525,7 @@ def config_show(
         output = json.dumps(config.model_dump(mode="json"), indent=2)
         console.print(output, highlight=False)
     else:
+        roots = resolve_zone_roots(config)
         # Human-readable output
         rule("Current Configuration")
         console.print(
@@ -503,8 +538,11 @@ def config_show(
             [
                 ("code_dir", config.code_dir),
                 ("timezone", config.timezone),
+                ("config_root", roots.config_root),
+                ("shared_root", roots.shared_root),
+                ("local_root", roots.local_root),
             ],
-            path_labels={"code_dir"},
+            path_labels={"code_dir", "config_root", "shared_root", "local_root"},
         )
         console.print()
 

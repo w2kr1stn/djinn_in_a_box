@@ -15,6 +15,14 @@ class ConfigValidationError(ValueError):
     pass
 
 
+class ZoneConfigurationError(ConfigValidationError):
+    pass
+
+
+class ZoneRootValidationError(ZoneConfigurationError):
+    pass
+
+
 class MountSpecificationError(ValueError):
     """Raised when a ``--mount`` value cannot be resolved or parsed."""
 

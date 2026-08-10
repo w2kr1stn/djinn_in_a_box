@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,8 @@ from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
     MountSpecificationError,
     RuntimeMountSpecificationError,
+    ZoneConfigurationError,
+    ZoneRootValidationError,
 )
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
@@ -76,6 +80,14 @@ _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/projects"),
     Path("/home/dev/sessions"),
 )
+
+
+def repo_owned_submount_targets(agent_root: Path) -> tuple[Path, ...]:
+    return tuple(
+        target
+        for target in _COMPOSE_DEV_MOUNT_TARGETS
+        if target != agent_root and target.is_relative_to(agent_root)
+    )
 
 
 def _resolve_image_aliases(target: Path) -> Path:
@@ -334,16 +346,16 @@ def _decode_timeout_output(
     return stdout, stderr
 
 
-def _docker_list(cmd: list[str]) -> list[str]:
+def _docker_list(cmd: list[str]) -> list[str] | None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         warning("Docker is not installed")
-        return []
+        return None
     if result.returncode != 0:
         stderr_msg = result.stderr.strip() if result.stderr else f"exit code {result.returncode}"
         warning(f"Docker command failed: {stderr_msg}")
-        return []
+        return None
     if not result.stdout.strip():
         return []
     return [line for line in result.stdout.strip().split("\n") if line]
@@ -521,6 +533,44 @@ def get_dbus_mount_args() -> list[str]:
     ]
 
 
+def get_zone_overlay_mount_args(config: AppConfig) -> list[str]:
+    """Build bind-mount arguments for existing zone directories."""
+    args, _ = _zone_overlay_mount_args_and_targets(config)
+    return args
+
+
+def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], tuple[Path, ...]]:
+    """Return overlay arguments and every configured overlay target.
+
+    The targets are returned independently of source existence: a user mount at
+    an assigned target would otherwise be reported as applied and then silently
+    hidden when a later migration creates the overlay source.
+    """
+    # ``config.zones`` imports root resolution from this module, so retain this
+    # import at the runtime boundary rather than creating an import cycle.
+    from djinn_in_a_box.config.zones import ZONE_CONTAINER_TARGETS, load_zone_assignments
+
+    roots = resolve_zone_roots(config)
+    assignments = load_zone_assignments(config)
+    args: list[str] = []
+    targets: list[Path] = []
+    zone_roots = {"local": roots.local_root, "shared": roots.shared_root}
+    for agent, target_root in ZONE_CONTAINER_TARGETS.items():
+        for zone in ("local", "shared"):
+            for relative_path in assignments.by_agent[agent][zone]:
+                target = target_root / relative_path
+                targets.append(target)
+                source = zone_roots[zone] / agent / relative_path
+                # An empty directory is the completed-migration marker. It must
+                # overlay just like populated data; only a missing source skips.
+                if source.is_symlink() or (source.exists() and not source.is_dir()):
+                    msg = f"Zone overlay source is not a directory: {source}"
+                    raise ZoneConfigurationError(msg)
+                if source.is_dir():
+                    args.extend(["-v", f"{source}:{target}"])
+    return args, tuple(targets)
+
+
 def _mount_targets_from_args(args: list[str]) -> list[Path]:
     """Extract container targets from volume arguments built in this module."""
     targets: list[Path] = []
@@ -604,9 +654,12 @@ def _reserved_mount_targets(
     shell_args: list[str] | None = None,
     audio_args: list[str] | None = None,
     dbus_args: list[str] | None = None,
+    zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> list[Path]:
     """Return targets occupied by this particular ``dev`` container invocation."""
-    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, _MOUNT_ROOT]
+    if zone_overlay_targets is None:
+        _, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, *zone_overlay_targets, _MOUNT_ROOT]
     if docker_mode is DockerMode.DIRECT:
         targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     if shell_args is None:
@@ -643,6 +696,7 @@ def validate_container_mounts(
     shell_args: list[str] | None = None,
     audio_args: list[str] | None = None,
     dbus_args: list[str] | None = None,
+    zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> None:
     """Reject user targets that equal or are ancestors of an occupied target."""
     normalized_mounts = tuple(
@@ -656,6 +710,7 @@ def validate_container_mounts(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        zone_overlay_targets=zone_overlay_targets,
     )
     occupied: list[tuple[Path, str, Path]] = []
     for target in reserved_targets:
@@ -808,6 +863,7 @@ def compose_run(
     dbus_args = _canonicalize_runtime_mount_args(
         get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
     )
+    zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     validate_container_mounts(
         mounts,
         config,
@@ -815,6 +871,7 @@ def compose_run(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        zone_overlay_targets=zone_overlay_targets,
     )
 
     for mount in mounts:
@@ -829,6 +886,7 @@ def compose_run(
         cmd.extend(["--workdir", str(workdir)])
 
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)
+    cmd.extend(zone_overlay_args)
     cmd.extend(shell_args)
     cmd.extend(audio_args)
     cmd.extend(dbus_args)
@@ -1114,10 +1172,10 @@ def cleanup_docker_proxy(docker_mode: DockerMode, config: AppConfig | None = Non
 
 def is_container_running(name: str) -> bool:
     names = _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"])
-    return name in names
+    return names is not None and name in names
 
 
-def get_running_containers(prefix: str = "djinn") -> list[str]:
+def get_running_containers(prefix: str = "djinn") -> list[str] | None:
     return _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"])
 
 
@@ -1188,6 +1246,69 @@ def get_config_root(config: AppConfig | None = None) -> Path:
     return Path.home() / ".djinn" / "config"
 
 
+@dataclass(frozen=True)
+class ZoneRoots:
+    config_root: Path
+    shared_root: Path
+    local_root: Path
+
+
+def resolve_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
+    config_root = get_config_root(config)
+    shared_root = (
+        config.shared_root
+        if config is not None and config.shared_root is not None
+        else Path(f"{config_root}.shared")
+    )
+    local_root = (
+        config.local_root
+        if config is not None and config.local_root is not None
+        else Path(f"{config_root}.local")
+    )
+    roots = ZoneRoots(config_root, shared_root, local_root)
+    root_paths = (roots.config_root, roots.shared_root, roots.local_root)
+    for index, root in enumerate(root_paths):
+        for other in root_paths[index + 1 :]:
+            if root == other or root.is_relative_to(other) or other.is_relative_to(root):
+                msg = f"Zone roots must be distinct and not nested: {root} and {other}"
+                raise ZoneRootValidationError(msg)
+    return roots
+
+
+def ensure_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
+    roots = resolve_zone_roots(config)
+    for root in (roots.config_root, roots.shared_root, roots.local_root):
+        _ensure_zone_root(root)
+    return roots
+
+
+def _ensure_zone_root(root: Path) -> None:
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        try:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            info = root.lstat()
+        except OSError as error:
+            msg = f"Cannot create zone root {root}: {error}"
+            raise ZoneRootValidationError(msg) from error
+    except OSError as error:
+        msg = f"Cannot inspect zone root {root}: {error}"
+        raise ZoneRootValidationError(msg) from error
+
+    if stat.S_ISLNK(info.st_mode):
+        msg = f"Zone root must not be a symlink: {root}"
+        raise ZoneRootValidationError(msg)
+    if not stat.S_ISDIR(info.st_mode):
+        msg = f"Zone root is not a directory: {root}"
+        raise ZoneRootValidationError(msg)
+    try:
+        root.chmod(0o700)
+    except OSError as error:
+        msg = f"Cannot secure zone root {root}: {error}"
+        raise ZoneRootValidationError(msg) from error
+
+
 def workflow_image_compatible(
     image: str = _WORKFLOW_IMAGE,
 ) -> WorkflowImageCompatibility:
@@ -1254,11 +1375,14 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     is a host-side input read by ``_sync_build_files`` (a no-op when absent), not a
     compose bind-mount, so it cannot trigger the root-owned-mount footgun.
     """
-    root = get_config_root(config)
+    roots = ensure_zone_roots(config)
+    root = roots.config_root
     for name in SYNC_PATHS.get("credentials", []):
         # 0700: credential stores hold secrets (OAuth tokens, age identities).
         # Applies on creation only, matching the ~/.ssh precedent below.
-        (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / name
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.chmod(0o700)
 
     claude_root = get_project_root() / "config" / "claude"
     companion = claude_root / "AGENTS.md"
@@ -1330,10 +1454,25 @@ def clear_sync_path(path: Path) -> bool:
 
 def _clear_directory_contents(path: Path) -> None:
     for item in path.iterdir():
-        if item.is_dir() and not item.is_symlink():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
+        _remove_sync_path_item(item)
+
+
+def _remove_sync_path_item(path: Path) -> bool:
+    if path.is_dir() and not path.is_symlink():
+        for child in path.iterdir():
+            if not _remove_sync_path_item(child):
+                return False
+        try:
+            path.rmdir()
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EBUSY, errno.EPERM, None}:
+                raise
+            if next(path.iterdir(), None) is None:
+                return False
+            raise
+        return True
+    path.unlink()
+    return True
 
 
 def is_sync_archive(archive_name: str) -> bool:

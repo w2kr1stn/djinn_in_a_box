@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, ParamSpec, TypeIs, TypeVar, cast
 
 import typer
 from rich.table import Table
 
+from djinn_in_a_box.commands.zone_gate import zone_command_gate
 from djinn_in_a_box.config.loader import load_agents, load_config
-from djinn_in_a_box.config.models import ConfigSyncSource
+from djinn_in_a_box.config.models import AppConfig, ConfigSyncSource
 from djinn_in_a_box.core.agent_runner import (
     AgentNetworkError,
     UnknownAgentError,
@@ -46,6 +50,38 @@ from djinn_in_a_box.core.exceptions import (
     RuntimeMountSpecificationError,
 )
 from djinn_in_a_box.core.paths import get_project_root
+
+P = ParamSpec("P")
+R = TypeVar("R")
+_NO_GATED_CONFIG = object()
+_gated_config: ContextVar[object] = ContextVar("gated_config", default=_NO_GATED_CONFIG)
+
+
+def _is_app_config(value: object) -> TypeIs[AppConfig]:
+    return isinstance(value, AppConfig)
+
+
+def _active_config() -> AppConfig:
+    config = _gated_config.get()
+    if config is _NO_GATED_CONFIG:
+        return load_config()
+    return cast(AppConfig, config)
+
+
+def _zone_gated_run(func: Callable[P, R]) -> Callable[P, R]:
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        candidate: object = load_config()
+        token = _gated_config.set(candidate)
+        try:
+            if not _is_app_config(candidate):
+                return func(*args, **kwargs)
+            with zone_command_gate(candidate, "run"):
+                return func(*args, **kwargs)
+        finally:
+            _gated_config.reset(token)
+
+    return wrapper
 
 
 def _agent_table(title: str) -> Table:
@@ -112,6 +148,7 @@ def _show_run_status(
 
 
 @handle_config_errors
+@_zone_gated_run
 def run(
     agent: Annotated[
         str,
@@ -197,7 +234,7 @@ def run(
 
     checked_config = None
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
-    config = load_config()
+    config = _active_config()
     checked_config = config
     if agent in {"claude", "codex"}:
         selected_agent = cast(ConfigSyncSource, agent)
