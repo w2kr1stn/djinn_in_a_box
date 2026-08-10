@@ -183,6 +183,55 @@ def test_without_a_tty_the_container_stays_up_instead_of_exiting(tmp_path: Path)
 
 
 @requires_zsh
+def test_detached_uses_the_keeper_even_though_a_tty_exists(tmp_path: Path) -> None:
+    """`--detach` must not leave an interactive shell as PID 1.
+
+    The compose file sets `tty: true`, so a terminal exists and the no-TTY branch
+    does not catch this mode. But nobody is on that terminal — consumers attach
+    with `djinn enter`, which brings its own TTY through docker exec. An unused
+    interactive shell as PID 1 makes the whole session hostage to it: a single EOF
+    (a stray attach, a closed pty master, a Ctrl-D) ends the shell with 0, PID 1
+    follows, and the container is gone without a signal or an error to point at.
+    """
+    harness = _harness(tmp_path)
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover - the child never returns
+        try:
+            os.environ["DJINN_DETACHED"] = "true"
+            os.execv("/bin/zsh", ["/bin/zsh", str(harness)])
+        finally:
+            os._exit(127)
+
+    try:
+        time.sleep(1.0)
+        assert os.waitpid(pid, os.WNOHANG) == (0, 0), "the keeper exited instead of holding"
+        os.write(fd, b"echo PROBE_$((6*7))\n")
+        assert not _read_until(fd, b"PROBE_42", timeout=2.0), (
+            "input was evaluated — an interactive shell is running, not the keeper"
+        )
+
+        os.kill(pid, signal.SIGTERM)  # docker stop signals PID 1 only
+        status: int | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            reaped, raw = os.waitpid(pid, os.WNOHANG)
+            if reaped:
+                status = raw
+                break
+            time.sleep(0.1)
+        assert status is not None, "PID 1 did not exit within the grace period"
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 128 + signal.SIGTERM
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        with suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+        os.close(fd)
+
+    assert len(_sync_lines(tmp_path)) == 3
+
+
+@requires_zsh
 def test_sigterm_persists_with_an_interactive_shell_running(tmp_path: Path) -> None:
     """The shape `docker stop` actually meets: PID 1 with a live interactive zsh.
 

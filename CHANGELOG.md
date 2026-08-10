@@ -73,6 +73,16 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- A detached container no longer dies when its unused PID-1 shell receives EOF.
+  `up -d` gives the container a TTY (the compose file sets `tty: true`) that
+  nobody is attached to, and an interactive shell there made the whole session
+  hostage to that terminal: one EOF — a stray attach, a closed pty master, a
+  Ctrl-D — ended the shell with 0, PID 1 followed, and the container was gone
+  with no signal and no error to point at. `djinn start --detach` now marks the
+  container with `DJINN_DETACHED=true`, and the entrypoint runs its keeper
+  instead of a shell. Consumers were never using that shell anyway — `djinn
+  enter` brings its own TTY through `docker exec` — and `docker stop` still
+  reaches the settings reverse-sync unchanged.
 - Captured Docker output is no longer mangled by Rich. Every command that echoes
   a subprocess's stdout/stderr as its own output — `build`, `start`, `clean`,
   `run`, `session`, `mcp` — now routes through `print_captured()`, which disables
