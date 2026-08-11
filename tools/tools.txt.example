@@ -1,0 +1,33 @@
+# =============================================================================
+# Optional CLI Tools
+# =============================================================================
+# Tools listed here are installed at container startup (with caching).
+# One tool per line. Comments (#) and empty lines are ignored.
+#
+# Usage:
+#   cp tools/tools.txt.example tools/tools.txt
+#   # uncomment the tools you want
+#   djinn start
+#
+# Every entry needs a matching installer at tools/installers/<name>.sh —
+# otherwise startup reports "Unknown tool: <name> (no installer found)".
+#
+# Note: tools are cached in a Docker volume, so they are reinstalled only when
+# the cache check fails (see the djinn-verify convention in tools/install.sh).
+# =============================================================================
+
+# --- Cloud CLIs ---
+# azure-cli          # Microsoft Azure CLI (az)
+# pulumi             # Pulumi Infrastructure as Code CLI
+
+# --- Secrets ---
+# sops               # SOPS — encrypted secrets management
+
+# --- Database Clients ---
+# psql               # PostgreSQL client (psql, pg_dump, …)
+
+# --- Dev ---
+# bun                # Bun JavaScript runtime & toolkit
+
+# --- Browser Automation ---
+# playwright         # Playwright browser automation
