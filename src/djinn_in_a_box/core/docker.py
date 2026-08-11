@@ -1031,6 +1031,7 @@ def compose_up_detached(
     dbus_args = _canonicalize_runtime_mount_args(
         get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
     )
+    zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     validate_container_mounts(
         mounts,
         config,
@@ -1038,6 +1039,7 @@ def compose_up_detached(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        zone_overlay_targets=zone_overlay_targets,
     )
 
     volume_specs: list[str] = []
@@ -1047,6 +1049,12 @@ def compose_up_detached(
         if mount.read_only:
             spec += ":ro"
         volume_specs.append(spec)
+    # The overlays are reserved targets above, so they must also be mounted here:
+    # `up` has no per-invocation `-v`, and a container started without them shows
+    # every migrated zone path as missing. Docker then creates each absent target
+    # as root — inside the config-root bind that carries their parent, so they
+    # land on the host — and the migrated data stays invisible behind them.
+    volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
     runtime_args = [*shell_args, *audio_args, *dbus_args]
     volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
     # The `-e` half of those same pairs has to ride along, or the sockets are
