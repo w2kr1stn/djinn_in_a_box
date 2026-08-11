@@ -2257,6 +2257,45 @@ class TestComposeUpDetached:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_carries_the_zone_overlays_like_the_foreground_path(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reserving a zone target without mounting it hides the migrated data.
+
+        The foreground path appends these overlays; this path builds its own
+        volume list, so a divergence starts the container with every migrated
+        zone path unmounted — the entrypoint then recreates them empty and the
+        agent state looks lost.
+        """
+        self._without_runtime_mounts(monkeypatch)
+        zones_file = mock_app_config.config_root.parent / "zones.toml"
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+        mock_root.return_value = Path("/project")
+        shared_source = Path(f"{mock_app_config.config_root}.shared") / "claude" / "projects"
+        shared_source.mkdir(parents=True)
+        local_source = Path(f"{mock_app_config.config_root}.local") / "claude" / "jobs"
+        local_source.mkdir(parents=True)
+        payload: dict[str, object] = {}
+
+        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
+            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            payload.update(json.loads(override.read_text()))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _read_override
+
+        compose_up_detached(mock_app_config, ContainerOptions())
+
+        service = payload["services"]["dev"]  # type: ignore[index]
+        assert f"{shared_source}:/home/dev/.claude/projects" in service["volumes"]
+        assert f"{local_source}:/home/dev/.claude/jobs" in service["volumes"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_carries_the_env_half_of_the_runtime_mount_pairs(
         self,
         mock_run: MagicMock,
