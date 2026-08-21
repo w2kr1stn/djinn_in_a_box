@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
@@ -328,6 +328,39 @@ def _run_captured(
         return RunResult(returncode=126, stdout="", stderr=f"Permission denied: {e}")
 
 
+def _run_streamed(
+    cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+) -> RunResult:
+    """Run a subprocess with stdout/stderr *inherited*, so its output is live.
+
+    The build path needs this: a captured build reveals nothing until the process
+    exits, which is precisely when a stalled build tells you nothing at all. The
+    child writes straight to this process's terminal instead.
+
+    Consequences the caller must know:
+
+    - ``RunResult.stdout``/``stderr`` are empty when the process actually ran —
+      the output already went to the terminal, there is nothing left to hand back.
+      The two spawn failures below are the exception: there `stderr` carries the
+      only diagnosis that exists.
+    - No ``timeout``. ``subprocess.run`` would kill only this direct child, not its
+      process group and not a BuildKit solve already running in the daemon, so a
+      timeout here would report a cancellation it cannot actually perform.
+    - ``stdin`` is closed: an inherited terminal descriptor lets a subprocess block
+      on a prompt, and on this path that prompt is indistinguishable from a hang.
+    - No ``text=True``: nothing is decoded here, because nothing is captured.
+    """
+    try:
+        result = subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, cwd=cwd, env=env, check=False,
+        )
+        return RunResult(returncode=result.returncode)
+    except FileNotFoundError as e:
+        return RunResult(returncode=127, stdout="", stderr=f"Command not found: {e}")
+    except PermissionError as e:
+        return RunResult(returncode=126, stdout="", stderr=f"Permission denied: {e}")
+
+
 def _decode_timeout_output(
     exc: subprocess.TimeoutExpired,
     timeout: int,
@@ -448,21 +481,30 @@ def _run_compose(
     config: AppConfig | None,
     cwd: Path,
     extra_env: dict[str, str] | None = None,
+    stream: bool = False,
 ) -> RunResult:
-    """Single choke-point for *captured* ``docker compose`` calls.
+    """Single choke-point for non-interactive ``docker compose`` calls.
 
-    Every captured compose invocation routes through here so the host
-    interpolation env is always injected. (The interactive/headless path in
-    ``compose_run`` is the only other sanctioned compose site.)
+    Every such compose invocation routes through here so the host interpolation
+    env is always injected. (The interactive/headless path in ``compose_run`` is
+    the only other sanctioned compose site.)
 
     ``extra_env`` carries values a subcommand cannot pass as a flag — ``up`` has
     no per-invocation ``-e`` — and is layered on top of the host bridge, never
     replacing it.
+
+    ``stream=True`` inherits stdout/stderr instead of capturing them, for a
+    long-running subcommand whose progress must be visible while it runs. It
+    returns empty ``stdout``/``stderr`` — see ``_run_streamed``. Callers that
+    parse output must leave it at the default.
     """
     env = _compose_host_env(config)
     if extra_env:
         env.update(extra_env)
-    return _run_captured(["docker", "compose", *args], cwd=cwd, env=env)
+    cmd = ["docker", "compose", *args]
+    if stream:
+        return _run_streamed(cmd, cwd=cwd, env=env)
+    return _run_captured(cmd, cwd=cwd, env=env)
 
 
 def get_shell_mount_args(config: AppConfig) -> list[str]:
@@ -733,12 +775,50 @@ def validate_container_mounts(
         )
 
 
+_COMPOSE_PROGRESS_MODES: Final[frozenset[str]] = frozenset(
+    {"auto", "tty", "plain", "quiet", "json"}
+)
+BUILD_PROGRESS_ENV: Final[str] = "DJINN_BUILD_PROGRESS"
+
+
+def _build_progress() -> str:
+    """Progress renderer for the build, ``plain`` unless overridden.
+
+    ``plain`` is the default because it keeps every stage line on screen, which is
+    what makes a stalled build readable. Someone who wants the compact redrawing
+    view back can set the env var; an unusable value falls back rather than
+    letting compose reject the whole build over a typo.
+    """
+    requested = os.environ.get(BUILD_PROGRESS_ENV)
+    if requested is None:
+        return "plain"
+    if requested not in _COMPOSE_PROGRESS_MODES:
+        warning(
+            f"Ignoring {BUILD_PROGRESS_ENV}={requested!r}: "
+            f"expected one of {', '.join(sorted(_COMPOSE_PROGRESS_MODES))}."
+        )
+        return "plain"
+    return requested
+
+
 def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) -> RunResult:
+    """Build the image, streaming progress to the terminal as it happens.
+
+    ``--progress plain`` is the deliberate default, overridable via
+    ``DJINN_BUILD_PROGRESS``: it keeps every stage line
+    on screen instead of redrawing one in place, so the stage a stalled build last
+    entered stays readable. It is a *global* compose flag and must precede the
+    subcommand — passing it after ``build`` still works but earns a deprecation
+    warning from compose.
+
+    Streaming means the returned ``RunResult`` carries no output. The build log was
+    already on the terminal; there is nothing to print afterwards.
+    """
     project_root = get_project_root()
-    args = ["build"]
+    args = ["--progress", _build_progress(), "build"]
     if no_cache:
         args.append("--no-cache")
-    return _run_compose(args, config=config, cwd=project_root)
+    return _run_compose(args, config=config, cwd=project_root, stream=True)
 
 
 BACKGROUND_START_ERROR = (
