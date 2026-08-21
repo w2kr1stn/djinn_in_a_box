@@ -85,6 +85,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # `default` on an ordinary host. `host` is the escape hatch for a host whose
+      # container DNS resolver is reachable from only one Docker network: builds run
+      # on another one and resolve nothing there. Set it via `djinn config set
+      # build.network host` — build steps then share the host's network namespace.
+      # Buildkit takes default/host/none, never a named network.
+      network: ${DJINN_BUILD_NETWORK:-default}
     image: djinn-in-a-box:latest
     container_name: djinn
     hostname: djinn

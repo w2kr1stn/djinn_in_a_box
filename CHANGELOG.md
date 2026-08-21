@@ -52,7 +52,40 @@ Versioning before and after the first stable release.
 - Shell startup UI helpers for section rules, status markers, boxed external
   command output, and zsh/bash-compatible sourcing.
 
+### Added
+
+- `build.network` config key (`default` | `host`) selects the network for
+  image-build steps, reaching compose as `DJINN_BUILD_NETWORK`. `host` is for a
+  host whose container DNS server is reachable from one Docker network only — a
+  VPN or split-DNS setup, where a resolver listens on one bridge while builds run
+  on another and resolve nothing there. The build then resolves through the same
+  resolver the host uses, instead of bypassing it; in exchange every build step
+  shares the host's network namespace, so it is opt-in and documented as such.
+  Default is unchanged. Buildkit's `none` is not offered (no layer of this image
+  builds without a network) and a named network buildkit rejects itself.
+- The image build now refuses a network it cannot resolve names on, checking from
+  inside each network-dependent build step rather than in a layer of its own — a
+  separate guard layer can stay cached while the download it protects re-runs. The
+  error names `build.network` and states its trade-off. Previously the failure
+  surfaced one timeout at a time: 70 minutes before npm gave up, since it retries
+  every package six times with a backoff, and over two minutes for `apt-get
+  update` alone.
+- `DJINN_BUILD_PROGRESS` overrides the build's progress renderer for anyone who
+  prefers compose's compact redrawing view; an unusable value falls back to
+  `plain` with a warning.
+
 ### Changed
+
+- `djinn build` now shows the build log while the build runs. It previously
+  captured the whole output and returned it only when the process exited, so a
+  build that stopped making progress displayed nothing at all — and on failure
+  only `stderr` was printed while `stdout` was discarded, which cost the lines
+  that name the failing step's cause. The build now inherits stdout/stderr and
+  forces `--progress plain`, keeping every stage line on screen so the stage a
+  stalled build last entered stays visible. Deliberately without a timeout:
+  killing the compose client would leave `docker-buildx` and the BuildKit solve
+  in the daemon running, so the timeout would report a cancellation it cannot
+  actually perform.
 
 - Restructured `djinn start` output into Python-rendered banner,
   `Environment`, and `Container` sections followed by shell-rendered
