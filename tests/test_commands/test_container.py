@@ -82,6 +82,29 @@ class TestBuildCommand:
         assert "[dev 3/25]" in captured
         assert "[internal]" in captured
 
+    def test_build_failure_without_captured_output_points_at_the_streamed_log(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A streamed build has already printed its log; there is nothing to reprint.
+
+        The empty `stderr` is the normal case now, so the failure message must send
+        the reader upwards instead of trailing off after the exit code.
+        """
+        with (
+            patch("djinn_in_a_box.commands.container.load_config"),
+            patch("djinn_in_a_box.commands.container.preflight"),
+            patch("djinn_in_a_box.commands.container._sync_build_files"),
+            patch("djinn_in_a_box.commands.container.compose_build") as mock_build,
+        ):
+            mock_build.return_value = RunResult(returncode=1)
+
+            with pytest.raises(typer.Exit):
+                container.build()
+
+        captured = capsys.readouterr().err
+        assert "exit code 1" in captured
+        assert "above" in captured
+
     def test_sync_build_files_uses_config_root_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1216,6 +1216,137 @@ class TestComposeBuild:
         assert "--no-cache" in cmd
 
 
+class TestStreamedBuildPath:
+    """`djinn build` streams: the log must appear while the build runs.
+
+    A captured build says nothing until the process exits — which is precisely the
+    moment a stalled build has nothing left to tell you. These pin the streaming
+    contract and the result contract that comes with it.
+    """
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_build_inherits_stdio_and_returns_no_output(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+        result = compose_build()
+        kwargs = mock_run.call_args.kwargs
+        # Nothing may be piped: any redirection puts the log back into a buffer.
+        assert "capture_output" not in kwargs
+        assert "stdout" not in kwargs
+        assert "stderr" not in kwargs
+        # An inherited terminal stdin lets a prompt masquerade as a hang.
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        # The log already went to the terminal, so the result carries none of it.
+        assert result.stdout == ""
+        assert result.stderr == ""
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_missing_docker_binary_keeps_exit_code_127(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        """Streaming must not cost the spawn-failure contract of the captured path.
+
+        Here `stderr` is load-bearing rather than empty: no process ever ran, so the
+        terminal holds nothing and this is the only place the diagnosis exists.
+        """
+        mock_run.side_effect = FileNotFoundError("docker")
+        result = compose_build()
+        assert result.returncode == 127
+        assert "Command not found" in result.stderr
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_unexecutable_docker_binary_keeps_exit_code_126(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        mock_run.side_effect = PermissionError("docker")
+        result = compose_build()
+        assert result.returncode == 126
+        assert "Permission denied" in result.stderr
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_progress_flag_precedes_the_subcommand(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        """`--progress` is a *global* compose flag, so its position is load-bearing.
+
+        Passed after `build` it still works, but compose answers with a deprecation
+        warning — noise this path exists to avoid.
+        """
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build()
+        argv = mock_run.call_args.args[0]
+        assert argv[:5] == ["docker", "compose", "--progress", "plain", "build"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_streamed_build_still_bridges_the_host_env(
+        self,
+        mock_run: MagicMock,
+        _root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The env bridge must survive the change of execution helper."""
+        monkeypatch.setenv("CODE_DIR", "/stale/from/shell")
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build(mock_app_config)
+        env = mock_run.call_args.kwargs["env"]
+        assert env["CODE_DIR"] == str(mock_app_config.code_dir)
+
+    @patch("djinn_in_a_box.core.docker.is_own_container", return_value=False)
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_only_the_build_streams(
+        self,
+        mock_run: MagicMock,
+        _root: MagicMock,
+        _own: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Streaming is opt-in per call site, and only `build` opts in.
+
+        Every other compose subcommand has callers that read its output, so the
+        default must stay captured — this pins the branch, not just the helper.
+        """
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        compose_down(mock_app_config)
+        assert mock_run.call_args.kwargs["capture_output"] is True
+
+
+class TestBuildProgressOverride:
+    """`plain` is the default, but it must not be a cage."""
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_override_is_honored(
+        self, mock_run: MagicMock, _root: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DJINN_BUILD_PROGRESS", "tty")
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build()
+        assert mock_run.call_args.args[0][:4] == ["docker", "compose", "--progress", "tty"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_unusable_value_falls_back_instead_of_failing_the_build(
+        self, mock_run: MagicMock, _root: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo must not cost the whole build: compose would reject the flag."""
+        monkeypatch.setenv("DJINN_BUILD_PROGRESS", "plian")
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("djinn_in_a_box.core.docker.warning") as mock_warning:
+            compose_build()
+        assert mock_run.call_args.args[0][:4] == ["docker", "compose", "--progress", "plain"]
+        # A silent fallback would leave the user believing the override took effect.
+        mock_warning.assert_called_once()
+        assert "plian" in mock_warning.call_args.args[0]
+
+
 class TestComposeRun:
     """Tests for compose_run function."""
 

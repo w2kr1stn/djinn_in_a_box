@@ -164,9 +164,15 @@ def build(
         blank()
         success("Done! Run 'djinn start' to begin.")
     else:
+        blank()
         error(f"Build failed with exit code {result.returncode}")
+        # The build streams, so its log is already above this line — reprinting is
+        # not possible and not wanted. `stderr` is only populated when the compose
+        # binary could not be started at all, and that diagnosis exists nowhere else.
         if result.stderr:
             print_captured(result.stderr)
+        else:
+            info("The failing step's output is above.")
         raise typer.Exit(result.returncode)
 
 
