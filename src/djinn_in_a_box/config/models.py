@@ -153,6 +153,36 @@ class ConfigSyncConfig(BaseModel):
     """Native workflow tree used as the single source of truth."""
 
 
+BuildNetwork = Literal["default", "host"]
+"""Build-step networks djinn offers.
+
+Buildkit also accepts ``none``, under which every network-dependent layer of this
+image would fail — that is a way to break a build, not to configure one, so it is
+left out. A *named* network buildkit rejects itself.
+"""
+
+
+class BuildConfig(BaseModel):
+    """Image-build settings."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    network: BuildNetwork = "default"
+    """Network for build steps (compose ``build.network``).
+
+    ``default`` suits an ordinary Docker host. ``host`` exists for a host whose
+    container DNS server is reachable from one Docker network only — a VPN or
+    split-DNS setup, say, where a resolver listens on one bridge while builds run
+    on another and can resolve nothing there. Building on the host stack then uses
+    the resolver the host itself uses, which keeps DNS on its intended path rather
+    than bypassing it.
+
+    The trade-off is why it stays opt-in: build steps then share the host's network
+    namespace and can reach host-local services, so it belongs only to a Dockerfile
+    you trust. Set it with ``djinn config set build.network host``.
+    """
+
+
 class AppConfig(BaseModel):
     """Main application configuration for Djinn in a Box.
 
@@ -186,6 +216,9 @@ class AppConfig(BaseModel):
 
     config_sync: ConfigSyncConfig = Field(default_factory=ConfigSyncConfig)
     """Agent workflow synchronization configuration."""
+
+    build: BuildConfig = Field(default_factory=BuildConfig)
+    """Image-build settings."""
 
     @field_validator("timezone", mode="after")
     @classmethod
