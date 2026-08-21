@@ -182,9 +182,29 @@ Supported `djinn config set` keys are:
 | `shell.skip_mounts` | Skip host shell config mounts | `false` |
 | `shell.omp_theme_path` | Optional Oh My Posh theme file mounted read-only | unset |
 | `config_sync.source` | Native global workflow source: `claude`, `codex`, or `opencode` | `claude` |
+| `build.network` | Network for image-build steps: `default` or `host` | `default` |
 
 Memory values must use Docker-style units such as `8G`, `4096M`, or `512K`.
 CPU values are positive integers. Reservations cannot exceed limits.
+
+`build.network` stays at `default` on an ordinary Docker host. Set it to `host`
+when your container DNS server is reachable from one Docker network only — a VPN
+or split-DNS setup, for instance, where a resolver listens on one bridge while
+builds run on another and resolve nothing there. The build then resolves through
+the resolver the host itself uses, which keeps DNS on its intended path instead of
+bypassing it.
+
+**Understand the trade-off before setting it.** `host` removes the build's network
+isolation: every `RUN` step in the Dockerfile shares the host's network namespace
+and can reach host-local services, including anything bound to loopback. It
+applies to the whole build, not one step, so enable it only for a Dockerfile you
+trust. It changes nothing about the resulting image or about how containers run
+afterwards — only how build steps reach the network.
+
+`djinn build` refuses early with this hint when it detects the situation, instead
+of letting each download time out in turn. Buildkit also accepts `none`, which
+`djinn` does not offer: no layer of this image can be built without a network. A
+named Docker network is rejected by buildkit itself.
 
 `DJINN_CONFIG_ROOT` is not something you normally have to export. The CLI loads
 `config.toml` and injects Compose interpolation variables, including

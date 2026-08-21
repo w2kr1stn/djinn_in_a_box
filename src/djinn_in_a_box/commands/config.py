@@ -18,6 +18,7 @@ from rich.text import Text
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import (
     AppConfig,
+    BuildConfig,
     ConfigSyncConfig,
     ResourceLimits,
     ShellConfig,
@@ -55,6 +56,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "shell.skip_mounts",
     "shell.omp_theme_path",
     "config_sync.source",
+    "build.network",
 )
 _LOCK_PROBLEM_IDENTIFIER = "canonical-lock-failed"
 
@@ -292,6 +294,7 @@ def _build_config(
     resources: ResourceLimits | None = None,
     shell: ShellConfig | None = None,
     config_sync: ConfigSyncConfig | None = None,
+    build: BuildConfig | None = None,
 ) -> AppConfig:
     return AppConfig(
         code_dir=config.code_dir if code_dir is None else code_dir,
@@ -302,6 +305,7 @@ def _build_config(
         resources=config.resources if resources is None else resources,
         shell=config.shell if shell is None else shell,
         config_sync=config.config_sync if config_sync is None else config_sync,
+        build=config.build if build is None else build,
     )
 
 
@@ -386,6 +390,9 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
     if key == "config_sync.source":
         config_sync = ConfigSyncConfig.model_validate({"source": value})
         return _build_config(config, config_sync=config_sync)
+    if key == "build.network":
+        build = BuildConfig.model_validate({"network": value.strip().lower()})
+        return _build_config(config, build=build)
 
     error(f"Unknown configuration key: {key}")
     error(f"Allowed keys: {_allowed_keys_message()}")
@@ -417,6 +424,8 @@ def _format_config_value(config: AppConfig, key: str) -> str:
         return str(config.shell.omp_theme_path)
     if key == "config_sync.source":
         return config.config_sync.source
+    if key == "build.network":
+        return config.build.network
 
     msg = f"Unknown configuration key: {key}"
     raise ValueError(msg)
@@ -567,6 +576,9 @@ def config_show(
             "Config Sync",
             [("source", config.config_sync.source)],
         )
+        console.print()
+
+        _print_config_table("Build", [("network", config.build.network)])
 
 
 def config_path() -> None:

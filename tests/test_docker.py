@@ -1216,6 +1216,198 @@ class TestComposeBuild:
         assert "--no-cache" in cmd
 
 
+class TestStreamedBuildPath:
+    """`djinn build` streams: the log must appear while the build runs.
+
+    A captured build says nothing until the process exits — which is precisely the
+    moment a stalled build has nothing left to tell you. These pin the streaming
+    contract and the result contract that comes with it.
+    """
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_build_inherits_stdio_and_returns_no_output(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+        result = compose_build()
+        kwargs = mock_run.call_args.kwargs
+        # Nothing may be piped: any redirection puts the log back into a buffer.
+        assert "capture_output" not in kwargs
+        assert "stdout" not in kwargs
+        assert "stderr" not in kwargs
+        # An inherited terminal stdin lets a prompt masquerade as a hang.
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        # The log already went to the terminal, so the result carries none of it.
+        assert result.stdout == ""
+        assert result.stderr == ""
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_missing_docker_binary_keeps_exit_code_127(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        """Streaming must not cost the spawn-failure contract of the captured path.
+
+        Here `stderr` is load-bearing rather than empty: no process ever ran, so the
+        terminal holds nothing and this is the only place the diagnosis exists.
+        """
+        mock_run.side_effect = FileNotFoundError("docker")
+        result = compose_build()
+        assert result.returncode == 127
+        assert "Command not found" in result.stderr
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_unexecutable_docker_binary_keeps_exit_code_126(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        mock_run.side_effect = PermissionError("docker")
+        result = compose_build()
+        assert result.returncode == 126
+        assert "Permission denied" in result.stderr
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_progress_flag_precedes_the_subcommand(
+        self, mock_run: MagicMock, _root: MagicMock
+    ) -> None:
+        """`--progress` is a *global* compose flag, so its position is load-bearing.
+
+        Passed after `build` it still works, but compose answers with a deprecation
+        warning — noise this path exists to avoid.
+        """
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build()
+        argv = mock_run.call_args.args[0]
+        assert argv[:5] == ["docker", "compose", "--progress", "plain", "build"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_streamed_build_still_bridges_the_host_env(
+        self,
+        mock_run: MagicMock,
+        _root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The env bridge must survive the change of execution helper."""
+        monkeypatch.setenv("CODE_DIR", "/stale/from/shell")
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build(mock_app_config)
+        env = mock_run.call_args.kwargs["env"]
+        assert env["CODE_DIR"] == str(mock_app_config.code_dir)
+
+    @patch("djinn_in_a_box.core.docker.is_own_container", return_value=False)
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_only_the_build_streams(
+        self,
+        mock_run: MagicMock,
+        _root: MagicMock,
+        _own: MagicMock,
+        mock_app_config: AppConfig,
+    ) -> None:
+        """Streaming is opt-in per call site, and only `build` opts in.
+
+        Every other compose subcommand has callers that read its output, so the
+        default must stay captured — this pins the branch, not just the helper.
+        """
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        compose_down(mock_app_config)
+        assert mock_run.call_args.kwargs["capture_output"] is True
+
+
+class TestBuildProgressOverride:
+    """`plain` is the default, but it must not be a cage."""
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_override_is_honored(
+        self, mock_run: MagicMock, _root: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DJINN_BUILD_PROGRESS", "tty")
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build()
+        assert mock_run.call_args.args[0][:4] == ["docker", "compose", "--progress", "tty"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_unusable_value_falls_back_instead_of_failing_the_build(
+        self, mock_run: MagicMock, _root: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo must not cost the whole build: compose would reject the flag."""
+        monkeypatch.setenv("DJINN_BUILD_PROGRESS", "plian")
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("djinn_in_a_box.core.docker.warning") as mock_warning:
+            compose_build()
+        assert mock_run.call_args.args[0][:4] == ["docker", "compose", "--progress", "plain"]
+        # A silent fallback would leave the user believing the override took effect.
+        mock_warning.assert_called_once()
+        assert "plian" in mock_warning.call_args.args[0]
+
+
+class TestDockerfileDnsGuard:
+    """The build must refuse a network it cannot resolve names on.
+
+    Without this the agent installs discover the failure one timeout at a time —
+    measured once at 70 minutes before npm gave up.
+    """
+
+    @staticmethod
+    def _dockerfile() -> str:
+        return (Path(__file__).parents[1] / "Dockerfile").read_text()
+
+    @staticmethod
+    def _run_instructions() -> list[str]:
+        """The Dockerfile's RUN instructions, each with its continuations joined.
+
+        Layer boundaries are what matter here, so line continuations must be folded
+        back into one string — a guard on the next physical line is in the same
+        instruction, a guard in the next RUN is not.
+        """
+        text = (Path(__file__).parents[1] / "Dockerfile").read_text()
+        joined = text.replace("\\\n", " ")
+        # Indented or lower-case RUN is still a RUN; matching the literal prefix only
+        # would let a renamed-but-real layer slip past this whole check.
+        return [line for line in joined.splitlines() if re.match(r"^\s*RUN\s+", line, re.I)]
+
+    def test_guard_shares_the_run_of_every_layer_it_protects(self) -> None:
+        """The guard must sit *inside* the download's instruction, not before it.
+
+        A guard in its own layer can stay cached while the download below re-runs —
+        only sharing a RUN shares the cache decision. `npm install -g` is the layer
+        that matters most: a `djinn update` bump invalidates it while everything
+        above stays cached, and its failure mode cost 70 minutes.
+        """
+        instructions = self._run_instructions()
+        assert instructions, "no RUN instructions parsed — has the Dockerfile moved?"
+        for needle in ("apt-get update", "npm install -g"):
+            owners = [i for i in instructions if needle in i]
+            assert owners, f"{needle} vanished from the Dockerfile"
+            for owner in owners:
+                assert "check-build-dns.sh" in owner, (
+                    f"the RUN containing {needle!r} does not call the DNS guard, "
+                    "so it can be cached away from it"
+                )
+
+    def test_guard_runs_before_the_download_it_shares_a_layer_with(self) -> None:
+        # `guard && download` fails first; `download && guard` would be decoration.
+        for instruction in self._run_instructions():
+            if "check-build-dns.sh" not in instruction:
+                continue
+            for needle in ("apt-get update", "npm install -g"):
+                if needle in instruction:
+                    assert instruction.index("check-build-dns.sh") < instruction.index(needle)
+
+    def test_guard_names_the_escape_hatch_and_its_cost(self) -> None:
+        # A message that does not say what to do costs another debugging session —
+        # and one that hides the trade-off invites an uninformed `host`.
+        script = (Path(__file__).parents[1] / "scripts" / "check-build-dns.sh").read_text()
+        assert "djinn config set build.network host" in script
+        assert "host's network namespace" in script
+
+
 class TestComposeRun:
     """Tests for compose_run function."""
 
@@ -2254,6 +2446,45 @@ class TestComposeUpDetached:
             compose_up_detached(mock_app_config, options)
 
         mock_run.assert_not_called()
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_carries_the_zone_overlays_like_the_foreground_path(
+        self,
+        mock_run: MagicMock,
+        mock_root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reserving a zone target without mounting it hides the migrated data.
+
+        The foreground path appends these overlays; this path builds its own
+        volume list, so a divergence starts the container with every migrated
+        zone path unmounted — the entrypoint then recreates them empty and the
+        agent state looks lost.
+        """
+        self._without_runtime_mounts(monkeypatch)
+        zones_file = mock_app_config.config_root.parent / "zones.toml"
+        monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+        mock_root.return_value = Path("/project")
+        shared_source = Path(f"{mock_app_config.config_root}.shared") / "claude" / "projects"
+        shared_source.mkdir(parents=True)
+        local_source = Path(f"{mock_app_config.config_root}.local") / "claude" / "jobs"
+        local_source.mkdir(parents=True)
+        payload: dict[str, object] = {}
+
+        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
+            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            payload.update(json.loads(override.read_text()))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _read_override
+
+        compose_up_detached(mock_app_config, ContainerOptions())
+
+        service = payload["services"]["dev"]  # type: ignore[index]
+        assert f"{shared_source}:/home/dev/.claude/projects" in service["volumes"]
+        assert f"{local_source}:/home/dev/.claude/jobs" in service["volumes"]
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")

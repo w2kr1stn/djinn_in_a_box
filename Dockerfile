@@ -8,7 +8,15 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies (base)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The DNS guard runs *inside* the network-dependent layers rather than in one of its
+# own. A separate guard layer can stay cached while the download below re-runs — only
+# sharing a RUN instruction shares the cache decision. It guards the first download
+# here and the agent installs further down; the curl-based steps in between fail in
+# seconds with their own resolver error, so they are left alone.
+COPY scripts/check-build-dns.sh /usr/local/bin/check-build-dns.sh
+RUN chmod +x /usr/local/bin/check-build-dns.sh
+
+RUN check-build-dns.sh && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg openssh-client git zsh jq python3 build-essential iptables sudo unzip locales \
     libpulse0 pulseaudio-utils alsa-utils libasound2-plugins sox \
     && rm -rf /var/lib/apt/lists/*
@@ -22,6 +30,7 @@ RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/a
 # Copy packages.txt if it exists (wildcard allows missing file)
 COPY packages.tx[t] /tmp/
 RUN if [ -f /tmp/packages.txt ]; then \
+        check-build-dns.sh && \
         apt-get update && \
         sed 's/#.*//' /tmp/packages.txt | grep -v '^[[:space:]]*$' | \
         xargs -r apt-get install -y --no-install-recommends && \
@@ -80,10 +89,10 @@ ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
 # CLI Agent versions - update with: ./scripts/update-agents.sh
-ARG CLAUDE_CODE_VERSION=2.1.226
-ARG GEMINI_CLI_VERSION=0.54.4
-ARG CODEX_VERSION=0.147.0
-ARG OPENCODE_VERSION=1.18.16
+ARG CLAUDE_CODE_VERSION=2.1.238
+ARG GEMINI_CLI_VERSION=0.56.0
+ARG CODEX_VERSION=0.149.0
+ARG OPENCODE_VERSION=1.18.19
 
 # Claude Code via native installer (no npm/Node.js dependency)
 # Installs to ~/.local/bin/claude (already in PATH via .zshrc)
@@ -95,7 +104,13 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
 # platform binary — that postinstall hard-exits 1 on a failed fetch, and this
 # layer re-runs on every `djinn update` (ARG bump). Hardens the unattended
 # build against transient registry/CDN hiccups without slowing runtime npm.
-RUN eval "$(fnm env --shell bash)" && \
+# The guard shares this RUN on purpose: this is the layer a `djinn update` bump
+# invalidates while everything above stays cached, and the layer whose failure mode is
+# pathological -- six retries per package with a backoff, measured at 70 minutes
+# before npm gave up. In the same instruction it cannot be cached away from the
+# install it protects.
+RUN check-build-dns.sh && \
+    eval "$(fnm env --shell bash)" && \
     NPM_CONFIG_FETCH_RETRIES=5 NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
     npm install -g \
     typescript \
