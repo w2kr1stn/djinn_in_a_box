@@ -20,7 +20,7 @@ import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.commands import doctor as doctor_mod
 from djinn_in_a_box.config.defaults import SYNC_PATHS
 from djinn_in_a_box.config.loader import load_config, save_config
-from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.config.models import AppConfig, BuildConfig
 from djinn_in_a_box.core.docker import (
     ContainerOptions,
     DockerMode,
@@ -55,6 +55,26 @@ class TestBuildComposeEnv:
         # The two ${...:?}-guarded vars must always be present so compose never aborts.
         for key in _GUARDED:
             assert key in env and env[key]
+
+    def test_build_network_reaches_compose(self, mock_app_config: AppConfig) -> None:
+        """`build.network` is interpolated from this var, so the bridge must carry it."""
+        assert build_compose_env(mock_app_config)["DJINN_BUILD_NETWORK"] == "default"
+
+    def test_configured_build_network_wins(self, tmp_path: Path) -> None:
+        config = AppConfig(code_dir=tmp_path, build=BuildConfig(network="host"))
+        assert build_compose_env(config)["DJINN_BUILD_NETWORK"] == "host"
+
+    def test_compose_consumes_the_variable_this_bridge_produces(self) -> None:
+        """Both halves of the contract, pinned together.
+
+        Rendering the variable is worthless if the compose file spells it differently
+        or reads it in the wrong place — and neither half fails on its own. This
+        checks the name, the default, and that it lands on `build.network`.
+        """
+        compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text()
+        assert "network: ${DJINN_BUILD_NETWORK:-default}" in compose
+        build_section = compose[compose.find("build:") : compose.find("image: djinn-in-a-box")]
+        assert "DJINN_BUILD_NETWORK" in build_section, "variable is not under build:"
 
 
 class TestComposeEnvBridge:

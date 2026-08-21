@@ -464,6 +464,7 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
             "MEMORY_LIMIT": config.resources.memory_limit,
             "CPU_RESERVATION": str(config.resources.cpu_reservation),
             "MEMORY_RESERVATION": config.resources.memory_reservation,
+            "DJINN_BUILD_NETWORK": config.build.network,
         }
     if terminal_width is not None:
         env["DJINN_TERM_WIDTH"] = terminal_width

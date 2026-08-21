@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from djinn_in_a_box.config.models import (
     AppConfig,
+    BuildConfig,
+    BuildNetwork,
     ConfigSyncConfig,
     ResourceLimits,
     ShellConfig,
@@ -144,3 +146,24 @@ class TestAppConfig:
         config = AppConfig.model_validate(data)
         assert config.resources.cpu_limit == 4
         assert config.shell.skip_mounts is True
+
+
+class TestBuildNetwork:
+    """BuildKit accepts default/host/none only — a named network is rejected."""
+
+    def test_default_is_conservative(self, tmp_path: Path) -> None:
+        assert AppConfig(code_dir=tmp_path).build.network == "default"
+
+    @pytest.mark.parametrize("mode", ["default", "host"])
+    def test_accepts_the_offered_modes(self, tmp_path: Path, mode: BuildNetwork) -> None:
+        assert AppConfig(code_dir=tmp_path, build=BuildConfig(network=mode)).build.network == mode
+
+    @pytest.mark.parametrize("mode", ["djinn-network", "none", "", "HOST"])
+    def test_rejects_everything_else(self, mode: str) -> None:
+        """Values arrive from untyped TOML, so validation is the only gate.
+
+        `none` is refused deliberately: buildkit accepts it, but no layer of this
+        image can be built without a network. A named network buildkit itself refuses.
+        """
+        with pytest.raises(ValidationError):
+            BuildConfig.model_validate({"network": mode})

@@ -1347,6 +1347,67 @@ class TestBuildProgressOverride:
         assert "plian" in mock_warning.call_args.args[0]
 
 
+class TestDockerfileDnsGuard:
+    """The build must refuse a network it cannot resolve names on.
+
+    Without this the agent installs discover the failure one timeout at a time —
+    measured once at 70 minutes before npm gave up.
+    """
+
+    @staticmethod
+    def _dockerfile() -> str:
+        return (Path(__file__).parents[1] / "Dockerfile").read_text()
+
+    @staticmethod
+    def _run_instructions() -> list[str]:
+        """The Dockerfile's RUN instructions, each with its continuations joined.
+
+        Layer boundaries are what matter here, so line continuations must be folded
+        back into one string — a guard on the next physical line is in the same
+        instruction, a guard in the next RUN is not.
+        """
+        text = (Path(__file__).parents[1] / "Dockerfile").read_text()
+        joined = text.replace("\\\n", " ")
+        # Indented or lower-case RUN is still a RUN; matching the literal prefix only
+        # would let a renamed-but-real layer slip past this whole check.
+        return [line for line in joined.splitlines() if re.match(r"^\s*RUN\s+", line, re.I)]
+
+    def test_guard_shares_the_run_of_every_layer_it_protects(self) -> None:
+        """The guard must sit *inside* the download's instruction, not before it.
+
+        A guard in its own layer can stay cached while the download below re-runs —
+        only sharing a RUN shares the cache decision. `npm install -g` is the layer
+        that matters most: a `djinn update` bump invalidates it while everything
+        above stays cached, and its failure mode cost 70 minutes.
+        """
+        instructions = self._run_instructions()
+        assert instructions, "no RUN instructions parsed — has the Dockerfile moved?"
+        for needle in ("apt-get update", "npm install -g"):
+            owners = [i for i in instructions if needle in i]
+            assert owners, f"{needle} vanished from the Dockerfile"
+            for owner in owners:
+                assert "check-build-dns.sh" in owner, (
+                    f"the RUN containing {needle!r} does not call the DNS guard, "
+                    "so it can be cached away from it"
+                )
+
+    def test_guard_runs_before_the_download_it_shares_a_layer_with(self) -> None:
+        # `guard && download` fails first; `download && guard` would be decoration.
+        for instruction in self._run_instructions():
+            if "check-build-dns.sh" not in instruction:
+                continue
+            for needle in ("apt-get update", "npm install -g"):
+                if needle in instruction:
+                    assert instruction.index("check-build-dns.sh") < instruction.index(needle)
+
+    def test_guard_names_the_escape_hatch_and_its_cost(self) -> None:
+        # A message that does not say what to do costs another debugging session —
+        # and one that hides the trade-off invites an uninformed `host`.
+        script = (Path(__file__).parents[1] / "scripts" / "check-build-dns.sh").read_text()
+        assert "djinn config set build.network host" in script
+        assert "host's network namespace" in script
+
+
 class TestComposeRun:
     """Tests for compose_run function."""
 
