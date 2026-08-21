@@ -153,6 +153,9 @@ producer:
   also gates command and CLI modules against literal Rich color usage: palette
   hex values must appear once in `theme.py`, and command/CLI Python files must
   not introduce literal hex colors or named Rich color style literals.
+- The build path is the one exception to captured output: it inherits the child's
+  streams (see "Image Build"), so `print_captured()` does not apply there — the
+  output never passes through Rich.
 - `core/console.py` defines `console` for stdout and `err_console` for stderr.
   Operational UI helpers (`success()`, `error()`, `warning()`, `info()`,
   `status_line()`, `blank()`, `header()`, and `rule()`) print through
@@ -200,6 +203,12 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 - `resources: ResourceLimits`
 - `shell: ShellConfig`
 - `config_sync: ConfigSyncConfig`
+- `build: BuildConfig`: `network: BuildNetwork` (`default` | `host`, default
+  `default`) — reaches compose as `DJINN_BUILD_NETWORK`, which
+  `docker-compose.yml` interpolates into `build.network`. `host` trades the
+  build's network isolation for the host's resolver path. Buildkit's third mode,
+  `none`, is not offered: no layer of this image builds without a network. A named
+  network buildkit rejects itself.
 
 `ResourceLimits` defaults are:
 
@@ -679,6 +688,40 @@ creates empty zone targets; `doctor` reports unmigrated paths, collisions, drift
 permission drift, and large direct files that cannot safely be overlaid.
 
 ## Image Build
+
+The Dockerfile refuses a build network it cannot resolve names on:
+`scripts/check-build-dns.sh`, invoked *inside* the network-dependent `RUN`
+instructions rather than in a layer of its own — the base `apt-get`, the optional
+`packages.txt` install, and the global `npm install`. A guard in its own layer
+would be cache-independent of the download it protects: it can stay cached while
+the download re-runs. Sharing the instruction is what makes them share the cache
+decision, which matters most for the npm layer, since a `djinn update` version bump
+invalidates exactly that layer while everything above it stays cached. The
+curl-based steps in between are deliberately unguarded: they fail in seconds with
+their own resolver error, so the guard would add noise without adding information.
+One script, so the check and its message have a single home; it uses `getent`,
+which ships with glibc and therefore works on the bare base image. Without the
+guard the failure surfaced one timeout at a time: measured at 70 minutes for the
+npm layer, because npm retries every package six times with a backoff, and over
+two minutes for `apt-get update` alone.
+
+The build streams. `compose_build()` runs compose through `_run_streamed()`
+instead of `_run_captured()`, so stdout and stderr are inherited and the log
+appears while the build runs rather than after it exits. It passes
+`--progress plain` — a *global* compose flag, therefore placed before the
+subcommand — so every stage line stays on screen instead of being redrawn in
+place, and the stage a stalled build last entered remains readable. Setting
+`DJINN_BUILD_PROGRESS` to another compose progress mode overrides that; an
+unusable value falls back to `plain` with a warning rather than letting compose
+reject the build over a typo.
+
+The streamed `RunResult` carries no output: the log already went to the terminal,
+and `commands/container.py build()` therefore points the reader upwards on
+failure instead of reprinting. The exception is a spawn failure, where the
+process never ran — there `stderr` holds the 126/127 diagnosis and is printed.
+Streaming has no timeout: killing the compose client would leave `docker-buildx`
+and the BuildKit solve in the daemon running, so a timeout here would report a
+cancellation it cannot perform.
 
 `Dockerfile` builds from `debian:bookworm-slim`. It installs base packages,
 audio client support, optional packages from `packages.txt`, Docker CLI,
