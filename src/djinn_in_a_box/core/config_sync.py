@@ -45,8 +45,10 @@ from djinn_in_a_box.core.workflow_publisher import (
     canonical_lock,
     decode_lean_manifest,
     fingerprint_source_inputs,
+    is_runtime_residue,
     load_strict_json,
     publish_workflow_view,
+    runtime_residue_prefixes,
     snapshot_file_view,
 )
 
@@ -201,6 +203,7 @@ def sync_config(
                 manifest_path,
                 canonical_lease=lease,
                 source_root=config_root / source,
+                source_residue_prefixes=runtime_residue_prefixes(source),
                 preflight_manifest=preflight_manifest,
             )
             audit = (
@@ -319,12 +322,36 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
     return ConfigSyncAudit(source, manifest_source, tuple(_deduplicate(filtered)))
 
 
+def _ignore_residue(
+    source_root: Path, residue: frozenset[PurePosixPath]
+) -> Callable[[str, list[str]], set[str]]:
+    """Keep tool-owned runtime state out of the snapshot that is copied and read.
+
+    Excluding it at copy time is what makes the exclusion hold for every later
+    stage: the adapter, the validator and the renderer only ever see the
+    snapshot, so none of them can read, decode or project what was never copied.
+    The live source tree is untouched — nothing is moved or deleted.
+    """
+
+    def ignore(directory: str, entries: list[str]) -> set[str]:
+        try:
+            base = PurePosixPath(Path(directory).relative_to(source_root).as_posix())
+        except ValueError:  # pragma: no cover - copytree only walks below the root
+            return set()
+        return {entry for entry in entries if is_runtime_residue(base / entry, residue)}
+
+    return ignore
+
+
 def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
     source_root = project_root / "config" / source
     if source_root.is_symlink() or not source_root.is_dir():
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
+    residue = runtime_residue_prefixes(source)
     try:
-        before = snapshot_file_view(source_root, source=source).source_fingerprint
+        before = snapshot_file_view(
+            source_root, source=source, residue_prefixes=residue
+        ).source_fingerprint
         if before is None:
             raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
         source_inputs: dict[ConfigSyncSource, tuple[Path, ...]] = {}
@@ -339,12 +366,16 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
                 else ()
             )
             source_inputs[tool] = paths
-            fingerprints[tool] = fingerprint_source_inputs(source_root, paths)
+            fingerprints[tool] = fingerprint_source_inputs(
+                source_root, paths, residue_prefixes=residue
+            )
         with tempfile.TemporaryDirectory(prefix="djinn-sync-") as temporary:
             snapshot_root = Path(temporary) / source
-            shutil.copytree(source_root, snapshot_root)
-            after = _fingerprint(source_root)
-            snapshot_fingerprint = _fingerprint(snapshot_root)
+            shutil.copytree(
+                source_root, snapshot_root, ignore=_ignore_residue(source_root, residue)
+            )
+            after = _fingerprint(source_root, residue)
+            snapshot_fingerprint = _fingerprint(snapshot_root, residue)
             if before != after or before != snapshot_fingerprint:
                 raise _BuildError(DriftClass.SOURCE_CHANGED)
             build = _build_views(
@@ -356,7 +387,8 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
                 source_inputs,
             )
             if any(
-                fingerprint_source_inputs(source_root, paths) != fingerprints[tool]
+                fingerprint_source_inputs(source_root, paths, residue_prefixes=residue)
+                != fingerprints[tool]
                 for tool, paths in source_inputs.items()
             ):
                 raise _BuildError(DriftClass.SOURCE_CHANGED)
@@ -1047,8 +1079,8 @@ def _is_missing(path: Path) -> bool:
     return False
 
 
-def _fingerprint(root: Path) -> str:
-    view = snapshot_file_view(root, source="snapshot")
+def _fingerprint(root: Path, residue: frozenset[PurePosixPath] = frozenset()) -> str:
+    view = snapshot_file_view(root, source="snapshot", residue_prefixes=residue)
     if view.source_fingerprint is None:
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
     return view.source_fingerprint

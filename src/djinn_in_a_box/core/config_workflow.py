@@ -31,6 +31,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     canonical_lock,
     publish_workflow_view,
     retire_legacy_delivery_manifest,
+    runtime_residue_prefixes,
 )
 
 
@@ -224,6 +225,9 @@ def prepare_config_workflow(
                     canonical_lease=lease,
                     source_root=canonical_root / loaded.audit.configured_source,
                     source_inputs=loaded.source_inputs,
+                    source_residue_prefixes=runtime_residue_prefixes(
+                        loaded.audit.configured_source
+                    ),
                 )
         except PublishError as error:
             return _canonical_lock_failure(canonical_root, error)

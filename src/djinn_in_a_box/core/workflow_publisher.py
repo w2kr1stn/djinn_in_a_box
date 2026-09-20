@@ -258,6 +258,35 @@ _NATIVE_ONLY_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
     tool: frozenset(item.script_path for item in specs)
     for tool, specs in NATIVE_ONLY_SPEC_MATRIX.items()
 }
+# Subtrees a tool writes into its own source root at runtime. They are not
+# workflow sources: they must never be read, decoded, fingerprinted or
+# projected, and they must never be deleted either — the writing tool owns them.
+# Claude Code syncs account skills into skills/synced/<bucket-id>/<skill>/.
+_RUNTIME_RESIDUE_PREFIXES: Mapping[str, frozenset[PurePosixPath]] = {
+    "claude": frozenset({PurePosixPath("skills/synced")}),
+    "codex": frozenset(),
+    "opencode": frozenset(),
+}
+_PYCACHE = "__pycache__"
+
+
+def runtime_residue_prefixes(tool: str) -> frozenset[PurePosixPath]:
+    """Return the tool-owned runtime subtrees inside that tool's source root."""
+    return _RUNTIME_RESIDUE_PREFIXES.get(tool, frozenset())
+
+
+def is_runtime_residue(relative: PurePosixPath, prefixes: Collection[PurePosixPath]) -> bool:
+    """Report whether a source-relative path is generated runtime state.
+
+    `__pycache__` is excluded unconditionally: the interpreter defines it as a
+    regenerable bytecode cache, so it is never an authored source anywhere in a
+    tree. A deliberately shipped extension module lives outside it and stays.
+    Everything else must be named by `prefixes`, so the exclusion stays bound to
+    the tool context that proved it.
+    """
+    return _PYCACHE in relative.parts or any(
+        relative == prefix or relative.is_relative_to(prefix) for prefix in prefixes
+    )
 
 
 @contextmanager
@@ -301,9 +330,10 @@ def snapshot_file_view(
     profile: str | None = None,
     target_tool: str | None = None,
     native_only_paths: Collection[PurePosixPath] = (),
+    residue_prefixes: Collection[PurePosixPath] = (),
 ) -> WorkflowView:
     try:
-        files, fingerprint = _read_file_tree(view_root, ignored_paths, profile)
+        files, fingerprint = _read_file_tree(view_root, ignored_paths, profile, residue_prefixes)
     except OSError as error:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     if not files:
@@ -328,6 +358,7 @@ def publish_workflow_view(
     source_inputs: Collection[Path] = (),
     ignored_source_paths: Collection[PurePosixPath] = (),
     source_profile: str | None = None,
+    source_residue_prefixes: Collection[PurePosixPath] = (),
     preflight_manifest: bytes | None = None,
 ) -> PublishResult:
     try:
@@ -350,6 +381,7 @@ def publish_workflow_view(
                 source_inputs,
                 ignored_source_paths,
                 source_profile,
+                source_residue_prefixes,
                 preflight_manifest,
             )
         with canonical_lock(canonical_root, exclusive=canonical_target) as lease:
@@ -364,6 +396,7 @@ def publish_workflow_view(
                 source_inputs,
                 ignored_source_paths,
                 source_profile,
+                source_residue_prefixes,
                 preflight_manifest,
             )
     except PublishError as error:
@@ -388,6 +421,7 @@ def _publish_with_lease(
     source_inputs: Collection[Path],
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
+    source_residue_prefixes: Collection[PurePosixPath],
     preflight_manifest: bytes | None,
 ) -> PublishResult:
     if canonical_target:
@@ -400,6 +434,7 @@ def _publish_with_lease(
             source_inputs,
             ignored_source_paths,
             source_profile,
+            source_residue_prefixes,
             preflight_manifest,
             canonical_target=True,
         )
@@ -413,6 +448,7 @@ def _publish_with_lease(
             source_inputs,
             ignored_source_paths,
             source_profile,
+            source_residue_prefixes,
             preflight_manifest,
             canonical_target=False,
         )
@@ -427,6 +463,7 @@ def _publish_locked(
     source_inputs: Collection[Path],
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
+    source_residue_prefixes: Collection[PurePosixPath],
     preflight_manifest: bytes | None,
     *,
     canonical_target: bool,
@@ -474,6 +511,7 @@ def _publish_locked(
             source_inputs,
             ignored_paths=ignored_source_paths,
             profile=source_profile,
+            residue_prefixes=source_residue_prefixes,
         )
         if expected_fingerprint is None:
             expected_fingerprint = current_fingerprint
@@ -502,6 +540,7 @@ def _publish_locked(
                 source_inputs=source_inputs,
                 ignored_source_paths=ignored_source_paths,
                 source_profile=source_profile,
+                source_residue_prefixes=source_residue_prefixes,
                 expected_fingerprint=expected_fingerprint,
             )
         raise
@@ -516,6 +555,7 @@ def _publish_locked(
         source_inputs=source_inputs,
         ignored_source_paths=ignored_source_paths,
         source_profile=source_profile,
+        source_residue_prefixes=source_residue_prefixes,
         expected_fingerprint=expected_fingerprint,
     )
 
@@ -728,6 +768,7 @@ def _commit(
     source_inputs: Collection[Path],
     ignored_source_paths: Collection[PurePosixPath],
     source_profile: str | None,
+    source_residue_prefixes: Collection[PurePosixPath],
     expected_fingerprint: str | None,
 ) -> PublishResult:
     changed: list[PurePosixPath] = []
@@ -747,6 +788,7 @@ def _commit(
                 source_inputs,
                 ignored_paths=ignored_source_paths,
                 profile=source_profile,
+                residue_prefixes=source_residue_prefixes,
             )
             != expected_fingerprint
         ):
@@ -1411,6 +1453,7 @@ def _read_file_tree(
     root: Path,
     ignored_paths: Collection[PurePosixPath] = (),
     profile: str | None = None,
+    residue_prefixes: Collection[PurePosixPath] = (),
 ) -> tuple[list[PublishedFile], str]:
     if not root.is_dir():
         raise OSError("View root is not a directory")
@@ -1418,9 +1461,13 @@ def _read_file_tree(
     for path in sorted(root.rglob("*")):
         if path.is_dir():
             continue
+        relative = PurePosixPath(path.relative_to(root).as_posix())
+        # Skipped before any stat/read so a tool rewriting its own runtime tree
+        # cannot make an unrelated view unreadable or shift its fingerprint.
+        if is_runtime_residue(relative, residue_prefixes):
+            continue
         if not path.is_file() or path.is_symlink():
             raise OSError("View root contains a non-regular file")
-        relative = PurePosixPath(path.relative_to(root).as_posix())
         if not _safe_relative(relative):
             raise OSError("View root contains an unsafe path")
         if relative in ignored_paths:
@@ -1444,9 +1491,10 @@ def _fingerprint_tree(
     root: Path,
     ignored_paths: Collection[PurePosixPath] = (),
     profile: str | None = None,
+    residue_prefixes: Collection[PurePosixPath] = (),
 ) -> str:
     try:
-        files, fingerprint = _read_file_tree(root, ignored_paths, profile)
+        files, fingerprint = _read_file_tree(root, ignored_paths, profile, residue_prefixes)
     except OSError as error:
         raise PublishError(DriftClass.SOURCE_CHANGED) from error
     del files
@@ -1459,13 +1507,16 @@ def fingerprint_source_inputs(
     *,
     ignored_paths: Collection[PurePosixPath] = (),
     profile: str | None = None,
+    residue_prefixes: Collection[PurePosixPath] = (),
 ) -> str:
     """Fingerprint the source view and every separately-read native input."""
     if not source_inputs:
-        return _fingerprint_tree(source_root, ignored_paths, profile)
+        return _fingerprint_tree(source_root, ignored_paths, profile, residue_prefixes)
     digest = hashlib.sha256()
     digest.update(b"source-root\0")
-    digest.update(_fingerprint_tree(source_root, ignored_paths, profile).encode())
+    digest.update(
+        _fingerprint_tree(source_root, ignored_paths, profile, residue_prefixes).encode()
+    )
     for path in sorted({item.absolute() for item in source_inputs}, key=str):
         digest.update(str(path).encode())
         digest.update(b"\0")
