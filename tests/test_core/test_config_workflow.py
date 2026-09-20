@@ -814,3 +814,47 @@ def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) ->
         "Author or edit the artifact natively in the target tool's view, "
         "or make the source form portable."
     )
+
+
+_BUCKET = "8838fb9b-ff03-4afc-9dca-4826659fd5b1_cc3e3300-e0c1-4cbe-9603-b1aca8eac330"
+_BINARY = b"\x00\x01\xff\xfe binary, not UTF-8 \xc3\x28\n"
+
+
+def _runtime_state(source_root: Path, *, generation: int = 0) -> None:
+    """Reproduce what Claude Code and the interpreter write into ./config/claude."""
+    synced = source_root / "skills" / "synced" / _BUCKET / "morning" / "assets" / "fonts"
+    synced.mkdir(parents=True, exist_ok=True)
+    (synced / "fraunces-latin-600-normal.woff2").write_bytes(_BINARY + bytes([generation]))
+    cache = source_root / "scripts" / "__pycache__"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / f"status-line.cpython-31{generation}.pyc").write_bytes(_BINARY)
+
+
+def test_runtime_state_does_not_block_repeated_workflow_preparation(tmp_path: Path) -> None:
+    """The start path that failed: prepare must stay clean across appearances.
+
+    Fehlerbild A and B both surfaced here, on `djinn start` — once per blocker,
+    each only after the previous one had been moved away.
+    """
+    project, config_path, _runtime = _workspace(tmp_path)
+    source_root = project / "config" / "claude"
+    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
+    _runtime_state(source_root)
+
+    first = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert first.success, first.problems
+    assert (target.destination_root / "AGENTS.md").read_text() == "shared workflow\n"
+
+    # A second start after Claude re-synced its account skills and a new cache
+    # appeared: still clean, and idempotent.
+    _runtime_state(source_root, generation=1)
+    second = prepare_config_workflow(project, (target,), config_path=config_path)
+
+    assert second.success, second.problems
+    assert second.problems == ()
+    assert not (target.destination_root / "skills" / "synced").exists()
+    assert not (target.destination_root / "scripts" / "__pycache__").exists()
+    # Nothing of the tool's own data was removed to get there.
+    assert (source_root / "skills" / "synced" / _BUCKET).is_dir()
+    assert list((source_root / "scripts" / "__pycache__").iterdir())

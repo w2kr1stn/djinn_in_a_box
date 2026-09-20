@@ -248,6 +248,27 @@ and never stale-removed. The Claude-only `/codex-review` command follows the
 same source-only rule. Repository-local instructions, agents, skills, and
 commands remain outside this global feature and are never rewritten.
 
+### Tool-Owned Runtime State
+
+The agent CLIs write into their own config root while they run, and those writes
+land in the workflow source because `config/claude/skills` and
+`config/claude/scripts` are bind-mounted read-write so you can edit skills in
+place. Two such trees are runtime state, not authored workflow, and Djinn skips
+them everywhere it reads a source:
+
+| Path | Written by | Treatment |
+| --- | --- | --- |
+| `skills/synced/**` (Claude source only) | Claude Code, syncing account skills | Left in place for Claude, never projected to Codex/OpenCode |
+| `**/__pycache__/**` (any source) | any Python interpreter | Left in place, never read |
+
+Skipped means skipped, not deleted: Djinn never removes these files, and
+changing them is not workflow drift, so a fresh account sync or a new bytecode
+cache cannot block the next `djinn start`. The exclusion is narrow on purpose. A
+binary file anywhere else — including a `.pyc` outside `__pycache__` or a `.pyd`
+shipped with a skill — is still reported as a non-UTF-8 workflow source, because
+portable workflow artifacts must be text. `synced` is reserved only under a
+Claude source; under a Codex or OpenCode source it is an ordinary skill name.
+
 Runtime delivery is deliberately broader than cross-tool projection. The shared
 publisher receives each complete native view, including its present hooks,
 plugins, and registrations; the existing Claude host-path rewrite and
