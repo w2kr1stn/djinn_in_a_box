@@ -670,3 +670,125 @@ def test_escaping_paths_block_without_target_or_manifest_mutation(
     assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
     assert _tree(project / "config") == before
     assert not (project / "config" / MANIFEST_NAME).exists()
+
+
+# --- Tool-owned runtime state inside a source root -------------------------
+# Claude Code syncs account skills into skills/synced/<bucket>/<skill>/ through
+# the writable ./config/claude/skills bind-mount, and any interpreter may drop a
+# __pycache__ beside a hook script. Neither is an authored workflow source.
+
+_BUCKET = "8838fb9b-ff03-4afc-9dca-4826659fd5b1_cc3e3300-e0c1-4cbe-9603-b1aca8eac330"
+_BINARY = b"\x00\x01\xff\xfe binary, not UTF-8 \xc3\x28\n"
+
+
+def _claude_runtime_state(root: Path) -> dict[str, bytes]:
+    """Write the two runtime trees that blocked `djinn start`, verbatim in shape."""
+    synced = f"skills/synced/{_BUCKET}"
+    written = {
+        f"skills/synced/.bucket-{_BUCKET}": b"",
+        f"{synced}/manifest.json": b'{"version": 1}\n',
+        f"{synced}/morning/SKILL.md": b"---\nname: morning\ndescription: Brief\n---\n\nB.\n",
+        f"{synced}/morning/assets/fonts/fraunces-latin-600-normal.woff2": _BINARY,
+        "scripts/__pycache__/status-line.cpython-311.pyc": _BINARY,
+    }
+    for relative, content in written.items():
+        _write(root, relative, content)
+    return written
+
+
+def _issue_ids(root: Path, tool: ConfigSyncSource) -> set[str]:
+    return {issue.identifier for issue in read_native_workflow(root, tool).validation_issues}
+
+
+def test_claude_runtime_state_is_not_read_as_a_workflow_source(tmp_path: Path) -> None:
+    """Fehlerbild A und B: both blockers came from the same over-broad scan."""
+    project, _config_path = _workspace(tmp_path, "claude")
+    source_root = project / "config" / "claude"
+    _full_source(source_root, "claude")
+    _claude_runtime_state(source_root)
+
+    identifiers = _issue_ids(source_root, "claude")
+
+    assert not [item for item in identifiers if item.startswith("invalid-utf8:")]
+    assert "skill-entrypoint:synced" not in identifiers
+    assert identifiers == set()
+
+
+def test_runtime_state_survives_a_sync_and_is_not_projected(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path, "claude")
+    source_root = project / "config" / "claude"
+    _full_source(source_root, "claude")
+    written = _claude_runtime_state(source_root)
+
+    result = sync_config(project, config_path=config_path)
+
+    assert result.success
+    # The writing tool keeps its data: excluded never means deleted.
+    for relative, content in written.items():
+        assert (source_root / relative).read_bytes() == content
+    # ... and it is not carried into the portable views.
+    for target in ("codex", "opencode"):
+        target_root = project / "config" / target
+        assert not (target_root / "skills/synced").exists()
+        assert not (target_root / "scripts/__pycache__").exists()
+        assert (target_root / "skills/check/SKILL.md").is_file()
+        assert (target_root / "skills/check/references/guide.md").is_file()
+
+
+def test_runtime_state_churn_is_not_workflow_drift(tmp_path: Path) -> None:
+    """Requirement 4+5: excluded state may change freely; real sources may not."""
+    project, config_path = _workspace(tmp_path, "claude")
+    source_root = project / "config" / "claude"
+    _full_source(source_root, "claude")
+    _claude_runtime_state(source_root)
+    assert sync_config(project, config_path=config_path).success
+    assert audit_config_sync(project, config_path=config_path).clean
+
+    # A fresh account sync and a fresh bytecode cache appear between two starts.
+    _write(source_root, f"skills/synced/{_BUCKET}/pdf/assets/logo.woff2", _BINARY + b"more")
+    _write(source_root, "scripts/__pycache__/run.cpython-314.pyc", _BINARY)
+    (source_root / f"skills/synced/.bucket-{_BUCKET}").unlink()
+
+    assert audit_config_sync(project, config_path=config_path).clean
+    assert audit_config_sync(project, config_path=config_path).clean
+
+    # A real source edit is still drift.
+    _write(source_root, "skills/check/SKILL.md", "---\nname: check\ndescription: C\n---\n\nNew.\n")
+
+    assert not audit_config_sync(project, config_path=config_path).clean
+
+
+def test_binary_outside_runtime_state_is_still_rejected(tmp_path: Path) -> None:
+    """Requirement 3: no blanket "drop every binary" and no blanket "ignore .pyc"."""
+    project, _config_path = _workspace(tmp_path, "claude")
+    source_root = project / "config" / "claude"
+    _full_source(source_root, "claude")
+    _write(source_root, "skills/check/assets/font.woff2", _BINARY)
+    _write(source_root, "skills/check/assets/native.pyd", _BINARY)
+    _write(source_root, "scripts/compiled.pyc", _BINARY)
+
+    identifiers = _issue_ids(source_root, "claude")
+
+    assert "invalid-utf8:skills/check/assets/font.woff2" in identifiers
+    assert "invalid-utf8:skills/check/assets/native.pyd" in identifiers
+    assert "invalid-utf8:scripts/compiled.pyc" in identifiers
+
+
+@pytest.mark.parametrize("tool", ["codex", "opencode"])
+def test_synced_is_reserved_for_claude_only(tmp_path: Path, tool: ConfigSyncSource) -> None:
+    """Requirement 3: the exclusion stays bound to the tool context that proved it."""
+    project, _config_path = _workspace(tmp_path, tool)
+    source_root = project / "config" / tool
+    _full_source(source_root, tool)
+    _write(
+        source_root,
+        "skills/synced/SKILL.md",
+        "---\nname: synced\ndescription: Sync\n---\n\nSync safely.\n",
+    )
+
+    names = {
+        item.name for item in read_native_workflow(source_root, tool).artifacts if item.name
+    }
+
+    assert "synced" in names
+    assert _issue_ids(source_root, tool) == set()

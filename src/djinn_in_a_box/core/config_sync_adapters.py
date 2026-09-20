@@ -17,7 +17,9 @@ from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.workflow_publisher import (
     NATIVE_ONLY_SPEC_MATRIX,
     ManifestError,
+    is_runtime_residue,
     load_strict_json,
+    runtime_residue_prefixes,
 )
 
 _p = PurePosixPath
@@ -160,6 +162,7 @@ class NativeOnlyReadResult(NamedTuple):
 
 def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResult:
     root, owned = root.resolve(), OWNERSHIP_MATRIX[tool]
+    residue = runtime_residue_prefixes(tool)
     artifacts: list[WorkflowArtifact] = []
     unresolved: list[UnresolvedItem] = []
     issues: list[ValidationIssue] = []
@@ -175,14 +178,14 @@ def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResul
         )
     else:
         artifacts.append(_artifact(tool, ArtifactKind.INSTRUCTIONS, "global", instruction))
-    for item in _scan(root, _p("agents"), issues):
+    for item in _scan(root, _p("agents"), issues, residue):
         if len(item[0].parts) == 2 and item[0].suffix == owned.agent_suffix:
             artifact, issue = _agent(tool, item)
             if artifact is not None:
                 artifacts.append(artifact)
             if issue is not None:
                 issues.append(issue)
-    skills = _scan(root, _p("skills"), issues)
+    skills = _scan(root, _p("skills"), issues, residue)
     for name, items in _group_skills(skills).items():
         if tool == "codex" and name.startswith("command-"):
             command = _command(tool, name.removeprefix("command-"), _entrypoint(items))
@@ -196,7 +199,7 @@ def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResul
                 )
             )
     if tool != "codex":
-        for item in _scan(root, _p("commands"), issues):
+        for item in _scan(root, _p("commands"), issues, residue):
             if (
                 len(item[0].parts) == 2
                 and item[0].suffix == ".md"
@@ -206,7 +209,7 @@ def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResul
     for prefix in (_p("context"), _p("scripts")):
         artifacts.extend(
             _artifact(tool, ArtifactKind.CONTEXT, prefix.name, item)
-            for item in _scan(root, prefix, issues)
+            for item in _scan(root, prefix, issues, residue)
             if not native_only_file_is_owned(tool, item[0])
         )
     unresolved.extend(_blocked(item) for item in artifacts if item.nonportable_metadata)
@@ -503,7 +506,12 @@ def _read(root: Path, path: PurePosixPath, issues: list[ValidationIssue]) -> _Fi
     return None
 
 
-def _scan(root: Path, prefix: PurePosixPath, issues: list[ValidationIssue]) -> tuple[_File, ...]:
+def _scan(
+    root: Path,
+    prefix: PurePosixPath,
+    issues: list[ValidationIssue],
+    residue: frozenset[PurePosixPath] = frozenset(),
+) -> tuple[_File, ...]:
     directory = root.joinpath(*prefix.parts)
     if not directory.exists() and not directory.is_symlink():
         return ()
@@ -514,10 +522,15 @@ def _scan(root: Path, prefix: PurePosixPath, issues: list[ValidationIssue]) -> t
     except (OSError, RuntimeError):
         issues.append(_issue(f"invalid-tree:{prefix}", "Allowlisted tree is invalid.", prefix))
         return ()
+    relatives = (_p(path.relative_to(root).as_posix()) for path in paths)
     return tuple(
         item
-        for path in paths
-        if (item := _read(root, _p(path.relative_to(root).as_posix()), issues)) is not None
+        # Runtime state is dropped before _read decodes it: a tool-owned tree is
+        # not a workflow source, so it can neither fail UTF-8 validation nor be
+        # mistaken for a skill.
+        for relative in relatives
+        if not is_runtime_residue(relative, residue)
+        and (item := _read(root, relative, issues)) is not None
     )
 
 
