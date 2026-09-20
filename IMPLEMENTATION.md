@@ -323,6 +323,20 @@ carrier key.
 Repository-local instruction files, agents, skills, and commands are outside
 this global projection and are not rewritten.
 
+Tool-owned runtime state inside a source root is not a workflow source.
+`workflow_publisher.runtime_residue_prefixes()` names the per-tool subtrees
+(`skills/synced/**` under a Claude source; none for Codex and OpenCode), and
+`is_runtime_residue()` adds `__pycache__` unconditionally, because the
+interpreter defines it as a regenerable cache. Both are skipped at every point
+that reads the source — the adapter scan, `_read_file_tree`, and the
+`shutil.copytree` that builds the audit snapshot — so the bytes are never read,
+decoded, fingerprinted, copied or projected. The exclusion is deliberately not a
+binary filter: a `.pyc` outside `__pycache__` and a `.pyd` shipped inside a skill
+are still UTF-8 failures. Excluded paths are never deleted; the writing tool owns
+them, and a change to one is not drift, which is what keeps repeated audits
+stable while Claude Code re-syncs its account skills through the writable
+`./config/claude/skills` bind-mount.
+
 `core/config_sync_adapters.py` holds the closed ownership table, native readers,
 renderers, and validation. It produces a transient typed IR; it is never a
 persisted user format. Validation covers ownership, UTF-8, containment,
