@@ -37,7 +37,11 @@ from djinn_in_a_box.core.config_sync import (
 )
 from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
-from djinn_in_a_box.core.docker import ensure_host_env, resolve_zone_roots
+from djinn_in_a_box.core.docker import (
+    ensure_host_env,
+    resolve_zone_roots,
+    sops_age_key_file_problem,
+)
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.hostinfo import detect_timezone, suggest_resources
 from djinn_in_a_box.core.paths import CONFIG_DIR, CONFIG_FILE, get_project_root
@@ -49,6 +53,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "general.config_root",
     "general.shared_root",
     "general.local_root",
+    "general.sops_age_key_file",
     "resources.cpu_limit",
     "resources.memory_limit",
     "resources.cpu_reservation",
@@ -291,6 +296,7 @@ def _build_config(
     config_root: Path | None = None,
     shared_root: Path | None | _Unset = _UNSET,
     local_root: Path | None | _Unset = _UNSET,
+    sops_age_key_file: Path | None | _Unset = _UNSET,
     resources: ResourceLimits | None = None,
     shell: ShellConfig | None = None,
     config_sync: ConfigSyncConfig | None = None,
@@ -302,6 +308,11 @@ def _build_config(
         config_root=config.config_root if config_root is None else config_root,
         shared_root=config.shared_root if isinstance(shared_root, _Unset) else shared_root,
         local_root=config.local_root if isinstance(local_root, _Unset) else local_root,
+        sops_age_key_file=(
+            config.sops_age_key_file
+            if isinstance(sops_age_key_file, _Unset)
+            else sops_age_key_file
+        ),
         resources=config.resources if resources is None else resources,
         shell=config.shell if shell is None else shell,
         config_sync=config.config_sync if config_sync is None else config_sync,
@@ -341,6 +352,18 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
                 f"local={new_roots.local_root}. Zone data does not follow. "
                 "New empty directories will be provisioned at the configured roots."
             )
+        return updated
+    if key == "general.sops_age_key_file":
+        normalized = value.strip().lower()
+        key_file = None if normalized in {"", "none", "null"} else Path(value).expanduser()
+        updated = _build_config(config, sops_age_key_file=key_file)
+        if updated.sops_age_key_file is not None:
+            problem = sops_age_key_file_problem(updated.sops_age_key_file)
+            if problem is not None:
+                warning(
+                    f"{updated.sops_age_key_file} {problem}. `djinn start` refuses to run "
+                    "until it is fixed."
+                )
         return updated
     if key == "resources.cpu_limit":
         resources = ResourceLimits(
@@ -410,6 +433,8 @@ def _format_config_value(config: AppConfig, key: str) -> str:
         return "derived" if config.shared_root is None else str(config.shared_root)
     if key == "general.local_root":
         return "derived" if config.local_root is None else str(config.local_root)
+    if key == "general.sops_age_key_file":
+        return "unset" if config.sops_age_key_file is None else str(config.sops_age_key_file)
     if key == "resources.cpu_limit":
         return str(config.resources.cpu_limit)
     if key == "resources.memory_limit":
