@@ -208,6 +208,15 @@ class AppConfig(BaseModel):
     local_root: Path | None = None
     """Optional root for host-local, rebuildable agent data."""
 
+    sops_age_key_file: Path | None = None
+    """Optional host file holding the SOPS age identity.
+
+    When set, every container start mounts this single file read-only at
+    ``~/.config/sops/age/keys.txt`` and points ``SOPS_AGE_KEY_FILE`` at it. Keep it
+    outside ``config_root`` when that root is mirrored across machines: a private
+    key belongs to one machine. Existence is checked at start, not here.
+    """
+
     resources: ResourceLimits = Field(default_factory=ResourceLimits)
     """Docker resource limits and reservations."""
 
@@ -255,3 +264,18 @@ class AppConfig(BaseModel):
             return None
         path = Path(value) if isinstance(value, str) else value
         return path.expanduser().resolve()
+
+    @field_validator("sops_age_key_file", mode="before")
+    @classmethod
+    def validate_sops_age_key_file(cls, value: str | Path | None) -> Path | None:
+        if value is None:
+            return None
+        path = (Path(value) if isinstance(value, str) else value).expanduser()
+        if not path.is_absolute():
+            msg = f"sops_age_key_file must be an absolute path: {path}"
+            raise ValueError(msg)
+        # ':' separates source, target and mode in a bind-mount spec.
+        if ":" in str(path):
+            msg = f"sops_age_key_file must not contain ':': {path}"
+            raise ValueError(msg)
+        return path

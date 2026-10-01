@@ -35,6 +35,7 @@ from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
+    SOPS_AGE_KEY_TARGET,
     ZoneRoots,
     ensure_host_env,
     ensure_network,
@@ -42,6 +43,7 @@ from djinn_in_a_box.core.docker import (
     get_dbus_mount_args,
     network_exists,
     resolve_zone_roots,
+    sops_age_key_file_problem,
 )
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
@@ -125,6 +127,39 @@ def loose_credential_dirs(
         if stat.S_IMODE(info.st_mode) & 0o077:
             loose.append(path)
     return loose
+
+
+def _sops_age_key_check(config: AppConfig, config_root: Path) -> Check | None:
+    """Report the configured SOPS age identity, or nothing when it is unset.
+
+    FAIL mirrors the start-time refusal. WARN flags an identity inside the config
+    root: that root is meant to be mirrorable, and a private key belongs to one
+    machine — mirroring it puts it into every replica and every backup.
+    """
+    key_file = config.sops_age_key_file
+    if key_file is None:
+        return None
+    problem = sops_age_key_file_problem(key_file)
+    if problem is not None:
+        return Check(
+            "SOPS age identity",
+            Status.FAIL,
+            f"{key_file} {problem}",
+            "Fix the file or unset it: `djinn config set general.sops_age_key_file none`. "
+            "`djinn start` refuses until then.",
+        )
+    if key_file.resolve().is_relative_to(config_root.resolve()):
+        return Check(
+            "SOPS age identity",
+            Status.WARN,
+            f"{key_file} lies inside the config root {config_root}",
+            "Move the key to a machine-local path outside the config root.",
+        )
+    return Check(
+        "SOPS age identity",
+        Status.PASS,
+        f"{key_file} (read-only at {SOPS_AGE_KEY_TARGET})",
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -528,6 +563,9 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
                 "" if root_ok else "Run `djinn init` (it provisions the config root).",
             )
         )
+        sops_check = _sops_age_key_check(config, root)
+        if sops_check is not None:
+            checks.append(sops_check)
 
         try:
             assignments = load_zone_assignments(config)
