@@ -317,6 +317,10 @@ def start(
     else:
         status_line("Audio", "No audio device detected", "status.disabled")
 
+    # The mount itself is built (and refused when unsafe) by the compose layer.
+    if config.sops_age_key_file is not None:
+        status_line("SOPS", f"{config.sops_age_key_file} (read-only)", value_style="path")
+
     # Security warning for direct mode
     if docker_direct:
         blank()

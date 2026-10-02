@@ -25,6 +25,7 @@ from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
     MountSpecificationError,
     RuntimeMountSpecificationError,
+    SopsAgeKeyFileError,
     ZoneConfigurationError,
     ZoneRootValidationError,
 )
@@ -45,6 +46,8 @@ _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 _MOUNT_ROOT = Path("/home/dev/mount")
 _WORKSPACE_PATH = Path("/home/dev/workspace")
+SOPS_AGE_KEY_TARGET: Final = Path("/home/dev/.config/sops/age/keys.txt")
+"""Container path of the SOPS age identity — SOPS's own default location."""
 _FORBIDDEN_MOUNT_TARGET_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
 _IMAGE_PATH_ALIASES = {
     Path("/var/run"): Path("/run"),
@@ -576,6 +579,52 @@ def get_dbus_mount_args() -> list[str]:
     ]
 
 
+def sops_age_key_file_problem(path: Path) -> str | None:
+    """Describe why ``path`` cannot serve as the mounted SOPS age identity.
+
+    Returns ``None`` when it can. Shared by the start-time mount builder (which
+    refuses) and ``djinn doctor`` (which reports), so both judge the same way.
+    Symlinks are followed: Docker binds the resolved file.
+    """
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return "does not exist"
+    except OSError as exc:
+        return f"cannot be inspected ({exc.strerror or exc})"
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if not os.access(path, os.R_OK):
+        return "is not readable by the current user"
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o077:
+        return f"is accessible to group or others (mode {mode:04o}); run chmod 600 on it"
+    return None
+
+
+def get_sops_age_key_mount_args(config: AppConfig) -> list[str]:
+    """Build the read-only SOPS age identity mount, or nothing when unset.
+
+    Fails closed: a configured identity that cannot be mounted safely stops the
+    start instead of silently leaving SOPS without a key — or, worse, letting
+    Docker create an empty directory at a missing source path.
+    """
+    key_file = config.sops_age_key_file
+    if key_file is None:
+        return []
+    problem = sops_age_key_file_problem(key_file)
+    if problem is not None:
+        msg = (
+            f"sops_age_key_file {key_file} {problem}. Fix the file or unset it with "
+            "`djinn config set general.sops_age_key_file none`."
+        )
+        raise SopsAgeKeyFileError(msg)
+    return [
+        "-v", f"{key_file}:{SOPS_AGE_KEY_TARGET}:ro",
+        "-e", f"SOPS_AGE_KEY_FILE={SOPS_AGE_KEY_TARGET}",
+    ]
+
+
 def get_zone_overlay_mount_args(config: AppConfig) -> list[str]:
     """Build bind-mount arguments for existing zone directories."""
     args, _ = _zone_overlay_mount_args_and_targets(config)
@@ -697,6 +746,7 @@ def _reserved_mount_targets(
     shell_args: list[str] | None = None,
     audio_args: list[str] | None = None,
     dbus_args: list[str] | None = None,
+    sops_args: list[str] | None = None,
     zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> list[Path]:
     """Return targets occupied by this particular ``dev`` container invocation."""
@@ -711,10 +761,13 @@ def _reserved_mount_targets(
         audio_args = get_audio_mount_args()
     if dbus_args is None:
         dbus_args = get_dbus_mount_args()
+    if sops_args is None:
+        sops_args = get_sops_age_key_mount_args(config)
     runtime_targets = [
         *_mount_targets_from_args(shell_args),
         *_mount_targets_from_args(audio_args),
         *_mount_targets_from_args(dbus_args),
+        *_mount_targets_from_args(sops_args),
     ]
     accepted_runtime_targets: list[Path] = []
     for runtime_target in runtime_targets:
@@ -739,6 +792,7 @@ def validate_container_mounts(
     shell_args: list[str] | None = None,
     audio_args: list[str] | None = None,
     dbus_args: list[str] | None = None,
+    sops_args: list[str] | None = None,
     zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> None:
     """Reject user targets that equal or are ancestors of an occupied target."""
@@ -753,6 +807,7 @@ def validate_container_mounts(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
     occupied: list[tuple[Path, str, Path]] = []
@@ -944,6 +999,7 @@ def compose_run(
     dbus_args = _canonicalize_runtime_mount_args(
         get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
     )
+    sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
     zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     validate_container_mounts(
         mounts,
@@ -952,6 +1008,7 @@ def compose_run(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
 
@@ -971,6 +1028,7 @@ def compose_run(
     cmd.extend(shell_args)
     cmd.extend(audio_args)
     cmd.extend(dbus_args)
+    cmd.extend(sops_args)
 
     # Service name
     cmd.append(service)
@@ -1112,6 +1170,7 @@ def compose_up_detached(
     dbus_args = _canonicalize_runtime_mount_args(
         get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
     )
+    sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
     zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     validate_container_mounts(
         mounts,
@@ -1120,6 +1179,7 @@ def compose_up_detached(
         shell_args=shell_args,
         audio_args=audio_args,
         dbus_args=dbus_args,
+        sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
 
@@ -1136,10 +1196,11 @@ def compose_up_detached(
     # as root — inside the config-root bind that carries their parent, so they
     # land on the host — and the migrated data stays invisible behind them.
     volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
-    runtime_args = [*shell_args, *audio_args, *dbus_args]
+    runtime_args = [*shell_args, *audio_args, *dbus_args, *sops_args]
     volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
-    # The `-e` half of those same pairs has to ride along, or the sockets are
-    # mounted but unreachable. Explicit `env` wins over the derived values.
+    # The `-e` half of those same pairs has to ride along, or the sockets (and
+    # the SOPS identity) are mounted but unreachable. Explicit `env` wins over
+    # the derived values.
     environment = {**_env_pairs_from_mount_args(runtime_args), **(env or {})}
 
     service_override: dict[str, object] = {}
