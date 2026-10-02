@@ -66,6 +66,7 @@ Install these on the host:
 
 - Docker Engine or Docker Desktop
 - Docker Compose v2, available as `docker compose`
+- Docker Buildx, available as `docker buildx`, used by `djinn build`
 - `uv`, used to install and run the Python CLI
 
 The CLI and tests target Python 3.14 through the project metadata. You normally
@@ -216,6 +217,12 @@ applies to the whole build, not one step, so enable it only for a Dockerfile you
 trust. It changes nothing about the resulting image or about how containers run
 afterwards — only how build steps reach the network.
 
+Buildx asks for explicit consent to that: since buildx 0.37.2, a build that
+requests the host network fails unless the `network.host` entitlement is granted.
+`djinn build` grants it for exactly the builds that run with `build.network host`,
+and never otherwise. A plain `docker compose build` cannot grant it and stops with
+`additional privileges requested`, so build through `djinn build`.
+
 `djinn build` refuses early with this hint when it detects the situation, instead
 of letting each download time out in turn. Buildkit also accepts `none`, which
 `djinn` does not offer: no layer of this image can be built without a network. A
@@ -348,7 +355,7 @@ djinn doctor
 ```
 
 The doctor command checks Docker, the Docker daemon, socket permissions, Compose
-v2, the main config, the projects directory, the config root, the image, the
+v2, Buildx, the main config, the projects directory, the config root, the image, the
 Docker network, the optional Docker MCP plugin, desktop notification detection,
 and seed target presence.
 

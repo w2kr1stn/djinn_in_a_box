@@ -93,8 +93,8 @@ Versioning before and after the first stable release.
   every package six times with a backoff, and over two minutes for `apt-get
   update` alone.
 - `DJINN_BUILD_PROGRESS` overrides the build's progress renderer for anyone who
-  prefers compose's compact redrawing view; an unusable value falls back to
-  `plain` with a warning.
+  prefers the compact redrawing view; an unusable value falls back to `plain`
+  with a warning.
 
 ### Changed
 
@@ -130,6 +130,17 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `djinn build` works again with `build.network host`. Since buildx 0.37.2, bake
+  rejects an entitlement nobody granted instead of skipping the consent check, and
+  `docker compose build` — which drives bake internally — never grants
+  `network.host`, so every such build stopped with `additional privileges
+  requested` before its first step. Compose has no flag to grant it, so the build
+  now calls `docker buildx bake` on `docker-compose.yml` directly and adds
+  `--allow network.host` exactly when the configured build network is `host`;
+  other builds grant nothing. The image definition still lives in the compose
+  file. Consequences: `docker buildx` is now a build requirement (`djinn doctor`
+  warns when it is missing), and `DJINN_BUILD_PROGRESS` takes bake's renderer
+  names — `rawjson` instead of compose's `json`.
 - `compose down` now refuses to reap the container it is running inside. The
   docker socket is mounted into the dev container, and `docker-compose.yml` pins
   the project name, so a teardown started from *any* copy of the repo — including
