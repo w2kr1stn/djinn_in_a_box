@@ -34,8 +34,15 @@ stores, and local command choices remain outside the published source.
 ├── docker-compose.docker.yml
 ├── docker-compose.docker-direct.yml
 ├── docs/
-│   └── design/
-│       └── CLI_DESIGN_SYSTEM.md
+│   ├── design/
+│   │   └── CLI_DESIGN_SYSTEM.md
+│   ├── headless-cheatsheet.md
+│   ├── suite-integration.md
+│   ├── sync-across-machines.md
+│   └── zshrc-djinn-snippet.sh
+├── mcp/
+│   ├── README.md
+│   └── docker-compose.yml
 ├── src/djinn_in_a_box/
 │   ├── cli/
 │   │   ├── djinn.py
@@ -47,11 +54,14 @@ stores, and local command choices remain outside the published source.
 │   │   ├── container.py
 │   │   ├── doctor.py
 │   │   ├── mcp.py
-│   │   └── session.py
+│   │   ├── migrate_zones.py
+│   │   ├── session.py
+│   │   └── zone_gate.py
 │   ├── config/
 │   │   ├── defaults.py
 │   │   ├── loader.py
-│   │   └── models.py
+│   │   ├── models.py
+│   │   └── zones.py
 │   └── core/
 │       ├── __init__.py
 │       ├── banner.py
@@ -69,21 +79,28 @@ stores, and local command choices remain outside the published source.
 │       ├── paths.py
 │       ├── seeding.py
 │       ├── session.py
-│       └── theme.py
+│       ├── theme.py
+│       └── zone_migration.py
 ├── scripts/
 │   ├── entrypoint.sh
 │   ├── settings-copy.py
 │   ├── output-lib.sh
 │   ├── seed-lib.sh
 │   ├── mcp-register.sh
+│   ├── opencode-credentials.sh
 │   ├── init-firewall.sh
+│   ├── check-build-dns.sh
 │   └── update-agents.sh
 ├── tools/
-│   └── install.sh
-├── templates/seed/
-│   ├── config/
-│   ├── packages.txt
-│   └── tools.txt
+│   ├── install.sh
+│   ├── installers/
+│   └── tools.txt.example
+├── templates/
+│   ├── devcontainer.json
+│   └── seed/
+│       ├── config/
+│       ├── packages.txt
+│       └── tools.txt
 └── tests/
 ```
 
