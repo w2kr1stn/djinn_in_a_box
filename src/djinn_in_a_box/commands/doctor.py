@@ -195,6 +195,11 @@ def compose_v2_ok() -> bool:
     return _command_ok(["docker", "compose", "version"])
 
 
+def buildx_ok() -> bool:
+    """True if Docker Buildx is available (``docker buildx``), which builds the image."""
+    return _command_ok(["docker", "buildx", "version"])
+
+
 def _image_built() -> bool:
     return _command_ok(["docker", "image", "inspect", _IMAGE])
 
@@ -511,6 +516,18 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             Status.PASS if compose else Status.FAIL,
             "available" if compose else "`docker compose` not available",
             "" if compose else "Install the Docker Compose v2 plugin.",
+        )
+    )
+
+    # Only `djinn build` needs buildx, so a missing plugin warns: an existing image
+    # still starts and runs.
+    buildx = installed and buildx_ok()
+    checks.append(
+        Check(
+            "Buildx",
+            Status.PASS if buildx else Status.WARN,
+            "available" if buildx else "`docker buildx` not available",
+            "" if buildx else "Install the Docker Buildx plugin; `djinn build` needs it.",
         )
     )
 

@@ -35,6 +35,9 @@ from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 DJINN_NETWORK: str = "djinn-network"
 """Docker network name for Djinn containers."""
 
+BUILD_NETWORK_VAR: Final = "DJINN_BUILD_NETWORK"
+"""Compose variable that sets ``build.network``; the build grants ``network.host`` from it."""
+
 _CONTAINER_USER_UID: int = 1000
 """Must match USER_UID build ARG in Dockerfile."""
 
@@ -467,7 +470,7 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
             "MEMORY_LIMIT": config.resources.memory_limit,
             "CPU_RESERVATION": str(config.resources.cpu_reservation),
             "MEMORY_RESERVATION": config.resources.memory_reservation,
-            "DJINN_BUILD_NETWORK": config.build.network,
+            BUILD_NETWORK_VAR: config.build.network,
         }
     if terminal_width is not None:
         env["DJINN_TERM_WIDTH"] = terminal_width
@@ -485,7 +488,6 @@ def _run_compose(
     config: AppConfig | None,
     cwd: Path,
     extra_env: dict[str, str] | None = None,
-    stream: bool = False,
 ) -> RunResult:
     """Single choke-point for non-interactive ``docker compose`` calls.
 
@@ -496,19 +498,11 @@ def _run_compose(
     ``extra_env`` carries values a subcommand cannot pass as a flag — ``up`` has
     no per-invocation ``-e`` — and is layered on top of the host bridge, never
     replacing it.
-
-    ``stream=True`` inherits stdout/stderr instead of capturing them, for a
-    long-running subcommand whose progress must be visible while it runs. It
-    returns empty ``stdout``/``stderr`` — see ``_run_streamed``. Callers that
-    parse output must leave it at the default.
     """
     env = _compose_host_env(config)
     if extra_env:
         env.update(extra_env)
-    cmd = ["docker", "compose", *args]
-    if stream:
-        return _run_streamed(cmd, cwd=cwd, env=env)
-    return _run_captured(cmd, cwd=cwd, env=env)
+    return _run_captured(["docker", "compose", *args], cwd=cwd, env=env)
 
 
 def get_shell_mount_args(config: AppConfig) -> list[str]:
@@ -831,8 +825,8 @@ def validate_container_mounts(
         )
 
 
-_COMPOSE_PROGRESS_MODES: Final[frozenset[str]] = frozenset(
-    {"auto", "tty", "plain", "quiet", "json"}
+_BUILD_PROGRESS_MODES: Final[frozenset[str]] = frozenset(
+    {"auto", "tty", "plain", "quiet", "rawjson"}
 )
 BUILD_PROGRESS_ENV: Final[str] = "DJINN_BUILD_PROGRESS"
 
@@ -843,38 +837,59 @@ def _build_progress() -> str:
     ``plain`` is the default because it keeps every stage line on screen, which is
     what makes a stalled build readable. Someone who wants the compact redrawing
     view back can set the env var; an unusable value falls back rather than
-    letting compose reject the whole build over a typo.
+    letting buildx reject the whole build over a typo.
     """
     requested = os.environ.get(BUILD_PROGRESS_ENV)
     if requested is None:
         return "plain"
-    if requested not in _COMPOSE_PROGRESS_MODES:
+    if requested not in _BUILD_PROGRESS_MODES:
         warning(
             f"Ignoring {BUILD_PROGRESS_ENV}={requested!r}: "
-            f"expected one of {', '.join(sorted(_COMPOSE_PROGRESS_MODES))}."
+            f"expected one of {', '.join(sorted(_BUILD_PROGRESS_MODES))}."
         )
         return "plain"
     return requested
 
 
 def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) -> RunResult:
-    """Build the image, streaming progress to the terminal as it happens.
+    """Build the compose-defined image with ``docker buildx bake``, streaming its log.
+
+    Bake reads ``docker-compose.yml`` itself, so the compose file stays the one
+    definition of the build. ``docker compose build`` cannot be used for it: compose
+    drives bake internally but forwards only its own ``fs.read`` and
+    ``security.insecure`` grants, never ``network.host``, and since buildx 0.37.2
+    bake rejects an ungranted entitlement instead of skipping the consent check. A
+    ``host`` build network therefore failed before its first step. Calling bake
+    directly is how that consent is given — only when the interpolated build
+    network is ``host``, the very value the compose file requests, so the grant
+    cannot drift from the request.
+
+    ``--load`` puts the result into the local image store on any builder. Compose
+    asked for that implicitly; without it a ``docker-container`` builder would
+    build the image and keep it only in its cache.
+
+    The working directory is load-bearing: bake resolves the compose file's
+    ``context`` against it, not against the file's own directory. Run from anywhere
+    else, it would build whatever ``Dockerfile`` lies there under djinn's image tag.
 
     ``--progress plain`` is the deliberate default, overridable via
-    ``DJINN_BUILD_PROGRESS``: it keeps every stage line
-    on screen instead of redrawing one in place, so the stage a stalled build last
-    entered stays readable. It is a *global* compose flag and must precede the
-    subcommand — passing it after ``build`` still works but earns a deprecation
-    warning from compose.
+    ``DJINN_BUILD_PROGRESS``: it keeps every stage line on screen instead of
+    redrawing one in place, so the stage a stalled build last entered stays readable.
 
     Streaming means the returned ``RunResult`` carries no output. The build log was
     already on the terminal; there is nothing to print afterwards.
     """
     project_root = get_project_root()
-    args = ["--progress", _build_progress(), "build"]
+    env = _compose_host_env(config)
+    cmd = [
+        "docker", "buildx", "bake", *get_compose_files(),
+        "--progress", _build_progress(), "--load",
+    ]
     if no_cache:
-        args.append("--no-cache")
-    return _run_compose(args, config=config, cwd=project_root, stream=True)
+        cmd.append("--no-cache")
+    if env.get(BUILD_NETWORK_VAR) == "host":
+        cmd.extend(["--allow", "network.host"])
+    return _run_streamed(cmd, cwd=project_root, env=env)
 
 
 BACKGROUND_START_ERROR = (

@@ -15,7 +15,7 @@ import pytest
 import djinn_in_a_box.config.zones as zones_mod
 import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.config.loader import load_config, save_config
-from djinn_in_a_box.config.models import AppConfig, ShellConfig
+from djinn_in_a_box.config.models import AppConfig, BuildConfig, ShellConfig
 from djinn_in_a_box.config.zones import ZoneAssignments, ZoneName
 from djinn_in_a_box.core.docker import (
     ContainerMount,
@@ -1201,9 +1201,7 @@ class TestComposeBuild:
         result = compose_build()
         assert result.success is True
         cmd = mock_run.call_args[0][0]
-        assert "docker" in cmd
-        assert "compose" in cmd
-        assert "build" in cmd
+        assert cmd[:3] == ["docker", "buildx", "bake"]
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -1269,18 +1267,28 @@ class TestStreamedBuildPath:
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_progress_flag_precedes_the_subcommand(
+    def test_bake_reads_the_compose_file_and_loads_the_image(
         self, mock_run: MagicMock, _root: MagicMock
     ) -> None:
-        """`--progress` is a *global* compose flag, so its position is load-bearing.
+        """The compose file stays the one build definition, named explicitly.
 
-        Passed after `build` it still works, but compose answers with a deprecation
-        warning — noise this path exists to avoid.
+        Bake's own file discovery would also pick up bake files and overrides lying
+        in the project root, which no other djinn call honors. `--load` is what
+        compose asked for implicitly: without it a `docker-container` builder keeps
+        the image in its cache and the local store never sees it.
+
+        Naming the file does not anchor the build, though: bake resolves `context`
+        against its working directory. Run elsewhere, it would build that
+        directory's Dockerfile under djinn's tag.
         """
         mock_run.return_value = MagicMock(returncode=0)
         compose_build()
         argv = mock_run.call_args.args[0]
-        assert argv[:5] == ["docker", "compose", "--progress", "plain", "build"]
+        assert argv == [
+            "docker", "buildx", "bake", "-f", "/project/docker-compose.yml",
+            "--progress", "plain", "--load",
+        ]
+        assert mock_run.call_args.kwargs["cwd"] == Path("/project")
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -1308,10 +1316,10 @@ class TestStreamedBuildPath:
         _own: MagicMock,
         mock_app_config: AppConfig,
     ) -> None:
-        """Streaming is opt-in per call site, and only `build` opts in.
+        """Only the build streams, and it is not a compose call.
 
-        Every other compose subcommand has callers that read its output, so the
-        default must stay captured — this pins the branch, not just the helper.
+        Every compose subcommand has callers that read its output, so compose
+        calls must stay captured even though the build next to them streams.
         """
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)
@@ -1329,22 +1337,110 @@ class TestBuildProgressOverride:
         monkeypatch.setenv("DJINN_BUILD_PROGRESS", "tty")
         mock_run.return_value = MagicMock(returncode=0)
         compose_build()
-        assert mock_run.call_args.args[0][:4] == ["docker", "compose", "--progress", "tty"]
+        assert _progress_of(mock_run.call_args.args[0]) == "tty"
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_unusable_value_falls_back_instead_of_failing_the_build(
         self, mock_run: MagicMock, _root: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A typo must not cost the whole build: compose would reject the flag."""
+        """A typo must not cost the whole build: buildx would reject the flag."""
         monkeypatch.setenv("DJINN_BUILD_PROGRESS", "plian")
         mock_run.return_value = MagicMock(returncode=0)
         with patch("djinn_in_a_box.core.docker.warning") as mock_warning:
             compose_build()
-        assert mock_run.call_args.args[0][:4] == ["docker", "compose", "--progress", "plain"]
+        assert _progress_of(mock_run.call_args.args[0]) == "plain"
         # A silent fallback would leave the user believing the override took effect.
         mock_warning.assert_called_once()
         assert "plian" in mock_warning.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        ("requested", "passed"), [("rawjson", "rawjson"), ("json", "plain"), ("none", "plain")]
+    )
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_modes_are_the_ones_bake_accepts(
+        self,
+        mock_run: MagicMock,
+        _root: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        requested: str,
+        passed: str,
+    ) -> None:
+        """`json` was compose's renderer; bake calls it `rawjson` and rejects `json`.
+
+        `none` appears in bake's help text, but only `buildx build` maps it to
+        `quiet` — bake fails with `invalid progress mode none`.
+        """
+        monkeypatch.setenv("DJINN_BUILD_PROGRESS", requested)
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch("djinn_in_a_box.core.docker.warning"):
+            compose_build()
+        assert _progress_of(mock_run.call_args.args[0]) == passed
+
+
+def _progress_of(argv: list[str]) -> str:
+    return argv[argv.index("--progress") + 1]
+
+
+def _allow_grants(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, arg in enumerate(argv) if arg == "--allow"]
+
+
+class TestBuildNetworkGrant:
+    """A `host` build network needs buildx's consent, and gets exactly that much.
+
+    Since buildx 0.37.2 bake rejects an ungranted `network.host` entitlement, and
+    `docker compose build` has no way to grant it — which is why the build calls
+    bake directly. The grant is consent to share the host's network namespace, so
+    it must follow the requested network exactly: missing, the build fails before
+    its first step; given on every build, it would sign away a protection nobody
+    asked to lose.
+    """
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_host_network_grants_network_host_only(
+        self, mock_run: MagicMock, _root: MagicMock, tmp_path: Path
+    ) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build(AppConfig(code_dir=tmp_path, build=BuildConfig(network="host")))
+        assert _allow_grants(mock_run.call_args.args[0]) == ["network.host"]
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_default_network_grants_nothing(
+        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
+    ) -> None:
+        mock_run.return_value = MagicMock(returncode=0)
+        compose_build(mock_app_config)
+        assert _allow_grants(mock_run.call_args.args[0]) == []
+
+    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_grant_follows_the_network_the_compose_file_receives(
+        self,
+        mock_run: MagicMock,
+        _root: MagicMock,
+        mock_app_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Request and grant come from one value, so they cannot disagree.
+
+        A stale shell export loses to the configured network on both sides; without
+        a config the exported value is what compose interpolates, so it is also
+        what gets granted.
+        """
+        monkeypatch.setenv("DJINN_BUILD_NETWORK", "host")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        compose_build(mock_app_config)
+        assert mock_run.call_args.kwargs["env"]["DJINN_BUILD_NETWORK"] == "default"
+        assert _allow_grants(mock_run.call_args.args[0]) == []
+
+        compose_build(None)
+        assert mock_run.call_args.kwargs["env"]["DJINN_BUILD_NETWORK"] == "host"
+        assert _allow_grants(mock_run.call_args.args[0]) == ["network.host"]
 
 
 class TestDockerfileDnsGuard:
