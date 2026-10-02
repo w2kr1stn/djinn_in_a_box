@@ -9,6 +9,19 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- Optional tools `rust` and `just` (`tools/installers/rust.sh`, `just.sh`). `rust`
+  installs rustup into the tools cache volume (`RUSTUP_HOME` and `CARGO_HOME` under
+  `~/.cache/djinn-tools`), so the toolchain, the crate registry cache and
+  `cargo install` binaries survive container restarts; a rebuild updates instead of
+  downloading again. `rustup-init` is checked against its published SHA-256 before
+  it runs. Each binary in `$CARGO_HOME/bin` gets a wrapper on the tools `bin`
+  directory that sets both variables, because the image's shell setup does not
+  know them. `RUST_TOOLCHAIN` (default `stable`) and `RUST_COMPONENTS` select the
+  toolchain and extra components; `rustfmt` and `clippy` are always included.
+  `just` installs the musl release binary after checking it against the release's
+  `SHA256SUMS`. Building libcosmic/COSMIC projects additionally needs the Debian
+  packages `cmake libexpat1-dev libfontconfig-dev libfreetype-dev libxkbcommon-dev
+  pkgconf` in `packages.txt`.
 - `general.sops_age_key_file`: an optional host path to a SOPS age identity.
   Every start (`djinn start`, `--detach`, `djinn run`) mounts that single file
   read-only at `~/.config/sops/age/keys.txt` and sets `SOPS_AGE_KEY_FILE`. It
