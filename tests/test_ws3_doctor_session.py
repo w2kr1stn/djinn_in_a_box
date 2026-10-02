@@ -52,6 +52,7 @@ def _quiet_doctor_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor_mod, "docker_daemon_ok", lambda: True)
     monkeypatch.setattr(doctor_mod, "_docker_socket_ok", lambda: True)
     monkeypatch.setattr(doctor_mod, "compose_v2_ok", lambda: True)
+    monkeypatch.setattr(doctor_mod, "buildx_ok", lambda: True)
     monkeypatch.setattr(doctor_mod, "_image_built", lambda: True)
     monkeypatch.setattr(doctor_mod, "network_exists", network_exists)
     monkeypatch.setattr(doctor_mod, "_docker_mcp_ok", lambda: True)
@@ -166,6 +167,24 @@ def test_doctor_fix_seed_permission_error_prints_chown_remedy(
     assert "root-owned" in result.output
     assert "sudo chown -R" in result.output
     assert str(tmp_path / "config") in result.output
+
+
+def test_run_checks_reports_buildx_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`djinn build` runs `docker buildx bake`, so a missing plugin needs a remedy.
+
+    It warns rather than fails: only the build needs buildx, and an existing image
+    still starts and runs without it.
+    """
+    _quiet_doctor_probes(monkeypatch)
+    monkeypatch.setattr(doctor_mod, "get_project_root", MagicMock(side_effect=FileNotFoundError))
+
+    buildx = _check_named(doctor_mod.run_checks(None), "Buildx")
+    assert buildx.status is doctor_mod.Status.PASS
+
+    monkeypatch.setattr(doctor_mod, "buildx_ok", lambda: False)
+    buildx = _check_named(doctor_mod.run_checks(None), "Buildx")
+    assert buildx.status is doctor_mod.Status.WARN
+    assert "djinn build" in buildx.remedy
 
 
 def test_run_checks_reports_dbus_row(monkeypatch: pytest.MonkeyPatch) -> None:

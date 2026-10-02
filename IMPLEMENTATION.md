@@ -408,8 +408,10 @@ host interpolation through:
 - `_compose_host_env(config)` overlays them onto `os.environ`
 - `_run_compose(args, config, cwd)` is the captured `docker compose` choke-point
 
-Captured Compose calls such as `compose_build()`,
-`compose_down()`, and Docker proxy cleanup route through `_run_compose()`.
+Captured Compose calls such as `compose_down()` and Docker proxy cleanup route
+through `_run_compose()`. `compose_build()` is no compose call — it runs
+`docker buildx bake` on the compose file — but takes its env from the same
+`_compose_host_env(config)`.
 `compose_run()` is the sanctioned interactive/headless run site; it also builds
 `host_env = _compose_host_env(config)` before calling `subprocess.run()`.
 When stdout or stderr is a TTY, `build_compose_env()` also renders
@@ -719,23 +721,37 @@ guard the failure surfaced one timeout at a time: measured at 70 minutes for the
 npm layer, because npm retries every package six times with a backoff, and over
 two minutes for `apt-get update` alone.
 
-The build streams. `compose_build()` runs compose through `_run_streamed()`
+The build runs `docker buildx bake -f docker-compose.yml --load`, not
+`docker compose build`. Bake reads the compose file itself, so it stays the one
+build definition, and it receives the same host interpolation env as every
+compose call. Compose is bypassed because it cannot grant an entitlement: it
+drives bake internally but forwards only its own `fs.read` and
+`security.insecure` grants, and since buildx 0.37.2 bake rejects an ungranted
+entitlement instead of skipping the consent check. `build.network host` requests
+`network.host`, so through compose that build failed before its first step.
+`compose_build()` adds `--allow network.host` when the interpolated
+`DJINN_BUILD_NETWORK` is `host` — the very value the compose file receives, so
+request and grant cannot disagree — and grants nothing otherwise. `--load`
+replaces compose's implicit `output: type=docker`, so a `docker-container`
+builder also lands the image in the local store. `djinn doctor` reports a
+missing buildx plugin as a warning: only the build needs it.
+
+The build streams. `compose_build()` runs bake through `_run_streamed()`
 instead of `_run_captured()`, so stdout and stderr are inherited and the log
 appears while the build runs rather than after it exits. It passes
-`--progress plain` — a *global* compose flag, therefore placed before the
-subcommand — so every stage line stays on screen instead of being redrawn in
-place, and the stage a stalled build last entered remains readable. Setting
-`DJINN_BUILD_PROGRESS` to another compose progress mode overrides that; an
-unusable value falls back to `plain` with a warning rather than letting compose
-reject the build over a typo.
+`--progress plain`, so every stage line stays on screen instead of being redrawn
+in place, and the stage a stalled build last entered remains readable. Setting
+`DJINN_BUILD_PROGRESS` to another bake progress mode (`auto`, `tty`, `quiet`,
+`rawjson`) overrides that; an unusable value falls back to `plain` with a
+warning rather than letting buildx reject the build over a typo.
 
 The streamed `RunResult` carries no output: the log already went to the terminal,
 and `commands/container.py build()` therefore points the reader upwards on
 failure instead of reprinting. The exception is a spawn failure, where the
 process never ran — there `stderr` holds the 126/127 diagnosis and is printed.
-Streaming has no timeout: killing the compose client would leave `docker-buildx`
-and the BuildKit solve in the daemon running, so a timeout here would report a
-cancellation it cannot perform.
+Streaming has no timeout: killing the buildx client would leave the BuildKit
+solve in the daemon running, so a timeout here would report a cancellation it
+cannot perform.
 
 `Dockerfile` builds from `debian:bookworm-slim`. It installs base packages,
 audio client support, optional packages from `packages.txt`, Docker CLI,
