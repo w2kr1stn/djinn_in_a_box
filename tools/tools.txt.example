@@ -28,6 +28,8 @@
 
 # --- Dev ---
 # bun                # Bun JavaScript runtime & toolkit
+# rust               # Rust toolchain via rustup (cargo, rustc, rustfmt, clippy)
+# just               # just command runner (justfiles)
 
 # --- Browser Automation ---
 # playwright         # Playwright browser automation
