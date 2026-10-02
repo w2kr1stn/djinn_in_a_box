@@ -27,5 +27,9 @@ class MountSpecificationError(ValueError):
     """Raised when a ``--mount`` value cannot be resolved or parsed."""
 
 
+class SopsAgeKeyFileError(MountSpecificationError):
+    """Raised when the configured SOPS age identity file cannot be mounted safely."""
+
+
 class RuntimeMountSpecificationError(RuntimeError):
     """Raised when an internal runtime mount builder emits invalid arguments."""

@@ -43,7 +43,22 @@ OpenCode, and the GitHub CLI each get their own host directory under the
 configured Djinn config root. The container sees those directories at the paths
 each CLI expects. An `age` encryption identity directory is provisioned the same
 way and appears at `~/.config/age`, so plain `age` keys persist across runs
-(`age -i ~/.config/age/keys.txt`); SOPS users set `SOPS_AGE_KEY_FILE` to that path.
+(`age -i ~/.config/age/keys.txt`).
+
+For SOPS, point Djinn at a key file that stays on this machine instead:
+
+```sh
+djinn config set general.sops_age_key_file /path/outside/the/config/root/keys.txt
+```
+
+Every start then mounts that one file read-only at `~/.config/sops/age/keys.txt`
+(SOPS's default location) and sets `SOPS_AGE_KEY_FILE`. The file must be a regular,
+readable file with mode `0600` or `0400`; otherwise `djinn start` and `djinn run`
+refuse instead of starting without a key, and `djinn doctor` names the problem.
+Keep it out of the config root when you mirror that root across machines: a private
+key copied to every replica also lands in every backup of them. Agents can still
+read a mounted key, so also deny it in their permission settings, for example
+`"Read(~/.config/sops/age/**)"` in Claude Code's `permissions.deny`.
 
 ## Requirements
 

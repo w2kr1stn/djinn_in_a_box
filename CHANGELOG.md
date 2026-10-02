@@ -9,6 +9,15 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- `general.sops_age_key_file`: an optional host path to a SOPS age identity.
+  Every start (`djinn start`, `--detach`, `djinn run`) mounts that single file
+  read-only at `~/.config/sops/age/keys.txt` and sets `SOPS_AGE_KEY_FILE`. It
+  fails closed: a missing, non-regular, unreadable, or group/world-accessible file
+  stops the start instead of leaving SOPS without a key — or letting Docker
+  create an empty directory at the missing source. `djinn doctor` reports the
+  same verdict and warns when the key lies inside the config root, which is meant
+  to be mirrorable. Set with `djinn config set general.sops_age_key_file <path>`,
+  unset with `none`; other `config set` calls keep it.
 - `djinn start --detach` starts the container with `docker compose up -d` and
   returns, leaving no Compose client attached; attach afterwards with
   `djinn enter`. The detached path keeps the `--docker` proxy running, refuses to
