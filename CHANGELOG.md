@@ -98,6 +98,10 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Djinn now uses `AGENTS.md` as the sole instruction file for Claude Code, Codex,
+  and OpenCode across workflow sources, synchronized views, host delivery, and
+  container mounts. The seeded instructions explain the per-directory `.agents/`
+  convention.
 - Default zone assignments put machine-local Codex and Claude runtime directories
   (package cache, daemon and socket state, locks, local caches and drafts) in the
   local zone, and the doctor's known config-root entries cover current agent

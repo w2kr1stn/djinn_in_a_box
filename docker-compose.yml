@@ -38,13 +38,12 @@ x-common-volumes: &common-volumes
   - ~/.gitconfig:/home/dev/.gitconfig:ro
   # Seed configs (rw for reverse-sync of settings.json on exit)
   - ./config/claude:/home/dev/.claude_seed
-  # Generic workflow seed → ~/.claude (nested over the live mount; in-place editable, shadows old install)
+  # Generic workflow → ~/.claude (nested over the state mount; in-place editable)
   - ./config/claude/skills:/home/dev/.claude/skills
   - ./config/claude/commands:/home/dev/.claude/commands
   - ./config/claude/agents:/home/dev/.claude/agents
   - ./config/claude/context:/home/dev/.claude/context
   - ./config/claude/scripts:/home/dev/.claude/scripts
-  - ./config/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md
   - ./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md
   - ./config/opencode:/home/dev/.opencode/seed
   - ./config:/home/dev/.djinn-canonical:ro

@@ -28,7 +28,7 @@ class SeedEntry:
 WORKFLOW_ROOT_NAMES: tuple[ConfigSyncSource, ...] = ("claude", "codex", "opencode")
 
 CLAUDE_BASELINE_SEEDS: tuple[SeedEntry, ...] = (
-    SeedEntry(Path("config/claude/CLAUDE.md"), Path("config/claude/CLAUDE.md"), "file"),
+    SeedEntry(Path("config/claude/AGENTS.md"), Path("config/claude/AGENTS.md"), "file"),
     SeedEntry(Path("config/claude/settings.json"), Path("config/claude/settings.json"), "file"),
     SeedEntry(Path("config/claude/skills"), Path("config/claude/skills"), "directory"),
     SeedEntry(Path("config/claude/commands"), Path("config/claude/commands"), "directory"),

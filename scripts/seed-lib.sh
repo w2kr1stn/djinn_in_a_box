@@ -78,7 +78,7 @@ _claude_filter_managed_hooks() {
 
 # -----------------------------------------------------------------------------
 # Claude Code: generic workflow seed → ~/.claude settings.json.
-# skills/commands/agents/context/scripts/CLAUDE.md + hooks are NESTED BIND-MOUNTS
+# skills/commands/agents/context/scripts/AGENTS.md + hooks are NESTED BIND-MOUNTS
 # (docker-compose) — in-place editable, no copy. Only settings.json is merged here:
 # the generic baseline (config/claude/settings.json, tracked) ⊕ the personal overlay
 # (config/claude/settings.local.json, git-ignored) — local wins.
@@ -86,9 +86,9 @@ _claude_filter_managed_hooks() {
 claude_settings_merge() {
     local seed_dir=$1 target_settings_file=$2
 
-    if [[ ! -f "$seed_dir/CLAUDE.md" || ! -f "$seed_dir/settings.json" ]]; then
+    if [[ ! -f "$seed_dir/AGENTS.md" || ! -f "$seed_dir/settings.json" ]]; then
         local missing=""
-        [[ -f "$seed_dir/CLAUDE.md" ]] || missing="CLAUDE.md"
+        [[ -f "$seed_dir/AGENTS.md" ]] || missing="AGENTS.md"
         [[ -f "$seed_dir/settings.json" ]] || missing="${missing:+${missing}, }settings.json"
         ui_err "[workflow] config/claude seed incomplete (missing: ${missing}) — skipping settings merge."
         ui_info "Run \`djinn init\` or \`djinn doctor --fix\` on the host."

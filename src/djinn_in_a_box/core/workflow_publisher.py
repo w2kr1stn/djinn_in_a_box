@@ -64,7 +64,6 @@ class WorkflowView:
     source_fingerprint: str | None = None
     target_tool: str | None = None
     native_only_paths: tuple[PurePosixPath, ...] = ()
-    provisioning_placeholder_paths: tuple[PurePosixPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,7 +508,6 @@ def _publish_locked(
         manifest_snapshot,
         canonical_target=canonical_target,
         target_tool=target_tool,
-        provisioning_placeholder_paths=view.provisioning_placeholder_paths,
     )
     return _commit(
         target_root,
@@ -609,7 +607,6 @@ def _preflight(
     *,
     canonical_target: bool = False,
     target_tool: str | None = None,
-    provisioning_placeholder_paths: Collection[PurePosixPath] = (),
 ) -> _Preflight:
     prior_files: Mapping[PurePosixPath, _FileState] = prior.files if prior else {}
     prior_fragments: Mapping[tuple[PurePosixPath, tuple[str, ...]], _FragmentState] = (
@@ -624,13 +621,7 @@ def _preflight(
         wanted = desired.manifest.files.get(path)
         previous = prior_files.get(path)
         if wanted is not None:
-            classification = _file_update_class(
-                path,
-                current,
-                wanted,
-                previous,
-                provisioning_placeholder_paths=provisioning_placeholder_paths,
-            )
+            classification = _file_update_class(current, wanted, previous)
             if classification is not None:
                 classes.append(classification)
         elif previous is not None:
@@ -663,17 +654,12 @@ def _preflight(
 
 
 def _file_update_class(
-    path: PurePosixPath,
     current: _Snapshot | None,
     wanted: _FileState,
     previous: _FileState | None,
-    *,
-    provisioning_placeholder_paths: Collection[PurePosixPath],
 ) -> DriftClass | None:
     if previous is None:
         if current is None or current.state == wanted:
-            return None
-        if path in provisioning_placeholder_paths and _zero_byte_file(current):
             return None
         return DriftClass.COLLISION
     if current is None:
@@ -687,10 +673,6 @@ def _file_removal_class(current: _Snapshot | None, previous: _FileState) -> Drif
     if current is None or current.state == previous:
         return None
     return DriftClass.TARGET_DRIFT
-
-
-def _zero_byte_file(current: _Snapshot | None) -> bool:
-    return current is not None and current.content == b"" and not current.executable
 
 
 def _carrier_classes(
@@ -1423,7 +1405,7 @@ def _manifest_fragment_is_owned(
 def _path_is_owned(tool: str, path: PurePosixPath) -> bool:
     value = path.as_posix()
     return _safe_relative(path) and (
-        value in {"AGENTS.md", "CLAUDE.md"}
+        value == "AGENTS.md"
         or len(path.parts) == 2
         and path.parts[0] == "agents"
         and path.suffix == (".toml" if tool == "codex" else ".md")

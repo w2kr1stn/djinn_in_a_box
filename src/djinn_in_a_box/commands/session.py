@@ -51,8 +51,8 @@ def session(
     """Start an interactive or headless AI agent session.
 
     Sessions run in the Djinn container via docker exec. The consumer
-    prepares a workspace at ~/.djinn/sessions/<project>/ with CLAUDE.md
-    and context files.
+    prepares a workspace at ~/.djinn/sessions/<project>/. Djinn delivers the
+    selected agent's global workflow to its native root.
 
     Interactive mode (default): Opens a terminal session with the agent.
     Headless mode (--prompt): Runs the agent with a prompt, captures output.

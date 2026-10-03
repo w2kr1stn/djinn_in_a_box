@@ -26,8 +26,10 @@ from djinn_in_a_box.core.config_sync import (
     sync_config,
 )
 from djinn_in_a_box.core.workflow_publisher import (
+    RUNTIME_MANIFEST_NAME,
     CanonicalLockLease,
     canonical_lock,
+    publish_workflow_view,
 )
 
 
@@ -35,8 +37,7 @@ def _workspace(tmp_path: Path, *, source: ConfigSyncSource = "claude") -> tuple[
     project = tmp_path / "project"
     for tool in ("claude", "codex", "opencode"):
         (project / "config" / tool).mkdir(parents=True)
-    native = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "opencode": "AGENTS.md"}
-    (project / "config" / source / native[source]).write_text("Shared instructions.\n")
+    (project / "config" / source / "AGENTS.md").write_text("Shared instructions.\n")
     code_dir = tmp_path / "code"
     code_dir.mkdir()
     config_path = tmp_path / "operator.toml"
@@ -77,7 +78,7 @@ def test_representative_sync_publishes_all_views_and_lean_manifest(tmp_path: Pat
     assert result.success
     assert audit_config_sync(project, config_path=config_path).clean
     assert (project / "config/codex/AGENTS.md").read_text() == "Shared instructions.\n"
-    assert (project / "config/opencode/CLAUDE.md").read_text() == "Shared instructions.\n"
+    assert (project / "config/opencode/AGENTS.md").read_text() == "Shared instructions.\n"
     assert set(manifest) == {"source", "items"}
     assert manifest["source"] == "claude"
     assert manifest["items"]
@@ -89,6 +90,44 @@ def test_representative_sync_publishes_all_views_and_lean_manifest(tmp_path: Pat
         )
         for item in manifest["items"]
     )
+
+
+@pytest.mark.parametrize("source", ("claude", "codex", "opencode"))
+def test_each_source_delivers_one_global_instruction_file(
+    tmp_path: Path, source: ConfigSyncSource
+) -> None:
+    project, config_path = _workspace(tmp_path, source=source)
+    authored = project / "config" / source / "AGENTS.md"
+    authored.chmod(0o755)
+    content = authored.read_bytes()
+
+    assert sync_config(project, config_path=config_path).success
+    assert audit_config_sync(project, config_path=config_path).clean
+    canonical = project / "config"
+    manifest = json.loads((canonical / MANIFEST_NAME).read_bytes())
+    assert all(PurePosixPath(item["path"]).name != "CLAUDE.md" for item in manifest["items"])
+    assert not any(item["path"].startswith(f"{source}/") for item in manifest["items"])
+
+    for tool in ("claude", "codex", "opencode"):
+        native_root = canonical / tool
+        assert {path.name for path in native_root.glob("*.md")} == {"AGENTS.md"}
+        assert (native_root / "AGENTS.md").read_bytes() == content
+        assert stat.S_IMODE((native_root / "AGENTS.md").stat().st_mode) == 0o755
+        assert not (native_root / "CLAUDE.md").exists()
+        loaded = load_canonical_delivery_view(project, tool, config_path=config_path)
+        assert loaded.success and loaded.view is not None
+        runtime = tmp_path / f"host-{tool}"
+        runtime.mkdir()
+        published = publish_workflow_view(
+            loaded.view, canonical, runtime, runtime / RUNTIME_MANIFEST_NAME
+        )
+        assert published.success
+        assert {path.name for path in runtime.glob("*.md")} == {"AGENTS.md"}
+        assert (runtime / "AGENTS.md").read_bytes() == content
+        assert stat.S_IMODE((runtime / "AGENTS.md").stat().st_mode) == 0o755
+        assert not (runtime / "CLAUDE.md").exists()
+        runtime_manifest = json.loads((runtime / RUNTIME_MANIFEST_NAME).read_bytes())
+        assert all(item["path"] != "CLAUDE.md" for item in runtime_manifest["items"])
 
 
 def test_audit_reports_canonical_lock_failure_as_an_operational_problem(
@@ -132,7 +171,7 @@ def test_sync_reports_canonical_lock_failure_as_an_operational_problem(
 
 
 def _change_source(project: Path) -> None:
-    (project / "config/claude/CLAUDE.md").write_text("changed\n")
+    (project / "config/claude/AGENTS.md").write_text("changed\n")
 
 
 def _change_target(project: Path) -> None:
@@ -184,27 +223,12 @@ def test_collision_and_invalid_artifacts_block_without_mutation(tmp_path: Path) 
     assert _tree(project / "config") == before
 
 
-@pytest.mark.parametrize("source", ("codex", "opencode"))
-def test_non_claude_source_adopts_declared_zero_byte_claude_companion(
-    tmp_path: Path, source: ConfigSyncSource
-) -> None:
-    project, config_path = _workspace(tmp_path, source=source)
-    companion = project / "config/claude/AGENTS.md"
-    companion.write_bytes(b"")
-
-    result = sync_config(project, config_path=config_path)
-
-    assert result.success
-    assert companion.read_text() == "Shared instructions.\n"
-    assert audit_config_sync(project, config_path=config_path).clean
-
-
-def test_nonempty_claude_companion_blocks_non_claude_source_without_mutation(
+def test_unmanaged_claude_instructions_block_non_claude_source_without_mutation(
     tmp_path: Path,
 ) -> None:
     project, config_path = _workspace(tmp_path, source="codex")
-    companion = project / "config/claude/AGENTS.md"
-    companion.write_text("operator content\n")
+    instructions = project / "config/claude/AGENTS.md"
+    instructions.write_text("operator content\n")
     before = _tree(project / "config")
 
     result = sync_config(project, config_path=config_path)
@@ -227,7 +251,7 @@ def test_snapshot_before_commit_blocks_without_writing(
         result = original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         if not changed:
             changed = True
-            (project / "config/claude/CLAUDE.md").write_text("operator change\n")
+            (project / "config/claude/AGENTS.md").write_text("operator change\n")
         return result
 
     monkeypatch.setattr(sync_module, "_build_views", race)
@@ -249,7 +273,7 @@ def test_snapshot_after_commit_finishes_frozen_generation(
         nonlocal changed
         if count == 1 and not changed:
             changed = True
-            (project / "config/claude/CLAUDE.md").write_text("later change\n")
+            (project / "config/claude/AGENTS.md").write_text("later change\n")
 
     monkeypatch.setattr(publisher_module, "_after_target_mutation", edit_source)
     result = sync_config(project, config_path=config_path)
@@ -289,7 +313,7 @@ def test_sync_uses_config_source_read_under_canonical_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, config_path = _workspace(tmp_path)
-    (project / "config/claude/CLAUDE.md").unlink()
+    (project / "config/claude/AGENTS.md").unlink()
     (project / "config/codex/AGENTS.md").write_text("Codex source.\n")
     original_lock = sync_module.canonical_lock
     source_switched = False
@@ -316,7 +340,7 @@ def test_sync_uses_config_source_read_under_canonical_lock(
     assert result.success
     assert result.audit.clean
     assert result.audit.configured_source == "codex"
-    assert (project / "config/claude/CLAUDE.md").read_text() == "Codex source.\n"
+    assert (project / "config/claude/AGENTS.md").read_text() == "Codex source.\n"
 
 
 @pytest.mark.parametrize("foreign_kind", ("file", "fragment"))
@@ -395,7 +419,7 @@ def test_switch_is_allowed_only_without_edited_managed_targets(tmp_path: Path) -
     assert sync_config(project, config_path=config_path).success
     source = project / "config/codex/AGENTS.md"
     source.write_text("Codex source.\n")
-    (project / "config/claude/CLAUDE.md").write_text("Codex source.\n")
+    (project / "config/claude/AGENTS.md").write_text("Codex source.\n")
     save_config(
         AppConfig(
             code_dir=tmp_path / "code",
@@ -406,7 +430,9 @@ def test_switch_is_allowed_only_without_edited_managed_targets(tmp_path: Path) -
     )
 
     assert sync_config(project, config_path=config_path).success
-    assert (project / "config/claude/CLAUDE.md").read_text() == "Codex source.\n"
+    assert (project / "config/claude/AGENTS.md").read_text() == "Codex source.\n"
+    manifest = json.loads((project / "config" / MANIFEST_NAME).read_bytes())
+    assert not any(item["path"].startswith("codex/") for item in manifest["items"])
     (project / "config/opencode/AGENTS.md").write_text("operator edit\n")
     save_config(
         AppConfig(
@@ -427,7 +453,7 @@ def test_source_switch_target_drift_keeps_manifest_byte_identical(tmp_path: Path
     project, config_path = _workspace(tmp_path)
     assert sync_config(project, config_path=config_path).success
     (project / "config/codex/AGENTS.md").write_text("Codex source.\n")
-    (project / "config/claude/CLAUDE.md").write_text("Codex source.\n")
+    (project / "config/claude/AGENTS.md").write_text("Codex source.\n")
     (project / "config/opencode/AGENTS.md").write_text("operator edit\n")
     save_config(
         AppConfig(
@@ -461,7 +487,7 @@ def test_source_switch_rejects_untracked_old_source_content(tmp_path: Path) -> N
         'name = "reviewer"\ndescription = "Review"\n'
         'developer_instructions = "Replacement review."\n'
     )
-    (project / "config/claude/CLAUDE.md").write_text("Codex source.\n")
+    (project / "config/claude/AGENTS.md").write_text("Codex source.\n")
     save_config(
         AppConfig(
             code_dir=tmp_path / "code",
@@ -488,10 +514,7 @@ def test_canonical_delivery_view_returns_publisher_view(tmp_path: Path) -> None:
     loaded = load_canonical_delivery_view(project, "codex", config_path=config_path)
 
     assert loaded.success and loaded.view is not None and loaded.revision is not None
-    assert {item.relative_path for item in loaded.view.files} >= {
-        PurePosixPath("AGENTS.md"),
-        PurePosixPath("CLAUDE.md"),
-    }
+    assert {item.relative_path for item in loaded.view.files} == {PurePosixPath("AGENTS.md")}
 
 
 def test_canonical_delivery_view_blocks_nonportable_source_added_after_audit(

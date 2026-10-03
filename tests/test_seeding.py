@@ -43,6 +43,8 @@ def test_empty_target_creates_all_manifest_targets(tmp_path: Path) -> None:
     expected = [tmp_path / "config" / name for name in WORKFLOW_ROOT_NAMES]
     expected.extend(_target(tmp_path, entry) for entry in SEED_MANIFEST)
     assert created == expected
+    assert tmp_path / "config/claude/AGENTS.md" in created
+    assert not (tmp_path / "config/claude/CLAUDE.md").exists()
     for entry in SEED_MANIFEST:
         target = _target(tmp_path, entry)
         if entry.kind == "file":
@@ -180,7 +182,7 @@ def test_missing_templates_seed_raises_actionable_error(tmp_path: Path) -> None:
 
 def test_pristine_workflow_seed_digest_matches_shipped_bytes(tmp_path: Path) -> None:
     _write_seed_fixture(tmp_path)
-    relative = Path("claude/CLAUDE.md")
+    relative = Path("claude/AGENTS.md")
     template = tmp_path / "templates" / "seed" / "config" / relative
 
     digest = pristine_workflow_seed_digest(tmp_path, relative)

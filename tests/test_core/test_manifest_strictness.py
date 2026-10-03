@@ -64,7 +64,7 @@ def _workspace(root: Path) -> tuple[Path, Path]:
     project = root / "project"
     for tool in ("claude", "codex", "opencode"):
         (project / "config" / tool).mkdir(parents=True)
-    (project / "config/claude/CLAUDE.md").write_text("Shared instructions.\n")
+    (project / "config/claude/AGENTS.md").write_text("Shared instructions.\n")
     config_path = root / "operator.toml"
     code_dir = root / "code"
     code_dir.mkdir()

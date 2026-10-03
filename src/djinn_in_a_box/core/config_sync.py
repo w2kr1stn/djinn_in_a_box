@@ -21,7 +21,6 @@ from djinn_in_a_box.core.config_sync_adapters import (
     RenderedFile,
     SettingsFragment,
     native_only_input_paths,
-    provisioning_placeholder_paths,
     read_native_only_workflow,
     read_native_workflow,
     render_native_workflow,
@@ -417,26 +416,20 @@ def _build_views(
             source_fingerprint=source_fingerprints[tool],
             target_tool=tool,
             native_only_paths=tuple(native_only_input_paths(tool)),
-            provisioning_placeholder_paths=tuple(provisioning_placeholder_paths(tool)),
         )
     published_files: list[PublishedFile] = []
     published_fragments: list[CarrierFragment] = []
     for tool, (rendered_files, rendered_fragments) in projection_views.items():
+        if tool == source:
+            continue
         prefix = PurePosixPath(tool)
-        companion = OWNERSHIP_MATRIX[source].instruction_companion
-        publish_files = (
-            rendered_files
-            if tool != source
-            else tuple(item for item in rendered_files if item.relative_path == companion)
-        )
         published_files.extend(
             PublishedFile(prefix / item.relative_path, item.content, item.executable)
-            for item in publish_files
+            for item in rendered_files
         )
         published_fragments.extend(
             CarrierFragment(prefix / item.carrier_path, item.key_path, item.value_json)
             for item in rendered_fragments
-            if tool != source
         )
     return _Build(
         source,
@@ -446,12 +439,6 @@ def _build_views(
             tuple(published_files),
             tuple(published_fragments),
             source_fingerprint=fingerprint,
-            provisioning_placeholder_paths=tuple(
-                PurePosixPath(tool) / path
-                for tool, (rendered_files, _) in projection_views.items()
-                for path in provisioning_placeholder_paths(tool)
-                if any(item.relative_path == path for item in rendered_files)
-            ),
         ),
         views,
         source_inputs,
@@ -500,12 +487,6 @@ def _source_view(
         )
         for item in read.artifacts
     }
-    instruction = next((item for item in read.artifacts if item.kind.value == "instructions"), None)
-    if instruction is not None:
-        companion = OWNERSHIP_MATRIX[read.tool].instruction_companion
-        files[companion] = RenderedFile(
-            companion, instruction.content, instruction.identifier, instruction.executable
-        )
     fragments: list[SettingsFragment] = []
     problems: list[SyncProblem] = []
     for hook in OWNERSHIP_MATRIX[read.tool].hooks:
@@ -566,21 +547,12 @@ def _compare_manifest(
     recorded_fragments = {
         (item.path, item.key_path): item for item in current_items if item.key_path is not None
     }
-    provisioning_placeholders = frozenset(desired.provisioning_placeholder_paths)
     drifts: list[DriftItem] = []
     for path in sorted(set(wanted_files) | set(recorded_files)):
         wanted = wanted_files.get(path)
         recorded = recorded_files.get(path)
         actual = _file_item_at(config_root / path, path)
-        drifts.extend(
-            _item_drift(
-                wanted,
-                recorded,
-                actual,
-                path,
-                provisioning_placeholder=path in provisioning_placeholders,
-            )
-        )
+        drifts.extend(_item_drift(wanted, recorded, actual, path))
     for key in sorted(set(wanted_fragments) | set(recorded_fragments)):
         wanted = wanted_fragments.get(key)
         recorded = recorded_fragments.get(key)
@@ -598,8 +570,6 @@ def _item_drift(
     recorded: _ManifestItem | None,
     actual: _ManifestItem | None,
     path: PurePosixPath,
-    *,
-    provisioning_placeholder: bool = False,
 ) -> list[DriftItem]:
     if wanted is None:
         if actual is None or actual == recorded:
@@ -607,8 +577,6 @@ def _item_drift(
         return [_drift(DriftClass.TARGET_DRIFT, path)]
     if recorded is None:
         if actual is None or actual == wanted:
-            return [_drift(DriftClass.SOURCE_CHANGED, path)]
-        if provisioning_placeholder and actual == _ManifestItem(path, _digest(b""), False):
             return [_drift(DriftClass.SOURCE_CHANGED, path)]
         return [_drift(DriftClass.COLLISION, path)]
     if actual is None:
@@ -640,12 +608,7 @@ def _release_manifest_records(
 
 
 def _release_canonical_manifest_item(item: _ManifestItem, source: ConfigSyncSource) -> bool:
-    tool = cast(ConfigSyncSource, item.path.parts[0])
-    relative_path = PurePosixPath(*item.path.parts[1:])
-    if tool == source:
-        companion = OWNERSHIP_MATRIX[source].instruction_companion
-        return item.key_path is not None or relative_path != companion
-    return False
+    return item.path.parts[0] == source
 
 
 def _lean_items(raw: bytes) -> tuple[ConfigSyncSource, tuple[_ManifestItem, ...]]:

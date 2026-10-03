@@ -309,7 +309,6 @@ def _host_claude_view(
         view.source_fingerprint,
         view.target_tool,
         view.native_only_paths,
-        view.provisioning_placeholder_paths,
     )
 
 
