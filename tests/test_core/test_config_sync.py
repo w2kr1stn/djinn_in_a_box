@@ -25,10 +25,15 @@ from djinn_in_a_box.core.config_sync import (
     load_canonical_delivery_view,
     sync_config,
 )
+from djinn_in_a_box.core.config_workflow import WorkflowDeliveryTarget, prepare_config_workflow
 from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CanonicalLockLease,
+    ManifestError,
+    PublishedFile,
+    WorkflowView,
     canonical_lock,
+    decode_lean_manifest,
     publish_workflow_view,
 )
 
@@ -118,16 +123,91 @@ def test_each_source_delivers_one_global_instruction_file(
         assert loaded.success and loaded.view is not None
         runtime = tmp_path / f"host-{tool}"
         runtime.mkdir()
-        published = publish_workflow_view(
-            loaded.view, canonical, runtime, runtime / RUNTIME_MANIFEST_NAME
+        published = prepare_config_workflow(
+            project, (WorkflowDeliveryTarget(tool, runtime),), config_path=config_path
         )
         assert published.success
-        assert {path.name for path in runtime.glob("*.md")} == {"AGENTS.md"}
+        expected = {"AGENTS.md", "CLAUDE.md"} if tool == "claude" else {"AGENTS.md"}
+        assert {path.name for path in runtime.glob("*.md")} == expected
         assert (runtime / "AGENTS.md").read_bytes() == content
         assert stat.S_IMODE((runtime / "AGENTS.md").stat().st_mode) == 0o755
-        assert not (runtime / "CLAUDE.md").exists()
         runtime_manifest = json.loads((runtime / RUNTIME_MANIFEST_NAME).read_bytes())
-        assert all(item["path"] != "CLAUDE.md" for item in runtime_manifest["items"])
+        if tool != "claude":
+            assert not (runtime / "CLAUDE.md").exists()
+            assert all(item["path"] != "CLAUDE.md" for item in runtime_manifest["items"])
+
+        bridge = PublishedFile(PurePosixPath("CLAUDE.md"), b"@AGENTS.md\n")
+        if tool == "claude":
+            bridge_runtime = tmp_path / "host-claude-bridge"
+            bridge_runtime.mkdir()
+            accepted = publish_workflow_view(
+                WorkflowView(source, (bridge,), target_tool="claude"),
+                canonical,
+                bridge_runtime,
+                bridge_runtime / RUNTIME_MANIFEST_NAME,
+            )
+            assert accepted.success
+            assert (bridge_runtime / "CLAUDE.md").read_bytes() == bridge.content
+
+            nested = PublishedFile(PurePosixPath("context/CLAUDE.md"), b"Nested context.\n")
+            nested_runtime = tmp_path / "host-claude-nested"
+            nested_runtime.mkdir()
+            accepted = publish_workflow_view(
+                WorkflowView(source, (nested,), target_tool="claude"),
+                canonical,
+                nested_runtime,
+                nested_runtime / RUNTIME_MANIFEST_NAME,
+            )
+            assert accepted.success
+            assert (nested_runtime / nested.relative_path).read_bytes() == nested.content
+            assert not publisher_module._is_claude_instruction_position(
+                nested.relative_path, canonical_target=False
+            )
+        else:
+            invalid = WorkflowView(source, (bridge,), target_tool=tool)
+            before = _tree(runtime)
+            rejected = publish_workflow_view(
+                invalid, canonical, runtime, runtime / RUNTIME_MANIFEST_NAME
+            )
+            assert rejected.drift_class is DriftClass.INVALID_OR_SEMANTIC
+            assert _tree(runtime) == before
+
+        canonical_bridge = PublishedFile(PurePosixPath(f"{tool}/CLAUDE.md"), bridge.content)
+        invalid = WorkflowView(source, (canonical_bridge,))
+        before = _tree(canonical)
+        rejected = publish_workflow_view(invalid, canonical, canonical, canonical / MANIFEST_NAME)
+        assert rejected.drift_class is DriftClass.INVALID_OR_SEMANTIC
+        assert _tree(canonical) == before
+
+        # Prior manifests obey the same boundary as newly submitted files.
+        item = {
+            "path": "CLAUDE.md",
+            "content_hash": hashlib.sha256(bridge.content).hexdigest(),
+            "executable": False,
+        }
+        if tool == "claude":
+            decoded = decode_lean_manifest(
+                json.dumps({"source": source, "items": [item]}).encode(),
+                canonical_target=False,
+                target_tool=tool,
+            )
+            assert any(
+                manifest_item.path == PurePosixPath("CLAUDE.md") for manifest_item in decoded.items
+            )
+        else:
+            with pytest.raises(ManifestError):
+                decode_lean_manifest(
+                    json.dumps({"source": source, "items": [item]}).encode(),
+                    canonical_target=False,
+                    target_tool=tool,
+                )
+        item["path"] = f"{tool}/CLAUDE.md"
+        with pytest.raises(ManifestError):
+            decode_lean_manifest(
+                json.dumps({"source": source, "items": [item]}).encode(),
+                canonical_target=True,
+                target_tool="claude",
+            )
 
 
 def test_audit_reports_canonical_lock_failure_as_an_operational_problem(

@@ -316,8 +316,11 @@ Only the selected tool's `AGENTS.md` is authoritative:
 | Native-only hooks | three Python scripts plus `settings.json` fragments | three Python scripts plus `hooks.json` fragments | three named plugin files             |
 
 The known hook fragments are `SessionStart`, `PreToolUse`, and `Stop`; Codex
-also owns the `project_doc_fallback_filenames` bridge in `config.toml`. Hooks
-and their registrations are native-only, like the Claude-only `/codex-review`
+also owns the `project_doc_fallback_filenames` bridge in `config.toml`.
+Claude Code reads global instructions only from `~/.claude/CLAUDE.md`, so Djinn
+mounts the shipped `templates/claude/CLAUDE.md` read-only in the container and
+publishes it as a managed file on the host fallback; it imports `AGENTS.md`.
+Hooks and their registrations are native-only, like the Claude-only `/codex-review`
 command: a present native item is validated for ownership, UTF-8, and containment
 (with the OpenCode export-marker check), but is never cross-tool projected or
 stale-removed. Missing native hooks are allowed.
@@ -633,6 +636,7 @@ Common mounts include:
 - read-only `~/.ssh` and `~/.gitconfig`
 - the writable `config/claude` seed mount plus nested direct mounts for its
   workflow files, including `AGENTS.md`
+- the read-only `templates/claude/CLAUDE.md` bridge at `/home/dev/.claude/CLAUDE.md`
 - the read-only canonical `./config` mount at `/home/dev/.djinn-canonical` for
   the shared publisher
 - `${CODE_DIR}` to `/home/dev/projects`

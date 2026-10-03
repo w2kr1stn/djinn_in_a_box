@@ -45,6 +45,7 @@ x-common-volumes: &common-volumes
   - ./config/claude/context:/home/dev/.claude/context
   - ./config/claude/scripts:/home/dev/.claude/scripts
   - ./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md
+  - ./templates/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md:ro
   - ./config/opencode:/home/dev/.opencode/seed
   - ./config:/home/dev/.djinn-canonical:ro
   # Shared MCP server registry (all CLI tools, local-only)

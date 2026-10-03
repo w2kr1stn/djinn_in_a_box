@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import stat
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig, ConfigSyncSource
@@ -22,9 +22,11 @@ from djinn_in_a_box.core.docker import (
     get_config_root,
     workflow_image_compatible,
 )
+from djinn_in_a_box.core.paths import get_project_root
 from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
+    PublishedFile,
     PublishError,
     PublishResult,
     WorkflowView,
@@ -302,9 +304,13 @@ def _host_claude_view(
             elif fragment.value_json != replacement[1]:
                 return None
         fragments.append(fragment)
+    bridge = PublishedFile(
+        PurePosixPath("CLAUDE.md"),
+        (get_project_root() / "templates/claude/CLAUDE.md").read_bytes(),
+    )
     return WorkflowView(
         view.source,
-        view.files,
+        (*view.files, bridge),
         tuple(fragments),
         view.source_fingerprint,
         view.target_tool,
