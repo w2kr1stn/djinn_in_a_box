@@ -29,7 +29,7 @@ def session(
     ] = "default",
     agent: Annotated[
         str,
-        typer.Option("--agent", "-a", help="Agent to use (claude, gemini, codex, opencode)"),
+        typer.Option("--agent", "-a", help="Agent to use (claude, codex, opencode)"),
     ] = "claude",
     model: Annotated[
         str | None,
@@ -65,8 +65,8 @@ def session(
         # Headless query
         djinn session --project my-project --prompt "Explain the codebase"
 
-        # Different agent and model
-        djinn session --project my-project --agent gemini --model gemini-2.5-flash
+        # Different agent
+        djinn session --project my-project --agent codex
     """
     sessions_base = Path.home() / ".djinn" / "sessions"
     workspace = sessions_base / project

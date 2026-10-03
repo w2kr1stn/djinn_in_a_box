@@ -104,11 +104,15 @@ def test_non_claude_first_use_creates_empty_workflow_roots(
         assert _target(tmp_path, entry).exists()
 
 
-def test_wrong_type_targets_are_repaired(tmp_path: Path) -> None:
+def test_wrong_type_targets_are_repaired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory_entry = SeedEntry(Path("config/sample-dir"), Path("config/sample-dir"), "directory")
+    monkeypatch.setattr(seeding_mod, "SHARED_SEEDS", (*SHARED_SEEDS, directory_entry))
     _write_seed_fixture(tmp_path)
+    (tmp_path / "templates" / "seed" / directory_entry.source).mkdir()
     seed_config(tmp_path)
     file_entry = next(entry for entry in SHARED_SEEDS if entry.kind == "file")
-    directory_entry = next(entry for entry in SHARED_SEEDS if entry.kind == "directory")
     file_target = _target(tmp_path, file_entry)
     directory_target = _target(tmp_path, directory_entry)
 
@@ -119,7 +123,7 @@ def test_wrong_type_targets_are_repaired(tmp_path: Path) -> None:
 
     created = seed_config(tmp_path)
 
-    assert created == [directory_target, file_target]
+    assert created == [file_target, directory_target]
     assert file_target.is_file()
     assert file_target.read_text(encoding="utf-8") == f"seed for {file_entry.source}\n"
     assert directory_target.is_dir()

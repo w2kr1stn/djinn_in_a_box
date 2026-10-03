@@ -6,8 +6,13 @@ from pathlib import Path
 
 import yaml
 
-from djinn_in_a_box.config.defaults import SYNC_PATHS
+from djinn_in_a_box.config.defaults import (
+    DEFAULT_ZONES,
+    KNOWN_CONFIG_ROOT_ENTRIES,
+    SYNC_PATHS,
+)
 from djinn_in_a_box.config.models import AppConfig, ResourceLimits
+from djinn_in_a_box.config.zones import ZONE_CONTAINER_TARGETS
 
 
 def project_root() -> Path:
@@ -56,12 +61,20 @@ def test_resource_limit_defaults_are_conservative() -> None:
 def test_credentials_sync_paths_are_decoupled_from_work_tools() -> None:
     assert SYNC_PATHS["credentials"] == [
         "claude",
-        "gemini",
         "codex",
         "opencode",
         "gh",
         "age",
     ]
+
+
+def test_per_agent_tables_share_one_key_set() -> None:
+    assert (
+        set(SYNC_PATHS["credentials"])
+        == set(DEFAULT_ZONES)
+        == set(KNOWN_CONFIG_ROOT_ENTRIES)
+        == set(ZONE_CONTAINER_TARGETS)
+    )
 
 
 def test_compose_mounts_age_credential_store() -> None:

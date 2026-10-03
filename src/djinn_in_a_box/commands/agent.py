@@ -152,7 +152,7 @@ def _show_run_status(
 def run(
     agent: Annotated[
         str,
-        typer.Argument(help="Agent to run: claude, gemini, codex, opencode"),
+        typer.Argument(help="Agent to run: claude, codex, opencode"),
     ],
     prompt: Annotated[
         str,
@@ -168,7 +168,7 @@ def run(
     ] = False,
     model: Annotated[
         str | None,
-        typer.Option("--model", "-m", help="Model override (e.g., sonnet, gemini-2.5-flash)"),
+        typer.Option("--model", "-m", help="Model override (e.g., sonnet)"),
     ] = None,
     docker: Annotated[
         bool,
@@ -217,7 +217,7 @@ def run(
         djinn run claude "Fix the bug in main.py" --write
 
         # Use a specific model with JSON output
-        djinn run gemini "Refactor this file" --write --model gemini-2.5-flash --json
+        djinn run claude "Refactor this file" --write --model sonnet --json
 
         # With Docker access and timeout
         djinn run claude "Build the Docker image" --docker --timeout 300

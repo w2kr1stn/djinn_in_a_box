@@ -54,7 +54,6 @@ color_text() {
 # versions are in sync and used here for version discovery only.
 declare -A PACKAGES=(
     ["CLAUDE_CODE_VERSION"]="@anthropic-ai/claude-code"
-    ["GEMINI_CLI_VERSION"]="@google/gemini-cli"
     ["CODEX_VERSION"]="@openai/codex"
     ["OPENCODE_VERSION"]="opencode-ai"
 )

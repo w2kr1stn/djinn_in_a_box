@@ -14,7 +14,6 @@ the selected agent CLI; otherwise it uses that agent's configured
 | Agent | Model flag forwarded by Djinn | Notes |
 |-------|-------------------------------|-------|
 | `claude` | `--model <name>` | Example aliases depend on the installed Claude Code CLI. |
-| `gemini` | `-m <name>` | Use a model supported by the installed Gemini CLI. |
 | `codex` | `--model <name>` | Uses `codex exec` for headless runs. |
 | `opencode` | `-m <name>` | Uses `opencode run` for headless runs. |
 
@@ -83,9 +82,6 @@ djinn run claude "Explain the architecture" --model sonnet
 # Claude with file modifications enabled
 djinn run claude "Fix the bug in main.py" --write --model sonnet
 
-# Gemini with a model override
-djinn run gemini "Refactor the auth flow" --write --model gemini-2.5-pro
-
 # Codex in headless mode
 djinn run codex "Review this change" --model gpt-5
 
@@ -126,7 +122,7 @@ with the agent's return code.
 
 | Flag | Description |
 |------|-------------|
-| `<agent>` | Agent name: `claude`, `gemini`, `codex`, or `opencode`. |
+| `<agent>` | Agent name: `claude`, `codex`, or `opencode`. |
 | `<prompt>` | Prompt to send to the agent. |
 | `--model <name>`, `-m <name>` | Model override forwarded to the agent. |
 | `--write`, `-w` | Enable the agent's write/edit mode. |
@@ -160,8 +156,8 @@ djinn session --project my-project --create --prompt "Explain this codebase"
 # Reuse an existing session workspace
 djinn session --project my-project --prompt "Continue the review"
 
-# Choose a different agent and model
-djinn session --project my-project --agent gemini --model gemini-2.5-flash --prompt "Summarize changes"
+# Choose a different agent
+djinn session --project my-project --agent codex --prompt "Summarize changes"
 
 # Increase the headless timeout
 djinn session --project my-project --prompt "Run a deeper analysis" --timeout 900

@@ -757,7 +757,7 @@ def test_legacy_semantic_record_made_portable_migrates(tmp_path: Path) -> None:
         ("artifact_id", "unknown:reviewer:agents/reviewer.md"),
         ("source_path", "../agents/reviewer.md"),
         ("target_tool", "claude"),
-        ("target_tool", "gemini"),
+        ("target_tool", "unknown"),
     ],
 )
 def test_legacy_semantic_record_fields_are_validated_before_migration(

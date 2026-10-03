@@ -103,7 +103,7 @@ class TestConfigSyncConfig:
 
     def test_rejects_unknown_source(self) -> None:
         with pytest.raises(ValidationError):
-            ConfigSyncConfig.model_validate({"source": "gemini"})
+            ConfigSyncConfig.model_validate({"source": "unknown"})
 
 
 class TestAppConfig:

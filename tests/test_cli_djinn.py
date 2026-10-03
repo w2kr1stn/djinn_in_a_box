@@ -405,7 +405,7 @@ class TestConfigSetCommand:
         (project_root / "config").mkdir(parents=True)
         monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project_root)
 
-        result = runner.invoke(app, ["config", "set", "config_sync.source", "gemini"])
+        result = runner.invoke(app, ["config", "set", "config_sync.source", "unknown"])
 
         assert result.exit_code == 1
         assert "Traceback" not in result.output

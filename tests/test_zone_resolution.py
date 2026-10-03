@@ -83,7 +83,6 @@ def test_default_zones_match_the_frozen_assignment_table() -> None:
             "shared": ["sessions"],
         },
         "opencode": {"local": ["node_modules", "native"], "shared": []},
-        "gemini": {"local": ["tmp"], "shared": ["history"]},
         "gh": {"local": [], "shared": []},
         "age": {"local": [], "shared": []},
     }

@@ -183,7 +183,7 @@ def test_without_a_tty_the_container_stays_up_instead_of_exiting(tmp_path: Path)
         sink.seek(0)
         assert "No TTY available" in sink.read()
 
-    assert len(_sync_lines(tmp_path)) == 3
+    assert len(_sync_lines(tmp_path)) == 2
 
 
 @requires_zsh
@@ -232,7 +232,7 @@ def test_detached_uses_the_keeper_even_though_a_tty_exists(tmp_path: Path) -> No
             os.waitpid(pid, 0)
         os.close(fd)
 
-    assert len(_sync_lines(tmp_path)) == 3
+    assert len(_sync_lines(tmp_path)) == 2
 
 
 @requires_zsh
@@ -277,7 +277,7 @@ def test_sigterm_persists_with_an_interactive_shell_running(tmp_path: Path) -> N
             os.waitpid(pid, 0)
         os.close(fd)  # hangs up the orphaned shell still holding the pty
 
-    assert len(_sync_lines(tmp_path)) == 3
+    assert len(_sync_lines(tmp_path)) == 2
 
 
 @requires_zsh
@@ -291,7 +291,7 @@ def test_normal_shell_exit_persists_state_and_keeps_the_exit_code(tmp_path: Path
     )
 
     assert result.returncode == 7, result.stderr
-    assert len(_sync_lines(tmp_path)) == 3
+    assert len(_sync_lines(tmp_path)) == 2
 
 
 @requires_zsh
@@ -314,8 +314,8 @@ def test_sigterm_persists_state_before_exiting(tmp_path: Path) -> None:
             process.wait(timeout=5)
 
     assert process.returncode == 128 + signal.SIGTERM
-    # Exactly three: the signal path must not double-run the normal path.
-    assert len(_sync_lines(tmp_path)) == 3
+    # Exactly two: the signal path must not double-run the normal path.
+    assert len(_sync_lines(tmp_path)) == 2
 
 
 @requires_zsh
@@ -347,7 +347,7 @@ def test_sigterm_persists_state_only_once(tmp_path: Path) -> None:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             process.wait(timeout=5)
 
-    assert len(_sync_lines(tmp_path)) == 3
+    assert len(_sync_lines(tmp_path)) == 2
 
 
 def _wait_until_shell_started(process: subprocess.Popen[str]) -> None:

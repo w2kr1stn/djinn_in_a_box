@@ -254,7 +254,7 @@ class TestEnsureHostEnv:
         ensure_host_env(config)
 
         root = get_config_root(config)
-        for name in SYNC_PATHS["credentials"]:  # claude, gemini, codex, opencode, gh, age
+        for name in SYNC_PATHS["credentials"]:  # claude, codex, opencode, gh, age
             assert (root / name).is_dir()
             # Credential stores hold secrets: no group/other access.
             assert (root / name).stat().st_mode & 0o077 == 0

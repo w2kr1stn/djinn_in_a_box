@@ -235,7 +235,7 @@ class TestSessionCommand:
         instance.preflight_check.assert_not_called()
         instance.run_interactive.assert_not_called()
 
-    def test_blocked_gemini_workflow_stops_before_workspace_creation_and_agent(
+    def test_blocked_codex_workflow_stops_before_workspace_creation_and_agent(
         self, tmp_path: Path
     ) -> None:
         target = SessionTarget(container_id="container-123")
@@ -257,12 +257,15 @@ class TestSessionCommand:
 
             result = runner.invoke(
                 app,
-                ["session", "--project", "new-project", "--agent", "gemini", "--create"],
+                ["session", "--project", "new-project", "--agent", "codex", "--create"],
             )
 
         assert result.exit_code == 1
         workflow.assert_called_once()
-        assert workflow.call_args.args == (Path("/project"), ())
+        assert workflow.call_args.args == (
+            Path("/project"),
+            (WorkflowDeliveryTarget("codex", Path("/runtime/codex")),),
+        )
         instance.workflow_image_compatible.assert_called_once_with(target)
         assert not (tmp_path / ".djinn/sessions/new-project").exists()
         instance.preflight_check.assert_not_called()

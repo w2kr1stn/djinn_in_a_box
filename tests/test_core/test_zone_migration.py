@@ -356,7 +356,7 @@ def test_collision_preserves_every_assigned_tree_without_moving_anything(
     local_jobs.mkdir(parents=True)
     (config_jobs / "config.txt").write_text("config")
     (local_jobs / "local.txt").write_text("local")
-    unrelated = roots.config_root / "gemini" / "tmp"
+    unrelated = roots.config_root / "unassigned-app" / "tmp"
     unrelated.mkdir(parents=True)
     (unrelated / "would-have-moved.txt").write_text("keep")
 

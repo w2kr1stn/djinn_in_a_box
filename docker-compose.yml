@@ -20,7 +20,6 @@ name: djinn-in-a-box
 x-common-volumes: &common-volumes
   # AI Agent configs & credentials (bind-mounts; optionally mirrored across machines)
   - ${DJINN_CONFIG_ROOT:?Run 'djinn init' to set DJINN_CONFIG_ROOT}/claude:/home/dev/.claude
-  - ${DJINN_CONFIG_ROOT}/gemini:/home/dev/.gemini
   - ${DJINN_CONFIG_ROOT}/codex:/home/dev/.codex
   - ${DJINN_CONFIG_ROOT}/opencode:/home/dev/.opencode
   - opencode-data:/home/dev/.local/share/opencode
@@ -47,7 +46,6 @@ x-common-volumes: &common-volumes
   - ./config/claude/scripts:/home/dev/.claude/scripts
   - ./config/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md
   - ./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md
-  - ./config/gemini:/home/dev/.gemini_seed
   - ./config/opencode:/home/dev/.opencode/seed
   - ./config:/home/dev/.djinn-canonical:ro
   # Shared MCP server registry (all CLI tools, local-only)
@@ -64,9 +62,6 @@ x-common-environment: &common-environment
   UV_LINK_MODE: copy
   # Host-local LLM endpoint (e.g. Ollama on the host)
   LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://host.docker.internal:11434/v1}
-  # Gemini CLI: Force file-based token storage instead of system keychain
-  # (keychain is not persistent in containers)
-  GEMINI_FORCE_FILE_STORAGE: "true"
 
 x-resource-limits: &resource-limits
   resources:

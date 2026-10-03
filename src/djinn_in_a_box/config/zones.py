@@ -29,7 +29,6 @@ ZONE_CONTAINER_TARGETS: Final[dict[str, Path]] = {
     "claude": Path("/home/dev/.claude"),
     "codex": Path("/home/dev/.codex"),
     "opencode": Path("/home/dev/.opencode"),
-    "gemini": Path("/home/dev/.gemini"),
     "gh": Path("/home/dev/.config/gh"),
     "age": Path("/home/dev/.config/age"),
 }

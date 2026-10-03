@@ -712,14 +712,14 @@ class TestMountTargetCollisions:
     def test_dockerfile_symlink_parser_checks_every_ln_on_a_line(self) -> None:
         assert _parse_dockerfile_symlink_line(
             "RUN ln --force --symbolic ~/.claude ~/.config/claude "
-            "&& ln --relative -s /home/dev/.gemini /home/dev/.gemini"
+            "&& ln --relative -s /home/dev/.sample-agent /home/dev/.sample-agent"
         ) == [
             ("~/.claude", "~/.config/claude"),
-            ("/home/dev/.gemini", "/home/dev/.gemini"),
+            ("/home/dev/.sample-agent", "/home/dev/.sample-agent"),
         ]
         assert _parse_dockerfile_symlink_line(
-            "RUN ln -s ~/.gemini /tmp/g || ln -s ~/.claude /srv/claude"
-        ) == [("~/.gemini", "/tmp/g"), ("~/.claude", "/srv/claude")]
+            "RUN ln -s ~/.sample-agent /tmp/g || ln -s ~/.claude /srv/claude"
+        ) == [("~/.sample-agent", "/tmp/g"), ("~/.claude", "/srv/claude")]
 
     def test_dockerfile_aliases_of_reserved_paths_are_reserved(
         self, mock_app_config: AppConfig
@@ -1996,11 +1996,11 @@ class TestGetExistingSyncPathsByCategory:
     ) -> None:
         monkeypatch.setenv("DJINN_CONFIG_ROOT", str(tmp_path))
         (tmp_path / "claude").mkdir()
-        # "gemini" dir intentionally missing
+        # "unused-agent" dir intentionally missing
 
         cat_patch = patch.dict(
             "djinn_in_a_box.core.docker.SYNC_PATHS",
-            {"credentials": ["claude", "gemini"]},
+            {"credentials": ["claude", "unused-agent"]},
             clear=True,
         )
         with cat_patch:
@@ -2037,7 +2037,7 @@ class TestGetExistingSyncPathsByCategory:
         code_dir.mkdir()
         configured_root = tmp_path / "configured-root"
         env_root = tmp_path / "env-root"
-        (configured_root / "gemini").mkdir(parents=True)
+        (configured_root / "unused-agent").mkdir(parents=True)
         (env_root / "claude").mkdir(parents=True)
         monkeypatch.setenv("DJINN_CONFIG_ROOT", str(env_root))
         config_file = tmp_path / "config.toml"
@@ -2046,7 +2046,7 @@ class TestGetExistingSyncPathsByCategory:
 
         cat_patch = patch.dict(
             "djinn_in_a_box.core.docker.SYNC_PATHS",
-            {"credentials": ["claude", "gemini"]},
+            {"credentials": ["claude", "unused-agent"]},
             clear=True,
         )
         with cat_patch:

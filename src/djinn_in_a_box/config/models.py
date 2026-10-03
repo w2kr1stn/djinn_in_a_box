@@ -29,7 +29,7 @@ def validate_memory_format(value: str) -> str:
 class AgentConfig(BaseModel):
     """Configuration for a CLI coding agent.
 
-    Defines how to invoke a specific agent (Claude, Gemini, Codex, etc.)
+    Defines how to invoke a specific agent (Claude, Codex, OpenCode, etc.)
     including the binary name, various flags for different modes, and
     prompt injection template.
     """
@@ -37,7 +37,7 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     binary: Annotated[str, Field(min_length=1)]
-    """Executable binary name (e.g., 'claude', 'gemini')."""
+    """Executable binary name (e.g., 'claude', 'codex')."""
 
     description: str = ""
     """Human-readable description of the agent."""

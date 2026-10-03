@@ -59,7 +59,6 @@ _IMAGE_PATH_ALIASES = {
 _DIRECT_DOCKER_SOCKET_TARGETS = (Path("/run/docker.sock"),)
 _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/.claude"),
-    Path("/home/dev/.gemini"),
     Path("/home/dev/.codex"),
     Path("/home/dev/.opencode"),
     Path("/home/dev/.local/share/opencode"),
@@ -79,7 +78,6 @@ _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/.claude/scripts"),
     Path("/home/dev/.claude/CLAUDE.md"),
     Path("/home/dev/.claude/AGENTS.md"),
-    Path("/home/dev/.gemini_seed"),
     Path("/home/dev/.opencode/seed"),
     Path("/home/dev/.djinn-canonical"),
     Path("/home/dev/.config/mcp-servers.json"),

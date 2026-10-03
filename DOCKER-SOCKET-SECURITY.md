@@ -4,7 +4,7 @@
 
 This analysis evaluates the security implications of Docker access in a
 containerized development environment for AI coding agents such as Claude Code,
-Gemini CLI, Codex, and OpenCode.
+Codex, and OpenCode.
 
 The host Docker socket is a high-risk interface. Any mode that can create
 containers through the host daemon must be treated as host-level control unless
@@ -32,10 +32,10 @@ the request path is tightly restricted and monitored.
 │  │  │  │              │ TCP  │ (dev container)  │     │  │    │ │
 │  │  │  │ FILTERS:     │      │                  │     │  │    │ │
 │  │  │  │ ✓ ps/images  │      │ Claude Code      │     │  │    │ │
-│  │  │  │ ✓ run/start  │      │ Gemini CLI       │     │  │    │ │
-│  │  │  │ ✓ stop       │      │ Codex CLI        │     │  │    │ │
-│  │  │  │ ✗ exec       │      │ OpenCode         │     │  │    │ │
-│  │  │  │ ✗ build      │      └──────────────────┘     │  │    │ │
+│  │  │  │ ✓ run/start  │      │ Codex CLI        │     │  │    │ │
+│  │  │  │ ✓ stop       │      │ OpenCode         │     │  │    │ │
+│  │  │  │ ✗ exec       │      └──────────────────┘     │  │    │ │
+│  │  │  │ ✗ build      │                               │  │    │ │
 │  │  │  │ ✗ commit     │                               │  │    │ │
 │  │  │  └──────┬───────┘                               │  │    │ │
 │  │  │         │                                       │  │    │ │
