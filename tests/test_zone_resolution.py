@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -182,6 +183,109 @@ def test_zone_root_resolution_rejects_equal_and_nested_roots(
         resolve_zone_roots(config)
 
 
+def _provisioning_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppConfig:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(docker_mod, "get_project_root", lambda: tmp_path / "project")
+    zones_file = tmp_path / "zones.toml"
+    zones_file.write_text(
+        '[zones.claude]\nlocal = ["custom/scratch/nested"]\n'
+        'shared = ["custom/transcripts/nested"]\n'
+    )
+    monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
+    return _config(tmp_path)
+
+
+def _overlay_directories(config: AppConfig) -> set[Path]:
+    roots = resolve_zone_roots(config)
+    directories: set[Path] = set()
+    for agent, by_zone in load_zone_assignments(config).by_agent.items():
+        for zone, root in (("local", roots.local_root), ("shared", roots.shared_root)):
+            for relative_path in by_zone[zone]:
+                directory = root
+                for component in (agent, *relative_path.parts):
+                    directory /= component
+                    directories.add(directory)
+    return directories
+
+
+def _host_tree(root: Path) -> dict[Path, tuple[int, int, int, int, bytes | None]]:
+    return {
+        path.relative_to(root): (
+            path.stat().st_ino,
+            path.stat().st_uid,
+            path.stat().st_gid,
+            path.stat().st_mode,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in root.rglob("*")
+    }
+
+
+def test_host_provisioning_creates_every_assigned_overlay_empty_private_and_user_owned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    expected = _overlay_directories(config)
+
+    ensure_host_env(config)
+
+    roots = resolve_zone_roots(config)
+    actual = set(roots.local_root.rglob("*")) | set(roots.shared_root.rglob("*"))
+    assert actual == expected
+    for directory in expected:
+        metadata = directory.lstat()
+        assert stat.S_ISDIR(metadata.st_mode)
+        assert stat.S_IMODE(metadata.st_mode) == 0o700
+        assert (metadata.st_uid, metadata.st_gid) == (os.getuid(), os.getgid())
+    for agent, by_zone in load_zone_assignments(config).by_agent.items():
+        for zone, root in (("local", roots.local_root), ("shared", roots.shared_root)):
+            for relative_path in by_zone[zone]:
+                assert list((root / agent / relative_path).iterdir()) == []
+
+
+def test_host_provisioning_preserves_existing_zone_and_config_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    roots = ensure_zone_roots(config)
+    for directory in sorted(_overlay_directories(config)):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for agent in SYNC_PATHS["credentials"]:
+        (roots.config_root / agent).mkdir(mode=0o700)
+    home = Path.home()
+    for directory in (home / ".djinn" / "sessions", home / ".djinn" / "backups", home / ".ssh"):
+        directory.mkdir(parents=True, mode=0o700)
+    (home / ".gitconfig").write_bytes(b"[user]\nname = Operator\n")
+    base = roots.config_root / "claude" / "jobs"
+    base.mkdir(mode=0o700)
+    for directory, content in (
+        (base, b"config data\x00"),
+        (roots.local_root / "claude" / "custom" / "scratch" / "nested", b"local data\xff"),
+        (roots.shared_root / "claude" / "custom" / "transcripts" / "nested", b"shared data\n"),
+        (roots.config_root, b"unrelated data"),
+    ):
+        (directory / "sentinel.bin").write_bytes(content)
+    before = _host_tree(tmp_path)
+
+    ensure_host_env(config)
+
+    assert _host_tree(tmp_path) == before
+
+
+def test_host_provisioning_is_idempotent_for_all_overlay_assignments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    ensure_host_env(config)
+    roots = resolve_zone_roots(config)
+    (roots.local_root / "claude" / "jobs" / "state.bin").write_bytes(b"persistent state")
+    before = _host_tree(tmp_path)
+
+    ensure_host_env(config)
+
+    assert _host_tree(tmp_path) == before
+
+
 def test_host_provisioning_creates_zone_roots_and_agent_roots_with_0700_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -218,14 +322,33 @@ def test_ensure_zone_roots_rejects_a_derived_symlink_without_chmodding_its_targe
     assert stat.S_IMODE(shared_target.stat().st_mode) == 0o755
 
 
+@pytest.mark.parametrize("zone", ("local", "shared"))
+@pytest.mark.parametrize("component", ("", "claude", "claude/custom", "claude/custom/nested"))
 def test_ensure_zone_roots_translates_a_regular_file_to_a_named_zone_error(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zone: str, component: str
 ) -> None:
-    config = _config(tmp_path)
-    config.config_root.write_text("not a directory")
+    config = _provisioning_config(tmp_path, monkeypatch)
+    zones_mod.ZONES_FILE.write_text(f'[zones.claude]\n{zone} = ["custom/nested"]\n')
+    roots = resolve_zone_roots(config)
+    root = roots.local_root if zone == "local" else roots.shared_root
+    file_path = root / component if component else config.config_root
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(b"not a directory")
+    before = file_path.stat()
 
-    with pytest.raises(ZoneRootValidationError, match="not a directory"):
-        ensure_zone_roots(config)
+    with pytest.raises((ZoneRootValidationError, ZoneConfigurationError), match="directory|file"):
+        ensure_host_env(config)
+
+    assert file_path.read_bytes() == b"not a directory"
+    after = file_path.stat()
+    assert (after.st_ino, after.st_uid, after.st_gid, after.st_mode) == (
+        before.st_ino, before.st_uid, before.st_gid, before.st_mode,
+    )
+    if component:
+        assert set(root.rglob("*")) == {
+            file_path,
+            *file_path.parents[: len(Path(component).parts) - 1],
+        }
 
 
 def test_zone_assignments_merge_defaults_for_every_container_agent(
@@ -285,14 +408,6 @@ def test_zone_assignments_reject_absolute_and_traversal_paths(tmp_path: Path, pa
         load_zone_assignments(_config(tmp_path), path=zones_file)
 
 
-def test_zone_assignments_reject_reserved_migration_paths(tmp_path: Path) -> None:
-    zones_file = tmp_path / "zones.toml"
-    zones_file.write_text('[zones.claude]\nlocal = [".djinn-migrating-jobs"]\n')
-
-    with pytest.raises(ZoneConfigurationError, match="reserved migration path"):
-        load_zone_assignments(_config(tmp_path), path=zones_file)
-
-
 def test_zone_assignments_reject_symlinked_components(tmp_path: Path) -> None:
     config = _config(tmp_path)
     target = tmp_path / "outside"
@@ -307,16 +422,32 @@ def test_zone_assignments_reject_symlinked_components(tmp_path: Path) -> None:
         load_zone_assignments(config, path=zones_file)
 
 
-def test_zone_assignments_reject_symlinked_destination_components(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+@pytest.mark.parametrize("zone", ("local", "shared"))
+@pytest.mark.parametrize("component", ("claude", "claude/custom", "claude/custom/nested"))
+@pytest.mark.parametrize("dangling", (False, True))
+def test_zone_assignments_reject_symlinked_destination_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zone: str, component: str, dangling: bool
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
     outside = tmp_path / "outside"
-    outside.mkdir()
+    if not dangling:
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"untouched")
+    zones_mod.ZONES_FILE.write_text(f'[zones.claude]\n{zone} = ["custom/nested"]\n')
     roots = resolve_zone_roots(config)
-    roots.local_root.mkdir()
-    (roots.local_root / "claude").symlink_to(outside, target_is_directory=True)
+    root = roots.local_root if zone == "local" else roots.shared_root
+    link = root / component
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside, target_is_directory=True)
+    target_before = _host_tree(outside) if not dangling else None
 
     with pytest.raises(ZoneConfigurationError, match="symlinked"):
-        load_zone_assignments(config)
+        ensure_host_env(config)
+
+    assert link.is_symlink()
+    assert link.readlink() == outside
+    assert (_host_tree(outside) if outside.exists() else None) == target_before
+    assert set(root.rglob("*")) == {link, *link.parents[: len(Path(component).parts) - 1]}
 
 
 def test_zone_assignments_reject_a_user_path_that_is_a_regular_file(tmp_path: Path) -> None:

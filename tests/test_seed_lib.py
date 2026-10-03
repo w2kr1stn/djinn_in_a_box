@@ -210,7 +210,7 @@ def test_malformed_local_overlay_fails_loud_and_keeps_existing_settings(tmp_path
     assert not (target_settings.parent / "settings.json.tmp").exists()  # no litter
 
 
-def test_malformed_local_overlay_on_fresh_volume_still_initialises_baseline(
+def test_malformed_local_overlay_on_fresh_store_still_initialises_baseline(
     tmp_path: Path,
 ) -> None:
     seed_dir = tmp_path / "seed"
@@ -220,7 +220,7 @@ def test_malformed_local_overlay_on_fresh_volume_still_initialises_baseline(
     (seed_dir / "settings.local.json").write_text("{not valid json", encoding="utf-8")
 
     target_settings = tmp_path / ".claude" / "settings.json"
-    target_settings.parent.mkdir()  # fresh volume: no settings.json yet
+    target_settings.parent.mkdir()  # fresh persistent settings store: no settings.json yet
 
     result = run_seed_lib(
         tmp_path,
@@ -230,7 +230,7 @@ def test_malformed_local_overlay_on_fresh_volume_still_initialises_baseline(
 
     assert result.returncode == 0, result.stderr
     assert "settings merge failed" in result.stderr
-    # A fresh volume must never end up settings-less: baseline fallback applies.
+    # A fresh persistent settings store must never end up settings-less: baseline fallback applies.
     assert json.loads(target_settings.read_text(encoding="utf-8")) == {"baseline": True}
 
 
@@ -243,7 +243,7 @@ def test_malformed_baseline_is_named_and_never_installed(tmp_path: Path) -> None
     write_json(seed_dir / "settings.local.json", {"local": True})
 
     target_settings = tmp_path / ".claude" / "settings.json"
-    target_settings.parent.mkdir()  # fresh volume
+    target_settings.parent.mkdir()  # fresh persistent settings store
 
     result = run_seed_lib(
         tmp_path,
@@ -291,12 +291,12 @@ def test_reverse_sync_file_copies_changed_file_and_skips_unchanged_file(tmp_path
 
 
 def test_reverse_sync_claude_settings_strips_only_managed_hooks(tmp_path: Path) -> None:
-    volume_file = tmp_path / "volume" / "settings.json"
-    seed_file = tmp_path / "seed" / "settings.local.json"
-    volume_file.parent.mkdir()
-    seed_file.parent.mkdir()
+    runtime_file = tmp_path / "volume" / "settings.json"
+    target_file = tmp_path / "seed" / "settings.local.json"
+    runtime_file.parent.mkdir()
+    target_file.parent.mkdir()
     write_json(
-        volume_file,
+        runtime_file,
         {
             "hooks": {
                 "SessionStart": [{"hooks": [{"command": "generated-start"}]}],
@@ -313,11 +313,11 @@ def test_reverse_sync_claude_settings_strips_only_managed_hooks(tmp_path: Path) 
     result = run_seed_lib(
         tmp_path,
         "reverse_sync_claude_settings "
-        f"{shlex.quote(str(volume_file))} {shlex.quote(str(seed_file))}",
+        f"{shlex.quote(str(runtime_file))} {shlex.quote(str(target_file))}",
     )
 
     assert result.returncode == 0, result.stderr
-    persisted = json.loads(seed_file.read_text(encoding="utf-8"))
+    persisted = json.loads(target_file.read_text(encoding="utf-8"))
     assert "SessionStart" not in persisted["hooks"]
     assert "PreToolUse" not in persisted["hooks"]
     assert "Stop" not in persisted["hooks"]
@@ -330,21 +330,21 @@ def test_reverse_sync_claude_settings_strips_only_managed_hooks(tmp_path: Path) 
 def test_reverse_sync_claude_settings_keeps_existing_on_invalid_json(
     tmp_path: Path,
 ) -> None:
-    volume_file = tmp_path / "volume" / "settings.json"
-    seed_file = tmp_path / "seed" / "settings.local.json"
-    volume_file.parent.mkdir()
-    seed_file.parent.mkdir()
-    volume_file.write_text("{not valid json", encoding="utf-8")
+    runtime_file = tmp_path / "volume" / "settings.json"
+    target_file = tmp_path / "seed" / "settings.local.json"
+    runtime_file.parent.mkdir()
+    target_file.parent.mkdir()
+    runtime_file.write_text("{not valid json", encoding="utf-8")
     original_bytes = b'{"personal":true}\n'
-    seed_file.write_bytes(original_bytes)
+    target_file.write_bytes(original_bytes)
 
     result = run_seed_lib(
         tmp_path,
         "reverse_sync_claude_settings "
-        f"{shlex.quote(str(volume_file))} {shlex.quote(str(seed_file))}",
+        f"{shlex.quote(str(runtime_file))} {shlex.quote(str(target_file))}",
     )
 
     assert result.returncode == 0, result.stderr
     assert "settings are not valid JSON" in result.stderr
-    assert seed_file.read_bytes() == original_bytes
-    assert not (seed_file.parent / "settings.local.json.tmp").exists()
+    assert target_file.read_bytes() == original_bytes
+    assert not (target_file.parent / "settings.local.json.tmp").exists()

@@ -249,10 +249,7 @@ def init_config(
 
     rule("Next steps")
     console.print("  [muted]1.[/muted] djinn build    [muted]# Build the Docker image[/muted]")
-    console.print(
-        "  [muted]2.[/muted] djinn migrate-zones    [muted]# Create zone overlays[/muted]"
-    )
-    console.print("  [muted]3.[/muted] djinn start    [muted]# Start development shell[/muted]")
+    console.print("  [muted]2.[/muted] djinn start    [muted]# Start development shell[/muted]")
     blank()
     console.print(
         "  [muted]Sign in to each CLI inside that shell — the tools print a URL and "

@@ -93,9 +93,7 @@ def load_agents(path: Path | None = None) -> dict[str, AgentConfig]:
     if AGENTS_FILE.exists():
         return _load_agents_from_toml(AGENTS_FILE)
 
-    # Priority 3: Built-in defaults. DEFAULT_AGENTS is the sole bundled source
-    # (the project config/agents.toml lookup was dropped — config/ is local-only).
-    # A user override lives at ~/.config/djinn_in_a_box/agents.toml (Priority 2).
+    # Built-in defaults are used when no user agents.toml is present.
     return dict(DEFAULT_AGENTS)
 
 

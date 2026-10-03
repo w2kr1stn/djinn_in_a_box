@@ -104,7 +104,7 @@ def test_registers_each_canonical_server_individually(tmp_path: Path) -> None:
         "Skipping invalid server name: local-sse\nremote-http\nlocal-http"
         not in result.stderr
     )
-    assert "Summary: 2 registered, 1 disabled, 0 skipped, 0 legacy" in result.stderr
+    assert "Summary: 2 registered, 1 disabled, 0 skipped" in result.stderr
 
     codex_config = tmp_path / ".codex" / "config.toml"
     content = codex_config.read_text(encoding="utf-8")
@@ -117,44 +117,12 @@ def test_registers_each_canonical_server_individually(tmp_path: Path) -> None:
     assert "[mcp_servers.local-sse]" not in content
 
 
-def test_legacy_type_schema_is_normalized_with_warning(tmp_path: Path) -> None:
-    result = run_register(
-        tmp_path,
-        {
-            "local-http": {
-                "type": "http",
-                "url": "http://mcp.example:8847/mcp",
-            },
-            "old-sse": {
-                "type": "sse",
-                "url": "http://host.docker.internal:8765/sse",
-            },
-        },
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert_plain_startup_output(result.stderr)
-    assert "legacy 'type' key detected" in result.stderr
-    assert "[ok] local-http (streamable-http)" in result.stderr
-    assert "[ok] old-sse (sse)" in result.stderr
-    assert "Summary: 2 registered, 0 disabled, 0 skipped, 2 legacy" in result.stderr
-
-    codex_config = tmp_path / ".codex" / "config.toml"
-    content = codex_config.read_text(encoding="utf-8")
-    assert "[mcp_servers.local-http]" in content
-    assert "[mcp_servers.old-sse]" not in content
-
-
-def test_codex_fallback_preserves_unrelated_config_and_replaces_section(tmp_path: Path) -> None:
+def test_codex_registration_preserves_unrelated_config_and_replaces_section(tmp_path: Path) -> None:
     codex_dir = tmp_path / ".codex"
     codex_dir.mkdir()
     codex_config = codex_dir / "config.toml"
     codex_config.write_text(
-        """[features]
-rmcp_client = true
-
-[mcp_servers.local-http]
+        """[mcp_servers.local-http]
 url = "http://old.example/mcp"
 
 [projects."/home/dev/projects"]
@@ -185,6 +153,25 @@ trust_level = "trusted"
     assert 'trust_level = "trusted"' in content
 
 
+def test_registry_skips_an_entry_without_transport(tmp_path: Path) -> None:
+    result = run_register(
+        tmp_path,
+        {
+            "missing-transport": {
+                "type": "http",
+                "url": "http://mcp.example/mcp",
+                "enabled": True,
+            },
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Skipping invalid transport for missing-transport" in result.stderr
+    assert "Summary: 0 registered, 0 disabled, 1 skipped" in result.stderr
+    assert json.loads((tmp_path / ".config/opencode/.opencode.json").read_text()) == {}
+    assert not (tmp_path / ".codex/config.toml").exists()
+
+
 def test_invalid_timeout_is_skipped(tmp_path: Path) -> None:
     result = run_register(
         tmp_path,
@@ -202,7 +189,7 @@ def test_invalid_timeout_is_skipped(tmp_path: Path) -> None:
     assert result.stdout == ""
     assert_plain_startup_output(result.stderr)
     assert "Skipping invalid tool_timeout_sec for local-http: soon" in result.stderr
-    assert "Summary: 0 registered, 0 disabled, 1 skipped, 0 legacy" in result.stderr
+    assert "Summary: 0 registered, 0 disabled, 1 skipped" in result.stderr
 
 
 def test_claude_mcp_output_is_boxed_without_changing_status_flow(tmp_path: Path) -> None:
@@ -244,7 +231,7 @@ exit 64
     assert "\nFile modified:" not in result.stderr
     assert "\nAdded HTTP MCP server" not in result.stderr
     assert "[ok] local-http (streamable-http)" in result.stderr
-    assert "Summary: 1 registered, 0 disabled, 0 skipped, 0 legacy" in result.stderr
+    assert "Summary: 1 registered, 0 disabled, 0 skipped" in result.stderr
 
 
 def test_plain_fallback_when_output_lib_is_absent(tmp_path: Path) -> None:

@@ -51,12 +51,6 @@ def _workspace(tmp_path: Path, source: ConfigSyncSource = "claude") -> tuple[Pat
     return project, config_path, runtime
 
 
-def _legacy_manifest() -> bytes:
-    return json.dumps(
-        {"schema_version": 1, "tool": "claude", "files": {}, "fragments": []}
-    ).encode()
-
-
 def _ensure_host_env(_config: AppConfig) -> None:
     return None
 
@@ -513,7 +507,7 @@ def test_canonical_config_reload_os_error_is_not_reported_as_publish_failure(
     assert str(target.destination_root) not in problem.message
 
 
-def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publisher(
+def test_compose_claude_uses_direct_mounts_and_codex_uses_publisher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, config_path, runtime = _workspace(tmp_path)
@@ -521,7 +515,6 @@ def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publishe
     codex_root = runtime / "codex"
     claude_root.mkdir(parents=True)
     codex_root.mkdir(parents=True)
-    (claude_root / ".djinn-workflow-delivery.json").write_bytes(_legacy_manifest())
     monkeypatch.setattr(
         workflow_module,
         "workflow_image_compatible",
@@ -540,39 +533,8 @@ def test_compose_claude_retires_legacy_without_publisher_and_codex_uses_publishe
     )
 
     assert result.success
-    assert not (claude_root / ".djinn-workflow-delivery.json").exists()
     assert not (claude_root / RUNTIME_MANIFEST_NAME).exists()
     assert (codex_root / RUNTIME_MANIFEST_NAME).is_file()
-
-
-def test_compose_retirement_write_error_reports_the_destination(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, config_path, runtime = _workspace(tmp_path)
-    assert prepare_config_workflow(project, config_path=config_path).success
-    claude_root = runtime / "claude"
-    claude_root.mkdir(parents=True)
-    (claude_root / ".djinn-workflow-delivery.json").write_bytes(_legacy_manifest())
-
-    def fail_fsync(_root: Path) -> None:
-        raise OSError(errno.ENOSPC, "No space left on device")
-
-    monkeypatch.setattr(workflow_module, "ensure_host_env", _ensure_host_env)
-    monkeypatch.setattr(workflow_publisher, "_fsync_directory", fail_fsync)
-    result = prepare_config_workflow(
-        project,
-        (WorkflowDeliveryTarget("claude", claude_root),),
-        config_path=config_path,
-        require_compose_host_env=True,
-        container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
-    )
-
-    assert not result.success
-    problem = result.problems[0]
-    assert problem.identifier == "workflow-publish-failed"
-    assert str(claude_root) in problem.message
-    assert "No space left on device" in problem.message
-    assert "portable" not in problem.remedy
 
 
 def test_compose_image_gate_blocks_before_audit_or_runtime_write(

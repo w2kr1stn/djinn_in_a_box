@@ -37,8 +37,7 @@ stores, and local command choices remain outside the published source.
 │   │   └── CLI_DESIGN_SYSTEM.md
 │   ├── headless-cheatsheet.md
 │   ├── suite-integration.md
-│   ├── sync-across-machines.md
-│   └── zshrc-djinn-snippet.sh
+│   └── sync-across-machines.md
 ├── src/djinn_in_a_box/
 │   ├── cli/
 │   │   └── djinn.py
@@ -48,9 +47,7 @@ stores, and local command choices remain outside the published source.
 │   │   ├── config.py
 │   │   ├── container.py
 │   │   ├── doctor.py
-│   │   ├── migrate_zones.py
-│   │   ├── session.py
-│   │   └── zone_gate.py
+│   │   └── session.py
 │   ├── config/
 │   │   ├── defaults.py
 │   │   ├── loader.py
@@ -73,8 +70,7 @@ stores, and local command choices remain outside the published source.
 │       ├── paths.py
 │       ├── seeding.py
 │       ├── session.py
-│       ├── theme.py
-│       └── zone_migration.py
+│       └── theme.py
 ├── scripts/
 │   ├── entrypoint.sh
 │   ├── settings-copy.py
@@ -90,7 +86,6 @@ stores, and local command choices remain outside the published source.
 │   ├── installers/
 │   └── tools.txt.example
 ├── templates/
-│   ├── devcontainer.json
 │   └── seed/
 │       ├── config/
 │       ├── packages.txt
@@ -325,9 +320,7 @@ also owns the `project_doc_fallback_filenames` bridge in `config.toml`. Hooks
 and their registrations are native-only, like the Claude-only `/codex-review`
 command: a present native item is validated for ownership, UTF-8, and containment
 (with the OpenCode export-marker check), but is never cross-tool projected or
-stale-removed. Missing native hooks are allowed. Legacy canonical records for
-target-view hooks are released on the next sync without deleting the file or
-carrier key.
+stale-removed. Missing native hooks are allowed.
 Repository-local instruction files, agents, skills, and commands are outside
 this global projection and are not rewritten.
 
@@ -380,9 +373,8 @@ carrier path plus key path and records `content_hash` and `executable`. The
 canonical instance is `config/.djinn-config-sync.json`; each publisher-managed
 runtime root uses `.djinn-workflow-state.json`. Neighboring JSON carrier keys
 are preserved semantically. The managed top-level TOML assignment is spliced
-while preserving every other byte and then re-parsed. Existing installations
-are adopted only after strict verification; an unknown or edited state fails
-closed.
+while preserving every other byte and then re-parsed. Unknown or edited current
+manifest state fails closed.
 
 The audit result is one of `clean`, `source-changed`, `target-drift`,
 `collision`, or `invalid-or-semantic`. `djinn config status` takes a shared
@@ -426,15 +418,13 @@ When stdout or stderr is a TTY, `build_compose_env()` also renders
 `DJINN_TERM_WIDTH` from `shutil.get_terminal_size().columns`; otherwise that
 variable is left to inherited host environment or Compose defaults.
 
-`ensure_host_env(config)` provisions bind-mount sources before Compose runs, so
-the Docker daemon does not auto-create missing paths as root-owned directories.
-It creates credential subdirectories from `SYNC_PATHS["credentials"]`,
-`~/.djinn/sessions`, `~/.djinn/backups`, `~/.ssh`, and `~/.gitconfig`. The three
-zone roots, credential subdirectories, and zone directories created by migration
-are mode `0700`. The mode applies on creation only; directories that already
-exist are left unchanged by `ensure_host_env`. `djinn doctor` reports credential
-and managed-zone permission drift, and `djinn doctor --fix` tightens those
-directories while skipping symlinked names rather than following them.
+`ensure_host_env(config)` provisions bind-mount sources before Compose runs.
+It creates the three zone roots, credential subdirectories and every assigned
+local/shared overlay directory as the invoking user, with mode `0700`, plus
+sessions/backups/SSH/gitconfig sources. Existing overlay content remains
+untouched. Current directory checks reject files and symlinks; private-directory
+modes are secured without changing ownership. `djinn doctor` reports permission
+drift and `djinn doctor --fix` repairs it.
 
 ## Host-Side Seeding
 
@@ -499,9 +489,9 @@ publication.
   repair hint and skips the merge rather than writing incomplete state. The
   baseline wins for the owned `SessionStart`, `PreToolUse`, and `Stop` hook
   fragments; neighboring settings remain overlay-controlled.
-- `reverse_sync_file(volume_file, seed_file)`: best-effort copy from container
+- `reverse_sync_file(runtime_file, target_file)`: best-effort copy from container
   state back to writable seed mounts at shutdown (shell exit or SIGTERM).
-- `reverse_sync_claude_settings(volume_file, seed_file)`: persists the personal
+- `reverse_sync_claude_settings(runtime_file, target_file)`: persists the personal
   Claude overlay after removing only those three managed hook fragments.
 
 `entrypoint.sh` applies those helpers as follows:
@@ -511,11 +501,11 @@ container start
   |
   +-- volume ownership repair for cache/workspace paths
   +-- source seed-lib.sh
-  +-- restore ~/.claude.json from the Claude volume when present
+  +-- restore ~/.claude.json from the persistent config root when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
   +-- settings-copy.py persists personal OpenCode settings only
-  +-- opencode-credentials.sh migrates legacy OpenCode credential files and
-      re-establishes volume-to-config-root symlinks on every start
+  +-- opencode-credentials.sh initializes config-root credentials and
+      canonical data-volume symlinks
   +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
       using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
@@ -621,13 +611,11 @@ container-local login server that the host browser cannot reach, so users must
 run `codex login --device-auth` (or choose the remote/headless option in its
 TUI). README documents this.
 
-Claude Code, Codex, GitHub CLI, and OpenCode persist the resulting
-credentials in config-root bind mounts. At each container start, the entrypoint
-reconciles legacy OpenCode `auth.json` and `mcp-auth.json` files from the
-`djinn-opencode-data` volume: it migrates volume-only files, or preserves the
-config-root file and sets aside the volume file on conflict. It then
-re-establishes the volume paths under `~/.local/share/opencode/` as symlinks to
-the config-root files.
+Claude Code, Codex, GitHub CLI, and OpenCode persist credentials in config-root
+bind mounts. OpenCode `auth.json` and `mcp-auth.json` live under `~/.opencode`.
+Startup initializes missing files with mode `0600` and ensures the paths under
+`~/.local/share/opencode` are canonical symlinks to those files. Unexpected
+credential redirects are refused.
 
 Common mounts include:
 
@@ -690,14 +678,13 @@ When a mount exists, `compose_run()` uses the first mount target as
 `--workdir`. With no mount it omits `--workdir`, so the Compose service's
 `working_dir: /home/dev/projects` remains effective.
 
-`config/zones.py` resolves the additive shipped and user `zones.toml`
-assignments. `compose_run()` turns each existing zone source directory into an
-additional `-v` argument over the config-zone bind mount; an empty source is
-still mounted because it records a completed migration. These overlays are kept
-outside `ContainerOptions.mounts`, so they cannot change the user mount that
-supplies `--workdir`. `migrate-zones` owns the explicit, locked data move and
-creates empty zone targets; `doctor` reports unmigrated paths, collisions, drift,
-permission drift, and large direct files that cannot safely be overlaid.
+`config/zones.py` resolves additive shipped and user `zones.toml` assignments.
+`ensure_host_env` creates every assigned local/shared overlay directory before
+Compose runs. `compose_run` and `compose_up_detached` mount empty and populated
+directories over the config-zone bind mounts. These overlays do not change the
+user mount that supplies `--workdir`. Doctor reports current assignment validity,
+skipped defaults, zone drift, private-directory modes and large direct files
+that cannot be overlaid.
 
 ## Image Build
 
@@ -906,8 +893,7 @@ the complete resolved mount collection before execution.
 `commands/session.py` exposes `djinn session`.
 
 `--model` is optional. Interactive and headless sessions use the selected
-agent's `default_model` when the caller omits it, so a non-Claude agent never
-receives the former session-wide `sonnet` fallback.
+agent's `default_model` when it is omitted.
 
 Host workspaces live under:
 
@@ -962,14 +948,14 @@ outer tar with `age --passphrase` into a `0600` temporary file in
 `~/.djinn/backups/` and atomically publishes
 `djinn-backup-YYYY-MM-DD.tar.gz.age`. The backup directory is actively set to
 `0700`; the default flow keeps only the newest archive across encrypted and
-legacy cleartext formats. `--no-encrypt` is the explicit cleartext opt-out and
+cleartext formats. `--no-encrypt` is the explicit cleartext opt-out and
 uses the same atomic publication path.
 
 `restore()` also refuses to run while containers are active. It identifies an
 age archive from its `age-encryption.org/v1` header, decrypts it into a separate
-restore-staging subdirectory, then extracts the outer tar. Legacy cleartext gzip
-archives remain supported. It restores config-root path archives by filename
-prefix and named volumes by validated volume name.
+restore-staging subdirectory, then extracts the outer tar. Cleartext gzip
+archives written with `--no-encrypt` remain supported. Restore routes config-root
+archives by filename prefix and named volumes by validated volume name.
 
 Cache volumes are intentionally excluded from default backups because they are
 large and rebuildable.
@@ -1041,7 +1027,7 @@ djinn backup
   +-- stage per-item tar.gz files
   +-- encrypt and validate the outer tar in a same-directory temp file
   +-- atomically publish ~/.djinn/backups/djinn-backup-YYYY-MM-DD.tar.gz.age
-  +-- rotate older encrypted and legacy cleartext archives
+  +-- rotate older encrypted and cleartext archives
 ```
 
 Session:
@@ -1087,7 +1073,7 @@ Coverage areas include:
 - closed workflow ownership, adapter directions, manifest safety, and read-only
   config-workflow audit output
 - shared publisher locking, stable snapshots, crash recovery, carrier
-  preservation, canonical/runtime manifest adoption, and standalone CLI use
+  preservation, strict current manifests, and standalone CLI use
 - deterministic projection across the 3×2 adapter matrix, non-portable
   fail-closed behavior, runtime publication, image compatibility, and shared
   start/run/session preparation

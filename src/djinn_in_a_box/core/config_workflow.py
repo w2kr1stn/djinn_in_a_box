@@ -30,7 +30,6 @@ from djinn_in_a_box.core.workflow_publisher import (
     WorkflowView,
     canonical_lock,
     publish_workflow_view,
-    retire_legacy_delivery_manifest,
     runtime_residue_prefixes,
 )
 
@@ -193,13 +192,6 @@ def prepare_config_workflow(
     canonical_root = project_root / "config"
     for target in targets:
         if _compose_claude_target(config, target, require_compose_host_env):
-            retired = retire_legacy_delivery_manifest(target.destination_root)
-            if retired.lock_error is not None:
-                return _publish_lock_failure(target.destination_root, retired.lock_error)
-            if retired.write_error is not None:
-                return _publish_write_failure(target.destination_root, retired.write_error)
-            if not retired.success:
-                return _publish_failure(retired)
             continue
         target_problem = _prepare_target(target)
         if target_problem is not None:

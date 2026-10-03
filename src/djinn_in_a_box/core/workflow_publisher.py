@@ -21,7 +21,6 @@ from typing import cast
 
 CANONICAL_MANIFEST_NAME = ".djinn-config-sync.json"
 RUNTIME_MANIFEST_NAME = ".djinn-workflow-state.json"
-LEGACY_DELIVERY_MANIFEST_NAME = ".djinn-workflow-delivery.json"
 PUBLISHER_WRITE_ERROR_PREFIX = "workflow publisher write-error: "
 PUBLISHER_LOCK_ERROR_PREFIX = "workflow publisher lock-error: "
 
@@ -490,20 +489,6 @@ def _publish_locked(
             )
         except _ManifestError as error:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
-    legacy_relative: PurePosixPath | None = None
-    legacy_residue = False
-    if not canonical_target:
-        legacy_relative = PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME)
-        if prior is None:
-            legacy = _load_legacy_delivery_manifest(
-                target_root,
-                legacy_relative,
-                target_tool=target_tool,
-            )
-            if legacy is not None:
-                prior = legacy
-        else:
-            legacy_residue = (target_root / legacy_relative).exists()
     expected_fingerprint = view.source_fingerprint
     if source_root is not None:
         current_fingerprint = fingerprint_source_inputs(
@@ -517,40 +502,21 @@ def _publish_locked(
             expected_fingerprint = current_fingerprint
         elif current_fingerprint != expected_fingerprint:
             raise PublishError(DriftClass.SOURCE_CHANGED)
-    try:
-        preflight = _preflight(
-            target_root,
-            desired,
-            prior,
-            manifest_snapshot,
-            canonical_target=canonical_target,
-            target_tool=target_tool,
-            provisioning_placeholder_paths=view.provisioning_placeholder_paths,
-        )
-    except PublishError:
-        if legacy_residue:
-            _commit(
-                target_root,
-                manifest_relative,
-                desired,
-                None,
-                prior,
-                legacy_relative,
-                source_root=source_root,
-                source_inputs=source_inputs,
-                ignored_source_paths=ignored_source_paths,
-                source_profile=source_profile,
-                source_residue_prefixes=source_residue_prefixes,
-                expected_fingerprint=expected_fingerprint,
-            )
-        raise
+    preflight = _preflight(
+        target_root,
+        desired,
+        prior,
+        manifest_snapshot,
+        canonical_target=canonical_target,
+        target_tool=target_tool,
+        provisioning_placeholder_paths=view.provisioning_placeholder_paths,
+    )
     return _commit(
         target_root,
         manifest_relative,
         desired,
         preflight,
         prior,
-        legacy_relative,
         source_root=source_root,
         source_inputs=source_inputs,
         ignored_source_paths=ignored_source_paths,
@@ -760,9 +726,8 @@ def _commit(
     target_root: Path,
     manifest_relative: PurePosixPath,
     desired: _Desired,
-    preflight: _Preflight | None,
+    preflight: _Preflight,
     prior: _Manifest | None,
-    legacy_relative: PurePosixPath | None,
     *,
     source_root: Path | None,
     source_inputs: Collection[Path],
@@ -794,16 +759,6 @@ def _commit(
         ):
             raise PublishError(DriftClass.SOURCE_CHANGED)
         commit_checked = True
-
-    if preflight is None:
-        if legacy_relative is not None:
-            legacy = target_root / legacy_relative
-            if legacy.exists():
-                allow_mutation()
-                legacy.unlink()
-                _fsync_directory(target_root)
-                _after_target_mutation(1)
-        return PublishResult(DriftClass.CLEAN)
 
     for path, item in sorted(desired.files.items()):
         current = _read_snapshot(target_root / path)
@@ -843,15 +798,6 @@ def _commit(
         _atomic_replace(target_root / manifest_relative, manifest, False)
         mutation_count += 1
         _after_target_mutation(mutation_count)
-        _after_runtime_manifest_write()
-    if legacy_relative is not None:
-        legacy = target_root / legacy_relative
-        if legacy.exists():
-            allow_mutation()
-            legacy.unlink()
-            _fsync_directory(target_root)
-            mutation_count += 1
-            _after_target_mutation(mutation_count)
     return PublishResult(DriftClass.CLEAN, tuple(changed), tuple(removed))
 
 
@@ -1120,128 +1066,6 @@ def _load_manifest(
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
 
 
-def retire_legacy_delivery_manifest(target_root: Path) -> PublishResult:
-    """Verify an old runtime manifest, then remove it without publishing a view."""
-    try:
-        with _target_lock(target_root):
-            legacy = target_root / LEGACY_DELIVERY_MANIFEST_NAME
-            if (
-                _load_legacy_delivery_manifest(
-                    target_root,
-                    PurePosixPath(LEGACY_DELIVERY_MANIFEST_NAME),
-                    target_tool="claude",
-                )
-                is None
-            ):
-                return PublishResult(DriftClass.CLEAN)
-            _after_legacy_delivery_verified()
-            legacy.unlink()
-            _fsync_directory(target_root)
-            return PublishResult(DriftClass.CLEAN)
-    except PublishError as error:
-        return PublishResult(error.drift_class, lock_error=error.lock_error)
-    except OSError as error:
-        return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
-
-
-def _load_legacy_delivery_manifest(
-    target_root: Path, relative_path: PurePosixPath, *, target_tool: str | None = None
-) -> _Manifest | None:
-    snapshot = _read_snapshot(target_root / relative_path)
-    if snapshot is None:
-        return None
-    try:
-        return _decode_legacy_delivery_manifest(
-            target_root, snapshot.content, target_tool=target_tool
-        )
-    except (_CarrierError, _ManifestError):
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from None
-
-
-def _decode_legacy_delivery_manifest(
-    target_root: Path, raw: bytes, *, target_tool: str | None = None
-) -> _Manifest:
-    try:
-        parsed = load_strict_json(raw)
-    except ManifestError as error:
-        raise _ManifestError from error
-    root = _object(parsed)
-    if set(root) != {"schema_version", "tool", "files", "fragments"}:
-        raise _ManifestError
-    if type(root["schema_version"]) is not int or root["schema_version"] != 1:
-        raise _ManifestError
-    tool = root["tool"]
-    if not isinstance(tool, str) or tool not in _TOOLS or target_tool not in {None, tool}:
-        raise _ManifestError
-    file_values = _object(root["files"])
-    files: dict[PurePosixPath, _FileState] = {}
-    for raw_path, raw_state in file_values.items():
-        path = PurePosixPath(raw_path)
-        state = _object(raw_state)
-        content_hash = state.get("content_hash")
-        executable = state.get("executable")
-        if (
-            raw_path != path.as_posix()
-            or not _safe_relative(path)
-            or set(state) != {"content_hash", "executable"}
-            or not isinstance(content_hash, str)
-            or not _valid_hash(content_hash)
-            or not isinstance(executable, bool)
-            or path in files
-            or not _path_is_owned(tool, path)
-        ):
-            raise _ManifestError
-        current = _read_snapshot(target_root / path)
-        if current is None or current.state != _FileState(content_hash, executable):
-            raise _ManifestError
-        files[path] = current.state
-
-    raw_fragments = root["fragments"]
-    if not isinstance(raw_fragments, list):
-        raise _ManifestError
-    fragments: dict[tuple[PurePosixPath, tuple[str, ...]], _FragmentState] = {}
-    for raw_fragment in cast(list[object], raw_fragments):
-        fragment = _object(raw_fragment)
-        carrier_value = fragment.get("carrier_path")
-        keys_value = fragment.get("key_path")
-        value_hash = fragment.get("value_hash")
-        if (
-            set(fragment) != {"carrier_path", "key_path", "value_hash"}
-            or not isinstance(carrier_value, str)
-            or not isinstance(keys_value, list)
-            or not isinstance(value_hash, str)
-            or not _valid_hash(value_hash)
-        ):
-            raise _ManifestError
-        carrier = PurePosixPath(carrier_value)
-        if (
-            carrier_value != carrier.as_posix()
-            or not _safe_relative(carrier)
-            or carrier.suffix not in {".json", ".toml"}
-            or not keys_value
-            or not all(isinstance(key, str) and key for key in cast(list[object], keys_value))
-        ):
-            raise _ManifestError
-        keys = tuple(cast(list[str], cast(list[object], keys_value)))
-        if (
-            carrier.suffix == ".toml"
-            and len(keys) != 1
-            or not _fragment_is_owned(tool, carrier, keys)
-        ):
-            raise _ManifestError
-        key = (carrier, keys)
-        if key in fragments or carrier in files:
-            raise _ManifestError
-        carrier_snapshot = _read_snapshot(target_root / carrier)
-        if carrier_snapshot is None:
-            raise _ManifestError
-        found, value, blocked = _nested_get(_parse_carrier(carrier, carrier_snapshot.content), keys)
-        if blocked or not found or _legacy_value_digest(value) != value_hash:
-            raise _ManifestError
-        fragments[key] = _FragmentState(carrier, keys, _value_digest(value))
-    return _Manifest("legacy", files, fragments)
-
-
 def _strict_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -1256,14 +1080,6 @@ def load_strict_json(raw: bytes) -> object:
         return cast(object, json.loads(raw, object_pairs_hook=_strict_object))
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
         raise ManifestError from error
-
-
-def _legacy_value_digest(value: object) -> str:
-    try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError) as error:
-        raise _ManifestError from error
-    return _digest(encoded.encode())
 
 
 def decode_lean_manifest(
@@ -1670,14 +1486,6 @@ def _after_target_mutation(_count: int) -> None:
 
 
 def _before_target_commit() -> None:
-    return None
-
-
-def _after_runtime_manifest_write() -> None:
-    return None
-
-
-def _after_legacy_delivery_verified() -> None:
     return None
 
 

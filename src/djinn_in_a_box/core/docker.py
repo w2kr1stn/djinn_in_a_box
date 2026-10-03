@@ -626,9 +626,8 @@ def get_zone_overlay_mount_args(config: AppConfig) -> list[str]:
 def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], tuple[Path, ...]]:
     """Return overlay arguments and every configured overlay target.
 
-    The targets are returned independently of source existence: a user mount at
-    an assigned target would otherwise be reported as applied and then silently
-    hidden when a later migration creates the overlay source.
+    Assigned overlay targets are reserved independently of whether a source
+    currently exists.
     """
     # ``config.zones`` imports root resolution from this module, so retain this
     # import at the runtime boundary rather than creating an import cycle.
@@ -645,8 +644,7 @@ def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], 
                 target = target_root / relative_path
                 targets.append(target)
                 source = zone_roots[zone] / agent / relative_path
-                # An empty directory is the completed-migration marker. It must
-                # overlay just like populated data; only a missing source skips.
+                # Empty and populated assigned directories mount equally.
                 if source.is_symlink() or (source.exists() and not source.is_dir()):
                     msg = f"Zone overlay source is not a directory: {source}"
                     raise ZoneConfigurationError(msg)
@@ -1203,11 +1201,7 @@ def compose_up_detached(
         if mount.read_only:
             spec += ":ro"
         volume_specs.append(spec)
-    # The overlays are reserved targets above, so they must also be mounted here:
-    # `up` has no per-invocation `-v`, and a container started without them shows
-    # every migrated zone path as missing. Docker then creates each absent target
-    # as root — inside the config-root bind that carries their parent, so they
-    # land on the host — and the migrated data stays invisible behind them.
+    # Detached startup mounts every assigned overlay so writes reach its host zone.
     volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
     runtime_args = [*shell_args, *audio_args, *dbus_args, *sops_args]
     volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
@@ -1294,8 +1288,7 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
     thing the user was just told to do.
 
     It additionally reaps containers the project owns but this file does not
-    declare — a proxy left by ``--docker``, or a service dropped in an upgrade.
-    Those two are transient; the one-off case is permanent. Do not drop the flag
+    declare, such as a proxy left by ``--docker``. Do not drop the flag
     on the reasoning that ``cleanup_docker_proxy`` already covers the proxy.
 
     Refuses outright when the container it would reap is the one this process runs
@@ -1398,8 +1391,7 @@ def get_config_root(config: AppConfig | None = None) -> Path:
     """Resolve the config/credential root directory.
 
     Precedence: env ``DJINN_CONFIG_ROOT`` → ``config.config_root`` → default
-    ``~/.djinn/config``. (Renamed from ``get_sync_root``; the "sync" vocabulary
-    is kept only for the optional cross-host backup/sync-path layer below.)
+    ``~/.djinn/config``.
     """
     env = os.environ.get("DJINN_CONFIG_ROOT")
     if env:
@@ -1533,16 +1525,29 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     out of the *preflight* provisioning only (``provision_host=False``) — it
     still provisions through that workflow path before Compose runs.
 
-    Provisions the compose-mounted credential subdirs (``SYNC_PATHS['credentials']``)
-    plus the fixed extras. ``repo-dotfiles`` is intentionally NOT provisioned: it
-    is a host-side input read by ``_sync_build_files`` (a no-op when absent), not a
-    compose bind-mount, so it cannot trigger the root-owned-mount footgun.
+    Provisions every assigned zone overlay, compose-mounted credential subdir
+    (``SYNC_PATHS['credentials']``) and the fixed extras. ``repo-dotfiles`` is
+    intentionally NOT provisioned: it is a host-side input read by
+    ``_sync_build_files`` (a no-op when absent), not a compose bind-mount, so it
+    cannot trigger the root-owned-mount footgun.
     """
+    # Zone resolution imports this module; load assignments at the runtime boundary.
+    from djinn_in_a_box.config.zones import load_zone_assignments
+
     roots = ensure_zone_roots(config)
+    assignments = load_zone_assignments(config)
+    zone_roots = {"local": roots.local_root, "shared": roots.shared_root}
+    for agent, by_zone in assignments.by_agent.items():
+        for zone in ("local", "shared"):
+            for relative_path in by_zone[zone]:
+                directory = zone_roots[zone]
+                for component in (agent, *relative_path.parts):
+                    directory /= component
+                    _ensure_zone_root(directory)
+
     root = roots.config_root
     for name in SYNC_PATHS.get("credentials", []):
         # 0700: credential stores hold secrets (OAuth tokens, age identities).
-        # Applies on creation only, matching the ~/.ssh precedent below.
         path = root / name
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)

@@ -158,8 +158,8 @@ this once per tool:
 | --- | --- | --- |
 | Claude Code, Codex, OpenCode, GitHub CLI | your configured config root | `credentials` |
 
-`djinn backup` includes both categories by default. If you back up selectively,
-copy the matching credential category.
+`djinn backup` includes credentials by default. When selecting categories,
+include credentials.
 
 ## Configuration
 
@@ -246,8 +246,8 @@ djinn config status  # exit 0 when clean, otherwise exit 1
 
 When changing authority, use **switch → sync → edit**: select the new source,
 run `djinn config sync`, then edit it. Sync requires a valid source and refuses
-to overwrite an edited managed target. It can adopt the recorded state of an
-existing deployment, but an unowned file at a managed path is a collision.
+to overwrite an edited managed target. Unmanaged content at a managed path is a
+collision.
 
 The choice is deployment-wide. The shared demo is one deployment with one
 source; this is not a per-tenant setting. Selecting a workflow source does not
@@ -309,10 +309,7 @@ The shared publisher uses one manifest schema in two locations:
 
 Each entry names either a file or a carrier-file key and records only its
 content hash and executable flag, plus the selected source for the manifest.
-Neighboring keys in shared JSON or TOML carriers stay operator-owned. A legacy
-installation is adopted safely during sync; obsolete canonical hook entries are
-released without deleting their files or carrier keys. It does not introduce
-another active manifest format.
+Neighboring keys in shared JSON or TOML carriers stay operator-owned.
 
 `djinn config status` is read-only: it reports the selected source, sanitized
 locations, one drift class, and one remedy without printing workflow or settings
@@ -337,9 +334,9 @@ roots. Only `djinn init` and `djinn doctor --fix` perform source seeding.
 Host fallback for Claude, Codex, or OpenCode receives the selected canonical
 view through the shared publisher. The container OpenCode runtime is refreshed
 the same way from the read-only canonical mount. The workflow publisher requires
-an image marked `djinn.workflow.publisher=1`; an old image causes a content-free
-`Rebuild/recreate required.` failure before Compose starts or a running-container
-session refresh executes.
+an image marked `djinn.workflow.publisher=1`; an image without that label stops
+preparation with `Rebuild/recreate required.` before Compose starts or a
+running-container refresh executes.
 
 Compose Claude is the deliberate exception: it is manifestless and uses direct
 mounts, including both `CLAUDE.md` and the generated `AGENTS.md` companion,
@@ -403,13 +400,6 @@ needed; MCP entries remain separate.
 `packages.txt` is read at image build time and may list extra Debian packages,
 one per line. `tools/tools.txt` is read at container start and may list installer
 names that correspond to scripts under `tools/installers/`.
-
-### Devcontainer Template Status
-
-There is no `.devcontainer/` directory in the repository. The only devcontainer
-artifact is `templates/devcontainer.json`, and that path is experimental and
-out of scope for v1. It uses its own named-volume mounts and does not run the
-seed/config-root setup path, so credentials and seed files would be skipped.
 
 ## Agents
 
@@ -568,10 +558,9 @@ Djinn isolates credentials per CLI. It does not encrypt them. Understand the
 model before you store a high-value key such as an `age` identity.
 
 - **Cleartext on the host.** Credential directories under the config root are
-  ordinary files guarded by filesystem permissions. Djinn creates new credential
-  directories with mode `0700`. A config root provisioned before that became the
-  default keeps the looser mode until you repair it: `djinn doctor` reports the
-  drift, `djinn doctor --fix` tightens those directories to `0700`.
+  ordinary files guarded by filesystem permissions. Host provisioning secures
+  config and credential roots with mode `0700`. `djinn doctor` reports permission
+  drift, and `djinn doctor --fix` repairs it.
 - **Readable by every agent in the container.** Each credential is mounted where
   its tool expects it, so the `dev` user — and therefore every coding agent you
   run — can read all of them. An `age` identity is a master decryption key. An
@@ -587,12 +576,10 @@ model before you store a high-value key such as an `age` identity.
   carefully as the credentials themselves.
 - **Zones separate credentials from agent data.** The config root is the
   credential/config zone: Djinn backs it up and you may mirror it. Its sibling
-  `<config-root>.shared` holds transcript directories: Djinn does not archive
-  it, so add it to your own backup and, when desired, cross-machine mirror.
-  `<config-root>.local` holds caches and scratch: Djinn neither archives nor
-  mirrors it. Run `djinn migrate-zones` only after adding the shared root to
-  mirroring or pausing mirroring; the move appears as deletions from the config
-  root to a synchronizer.
+  `<config-root>.shared` holds transcript directories and needs your own backup
+  and, when desired, cross-machine mirror. `<config-root>.local` holds caches
+  and scratch; exclude it from mirroring. `djinn init` provisions every assigned
+  overlay directory, and startup ensures it exists before mounting.
 - **Transcript retention belongs to the agent.** Djinn never deletes
   agent-owned transcript data. For Claude Code, configure its native
   `cleanupPeriodDays` setting or use `claude project purge`; use the equivalent
@@ -681,8 +668,7 @@ To back up specific categories:
 djinn backup --categories credentials --categories data
 ```
 
-To deliberately create a cleartext archive (for example, for a controlled
-one-time migration), use:
+To deliberately create a cleartext archive, use:
 
 ```sh
 djinn backup --no-encrypt
