@@ -76,6 +76,7 @@ _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/.claude/context"),
     Path("/home/dev/.claude/scripts"),
     Path("/home/dev/.claude/AGENTS.md"),
+    Path("/home/dev/.claude/CLAUDE.md"),
     Path("/home/dev/.opencode/seed"),
     Path("/home/dev/.djinn-canonical"),
     Path("/home/dev/.config/mcp-servers.json"),

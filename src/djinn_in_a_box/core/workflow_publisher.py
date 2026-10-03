@@ -615,6 +615,10 @@ def _preflight(
     files: dict[PurePosixPath, _Snapshot | None] = {}
     classes: list[DriftClass] = []
     for path in sorted(set(desired.files) | set(prior_files)):
+        if _is_claude_instruction_position(path, canonical_target) and not _manifest_file_is_owned(
+            path, canonical_target, target_tool
+        ):
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         _check_parent_paths(target_root, path)
         current = _read_snapshot(target_root / path)
         files[path] = current
@@ -1382,11 +1386,19 @@ def _target_tool(view: WorkflowView) -> str:
 def _manifest_file_is_owned(
     path: PurePosixPath, canonical_target: bool, target_tool: str | None
 ) -> bool:
+    if _is_claude_instruction_position(path, canonical_target):
+        return not canonical_target and target_tool == "claude"
     if canonical_target:
         if len(path.parts) < 2 or path.parts[0] not in _TOOLS:
             return False
         return _path_is_owned(path.parts[0], PurePosixPath(*path.parts[1:]))
     return target_tool is not None and _path_is_owned(target_tool, path)
+
+
+def _is_claude_instruction_position(path: PurePosixPath, canonical_target: bool) -> bool:
+    if canonical_target:
+        return len(path.parts) == 2 and path.parts[1] == "CLAUDE.md"
+    return path == PurePosixPath("CLAUDE.md")
 
 
 def _manifest_fragment_is_owned(

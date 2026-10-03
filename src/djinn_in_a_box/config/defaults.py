@@ -106,6 +106,7 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
             "scripts",
             "skills",
             "AGENTS.md",
+            "CLAUDE.md",
             "backups",
             "history.jsonl",
             "bin-shellcheck",

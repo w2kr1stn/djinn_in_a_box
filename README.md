@@ -266,6 +266,10 @@ for a working directory lives in that directory's `.agents/` directory and is
 read before working there. Global native skills, agents, commands, context, and
 scripts remain in their tool-native locations.
 
+Codex uses the `project_doc_fallback_filenames` bridge; Claude Code reads global
+instructions only from `~/.claude/CLAUDE.md`, so Djinn supplies that file as an
+`@AGENTS.md` import bridge in the container and on the host fallback.
+
 The cross-tool projection surface also includes `skills/<name>/**`,
 `context/**`, and `scripts/**`. Hooks are native-only per tool: the known
 startup/security/ready implementations and their `SessionStart`, `PreToolUse`,
@@ -528,6 +532,7 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
 | `./config/claude/AGENTS.md` | `/home/dev/.claude/AGENTS.md` | Direct Compose-Claude instruction mount |
+| `./templates/claude/CLAUDE.md` | `/home/dev/.claude/CLAUDE.md:ro` | Read-only bridge importing `AGENTS.md` |
 | `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |

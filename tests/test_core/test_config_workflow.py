@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import stat
@@ -77,19 +78,32 @@ def _audit_must_not_run(*_args: object, **_kwargs: object) -> NoReturn:
     pytest.fail("audit")
 
 
-def test_host_runtime_publisher_syncs_selected_view_and_state_manifest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool", ("claude", "codex", "opencode"))
+def test_host_runtime_publisher_syncs_selected_view_and_state_manifest(
+    tmp_path: Path, tool: ConfigSyncSource
+) -> None:
     project, config_path, _runtime = _workspace(tmp_path)
-    host_codex = tmp_path / "host-codex"
+    host_root = tmp_path / f"host-{tool}"
+    targets = (WorkflowDeliveryTarget(tool, host_root, provision=True),)
 
-    result = prepare_config_workflow(
-        project,
-        (WorkflowDeliveryTarget("codex", host_codex, provision=True),),
-        config_path=config_path,
-    )
+    result = prepare_config_workflow(project, targets, config_path=config_path)
 
-    assert result.success
-    assert (host_codex / "AGENTS.md").read_text() == "shared workflow\n"
-    assert (host_codex / RUNTIME_MANIFEST_NAME).is_file()
+    assert result.success, result.problems
+    assert (host_root / "AGENTS.md").read_bytes() == b"shared workflow\n"
+    manifest_path = host_root / RUNTIME_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_bytes())
+    files = {item["path"]: item for item in manifest["items"] if "key_path" not in item}
+    expected = {"AGENTS.md": b"shared workflow\n"}
+    if tool == "claude":
+        expected["CLAUDE.md"] = b"@AGENTS.md\n"
+    assert set(files) == set(expected)
+    for name, content in expected.items():
+        assert (host_root / name).read_bytes() == content
+        assert files[name]["content_hash"] == hashlib.sha256(content).hexdigest()
+        assert files[name]["executable"] is False
+    before = manifest_path.read_bytes()
+    assert prepare_config_workflow(project, targets, config_path=config_path).success
+    assert manifest_path.read_bytes() == before
 
 
 def test_preflight_reports_one_class_and_remedy_without_workflow_body(tmp_path: Path) -> None:

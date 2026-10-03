@@ -154,6 +154,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Claude Code loads the global `AGENTS.md` again: Djinn provides
+  `~/.claude/CLAUDE.md` as a read-only bridge that imports it, in the container and
+  on the host fallback.
 - Host provisioning now creates zone overlay targets inside the config root, so
   Docker no longer creates them as root-owned directories.
 - `djinn build` works again with `build.network host`. Since buildx 0.37.2, bake
