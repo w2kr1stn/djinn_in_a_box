@@ -1464,6 +1464,31 @@ def _ensure_zone_root(root: Path) -> None:
         raise ZoneRootValidationError(msg) from error
 
 
+def _ensure_zone_target(config_root: Path, agent: str, relative_path: Path) -> None:
+    directory = config_root / agent
+    for component in relative_path.parts:
+        directory /= component
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            try:
+                directory.mkdir(mode=0o700, exist_ok=True)
+                info = directory.lstat()
+            except OSError as error:
+                msg = f"Cannot create zone target {directory}: {error}"
+                raise ZoneRootValidationError(msg) from error
+        except OSError as error:
+            msg = f"Cannot inspect zone target {directory}: {error}"
+            raise ZoneRootValidationError(msg) from error
+
+        if stat.S_ISLNK(info.st_mode):
+            msg = f"Zone target must not be a symlink: {directory}"
+            raise ZoneRootValidationError(msg)
+        if not stat.S_ISDIR(info.st_mode):
+            msg = f"Zone target is not a directory: {directory}"
+            raise ZoneRootValidationError(msg)
+
+
 def workflow_image_compatible(
     image: str = _WORKFLOW_IMAGE,
 ) -> WorkflowImageCompatibility:
@@ -1525,9 +1550,10 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     out of the *preflight* provisioning only (``provision_host=False``) — it
     still provisions through that workflow path before Compose runs.
 
-    Provisions every assigned zone overlay, compose-mounted credential subdir
-    (``SYNC_PATHS['credentials']``) and the fixed extras. ``repo-dotfiles`` is
-    intentionally NOT provisioned: it is a host-side input read by
+    Provisions every assigned zone overlay source and target (the source in its
+    zone root and the target in the config root), compose-mounted credential
+    subdir (``SYNC_PATHS['credentials']``) and the fixed extras. ``repo-dotfiles``
+    is intentionally NOT provisioned: it is a host-side input read by
     ``_sync_build_files`` (a no-op when absent), not a compose bind-mount, so it
     cannot trigger the root-owned-mount footgun.
     """
@@ -1551,6 +1577,11 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
         path = root / name
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)
+
+    for agent, by_zone in assignments.by_agent.items():
+        for zone in ("local", "shared"):
+            for relative_path in by_zone[zone]:
+                _ensure_zone_target(root, agent, relative_path)
 
     claude_root = get_project_root() / "config" / "claude"
     companion = claude_root / "AGENTS.md"

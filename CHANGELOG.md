@@ -150,6 +150,8 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Host provisioning now creates zone overlay targets inside the config root, so
+  Docker no longer creates them as root-owned directories.
 - `djinn build` works again with `build.network host`. Since buildx 0.37.2, bake
   rejects an entitlement nobody granted instead of skipping the consent check, and
   `docker compose build` — which drives bake internally — never grants
