@@ -203,11 +203,6 @@ else
     ui_info "Enable with: djinn start --docker"
 fi
 
-if [[ "${MCP_REACHABLE:-false}" == "true" ]]; then
-    ui_ok "MCP Gateway:  Connected"
-else
-    ui_warn "MCP Gateway:  Not connected"
-fi
 echo "" >&2
 
 # =============================================================================

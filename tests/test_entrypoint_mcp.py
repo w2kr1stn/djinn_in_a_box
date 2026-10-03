@@ -75,9 +75,9 @@ def test_registers_each_canonical_server_individually(tmp_path: Path) -> None:
     result = run_register(
         tmp_path,
         {
-            "docker-gateway": {
+            "remote-http": {
                 "transport": "streamable-http",
-                "url": "http://mcp-gateway:8811/mcp",
+                "url": "http://remote.example:8847/mcp",
                 "enabled": True,
             },
             "local-http": {
@@ -97,19 +97,19 @@ def test_registers_each_canonical_server_individually(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert_plain_startup_output(result.stderr)
-    assert "[ok] docker-gateway (streamable-http)" in result.stderr
+    assert "[ok] remote-http (streamable-http)" in result.stderr
     assert "[ok] local-http (streamable-http)" in result.stderr
     assert "[off] local-sse (disabled)" in result.stderr
     assert (
-        "Skipping invalid server name: local-sse\ndocker-gateway\nlocal-http"
+        "Skipping invalid server name: local-sse\nremote-http\nlocal-http"
         not in result.stderr
     )
     assert "Summary: 2 registered, 1 disabled, 0 skipped, 0 legacy" in result.stderr
 
     codex_config = tmp_path / ".codex" / "config.toml"
     content = codex_config.read_text(encoding="utf-8")
-    assert '[mcp_servers.docker-gateway]' in content
-    assert 'url = "http://mcp-gateway:8811/mcp"' in content
+    assert '[mcp_servers.remote-http]' in content
+    assert 'url = "http://remote.example:8847/mcp"' in content
     assert "enabled = true" in content
     assert "[mcp_servers.local-http]" in content
     assert 'url = "http://mcp.example:8847/mcp"' in content

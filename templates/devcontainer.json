@@ -13,18 +13,12 @@
     "workspaceMount": "source=${localWorkspaceFolder},target=/home/dev/project,type=bind",
     "workspaceFolder": "/home/dev/project",
     // -------------------------------------------------------------------------
-    // Network: Connect to djinn-network (where MCP Gateway runs)
+    // Network: Connect to djinn-network
     // -------------------------------------------------------------------------
     "runArgs": [
         "--network=djinn-network",
         "--cap-add=NET_ADMIN"
     ],
-    // -------------------------------------------------------------------------
-    // Environment: MCP Gateway URL
-    // -------------------------------------------------------------------------
-    "containerEnv": {
-        "MCP_GATEWAY_URL": "http://mcp-gateway:8811"
-    },
     // -------------------------------------------------------------------------
     // Persistent mounts (same as docker-compose, keeps credentials)
     // -------------------------------------------------------------------------

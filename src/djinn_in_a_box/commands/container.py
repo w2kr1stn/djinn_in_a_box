@@ -566,12 +566,6 @@ def status() -> None:
     else:
         status_line("Docker Proxy", "Not running", "status.disabled")
 
-    # MCP Gateway Status
-    if is_container_running("mcp-gateway"):
-        status_line("MCP Gateway", "Running", "status.enabled")
-    else:
-        status_line("MCP Gateway", "Not running", "status.disabled")
-
 
 clean_app = typer.Typer(
     name="clean",

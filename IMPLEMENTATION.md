@@ -13,7 +13,6 @@ tests, and it is intended to explain the whole system from this single document.
 Djinn ships the mechanism:
 
 - a Python CLI named `djinn`
-- a companion `mcpgateway` CLI
 - a Docker image and Compose stack
 - host-side setup, validation, and repair flows
 - neutral seed templates under `templates/seed/`
@@ -40,20 +39,15 @@ stores, and local command choices remain outside the published source.
 │   ├── suite-integration.md
 │   ├── sync-across-machines.md
 │   └── zshrc-djinn-snippet.sh
-├── mcp/
-│   ├── README.md
-│   └── docker-compose.yml
 ├── src/djinn_in_a_box/
 │   ├── cli/
-│   │   ├── djinn.py
-│   │   └── mcpgateway.py
+│   │   └── djinn.py
 │   ├── commands/
 │   │   ├── agent.py
 │   │   ├── backup.py
 │   │   ├── config.py
 │   │   ├── container.py
 │   │   ├── doctor.py
-│   │   ├── mcp.py
 │   │   ├── migrate_zones.py
 │   │   ├── session.py
 │   │   └── zone_gate.py
@@ -146,9 +140,6 @@ core + config
   v
 Docker Compose + container entrypoint
 ```
-
-`mcpgateway` is a separate Typer app in `cli/mcpgateway.py` that delegates to
-`commands/mcp.py`.
 
 ## CLI Output System
 
@@ -839,7 +830,7 @@ backed by named volumes.
   entrypoint keeps the container up rather than exiting. `--detach` remains the
   supported way to background a session.
 - `status()`: reports config, containers, known volumes, config-root paths,
-  networks, Docker proxy, and MCP Gateway status.
+  networks, and Docker proxy status.
 - `clean_default()`: `djinn clean` stops and removes containers with
   `compose_down(config=None)`, using best-effort placeholders. `compose_down()`
   refuses outright when the container it would reap is the one the process runs
@@ -884,7 +875,7 @@ only the preflight provisioning, not provisioning as such.
 
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,
-image, network, optional Docker MCP plugin, D-Bus session availability, and seed
+image, network, D-Bus session availability, and seed
 config presence. It also includes the read-only `Config workflow` audit, which
 is `PASS` when clean and `WARN` when drift or validation needs attention.
 
@@ -995,25 +986,6 @@ prefix and named volumes by validated volume name.
 Cache volumes are intentionally excluded from default backups because they are
 large and rebuildable.
 
-## MCP Gateway
-
-`commands/mcp.py` implements the separate `mcpgateway` CLI.
-
-It requires Docker and the Docker MCP CLI plugin for server management. It uses
-`mcp/docker-compose.yml`, the shared `djinn-network`, and a gateway container
-named `mcp-gateway`.
-
-Commands include:
-
-- `start`, `stop`, `restart`
-- `status`, `logs`
-- `enable`, `disable`, `servers`, `catalog`
-- `test`
-- `clean`
-
-The dev container receives `MCP_GATEWAY_URL` pointing at the gateway over the
-Docker network.
-
 ## Data Flow Diagrams
 
 First run:
@@ -1065,7 +1037,7 @@ entrypoint.sh
       from the read-only canonical mount
   +-- MCP: register MCP servers and box third-party CLI output
   +-- Tools: install optional tools
-  +-- Security: summarize firewall, Docker access, and MCP gateway state
+  +-- Security: summarize firewall and Docker access
   +-- run interactive shell as a background job
   +-- reverse-sync selected settings on shell exit or on SIGTERM
 ```

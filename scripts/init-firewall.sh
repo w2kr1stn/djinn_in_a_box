@@ -8,8 +8,7 @@
 # Usage: Run as root at container startup
 #   docker run --cap-add=NET_ADMIN ... 
 #
-# NOTE: This script is for the Djinn Container, not the MCP Gateway.
-#       The MCP Gateway and MCP Servers have their own isolation.
+# NOTE: This script initializes the Djinn container firewall.
 # =============================================================================
 
 set -euo pipefail
@@ -147,7 +146,7 @@ iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
 # -----------------------------------------------------------------------------
-# Allow Docker internal networks (for MCP Gateway + Docker Proxy)
+# Allow Docker internal networks (for Docker Proxy)
 # -----------------------------------------------------------------------------
 echo "" >&2
 ui_info "Allowing Docker internal networks..."
@@ -203,7 +202,7 @@ echo "" >&2
 ui_ok "Firewall initialized. Outbound traffic restricted to whitelist."
 echo "" >&2
 ui_info "Allowed:"
-ui_info "Docker internal networks (MCP Gateway, Docker Proxy, etc.)"
+ui_info "Docker internal networks (including the Docker Proxy)"
 ui_info "Whitelisted domains (package registries, AI APIs, etc.)"
 echo "" >&2
 ui_info "To add domains at runtime:"

@@ -37,9 +37,8 @@ the request path is tightly restricted and monitored.
 │  │  │  │ ✗ exec       │      │ OpenCode         │     │  │    │ │
 │  │  │  │ ✗ build      │      └──────────────────┘     │  │    │ │
 │  │  │  │ ✗ commit     │                               │  │    │ │
-│  │  │  └──────┬───────┘      ┌──────────────────┐     │  │    │ │
-│  │  │         │              │   mcp-gateway    │     │  │    │ │
-│  │  │         │              └──────────────────┘     │  │    │ │
+│  │  │  └──────┬───────┘                               │  │    │ │
+│  │  │         │                                       │  │    │ │
 │  │  │         ▼                                       │  │    │ │
 │  │  │  ┌──────────────┐                               │  │    │ │
 │  │  │  │   Spawned    │                               │  │    │ │
@@ -307,13 +306,6 @@ and newly created containers may be able to reach external networks.
 - Keep `djinn-network` dedicated to Djinn services.
 - Stop unexpected containers promptly.
 
-### 5. MCP Gateway socket access
-
-The MCP Gateway compose file (`mcp/docker-compose.yml`) also mounts the host
-Docker socket directly into the `mcp-gateway` container so it can spawn MCP
-server containers. This is separate from `djinn start --docker`. Run MCP only
-when you need it, and enable only MCP servers you trust.
-
 ---
 
 ## Security Checklist
@@ -400,9 +392,7 @@ done
 3. **Treat direct mode as host-root equivalent.** `--docker-direct` mounts the
    host Docker socket read-write into the development container and deliberately
    bypasses API filtering.
-4. **Keep MCP optional.** The MCP Gateway also needs direct socket access to
-   spawn MCP server containers. Run it only when those tools are required.
-5. **Audit after risky sessions.** Review Docker state and proxy logs whenever an
+4. **Audit after risky sessions.** Review Docker state and proxy logs whenever an
    agent had Docker access, especially write-capable access.
 
 The proxy design is the safer Docker-enabled mode currently implemented, but it

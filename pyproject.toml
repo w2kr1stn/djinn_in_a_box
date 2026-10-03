@@ -31,7 +31,6 @@ fmt = "devops:format_code"
 test = "devops:test"
 clean = "devops:clean"
 djinn = "djinn_in_a_box.cli.djinn:app"
-mcpgateway = "djinn_in_a_box.cli.mcpgateway:app"
 
 [build-system]
 requires = ["hatchling"]

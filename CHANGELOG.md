@@ -120,6 +120,10 @@ Versioning before and after the first stable release.
 
 ### Removed
 
+- The Docker MCP Gateway: the `mcpgateway` CLI, its Compose stack under `mcp/`,
+  the gateway rows in startup output, `djinn status` and `djinn doctor`, and the
+  `docker-gateway` special case in MCP registration.
+
 - The `djinn auth` command, the `dev-auth` Compose service, and the `auth`
   Compose profile. They existed only for OAuth flows needing a loopback
   callback, which required host networking. Every bundled CLI can now sign in

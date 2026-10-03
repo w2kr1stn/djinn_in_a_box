@@ -184,7 +184,6 @@ _codex_disable_server() {
 
 register_mcp_servers() {
     local mcp_config="${MCP_SERVERS_CONFIG:-$HOME/.config/mcp-servers.json}"
-    MCP_REACHABLE=false
 
     if [[ ! -f "$mcp_config" ]] || ! command -v jq &>/dev/null; then
         ui_info "[mcp] No mcp-servers.json found, skipping global MCP registration"
@@ -287,9 +286,7 @@ register_mcp_servers() {
         host=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
 
         # Warn only: registration should survive peers that come up later.
-        if curl -s --connect-timeout 2 "$url" >/dev/null 2>&1; then
-            [[ "$server" == "docker-gateway" ]] && MCP_REACHABLE=true
-        else
+        if ! curl -s --connect-timeout 2 "$url" >/dev/null 2>&1; then
             ui_warn "${server}: not reachable (${host})"
         fi
 

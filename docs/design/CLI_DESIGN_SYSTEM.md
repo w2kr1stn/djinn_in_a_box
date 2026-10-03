@@ -1,7 +1,7 @@
 # Djinn CLI Design System
 
-This document describes the shipped CLI output system for `djinn` and
-`mcpgateway`. The source of truth for Python styling is
+This document describes the shipped CLI output system for `djinn`.
+The source of truth for Python styling is
 `src/djinn_in_a_box/core/theme.py`; the source of truth for container-startup
 shell styling is `scripts/output-lib.sh`.
 
@@ -56,8 +56,8 @@ exactly one blank line before the rule, and the rendered rule line spans the
 current Rich console width.
 
 Examples of shipped rule sections include `djinn start` (`Environment`,
-`Container`), `djinn status`, `djinn doctor`, `djinn clean volumes`, `djinn
-agents`, and `mcpgateway status`.
+`Container`), `djinn status`, `djinn doctor`, `djinn clean volumes`, and `djinn
+agents`.
 
 ### Status Lines
 
