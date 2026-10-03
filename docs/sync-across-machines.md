@@ -47,11 +47,9 @@ djinn init
 djinn build
 ```
 
-Then configure your file synchronizer to mirror the local config paths listed
-above. Before the first `djinn migrate-zones`, add the shared root to that set
-or pause synchronization. The migration moves data out of the config root, so a
-synchronizer otherwise sees source deletions and can propagate them before the
-shared copy is protected.
+Then configure your file synchronizer to mirror the config paths and shared root
+listed above. Exclude the local root. `djinn init` creates the assigned overlay
+directories before the first start.
 
 ## Second Host
 

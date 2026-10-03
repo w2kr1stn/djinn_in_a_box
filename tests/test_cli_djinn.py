@@ -27,6 +27,29 @@ def test_project_scripts_are_exact() -> None:
     assert set(project["project"]["scripts"]) == {"fmt", "test", "clean", "djinn"}
 
 
+def test_top_level_commands_are_exact() -> None:
+    from typer.main import get_command
+
+    assert set(get_command(app).commands) == {
+        "init",
+        "config",
+        "build",
+        "start",
+        "status",
+        "doctor",
+        "audit",
+        "update",
+        "enter",
+        "clean",
+        "backup",
+        "restore",
+        "run",
+        "agents",
+        "session",
+    }
+
+
+
 def _patch_init_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     config_dir: Path,
@@ -120,10 +143,9 @@ class TestInitCommand:
         combined = result.stdout + result.output
         assert "Next steps" in combined
         assert "djinn build" in combined
-        assert "djinn migrate-zones" in combined
         assert "djinn start" in combined
         assert "(optional)" not in combined
-        assert combined.index("djinn migrate-zones") < combined.index("djinn start")
+        assert combined.index("djinn build") < combined.index("djinn start")
 
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / ".config" / "djinn_in_a_box"

@@ -1552,7 +1552,7 @@ class TestComposeRun:
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An empty source is a migrated overlay, not an omitted mount or workdir."""
+        """An empty assigned source mounts without changing workdir."""
         self._without_runtime_mounts(monkeypatch)
         zones_file = mock_app_config.config_root.parent / "zones.toml"
         monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
@@ -1973,7 +1973,7 @@ class TestGetExistingVolumesByCategory:
 
 
 class TestGetConfigRoot:
-    """Tests for get_config_root (renamed from get_sync_root)."""
+    """Tests for get_config_root."""
 
     def test_uses_env_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DJINN_CONFIG_ROOT", "/custom/config")
@@ -2093,8 +2093,8 @@ class TestRestoreSyncPath:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        sync_root = tmp_path / "sync"
-        monkeypatch.setenv("DJINN_CONFIG_ROOT", str(sync_root))
+        config_root = tmp_path / "config"
+        monkeypatch.setenv("DJINN_CONFIG_ROOT", str(config_root))
         source = tmp_path / "staging"
         source.mkdir()
         archive = source / "djinn-sync-claude.tar.gz"
@@ -2104,7 +2104,7 @@ class TestRestoreSyncPath:
         result = restore_sync_path("claude", source)
 
         assert result.success
-        assert (sync_root / "claude").is_dir()
+        assert (config_root / "claude").is_dir()
         args = mock_run.call_args[0][0]
         assert args[:2] == ["tar", "xzf"]
 
@@ -2156,7 +2156,7 @@ class TestSyncArchiveHelpers:
 
     def test_is_sync_archive_detects_prefix(self) -> None:
         assert is_sync_archive("djinn-sync-claude.tar.gz")
-        assert not is_sync_archive("djinn-claude-config.tar.gz")
+        assert not is_sync_archive("djinn-opencode-data.tar.gz")
         assert not is_sync_archive("random.tar.gz")
 
     def test_extract_sync_path_name(self) -> None:
@@ -2170,17 +2170,17 @@ class TestBackupVolume:
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_successful_backup(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = backup_volume("djinn-claude-config", Path("/tmp/staging"))
+        result = backup_volume("djinn-opencode-data", Path("/tmp/staging"))
         assert result.success
         assert result.returncode == 0
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_backup_command_structure(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        backup_volume("djinn-claude-config", Path("/tmp/staging"))
+        backup_volume("djinn-opencode-data", Path("/tmp/staging"))
         args = mock_run.call_args[0][0]
         assert args[0:3] == ["docker", "run", "--rm"]
-        assert "djinn-claude-config:/source:ro" in args[4]
+        assert "djinn-opencode-data:/source:ro" in args[4]
         assert "/tmp/staging:/backup" in args[6]
         assert "alpine" in args
         assert "tar" in args
@@ -2198,17 +2198,17 @@ class TestRestoreVolume:
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_successful_restore(self, mock_run: MagicMock, tmp_path: Path) -> None:
-        (tmp_path / "djinn-claude-config.tar.gz").touch()
+        (tmp_path / "djinn-opencode-data.tar.gz").touch()
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        result = restore_volume("djinn-claude-config", tmp_path)
+        result = restore_volume("djinn-opencode-data", tmp_path)
         assert result.success
         assert result.returncode == 0
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_restore_command_clears_data(self, mock_run: MagicMock, tmp_path: Path) -> None:
-        (tmp_path / "djinn-claude-config.tar.gz").touch()
+        (tmp_path / "djinn-opencode-data.tar.gz").touch()
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        restore_volume("djinn-claude-config", tmp_path)
+        restore_volume("djinn-opencode-data", tmp_path)
         args = mock_run.call_args[0][0]
         # Should use sh -c with rm -rf before tar extract
         assert "sh" in args
@@ -2552,13 +2552,7 @@ class TestComposeUpDetached:
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Reserving a zone target without mounting it hides the migrated data.
-
-        The foreground path appends these overlays; this path builds its own
-        volume list, so a divergence starts the container with every migrated
-        zone path unmounted — the entrypoint then recreates them empty and the
-        agent state looks lost.
-        """
+        """Detached startup mounts assigned overlays just like foreground startup."""
         self._without_runtime_mounts(monkeypatch)
         zones_file = mock_app_config.config_root.parent / "zones.toml"
         monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
@@ -2701,8 +2695,8 @@ class TestRunningContainerProbeFailure:
     """A failed probe must stay distinguishable from 'no containers running'.
 
     `_guard_no_containers_running` refuses on ``None`` and proceeds on ``[]``, so
-    collapsing the two here would let a migration rename a directory a live
-    container is using — with both commands reporting success.
+    collapsing the two would allow backup/restore while a live container may
+    still be using the managed data.
     """
 
     def test_a_failed_docker_call_yields_none_not_an_empty_list(

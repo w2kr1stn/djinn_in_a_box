@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import stat
 import tomllib
@@ -25,7 +24,7 @@ from djinn_in_a_box.core.config_sync_adapters import (
     read_native_workflow,
     render_native_workflow,
 )
-from djinn_in_a_box.core.workflow_publisher import RUNTIME_MANIFEST_NAME, decode_lean_manifest
+from djinn_in_a_box.core.workflow_publisher import RUNTIME_MANIFEST_NAME
 
 
 def _workspace(tmp_path: Path, source: ConfigSyncSource) -> tuple[Path, Path]:
@@ -477,94 +476,6 @@ def test_opencode_runtime_publisher_delivers_native_plugins_after_claude_sync(
     assert {item["path"] for item in state["items"]} >= set(plugins)
     for path, content in plugins.items():
         assert (runtime_root / path).read_bytes() == content
-
-
-def test_sync_releases_legacy_target_hook_records_without_removing_native_artifacts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, config_path = _workspace(tmp_path, "claude")
-    _full_source(project / "config" / "claude", "claude")
-    codex_root = project / "config" / "codex"
-    native_hooks, native_carrier = _native_hooks(codex_root, "codex")
-    assert native_carrier is not None
-    assert sync_config(project, config_path=config_path).success
-    manifest_path = project / "config" / MANIFEST_NAME
-    manifest = json.loads(manifest_path.read_text())
-    for hook in OWNERSHIP_MATRIX["codex"].hooks:
-        hook_path = codex_root / hook.script_path
-        manifest["items"].append(
-            {
-                "path": f"codex/{hook.script_path}",
-                "content_hash": hashlib.sha256(hook_path.read_bytes()).hexdigest(),
-                "executable": False,
-            }
-        )
-        assert hook.carrier_path is not None and hook.event is not None
-        registration = json.loads((codex_root / hook.carrier_path).read_text())["hooks"][hook.event]
-        manifest["items"].append(
-            {
-                "path": f"codex/{hook.carrier_path}",
-                "key_path": ["hooks", hook.event],
-                "content_hash": hashlib.sha256(
-                    json.dumps(
-                        registration,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        allow_nan=False,
-                    ).encode()
-                ).hexdigest(),
-                "executable": False,
-            }
-        )
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
-    before_hooks = {
-        hook.name: (codex_root / hook.script_path).read_bytes()
-        for hook in OWNERSHIP_MATRIX["codex"].hooks
-    }
-    before_carrier = (codex_root / "hooks.json").read_bytes()
-
-    def crash_after_first_mutation(count: int) -> None:
-        if count == 1:
-            raise RuntimeError("injected native-only release crash")
-
-    def no_crash(_count: int) -> None:
-        return None
-
-    monkeypatch.setattr(publisher_module, "_after_target_mutation", crash_after_first_mutation)
-    with pytest.raises(RuntimeError, match="injected native-only release crash"):
-        sync_config(project, config_path=config_path)
-    monkeypatch.setattr(publisher_module, "_after_target_mutation", no_crash)
-    assert (codex_root / "hooks.json").read_bytes() == before_carrier
-    for hook in OWNERSHIP_MATRIX["codex"].hooks:
-        assert (codex_root / hook.script_path).read_bytes() == before_hooks[hook.name]
-
-    result = sync_config(project, config_path=config_path)
-
-    assert result.success
-    assert not set(result.removed_paths) & {
-        PurePosixPath("codex") / hook.script_path for hook in OWNERSHIP_MATRIX["codex"].hooks
-    }
-    assert (codex_root / "hooks.json").read_bytes() == before_carrier
-    for hook in OWNERSHIP_MATRIX["codex"].hooks:
-        assert (codex_root / hook.script_path).read_bytes() == before_hooks[hook.name]
-        assert before_hooks[hook.name] == native_hooks[hook.name]
-    strict = decode_lean_manifest(
-        manifest_path.read_bytes(), canonical_target=True, target_tool=None
-    )
-    assert not {
-        item.path for item in strict.items
-    } & {PurePosixPath("codex") / hook.script_path for hook in OWNERSHIP_MATRIX["codex"].hooks}
-    assert not {
-        (item.path, item.key_path)
-        for item in strict.items
-        if item.key_path is not None
-    } & {
-        (PurePosixPath("codex") / hook.carrier_path, ("hooks", hook.event))
-        for hook in OWNERSHIP_MATRIX["codex"].hooks
-        if hook.carrier_path and hook.event
-    }
-    assert audit_config_sync(project, config_path=config_path).clean
 
 
 def test_claude_source_only_command_survives_a_blocked_source_switch_without_projection(

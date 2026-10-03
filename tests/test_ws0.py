@@ -145,7 +145,7 @@ class TestComposeEnvBridge:
         how ``start``/``run`` create the dev container — so without this flag
         ``djinn clean`` reports success while the live session survives and
         ``djinn backup`` keeps refusing. It also reaps a proxy left by
-        ``--docker`` and services dropped in an upgrade.
+        ``--docker``.
         """
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)

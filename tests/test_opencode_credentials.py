@@ -71,62 +71,6 @@ def test_fresh_credentials_are_created_in_config_root_and_linked(tmp_path: Path)
         assert volume_path.resolve() == config_path
 
 
-def test_existing_volume_credential_migrates_with_restrictive_mode(tmp_path: Path) -> None:
-    volume_path = volume_credential(tmp_path)
-    volume_path.parent.mkdir(parents=True)
-    secret = "migrated-provider-token"
-    volume_path.write_text(secret, encoding="utf-8")
-    volume_path.chmod(0o600)
-
-    result = run_credentials(tmp_path)
-
-    config_path = config_credential(tmp_path)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert result.stderr == (
-        "  [info] Migrated OpenCode credential auth.json to the config root.\n"
-    )
-    assert secret not in result.stderr
-    assert config_path.read_text(encoding="utf-8") == secret
-    assert_restrictive_mode(config_path)
-    assert volume_path.is_symlink()
-    assert volume_path.resolve() == config_path
-
-
-def test_conflicting_credential_keeps_config_and_sets_aside_volume_file(
-    tmp_path: Path,
-) -> None:
-    config_path = config_credential(tmp_path)
-    config_path.parent.mkdir()
-    config_secret = "config-root-token"
-    config_path.write_text(config_secret, encoding="utf-8")
-    config_path.chmod(0o600)
-
-    volume_path = volume_credential(tmp_path)
-    volume_path.parent.mkdir(parents=True)
-    volume_secret = "volume-token-to-preserve"
-    volume_path.write_text(volume_secret, encoding="utf-8")
-    volume_path.chmod(0o600)
-
-    result = run_credentials(tmp_path)
-
-    set_aside_path = volume_path.with_name("auth.json.pre-migration")
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert result.stderr == (
-        "  [warn] OpenCode credential conflict for auth.json; "
-        "set aside auth.json.pre-migration.\n"
-    )
-    assert volume_secret not in result.stderr
-    assert config_secret not in result.stderr
-    assert config_path.read_text(encoding="utf-8") == config_secret
-    assert_restrictive_mode(config_path)
-    assert set_aside_path.exists()
-    assert set_aside_path.read_text(encoding="utf-8") == volume_secret
-    assert volume_path.is_symlink()
-    assert volume_path.resolve() == config_path
-
-
 def test_existing_correct_symlinks_are_idempotent_and_silent(tmp_path: Path) -> None:
     for name in ("auth.json", "mcp-auth.json"):
         config_path = config_credential(tmp_path, name)
@@ -159,54 +103,12 @@ def test_existing_correct_symlinks_are_idempotent_and_silent(tmp_path: Path) -> 
         )
 
 
-def test_conflicts_use_a_numbered_set_aside_without_replacing_an_earlier_one(
-    tmp_path: Path,
-) -> None:
-    for name in ("auth.json", "mcp-auth.json"):
-        config_path = config_credential(tmp_path, name)
-        config_path.parent.mkdir(exist_ok=True)
-        config_path.write_text(f"{name}-config", encoding="utf-8")
-        config_path.chmod(0o600)
-
-        volume_path = volume_credential(tmp_path, name)
-        volume_path.parent.mkdir(parents=True, exist_ok=True)
-        volume_path.write_text(f"{name}-restored-volume", encoding="utf-8")
-        volume_path.chmod(0o640)
-        earlier_set_aside = volume_path.with_name(f"{name}.pre-migration")
-        earlier_set_aside.write_text(f"{name}-earlier-set-aside", encoding="utf-8")
-        earlier_set_aside.chmod(0o600)
-
-    result = run_credentials(tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert result.stderr == (
-        "  [warn] OpenCode credential conflict for auth.json; "
-        "set aside auth.json.pre-migration.1.\n"
-        "  [warn] OpenCode credential conflict for mcp-auth.json; "
-        "set aside mcp-auth.json.pre-migration.1.\n"
-    )
-    for name in ("auth.json", "mcp-auth.json"):
-        volume_path = volume_credential(tmp_path, name)
-        assert volume_path.is_symlink()
-        assert volume_path.resolve() == config_credential(tmp_path, name)
-        assert (
-            volume_path.with_name(f"{name}.pre-migration").read_text(
-                encoding="utf-8"
-            )
-            == f"{name}-earlier-set-aside"
-        )
-        numbered_set_aside = volume_path.with_name(f"{name}.pre-migration.1")
-        assert numbered_set_aside.read_text(encoding="utf-8") == (
-            f"{name}-restored-volume"
-        )
-        assert_restrictive_mode(numbered_set_aside)
-
-
 @pytest.mark.parametrize("name", ("auth.json", "mcp-auth.json"))
-def test_noncanonical_volume_symlink_is_refused_without_mutation(
+@pytest.mark.parametrize("shape", ("symlink", "file", "directory"))
+def test_noncanonical_volume_path_is_refused_without_mutation(
     tmp_path: Path,
     name: str,
+    shape: str,
 ) -> None:
     host_managed_path = tmp_path / "host-managed" / name
     host_managed_path.parent.mkdir()
@@ -215,7 +117,14 @@ def test_noncanonical_volume_symlink_is_refused_without_mutation(
 
     volume_path = volume_credential(tmp_path, name)
     volume_path.parent.mkdir(parents=True, exist_ok=True)
-    volume_path.symlink_to(host_managed_path)
+    if shape == "symlink":
+        volume_path.symlink_to(host_managed_path)
+    elif shape == "file":
+        volume_path.write_bytes(b"private credential")
+    else:
+        volume_path.mkdir()
+        (volume_path / "sentinel").write_bytes(b"private credential")
+    before = volume_path.lstat()
 
     result = run_credentials(tmp_path)
 
@@ -223,13 +132,22 @@ def test_noncanonical_volume_symlink_is_refused_without_mutation(
     assert result.returncode != 0
     assert result.stdout == ""
     assert result.stderr == (
-        f"  [err] OpenCode credential {name} at {volume_path} must be a regular "
-        f"file or the canonical symlink to {config_path}; refusing to change it.\n"
+        f"  [err] OpenCode credential {name} at {volume_path} must be absent or "
+        f"the canonical symlink to {config_path}; refusing to change it.\n"
     )
     assert not config_path.exists()
     assert not config_path.is_symlink()
-    assert volume_path.is_symlink()
-    assert volume_path.resolve() == host_managed_path
+    after = volume_path.lstat()
+    assert (after.st_ino, after.st_uid, after.st_gid, after.st_mode) == (
+        before.st_ino, before.st_uid, before.st_gid, before.st_mode,
+    )
+    if shape == "symlink":
+        assert volume_path.is_symlink()
+        assert volume_path.resolve() == host_managed_path
+    elif shape == "file":
+        assert volume_path.read_bytes() == b"private credential"
+    else:
+        assert (volume_path / "sentinel").read_bytes() == b"private credential"
     assert host_managed_path.read_text(encoding="utf-8") == f"{name}-host-managed"
     assert stat.S_IMODE(host_managed_path.stat().st_mode) == 0o640
 
@@ -364,13 +282,7 @@ def test_relative_link_to_an_unrelated_file_is_still_refused(tmp_path: Path) -> 
 
 
 def test_aliased_directory_link_is_refused_consistently(tmp_path: Path) -> None:
-    """One definition of canonical, before and after a clean.
-
-    `-ef` accepted a link through an aliased directory while the target existed
-    and the text comparison refused it afterwards, so the same arrangement was
-    valid on one start and unstartable on the next. Lexical comparison refuses it
-    in both, which is the intended handling of a deliberate redirect.
-    """
+    """Aliased redirects are refused both before and after credentials are cleared."""
     config_path = config_credential(tmp_path, "auth.json")
     config_path.parent.mkdir(exist_ok=True)
     config_path.write_text("secret", encoding="utf-8")

@@ -102,45 +102,6 @@ _codex_remove_server_from_toml() {
     ' "$codex_config" > "$tmp" && mv "$tmp" "$codex_config"
 }
 
-_codex_ensure_features() {
-    local codex_config=$(_codex_config_file)
-    mkdir -p "${codex_config:h}"
-
-    if [[ ! -f "$codex_config" ]]; then
-        printf '[features]\nrmcp_client = true\n' > "$codex_config"
-        return
-    fi
-
-    if grep -q '^rmcp_client[[:space:]]*=' "$codex_config"; then
-        return
-    fi
-
-    local tmp="${codex_config}.tmp"
-    if grep -q '^\[features\]$' "$codex_config"; then
-        awk '
-            BEGIN { in_features = 0; inserted = 0 }
-            $0 == "[features]" { in_features = 1; print; next }
-            in_features && $0 ~ /^\[/ && !inserted {
-                print "rmcp_client = true"
-                print ""
-                inserted = 1
-                in_features = 0
-            }
-            { print }
-            END {
-                if (in_features && !inserted) {
-                    print "rmcp_client = true"
-                }
-            }
-        ' "$codex_config" > "$tmp" && mv "$tmp" "$codex_config"
-    else
-        {
-            printf '[features]\nrmcp_client = true\n\n'
-            cat "$codex_config"
-        } > "$tmp" && mv "$tmp" "$codex_config"
-    fi
-}
-
 _codex_write_streamable_http_server() {
     local server=$1
     local url=$2
@@ -148,7 +109,8 @@ _codex_write_streamable_http_server() {
     local startup_timeout_sec=${4:-}
     local codex_config=$(_codex_config_file)
 
-    _codex_ensure_features
+    mkdir -p "${codex_config:h}"
+    [[ -f "$codex_config" ]] || : > "$codex_config"
     _codex_remove_server_from_toml "$server"
     {
         printf '\n[mcp_servers.%s]\nurl = "%s"\nenabled = true\n' "$server" "$url"
@@ -212,7 +174,6 @@ register_mcp_servers() {
     local registered=0
     local disabled=0
     local skipped=0
-    local legacy=0
 
     local entry server url transport enabled host claude_transport opencode_transport
     local tool_timeout_sec startup_timeout_sec
@@ -226,20 +187,10 @@ register_mcp_servers() {
         fi
 
         url=$(jq -r '.value.url // ""' <<< "$entry")
-        transport=$(jq -r '
-            if .value.transport then .value.transport
-            elif .value.type == "http" then "streamable-http"
-            elif .value.type == "sse" then "sse"
-            else "" end
-        ' <<< "$entry")
+        transport=$(jq -r '.value.transport // ""' <<< "$entry")
         enabled=$(jq -r 'if .value.enabled == null then "true" else (.value.enabled | tostring) end' <<< "$entry")
         tool_timeout_sec=$(jq -r '.value.tool_timeout_sec // ""' <<< "$entry")
         startup_timeout_sec=$(jq -r '.value.startup_timeout_sec // ""' <<< "$entry")
-
-        if [[ "$(jq -r '(.value | has("type")) and (.value | has("transport") | not)' <<< "$entry")" == "true" ]]; then
-            ui_warn "${server}: legacy 'type' key detected; migrate local mcp-servers.json to 'transport' + 'enabled'"
-            (( ++legacy ))
-        fi
 
         if [[ "$enabled" != "true" && "$enabled" != "false" ]]; then
             ui_warn "mcp: Skipping invalid enabled value for $server: $enabled"
@@ -305,5 +256,5 @@ register_mcp_servers() {
         (( ++registered ))
     done < <(jq -c 'to_entries[]' "$mcp_config")
 
-    ui_info "[mcp] Summary: ${registered} registered, ${disabled} disabled, ${skipped} skipped, ${legacy} legacy"
+    ui_info "[mcp] Summary: ${registered} registered, ${disabled} disabled, ${skipped} skipped"
 }

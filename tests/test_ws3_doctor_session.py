@@ -45,9 +45,6 @@ def _quiet_doctor_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     def network_exists(_name: str) -> bool:
         return True
 
-    def old_sync_root_present(_config: AppConfig | None) -> bool:
-        return False
-
     monkeypatch.setattr(doctor_mod, "_docker_installed", lambda: True)
     monkeypatch.setattr(doctor_mod, "docker_daemon_ok", lambda: True)
     monkeypatch.setattr(doctor_mod, "_docker_socket_ok", lambda: True)
@@ -55,7 +52,6 @@ def _quiet_doctor_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor_mod, "buildx_ok", lambda: True)
     monkeypatch.setattr(doctor_mod, "_image_built", lambda: True)
     monkeypatch.setattr(doctor_mod, "network_exists", network_exists)
-    monkeypatch.setattr(doctor_mod, "_old_sync_root_present", old_sync_root_present)
 
 
 def _check_named(checks: list[doctor_mod.Check], name: str) -> doctor_mod.Check:

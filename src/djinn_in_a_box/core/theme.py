@@ -8,7 +8,7 @@ SECONDARY = "#226666"
 SUCCESS = "#C1FF62"
 ERROR = "#F53263"
 WARNING = "#FAF870"
-# Deliberately ANSI blue color 4, matching the old shell \033[0;34m rendering.
+# info uses basic ANSI blue (color 4).
 INFO = "blue"
 PATH = "#8608B8"
 MUTED = "#333676"

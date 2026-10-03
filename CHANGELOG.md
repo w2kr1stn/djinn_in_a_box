@@ -137,6 +137,13 @@ Versioning before and after the first stable release.
   to select that flow; the other CLIs pick it automatically. See "First
   Authentication" in the README.
 
+- The doctor check for an outdated sync root location.
+- MCP registration: the `type` key in `config/mcp-servers.json` (entries use
+  `transport` and `enabled`), and the `rmcp_client` feature flag written to the
+  Codex config.
+- The shell wrapper guide `docs/zshrc-djinn-snippet.sh` and the devcontainer
+  template `templates/devcontainer.json`.
+
 ### Fixed
 
 - `djinn build` works again with `build.network host`. Since buildx 0.37.2, bake
@@ -215,12 +222,11 @@ Versioning before and after the first stable release.
 
 ### Security
 
-- Credential directories under the config root are created with mode `0700`,
-  matching the `~/.ssh` precedent. The mode applies on creation only; existing
-  directories are not tightened retroactively.
-- Documented the credential trust model: credentials are stored unencrypted,
-  are readable by every agent in the container, and `djinn backup` archives are
-  unencrypted.
+- Host provisioning secures config and credential roots with mode `0700` and
+  creates every assigned zone overlay directory before Compose starts.
+- Documented credential storage and access: credentials remain unencrypted at
+  rest and readable by every agent in the container; backups are encrypted by
+  default, with an explicit `--no-encrypt` option.
 
 ## [0.1.0] - 2026-07-03
 

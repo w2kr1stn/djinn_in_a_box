@@ -72,7 +72,7 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
-    "UP047", # Generic functions can use legacy TypeVar syntax (both are valid)
+    "UP047", # TypeVar syntax is permitted.
 ]
 
 [tool.ruff.format]

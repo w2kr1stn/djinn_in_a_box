@@ -30,7 +30,6 @@ from djinn_in_a_box.core.workflow_publisher import (
     WorkflowView,
     canonical_lock,
     publish_workflow_view,
-    retire_legacy_delivery_manifest,
     snapshot_file_view,
 )
 
@@ -80,28 +79,6 @@ def _write(path: Path, content: bytes, *, executable: bool = False) -> None:
     path.write_bytes(content)
     if executable:
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
-def _legacy_manifest(
-    files: dict[str, tuple[bytes, bool]],
-    fragments: list[Mapping[str, object]] | None = None,
-    *,
-    tool: str = "claude",
-) -> bytes:
-    return json.dumps(
-        {
-            "schema_version": 1,
-            "tool": tool,
-            "files": {
-                path: {
-                    "content_hash": workflow_publisher._digest(content),  # pyright: ignore[reportPrivateUsage]
-                    "executable": executable,
-                }
-                for path, (content, executable) in files.items()
-            },
-            "fragments": [] if fragments is None else fragments,
-        }
-    ).encode()
 
 
 def _no_target_mutation(_count: int) -> None:
@@ -218,7 +195,7 @@ def test_zero_byte_native_agents_file_is_a_collision(
     assert _tree(target) == before
 
 
-def test_claude_root_hook_paths_round_trip_and_adopt_legacy_writer_state(tmp_path: Path) -> None:
+def test_claude_root_hook_paths_round_trip(tmp_path: Path) -> None:
     canonical, target = _roots(tmp_path)
     security = b"security\n"
     ready = b"ready\n"
@@ -232,121 +209,6 @@ def test_claude_root_hook_paths_round_trip_and_adopt_legacy_writer_state(tmp_pat
 
     assert _publish(canonical, target, view).success
     assert _publish(canonical, target, view).success
-    (target / RUNTIME_MANIFEST_NAME).unlink()
-    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
-    legacy.write_bytes(
-        _legacy_manifest(
-            {
-                "AGENTS.md": (b"one\n", False),
-                "security_reminder_hook.py": (security, False),
-                "ready_notify_hook.py": (ready, False),
-            }
-        )
-    )
-
-    adopted = _publish(canonical, target, view)
-
-    assert adopted.success
-    assert (target / RUNTIME_MANIFEST_NAME).is_file()
-    assert not legacy.exists()
-
-
-def test_runtime_legacy_manifest_adoption_covers_files_and_fragments(tmp_path: Path) -> None:
-    canonical, target = _roots(tmp_path)
-    _write(target / "AGENTS.md", b"one\n")
-    _write(target / "settings.json", b'{"hooks":{"Stop":["ready"]},"operator":true}\n')
-    value = ["ready"]
-    fragment = {
-        "carrier_path": "settings.json",
-        "key_path": ["hooks", "Stop"],
-        "value_hash": workflow_publisher._legacy_value_digest(value),  # pyright: ignore[reportPrivateUsage]
-    }
-    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
-    legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"one\n", False)}, [fragment]))
-
-    result = _publish(
-        canonical,
-        target,
-        _view(fragments=(_fragment("settings.json", ("hooks", "Stop"), value),)),
-    )
-
-    assert result.success
-    assert not legacy.exists()
-    assert (target / RUNTIME_MANIFEST_NAME).is_file()
-    assert json.loads((target / "settings.json").read_text())["operator"] is True
-
-
-def test_runtime_legacy_adoption_is_retry_safe_after_state_write_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    canonical, target = _roots(tmp_path)
-    _write(target / "AGENTS.md", b"one\n")
-    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
-    legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"one\n", False)}))
-
-    def abort_after_state_write() -> None:
-        raise RuntimeError("injected adoption crash")
-
-    monkeypatch.setattr(
-        workflow_publisher,
-        "_after_runtime_manifest_write",
-        abort_after_state_write,
-    )
-    with pytest.raises(RuntimeError, match="injected adoption crash"):
-        _publish(canonical, target, _view())
-    monkeypatch.setattr(
-        workflow_publisher,
-        "_after_runtime_manifest_write",
-        lambda: None,
-    )
-
-    assert (target / RUNTIME_MANIFEST_NAME).is_file()
-    assert legacy.is_file()
-    assert _publish(canonical, target, _view()).success
-    assert not legacy.exists()
-
-
-def test_runtime_adoption_retry_removes_legacy_before_reporting_new_state_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    canonical, target = _roots(tmp_path)
-    _write(target / "AGENTS.md", b"one\n")
-    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
-    legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"one\n", False)}))
-
-    monkeypatch.setattr(
-        workflow_publisher,
-        "_after_runtime_manifest_write",
-        lambda: (_ for _ in ()).throw(RuntimeError("injected adoption crash")),
-    )
-    with pytest.raises(RuntimeError, match="injected adoption crash"):
-        _publish(canonical, target, _view())
-    monkeypatch.setattr(workflow_publisher, "_after_runtime_manifest_write", lambda: None)
-    (target / "AGENTS.md").write_bytes(b"operator edit\n")
-
-    retried = _publish(canonical, target, _view())
-
-    assert retried.drift_class is DriftClass.TARGET_DRIFT
-    assert not legacy.exists()
-
-
-@pytest.mark.parametrize("payload", [b"not-json", b'{"schema_version":1}'])
-def test_runtime_legacy_manifest_malformed_or_edited_fails_closed(
-    tmp_path: Path, payload: bytes
-) -> None:
-    canonical, target = _roots(tmp_path)
-    _write(target / "AGENTS.md", b"one\n")
-    legacy = target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
-    if payload == b"not-json":
-        legacy.write_bytes(payload)
-    else:
-        legacy.write_bytes(_legacy_manifest({"AGENTS.md": (b"recorded\n", False)}))
-    before = _tree(target)
-
-    result = _publish(canonical, target, _view())
-
-    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
-    assert _tree(target) == before
 
 
 @pytest.mark.parametrize("foreign_kind", ("file", "fragment"))
@@ -385,87 +247,6 @@ def test_runtime_state_rejects_unowned_manifest_items_without_mutation(
 
     assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
     assert _tree(target) == before
-
-
-@pytest.mark.parametrize("foreign_kind", ("file", "fragment"))
-def test_runtime_legacy_rejects_unowned_manifest_items_without_mutation(
-    tmp_path: Path, foreign_kind: str
-) -> None:
-    canonical, target = _roots(tmp_path)
-    _write(target / "AGENTS.md", b"one\n")
-    if foreign_kind == "file":
-        operator_file = target / "operator-private.txt"
-        operator_file.write_bytes(b"operator-owned\n")
-        legacy = _legacy_manifest(
-            {
-                "AGENTS.md": (b"one\n", False),
-                "operator-private.txt": (operator_file.read_bytes(), False),
-            }
-        )
-    else:
-        carrier = target / "settings.json"
-        carrier.write_bytes(b'{"operator":{"keep":true}}\n')
-        legacy = _legacy_manifest(
-            {"AGENTS.md": (b"one\n", False)},
-            [
-                {
-                    "carrier_path": "settings.json",
-                    "key_path": ["operator", "keep"],
-                    "value_hash": workflow_publisher._legacy_value_digest(True),  # pyright: ignore[reportPrivateUsage]
-                }
-            ],
-        )
-    (target / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME).write_bytes(legacy)
-    before = _tree(target)
-
-    result = _publish(canonical, target, _view())
-
-    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
-    assert _tree(target) == before
-
-
-def test_compose_retirement_retries_after_verify_before_remove_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "claude"
-    root.mkdir()
-    legacy = root / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME
-    legacy.write_bytes(_legacy_manifest({}))
-
-    def abort_before_remove() -> None:
-        raise RuntimeError("injected retirement crash")
-
-    monkeypatch.setattr(
-        workflow_publisher,
-        "_after_legacy_delivery_verified",
-        abort_before_remove,
-    )
-    with pytest.raises(RuntimeError, match="injected retirement crash"):
-        retire_legacy_delivery_manifest(root)
-    monkeypatch.setattr(workflow_publisher, "_after_legacy_delivery_verified", lambda: None)
-
-    assert legacy.exists()
-    assert retire_legacy_delivery_manifest(root).success
-    assert not legacy.exists()
-
-
-def test_retirement_carries_directory_fsync_error_as_write_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "claude"
-    root.mkdir()
-    (root / workflow_publisher.LEGACY_DELIVERY_MANIFEST_NAME).write_bytes(_legacy_manifest({}))
-
-    def fail_fsync(_root: Path) -> None:
-        raise OSError(errno.ENOSPC, "No space left on device")
-
-    monkeypatch.setattr(workflow_publisher, "_fsync_directory", fail_fsync)
-    result = retire_legacy_delivery_manifest(root)
-
-    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
-    assert result.write_error is not None
-    assert result.write_error.errno == errno.ENOSPC
-    assert result.write_error.strerror == "No space left on device"
 
 
 def test_stale_file_and_owned_json_key_are_removed_without_touching_neighbor(

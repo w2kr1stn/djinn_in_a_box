@@ -23,10 +23,6 @@ runner = CliRunner()
 _SENTINEL = "PRIVATE-WORKFLOW-BODY-SENTINEL"
 
 
-def _no_legacy_root(_config: AppConfig | None) -> bool:
-    return False
-
-
 def _no_mount_args() -> list[str]:
     return []
 
@@ -224,7 +220,6 @@ def test_doctor_audits_once_without_sync_or_provider(
     monkeypatch.setattr(doctor_module, "get_project_root", lambda: tmp_path)
     monkeypatch.setattr(doctor_module, "_docker_installed", lambda: False)
     monkeypatch.setattr(doctor_module, "_docker_socket_ok", lambda: True)
-    monkeypatch.setattr(doctor_module, "_old_sync_root_present", _no_legacy_root)
     monkeypatch.setattr(doctor_module, "get_dbus_mount_args", _no_mount_args)
 
     checks = doctor_module.run_checks(config)
@@ -235,16 +230,3 @@ def test_doctor_audits_once_without_sync_or_provider(
     assert _SENTINEL not in workflow.detail
     audit.assert_called_once_with(tmp_path)
     sync.assert_not_called()
-
-
-def test_removed_semantic_module_has_no_consumer() -> None:
-    root = Path(__file__).parents[2]
-    removed_module = "config_sync" + "_agent"
-    removed_symbol = "Semantic" + "Failure"
-    hits = [
-        path
-        for path in root.rglob("*.py")
-        if removed_module in path.read_text() or removed_symbol in path.read_text()
-    ]
-
-    assert hits == []

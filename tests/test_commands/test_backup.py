@@ -226,16 +226,16 @@ class TestBackupCommand:
             patch.object(Path, "iterdir", new=include_staged_outer),
             patch.object(tarfile.TarFile, "add", new=record_add),
         ):
-            mock_get.side_effect = [["djinn-claude-config"], [], []]
+            mock_get.side_effect = [["djinn-opencode-data"], [], []]
             mock_backup.return_value = RunResult(returncode=0, stdout="", stderr="")
 
-            fake_archive = staging_dir / "djinn-claude-config.tar.gz"
+            fake_archive = staging_dir / "djinn-opencode-data.tar.gz"
             with tarfile.open(fake_archive, "w:gz") as _tar:
                 pass  # empty archive is fine for test
 
             backup_module.backup()
 
-            mock_backup.assert_called_once_with("djinn-claude-config", staging_dir)
+            mock_backup.assert_called_once_with("djinn-opencode-data", staging_dir)
             archives = list(backups_dir.glob("djinn-backup-*.tar.gz.age"))
             assert len(archives) == 1
             assert archives[0].read_bytes().startswith(b"age-encryption.org/v1\n")
@@ -263,10 +263,10 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
         ):
-            mock_get.return_value = ["djinn-claude-config"]
+            mock_get.return_value = ["djinn-opencode-data"]
             mock_backup.return_value = RunResult(returncode=0, stdout="", stderr="")
 
-            fake_archive = staging_dir / "djinn-claude-config.tar.gz"
+            fake_archive = staging_dir / "djinn-opencode-data.tar.gz"
             with tarfile.open(fake_archive, "w:gz") as _tar:
                 pass
 
@@ -287,7 +287,7 @@ class TestBackupCommand:
         old_backup.write_bytes(b"age-encryption.org/v1\nold")
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -295,7 +295,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -320,7 +320,7 @@ class TestBackupCommand:
         stale.write_bytes(b"stale")
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -328,7 +328,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -358,7 +358,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.backup_volume") as mock_backup,
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
         ):
-            mock_get.return_value = ["djinn-claude-config"]
+            mock_get.return_value = ["djinn-opencode-data"]
             mock_backup.return_value = RunResult(returncode=1, stdout="", stderr="backup failed")
             mock_tempfile.mkdtemp.return_value = str(staging_dir)
 
@@ -434,7 +434,7 @@ class TestBackupCommand:
         backups_dir.chmod(0o755)
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         real_mkstemp = backup_module.tempfile.mkstemp
@@ -443,7 +443,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -472,7 +472,7 @@ class TestBackupCommand:
         previous.write_bytes(b"known-good")
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -480,7 +480,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -506,7 +506,7 @@ class TestBackupCommand:
         previous.touch()
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         original_unlink = Path.unlink
@@ -529,7 +529,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -577,7 +577,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -585,7 +585,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -612,7 +612,7 @@ class TestBackupCommand:
         backups_dir.chmod(0o775)
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         real_mkstemp = backup_module.tempfile.mkstemp
@@ -622,7 +622,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -659,7 +659,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         events: list[tuple[str, str | None]] = []
@@ -677,7 +677,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -735,7 +735,7 @@ class TestBackupCommand:
         previous.write_bytes(previous_bytes)
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -748,7 +748,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -776,7 +776,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -784,7 +784,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -810,7 +810,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -818,7 +818,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -850,7 +850,7 @@ class TestBackupCommand:
         previous.write_bytes(b"known-good")
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -858,7 +858,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -884,7 +884,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -892,7 +892,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -915,7 +915,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
-        inner_archive = staging_dir / "djinn-claude-config.tar.gz"
+        inner_archive = staging_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
 
@@ -923,7 +923,7 @@ class TestBackupCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -997,14 +997,14 @@ class TestRestoreCommand:
         assert "Install age" in message
         assert "--no-encrypt" not in message
 
-    def test_restore_legacy_archive_works_without_age(self, tmp_path: Path) -> None:
+    def test_restore_cleartext_archive_works_without_age(self, tmp_path: Path) -> None:
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
         inner_staging = tmp_path / "inner"
         inner_staging.mkdir()
-        inner_archive = inner_staging / "djinn-claude-config.tar.gz"
+        inner_archive = inner_staging / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
@@ -1023,7 +1023,7 @@ class TestRestoreCommand:
             mock_restore.return_value = RunResult(0, "", "")
             backup_module.restore()
 
-        mock_restore.assert_called_once_with("djinn-claude-config", staging_dir)
+        mock_restore.assert_called_once_with("djinn-opencode-data", staging_dir)
         mock_subprocess.run.assert_not_called()
         assert not staging_dir.exists()
 
@@ -1050,13 +1050,13 @@ class TestRestoreCommand:
         # Create a backup archive with one inner archive
         inner_staging = tmp_path / "inner"
         inner_staging.mkdir()
-        inner_archive = inner_staging / "djinn-claude-config.tar.gz"
+        inner_archive = inner_staging / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz") as _tar:
             pass
 
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
         with tarfile.open(backup_file, "w:gz") as outer:
-            outer.add(str(inner_archive), arcname="djinn-claude-config.tar.gz")
+            outer.add(str(inner_archive), arcname="djinn-opencode-data.tar.gz")
 
         with (
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
@@ -1071,7 +1071,7 @@ class TestRestoreCommand:
 
             backup_module.restore()
 
-            mock_restore.assert_called_once_with("djinn-claude-config", staging_dir)
+            mock_restore.assert_called_once_with("djinn-opencode-data", staging_dir)
             mock_subprocess.run.assert_not_called()
 
         assert backups_dir.stat().st_mode & 0o777 == 0o700
@@ -1084,13 +1084,13 @@ class TestRestoreCommand:
 
         inner_staging = tmp_path / "inner"
         inner_staging.mkdir()
-        inner_archive = inner_staging / "djinn-claude-config.tar.gz"
+        inner_archive = inner_staging / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz") as _tar:
             pass
 
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
         with tarfile.open(backup_file, "w:gz") as outer:
-            outer.add(str(inner_archive), arcname="djinn-claude-config.tar.gz")
+            outer.add(str(inner_archive), arcname="djinn-opencode-data.tar.gz")
 
         with (
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
@@ -1167,7 +1167,7 @@ class TestRestoreCommand:
 
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
         with tarfile.open(backup_file, "w:gz") as outer:
-            for name in ["djinn-claude-config", "djinn-azure-config"]:
+            for name in ["djinn-opencode-data", "djinn-vscode-workspaces"]:
                 archive = inner_staging / f"{name}.tar.gz"
                 with tarfile.open(archive, "w:gz") as _tar:
                     pass
@@ -1229,7 +1229,7 @@ class TestRestoreCommand:
 
         assert (configured_root / "claude" / "token.txt").read_text() == "secret\n"
 
-    def test_restore_rehardens_sync_target_after_extracting_legacy_archive(
+    def test_restore_rehardens_sync_target_after_extracting_cleartext_archive(
         self, tmp_path: Path
     ) -> None:
         code_dir = tmp_path / "code"
@@ -1242,19 +1242,19 @@ class TestRestoreCommand:
         outside.chmod(0o755)
         inner_archives: list[Path] = []
         for name in ("claude", "codex"):
-            legacy_target = tmp_path / f"legacy-{name}"
-            legacy_target.mkdir(mode=0o755)
-            legacy_target.chmod(0o755)
-            (legacy_target / "credentials.json").write_text("secret\n")
-            nested = legacy_target / "nested"
+            cleartext_target = tmp_path / f"cleartext-{name}"
+            cleartext_target.mkdir(mode=0o755)
+            cleartext_target.chmod(0o755)
+            (cleartext_target / "credentials.json").write_text("secret\n")
+            nested = cleartext_target / "nested"
             nested.mkdir(mode=0o755)
             nested.chmod(0o755)
             (nested / "session.jsonl").write_text("history\n")
             if name == "claude":
-                (legacy_target / "outside-link").symlink_to(outside, target_is_directory=True)
+                (cleartext_target / "outside-link").symlink_to(outside, target_is_directory=True)
             inner_archive = tmp_path / f"djinn-sync-{name}.tar.gz"
             with tarfile.open(inner_archive, "w:gz") as inner:
-                inner.add(legacy_target, arcname=".")
+                inner.add(cleartext_target, arcname=".")
             inner_archives.append(inner_archive)
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
         with tarfile.open(backup_file, "w:gz") as outer:
@@ -1280,15 +1280,15 @@ class TestRestoreCommand:
         config = AppConfig(code_dir=code_dir, config_root=tmp_path / "config")
         backups_dir = tmp_path / "backups"
         backups_dir.mkdir()
-        legacy_claude = tmp_path / "legacy-claude"
-        nested = legacy_claude / "nested"
+        cleartext_claude = tmp_path / "cleartext-claude"
+        nested = cleartext_claude / "nested"
         nested.mkdir(parents=True, mode=0o755)
-        legacy_claude.chmod(0o755)
+        cleartext_claude.chmod(0o755)
         nested.chmod(0o755)
         (nested / "session.jsonl").write_text("history\n")
         inner_archive = tmp_path / "djinn-sync-claude.tar.gz"
         with tarfile.open(inner_archive, "w:gz") as inner:
-            inner.add(legacy_claude, arcname=".")
+            inner.add(cleartext_claude, arcname=".")
         inner_archive.write_bytes(inner_archive.read_bytes()[:-8])
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
         with tarfile.open(backup_file, "w:gz") as outer:
@@ -1314,13 +1314,13 @@ class TestRestoreCommand:
         staging_dir.mkdir()
         inner_dir = tmp_path / "inner"
         inner_dir.mkdir()
-        inner_archive = inner_dir / "djinn-claude-config.tar.gz"
+        inner_archive = inner_dir / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         outer_archive = tmp_path / "outer.tar.gz"
         with tarfile.open(outer_archive, "w:gz") as outer:
             outer.add(inner_archive, arcname=inner_archive.name)
-        (backups_dir / "djinn-backup-2026-03-13.tar.gz").write_bytes(b"legacy")
+        (backups_dir / "djinn-backup-2026-03-13.tar.gz").write_bytes(b"cleartext")
         encrypted_backup = backups_dir / "djinn-backup-2026-03-13.tar.gz.age"
         encrypted_backup.write_bytes(b"age-encryption.org/v1\nplaceholder")
 
@@ -1343,7 +1343,7 @@ class TestRestoreCommand:
         argv = mock_subprocess.run.call_args.args[0]
         assert argv[:2] == ["age", "--decrypt"]
         assert mock_restore.call_count == 1
-        assert mock_restore.call_args.args[0] == "djinn-claude-config"
+        assert mock_restore.call_args.args[0] == "djinn-opencode-data"
         assert not staging_dir.exists()
 
     def test_restore_decryption_failure_cleans_partial_cleartext(self, tmp_path: Path) -> None:
@@ -1383,7 +1383,7 @@ class TestRestoreCommand:
         staging_dir.mkdir()
         inner_staging = tmp_path / "inner"
         inner_staging.mkdir()
-        inner_archive = inner_staging / "djinn-claude-config.tar.gz"
+        inner_archive = inner_staging / "djinn-opencode-data.tar.gz"
         with tarfile.open(inner_archive, "w:gz"):
             pass
         valid_outer = tmp_path / "valid-outer.tar.gz"
@@ -1487,7 +1487,7 @@ class TestRestoreCommand:
         mock_confirm.assert_not_called()
         assert "intact age-encrypted archive" in capsys.readouterr().err
 
-    def test_restore_invalid_legacy_archive_has_format_error(
+    def test_restore_invalid_cleartext_archive_has_format_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         backups_dir = tmp_path / "backups"
@@ -1537,7 +1537,7 @@ class TestRestoreCommand:
         backups_dir = tmp_path / "backups"
 
         def write_inner_archive(_: str, staging_dir: Path) -> RunResult:
-            with tarfile.open(staging_dir / "djinn-claude-config.tar.gz", "w:gz"):
+            with tarfile.open(staging_dir / "djinn-opencode-data.tar.gz", "w:gz"):
                 pass
             return RunResult(0, "", "")
 
@@ -1570,7 +1570,7 @@ class TestRestoreCommand:
             patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
-                return_value=["djinn-claude-config"],
+                return_value=["djinn-opencode-data"],
             ),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -1659,7 +1659,7 @@ class TestControllingTerminalCheck:
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
             patch("djinn_in_a_box.commands.backup.shutil") as mock_shutil,
         ):
-            mock_get.return_value = ["djinn-claude-config"]
+            mock_get.return_value = ["djinn-opencode-data"]
             mock_backup.return_value = RunResult(returncode=1, stdout="", stderr="fail")
             mock_tempfile.mkdtemp.return_value = str(staging_dir)
 

@@ -84,9 +84,7 @@ if [[ ! -r "$SEED_LIB" ]]; then
 fi
 source "$SEED_LIB"
 
-# Restore claude.json from volume (Claude Code uses atomic writes which break
-# the Dockerfile symlink, so we sync the file explicitly instead)
-[[ -L "$HOME/.claude.json" ]] && rm -f "$HOME/.claude.json"
+# Copy Claude's state from the persistent config-root store.
 if [[ -f "$HOME/.claude/claude.json" ]]; then
     cp "$HOME/.claude/claude.json" "$HOME/.claude.json"
 fi
@@ -99,14 +97,8 @@ claude_settings_merge "$HOME/.claude_seed" "$HOME/.claude/settings.json" >&2
 OPENCODE_RUNTIME_ROOT="${OPENCODE_RUNTIME_ROOT:-$HOME/.config/opencode}"
 OPENCODE_RUNTIME_SETTINGS="$OPENCODE_RUNTIME_ROOT/.opencode.json"
 OPENCODE_PERSISTENT_SETTINGS="$HOME/.opencode/.opencode.json"
-OPENCODE_LEGACY_SETTINGS="$HOME/.opencode/seed/.opencode.json"
 SETTINGS_COPY_HELPER="${SETTINGS_COPY_HELPER:-/home/dev/settings-copy.py}"
 if [[ -e "$OPENCODE_PERSISTENT_SETTINGS" || -L "$OPENCODE_PERSISTENT_SETTINGS" ]]; then
-    python3 "$SETTINGS_COPY_HELPER" \
-        --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
-elif [[ -e "$OPENCODE_LEGACY_SETTINGS" || -L "$OPENCODE_LEGACY_SETTINGS" ]]; then
-    python3 "$SETTINGS_COPY_HELPER" \
-        --copy-settings "$OPENCODE_LEGACY_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" >&2
     python3 "$SETTINGS_COPY_HELPER" \
         --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
 fi
@@ -218,7 +210,7 @@ persist_session_state() {
     [[ "$_DJINN_STATE_PERSISTED" == "1" ]] && return 0
     _DJINN_STATE_PERSISTED=1
 
-    # Persist claude.json state into volume for next container start
+    # Copy Claude's state to the persistent config-root store.
     reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.json"
     # → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
     reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"

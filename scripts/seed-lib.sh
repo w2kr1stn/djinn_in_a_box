@@ -32,8 +32,8 @@ fi
 # merge_settings: Deep-merge two JSON settings files with selective replacement.
 # Most keys are recursively merged (overlay wins on conflicts). Plugin-related
 # keys (enabledPlugins, extraKnownMarketplaces) are fully replaced by the
-# overlay to prevent stale entries from persisting on the Docker volume.
-#   $1 = base file    (e.g. volume settings)
+# overlay to prevent stale entries from persisting in the persistent settings store.
+#   $1 = base file    (e.g. persistent settings)
 #   $2 = overlay file (e.g. seed settings — authoritative for plugin keys)
 #   $3 = output file
 # -----------------------------------------------------------------------------
@@ -91,7 +91,7 @@ claude_settings_merge() {
         [[ -f "$seed_dir/CLAUDE.md" ]] || missing="CLAUDE.md"
         [[ -f "$seed_dir/settings.json" ]] || missing="${missing:+${missing}, }settings.json"
         ui_err "[workflow] config/claude seed incomplete (missing: ${missing}) — skipping settings merge."
-        ui_info "Run \`djinn init\` on the host (or restart via \`djinn start\`, which reseeds automatically)."
+        ui_info "Run \`djinn init\` or \`djinn doctor --fix\` on the host."
     else
         local base="$seed_dir/settings.json" out="$target_settings_file"
         if [[ -f "$seed_dir/settings.local.json" ]]; then
@@ -110,7 +110,7 @@ claude_settings_merge() {
                     || bad="${bad:+${bad}, }${seed_dir}/settings.local.json"
                 ui_err "[workflow] settings merge failed — ${bad:-unknown input} is not valid JSON."
                 ui_info "Fix it on the host under config/claude/. Keeping existing settings."
-                # A fresh volume must still get a permissions baseline — but never
+                # A fresh persistent settings store must still get a permissions baseline — but never
                 # a malformed one.
                 if [[ ! -f "$out" ]]; then
                     if jq -e . "$base" >/dev/null 2>&1; then
@@ -122,7 +122,7 @@ claude_settings_merge() {
             fi
         else
             ui_warn "[workflow] no settings.local.json — keeping existing settings; baseline only if none yet"
-            # NEVER clobber an existing volume settings.json with the bare baseline: a missing personal
+            # NEVER clobber an existing persistent settings.json with the bare baseline: a missing personal
             # overlay (e.g. a fresh git pull — settings.local.json is git-ignored) must not wipe the
             # user's prefs/marketplace. Only initialise from the baseline when no settings.json exists yet.
             [[ -f "$out" ]] || cp "$base" "$out"
@@ -130,22 +130,21 @@ claude_settings_merge() {
     fi
 }
 
-# Reverse-sync: Copy config files from volume back to seed mounts so
-# changes made inside the container are captured in the host repo.
+# Reverse-sync: copy a file changed inside the container back to its persistent host location.
 reverse_sync_file() {
-    local volume_file=$1 seed_file=$2
+    local runtime_file=$1 target_file=$2
     local seed_dir_path
-    seed_dir_path="$(dirname "$seed_file")"
-    # Missing volume file / missing seed dir are normal states — skip silently.
-    [[ -f "$volume_file" && -d "$seed_dir_path" ]] && {
+    seed_dir_path="$(dirname "$target_file")"
+    # Missing runtime file or missing target directory are normal states — skip silently.
+    [[ -f "$runtime_file" && -d "$seed_dir_path" ]] && {
         if [[ ! -w "$seed_dir_path" ]]; then
             # Same user outcome as a failed cp — same signal (not a silent skip).
-            ui_warn "could not persist ${volume_file} → ${seed_file} (target directory not writable)"
-        elif ! diff -q "$volume_file" "$seed_file" &>/dev/null; then
+            ui_warn "could not persist ${runtime_file} → ${target_file} (target directory not writable)"
+        elif ! diff -q "$runtime_file" "$target_file" &>/dev/null; then
             # Best-effort with warning: a single failed persist must not abort the
             # session-end sync chain or clobber the shell's exit code (set -e).
-            cp "$volume_file" "$seed_file" \
-                || ui_warn "could not persist ${volume_file} → ${seed_file}"
+            cp "$runtime_file" "$target_file" \
+                || ui_warn "could not persist ${runtime_file} → ${target_file}"
         fi
     }
     return 0
@@ -154,30 +153,30 @@ reverse_sync_file() {
 # Claude settings need a narrow reverse-sync: workflow-owned hook fragments are
 # generated from the baseline and must never become personal overlay state.
 reverse_sync_claude_settings() {
-    local volume_file=$1 seed_file=$2
+    local runtime_file=$1 target_file=$2
     local seed_dir_path tmp
-    seed_dir_path="$(dirname "$seed_file")"
-    tmp="${seed_file}.tmp"
+    seed_dir_path="$(dirname "$target_file")"
+    tmp="${target_file}.tmp"
 
-    # Missing volume file / missing seed dir are normal states — skip silently.
-    [[ -f "$volume_file" && -d "$seed_dir_path" ]] || return 0
+    # Missing runtime file or missing target directory are normal states — skip silently.
+    [[ -f "$runtime_file" && -d "$seed_dir_path" ]] || return 0
 
     if [[ ! -w "$seed_dir_path" ]]; then
-        ui_warn "could not persist ${volume_file} → ${seed_file} (target directory not writable)"
+        ui_warn "could not persist ${runtime_file} → ${target_file} (target directory not writable)"
         return 0
     fi
 
-    if ! _claude_filter_managed_hooks "$volume_file" "$tmp"; then
+    if ! _claude_filter_managed_hooks "$runtime_file" "$tmp"; then
         rm -f "$tmp"
-        ui_warn "could not persist ${volume_file} → ${seed_file} (settings are not valid JSON)"
+        ui_warn "could not persist ${runtime_file} → ${target_file} (settings are not valid JSON)"
         return 0
     fi
 
-    if [[ -f "$seed_file" ]] && diff -q "$tmp" "$seed_file" &>/dev/null; then
+    if [[ -f "$target_file" ]] && diff -q "$tmp" "$target_file" &>/dev/null; then
         rm -f "$tmp"
-    elif ! mv "$tmp" "$seed_file"; then
+    elif ! mv "$tmp" "$target_file"; then
         rm -f "$tmp"
-        ui_warn "could not persist ${volume_file} → ${seed_file}"
+        ui_warn "could not persist ${runtime_file} → ${target_file}"
     fi
 
     return 0

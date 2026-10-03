@@ -149,7 +149,7 @@ def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
             timeout=30,
         )
         assert before.returncode == 0, before.stderr
-        migrated = subprocess.run(
+        base_paths_cleared = subprocess.run(
             [
                 "docker",
                 "run",
@@ -166,7 +166,7 @@ def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
             check=False,
             timeout=30,
         )
-        assert migrated.returncode == 0, migrated.stderr
+        assert base_paths_cleared.returncode == 0, base_paths_cleared.stderr
         source_directories = {
             roots.shared_root / "claude" / "projects",
             roots.local_root / "claude" / "plugins" / "cache",

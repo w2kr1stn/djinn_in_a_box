@@ -318,8 +318,8 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     opencode_seed.mkdir(parents=True)
     instructions = b"OpenCode instructions.\n"
     (opencode_seed / "AGENTS.md").write_bytes(instructions)
-    legacy_opencode_settings = b'{"personal":true}\n'
-    (opencode_seed / ".opencode.json").write_bytes(legacy_opencode_settings)
+    personal_opencode_settings = b'{"personal":true}\n'
+    (tmp_path / ".opencode" / ".opencode.json").write_bytes(personal_opencode_settings)
     canonical = tmp_path / "canonical"
     canonical.mkdir()
     (canonical / ".djinn-config-sync.json").write_text(
@@ -381,7 +381,8 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert "MCP Gateway" not in result.stderr
     persistent_settings = tmp_path / ".opencode" / ".opencode.json"
     assert json.loads(persistent_settings.read_bytes())["personal"] is True
-    assert (opencode_seed / ".opencode.json").read_bytes() == legacy_opencode_settings
+    runtime_settings = tmp_path / "runtime-opencode" / ".opencode.json"
+    assert runtime_settings.read_bytes() == personal_opencode_settings
 
 
 def test_firewall_startup_uses_plain_ascii_markers(tmp_path: Path) -> None:
