@@ -245,10 +245,11 @@ class TestEnsureHostEnv:
         self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
-        # ensure_host_env touches get_project_root()/config/claude. Without this
-        # patch that is the real checkout — this test created the repo's own
-        # config/claude/AGENTS.md. Tests must not write into the working copy.
-        monkeypatch.setattr(docker_mod, "get_project_root", lambda: mock_home / "project")
+        project = mock_home / "project"
+        claude_root = project / "config/claude"
+        claude_root.mkdir(parents=True)
+        (claude_root / "settings.json").write_text("{}\n")
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: project)
         config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
 
         ensure_host_env(config)
@@ -266,6 +267,8 @@ class TestEnsureHostEnv:
         # Idempotent: a second run must not raise.
         ensure_host_env(config)
         assert (mock_home / ".gitconfig").is_file()
+        assert not (claude_root / "AGENTS.md").exists()
+        assert not (claude_root / "CLAUDE.md").exists()
 
     def test_preserves_existing_gitconfig(
         self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -280,37 +283,6 @@ class TestEnsureHostEnv:
 
         assert "existing" in gitconfig.read_text()  # never clobbered
 
-    def test_initialized_claude_root_gets_empty_companion_mount_source(
-        self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        project = mock_home / "project"
-        claude_root = project / "config" / "claude"
-        claude_root.mkdir(parents=True)
-        (claude_root / "CLAUDE.md").write_text("seed\n")
-        monkeypatch.setattr(docker_mod, "get_project_root", lambda: project)
-        config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
-
-        ensure_host_env(config)
-
-        companion = claude_root / "AGENTS.md"
-        assert companion.is_file()
-        assert companion.read_bytes() == b""
-        companion.write_text("projected\n")
-        ensure_host_env(config)
-        assert companion.read_text() == "projected\n"
-
-    def test_uninitialized_claude_root_never_gets_companion(
-        self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        project = mock_home / "project"
-        claude_root = project / "config" / "claude"
-        claude_root.mkdir(parents=True)
-        monkeypatch.setattr(docker_mod, "get_project_root", lambda: project)
-        config = AppConfig(code_dir=mock_home, config_root=mock_home / ".djinn" / "config")
-
-        ensure_host_env(config)
-
-        assert not (claude_root / "AGENTS.md").exists()
 
 
 class TestDoctor:

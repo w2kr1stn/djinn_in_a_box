@@ -36,8 +36,7 @@ def _workspace(tmp_path: Path, source: ConfigSyncSource = "claude") -> tuple[Pat
     project = tmp_path / "project"
     for tool in ("claude", "codex", "opencode"):
         (project / "config" / tool).mkdir(parents=True)
-    instruction = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "opencode": "AGENTS.md"}
-    (project / "config" / source / instruction[source]).write_text("shared workflow\n")
+    (project / "config" / source / "AGENTS.md").write_text("shared workflow\n")
     config_path = tmp_path / "djinn.toml"
     runtime = tmp_path / "runtime"
     save_config(
@@ -91,21 +90,6 @@ def test_host_runtime_publisher_syncs_selected_view_and_state_manifest(tmp_path:
     assert result.success
     assert (host_codex / "AGENTS.md").read_text() == "shared workflow\n"
     assert (host_codex / RUNTIME_MANIFEST_NAME).is_file()
-
-
-def test_preflight_adopts_only_the_declared_zero_byte_companion(tmp_path: Path) -> None:
-    project, config_path, _runtime = _workspace(tmp_path)
-    companion = project / "config/claude/AGENTS.md"
-    companion.write_bytes(b"")
-    target = WorkflowDeliveryTarget("codex", tmp_path / "host-codex", provision=True)
-
-    audit = audit_config_sync(project, config_path=config_path)
-    result = prepare_config_workflow(project, (target,), config_path=config_path)
-
-    assert audit.drift_classes == (DriftClass.SOURCE_CHANGED,)
-    assert result.success
-    assert companion.read_text() == "shared workflow\n"
-    assert (target.destination_root / "AGENTS.md").read_text() == "shared workflow\n"
 
 
 def test_preflight_reports_one_class_and_remedy_without_workflow_body(tmp_path: Path) -> None:
@@ -507,10 +491,11 @@ def test_canonical_config_reload_os_error_is_not_reported_as_publish_failure(
     assert str(target.destination_root) not in problem.message
 
 
+@pytest.mark.parametrize("source", ("claude", "codex", "opencode"))
 def test_compose_claude_uses_direct_mounts_and_codex_uses_publisher(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: ConfigSyncSource
 ) -> None:
-    project, config_path, runtime = _workspace(tmp_path)
+    project, config_path, runtime = _workspace(tmp_path, source=source)
     claude_root = runtime / "claude"
     codex_root = runtime / "codex"
     claude_root.mkdir(parents=True)
@@ -533,8 +518,45 @@ def test_compose_claude_uses_direct_mounts_and_codex_uses_publisher(
     )
 
     assert result.success
+    instructions = project / "config/claude/AGENTS.md"
+    assert instructions.is_file()
+    assert stat.S_ISREG(instructions.lstat().st_mode)
+    assert instructions.read_text() == "shared workflow\n"
     assert not (claude_root / RUNTIME_MANIFEST_NAME).exists()
     assert (codex_root / RUNTIME_MANIFEST_NAME).is_file()
+
+
+@pytest.mark.parametrize("source", ("claude", "codex", "opencode"))
+@pytest.mark.parametrize("invalid_entry", ("missing", "directory"))
+def test_compose_preparation_refuses_unusable_instruction_mount_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: ConfigSyncSource,
+    invalid_entry: str,
+) -> None:
+    project, config_path, runtime = _workspace(tmp_path, source=source)
+    monkeypatch.setattr(workflow_module, "ensure_host_env", _ensure_host_env)
+    if source != "claude":
+        assert prepare_config_workflow(project, config_path=config_path).success
+    instructions = project / "config/claude/AGENTS.md"
+    instructions.unlink()
+    if invalid_entry == "directory":
+        instructions.mkdir()
+
+    result = prepare_config_workflow(
+        project,
+        (WorkflowDeliveryTarget("claude", runtime / "claude"),),
+        config_path=config_path,
+        require_compose_host_env=True,
+        container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+    )
+
+    assert not result.success
+    assert result.problems[0].identifier == (
+        "invalid-or-semantic" if source == "claude" else "target-drift"
+    )
+    assert not instructions.is_file()
+    assert not (runtime / "claude" / RUNTIME_MANIFEST_NAME).exists()
 
 
 def test_compose_image_gate_blocks_before_audit_or_runtime_write(
@@ -542,7 +564,7 @@ def test_compose_image_gate_blocks_before_audit_or_runtime_write(
 ) -> None:
     project, config_path, runtime = _workspace(tmp_path)
     sentinel = "PRIVATE-WORKFLOW-BODY"
-    (project / "config/claude/CLAUDE.md").write_text(sentinel)
+    (project / "config/claude/AGENTS.md").write_text(sentinel)
     monkeypatch.setattr(
         workflow_module,
         "workflow_image_compatible",
@@ -678,7 +700,7 @@ def test_runtime_publish_rechecks_source_after_delivery_view_load(
             config_path=config_path,
             canonical_lease=canonical_lease,
         )
-        (project / "config/claude/CLAUDE.md").write_text("operator edit\n")
+        (project / "config/claude/AGENTS.md").write_text("operator edit\n")
         return loaded
 
     monkeypatch.setattr(

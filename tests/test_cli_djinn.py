@@ -1,6 +1,8 @@
 """Tests for the djinn CLI entry point."""
 
 import errno
+import shutil
+import stat
 import subprocess
 import tomllib
 from collections.abc import Iterator
@@ -17,6 +19,9 @@ from djinn_in_a_box.config.loader import load_config as load_config_file
 from djinn_in_a_box.config.loader import save_config as save_config_file
 from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
 from djinn_in_a_box.core import config_lock
+from djinn_in_a_box.core.config_workflow import prepare_config_workflow
+from djinn_in_a_box.core.docker import WorkflowImageCompatibility, ensure_host_env
+from djinn_in_a_box.core.seeding import seed_config
 
 runner = CliRunner()
 
@@ -125,6 +130,48 @@ class TestDjinnVersion:
 
 class TestInitCommand:
     """Tests for the init command."""
+
+    def test_fresh_init_seeds_regular_instruction_file_before_compose(
+        self, mock_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = mock_home / "djinn"
+        shutil.copytree(
+            Path(__file__).resolve().parents[1] / "templates/seed",
+            project / "templates/seed",
+        )
+        config_dir = mock_home / ".config/djinn_in_a_box"
+        config_file = config_dir / "config.toml"
+        _patch_init_dependencies(monkeypatch, config_dir, config_file)
+        monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.get_project_root", lambda: project)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.seed_config", seed_config)
+        monkeypatch.setattr("djinn_in_a_box.commands.config.ensure_host_env", ensure_host_env)
+        monkeypatch.setattr(
+            "djinn_in_a_box.commands.config.save_config",
+            lambda config: save_config_file(config, config_file),
+        )
+        monkeypatch.setattr("djinn_in_a_box.config.zones.ZONES_FILE", config_dir / "zones.toml")
+        projects_dir = mock_home / "projects"
+        projects_dir.mkdir()
+
+        result = runner.invoke(app, ["init"], input=f"{projects_dir}\nUTC\nn\n")
+
+        assert result.exit_code == 0, result.output
+        instructions = project / "config/claude/AGENTS.md"
+        assert instructions.is_file()
+        assert stat.S_ISREG(instructions.lstat().st_mode)
+        content = instructions.read_text()
+        assert "read the relevant material in its `.agents/` directory." in content
+        assert not (instructions.parent / "CLAUDE.md").exists()
+        prepared = prepare_config_workflow(
+            project,
+            config_path=config_file,
+            require_compose_host_env=True,
+            container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,
+        )
+        assert prepared.success
+        assert stat.S_ISREG(instructions.lstat().st_mode)
+        assert instructions.read_text() == content
 
     def test_init_creates_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

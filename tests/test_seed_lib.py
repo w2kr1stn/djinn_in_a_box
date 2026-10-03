@@ -57,7 +57,7 @@ def write_json(path: Path, data: dict[str, object]) -> None:
 def test_minimal_claude_seed_without_skills_dir_merges_settings(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     write_json(seed_dir / "settings.json", {"permissions": {"allow": ["Read"]}})
 
     target_settings = tmp_path / ".claude" / "settings.json"
@@ -80,7 +80,7 @@ def test_minimal_claude_seed_without_skills_dir_merges_settings(tmp_path: Path) 
 def test_claude_settings_local_overlay_wins_over_baseline(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     write_json(
         seed_dir / "settings.json",
         {
@@ -118,7 +118,7 @@ def test_claude_settings_local_overlay_wins_over_baseline(tmp_path: Path) -> Non
 def test_claude_managed_hooks_win_after_local_overlay(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     write_json(
         seed_dir / "settings.json",
         {
@@ -167,7 +167,7 @@ def test_claude_managed_hooks_win_after_local_overlay(tmp_path: Path) -> None:
 def test_existing_target_settings_are_not_clobbered_without_local_overlay(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     write_json(seed_dir / "settings.json", {"baseline": True})
 
     target_settings = tmp_path / ".claude" / "settings.json"
@@ -188,7 +188,7 @@ def test_existing_target_settings_are_not_clobbered_without_local_overlay(tmp_pa
 def test_malformed_local_overlay_fails_loud_and_keeps_existing_settings(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     write_json(seed_dir / "settings.json", {"baseline": True})
     (seed_dir / "settings.local.json").write_text("{not valid json", encoding="utf-8")
 
@@ -215,7 +215,7 @@ def test_malformed_local_overlay_on_fresh_store_still_initialises_baseline(
 ) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     write_json(seed_dir / "settings.json", {"baseline": True})
     (seed_dir / "settings.local.json").write_text("{not valid json", encoding="utf-8")
 
@@ -237,7 +237,7 @@ def test_malformed_local_overlay_on_fresh_store_still_initialises_baseline(
 def test_malformed_baseline_is_named_and_never_installed(tmp_path: Path) -> None:
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    (seed_dir / "CLAUDE.md").write_text("Starter instructions.\n", encoding="utf-8")
+    (seed_dir / "AGENTS.md").write_text("Starter instructions.\n", encoding="utf-8")
     # The BASELINE is malformed (the hand-edited file); the overlay is valid.
     (seed_dir / "settings.json").write_text("{trailing comma,}", encoding="utf-8")
     write_json(seed_dir / "settings.local.json", {"local": True})

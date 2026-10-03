@@ -51,14 +51,12 @@ def _view(
     files: tuple[PublishedFile, ...] = (),
     fragments: tuple[CarrierFragment, ...] = (),
     target_tool: str | None = None,
-    provisioning_placeholder_paths: tuple[PurePosixPath, ...] = (),
 ) -> WorkflowView:
     return WorkflowView(
         "claude",
         (_file("AGENTS.md", marker), *files),
         fragments,
         target_tool=target_tool,
-        provisioning_placeholder_paths=provisioning_placeholder_paths,
     )
 
 
@@ -153,35 +151,7 @@ def test_unmanaged_collision_and_managed_edit_fail_closed(tmp_path: Path) -> Non
     assert _tree(target) == before_edit
 
 
-def test_zero_byte_claude_companion_adopts_but_nonempty_file_blocks(tmp_path: Path) -> None:
-    canonical, target = _roots(tmp_path)
-    _write(target / "AGENTS.md", b"")
-
-    adopted = _publish(
-        canonical,
-        target,
-        _view(
-            target_tool="claude",
-            provisioning_placeholder_paths=(_p("AGENTS.md"),),
-        ),
-    )
-
-    assert adopted.success
-    assert (target / "AGENTS.md").read_bytes() == b"one\n"
-    (target / RUNTIME_MANIFEST_NAME).unlink()
-    (target / "AGENTS.md").write_bytes(b"operator content\n")
-    result = _publish(
-        canonical,
-        target,
-        _view(
-            target_tool="claude",
-            provisioning_placeholder_paths=(_p("AGENTS.md"),),
-        ),
-    )
-    assert result.drift_class is DriftClass.COLLISION
-
-
-@pytest.mark.parametrize("target_tool", ("codex", "opencode"))
+@pytest.mark.parametrize("target_tool", ("claude", "codex", "opencode"))
 def test_zero_byte_native_agents_file_is_a_collision(
     tmp_path: Path, target_tool: str
 ) -> None:

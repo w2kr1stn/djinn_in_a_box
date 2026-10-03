@@ -256,7 +256,7 @@ def test_full_surface_projection_excludes_hooks_and_preserves_native_ones(
 
     assert result.success
     assert (target_root / owned.instruction_path).is_file()
-    assert (target_root / owned.instruction_companion).is_file()
+    assert not (target_root / "CLAUDE.md").exists()
     assert (
         target_root / ("agents/reviewer.toml" if target == "codex" else "agents/reviewer.md")
     ).is_file()
@@ -509,7 +509,7 @@ def test_claude_source_only_command_survives_a_blocked_source_switch_without_pro
 def test_portable_runtime_named_skill_projects_like_other_skills(tmp_path: Path) -> None:
     project, config_path = _workspace(tmp_path, "claude")
     source = project / "config/claude"
-    _write(source, "CLAUDE.md", "Instructions.\n")
+    _write(source, "AGENTS.md", "Instructions.\n")
     skill = _write(
         source,
         "skills/convergence-loop/SKILL.md",
@@ -568,7 +568,7 @@ def test_escaping_paths_block_without_target_or_manifest_mutation(
 ) -> None:
     project, config_path = _workspace(tmp_path, "claude")
     root = project / "config" / "claude"
-    _write(root, "CLAUDE.md", "Instructions.\n")
+    _write(root, "AGENTS.md", "Instructions.\n")
     outside = tmp_path / "outside.txt"
     outside.write_text("outside\n")
     escaped = root / "context" / "escaped.txt"

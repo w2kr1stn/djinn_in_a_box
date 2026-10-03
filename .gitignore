@@ -16,7 +16,6 @@ Thumbs.db
 
 # Session/Task files (AI agent working files)
 /.claude/
-/CLAUDE.md
 /PLAN.md
 /TASKS.yml
 

@@ -110,10 +110,8 @@ class NativeOnlySpec(NamedTuple):
 
 class ToolOwnership(NamedTuple):
     instruction_path: PurePosixPath
-    instruction_companion: PurePosixPath
     agent_suffix: str
     native_only: tuple[NativeOnlySpec, ...]
-    provisioning_placeholders: tuple[PurePosixPath, ...] = ()
 
     @property
     def hooks(self) -> tuple[NativeOnlySpec, ...]:
@@ -131,21 +129,17 @@ def _native_specs(tool: ConfigSyncSource) -> tuple[NativeOnlySpec, ...]:
 
 OWNERSHIP_MATRIX: Mapping[ConfigSyncSource, ToolOwnership] = {
     "claude": ToolOwnership(
-        _p("CLAUDE.md"),
         _p("AGENTS.md"),
         ".md",
         _native_specs("claude"),
-        (_p("AGENTS.md"),),
     ),
     "codex": ToolOwnership(
         _p("AGENTS.md"),
-        _p("CLAUDE.md"),
         ".toml",
         _native_specs("codex"),
     ),
     "opencode": ToolOwnership(
         _p("AGENTS.md"),
-        _p("CLAUDE.md"),
         ".md",
         _native_specs("opencode"),
     ),
@@ -290,10 +284,9 @@ def render_native_workflow(
         if artifact.native_only_for is not None:
             continue
         if artifact.kind == ArtifactKind.INSTRUCTIONS:
-            for path in (owned.instruction_path, owned.instruction_companion):
-                _append_portable_file(
-                    files, unresolved, _rendered(path, artifact), artifact, target
-                )
+            _append_portable_file(
+                files, unresolved, _rendered(owned.instruction_path, artifact), artifact, target
+            )
         elif artifact.kind == ArtifactKind.AGENT:
             rendered = _render_agent(artifact, target)
             if rendered is None:
@@ -357,16 +350,13 @@ def validate_rendered_workflow(
             issues.append(_issue(f"duplicate-path:{path}", "Rendered path is duplicated.", path))
         paths.add(path)
         issues.extend(_file_issues(tool, item))
-    for path in (
-        OWNERSHIP_MATRIX[tool].instruction_path,
-        OWNERSHIP_MATRIX[tool].instruction_companion,
-    ):
-        if path not in paths:
-            issues.append(
-                _issue(
-                    f"instructions:missing:{path}", "Rendered instruction form is missing.", path
-                )
+    path = OWNERSHIP_MATRIX[tool].instruction_path
+    if path not in paths:
+        issues.append(
+            _issue(
+                f"instructions:missing:{path}", "Rendered instruction form is missing.", path
             )
+        )
     seen: set[tuple[PurePosixPath, tuple[str, ...]]] = set()
     for item in fragments:
         key = item.carrier_path, item.key_path
@@ -395,7 +385,7 @@ def is_safe_relative_path(path: PurePosixPath) -> bool:
 def path_is_owned(tool: ConfigSyncSource, path: PurePosixPath) -> bool:
     owned = OWNERSHIP_MATRIX[tool]
     return is_safe_relative_path(path) and (
-        path in {owned.instruction_path, owned.instruction_companion}
+        path == owned.instruction_path
         or len(path.parts) == 2
         and path.parts[0] == "agents"
         and path.suffix == owned.agent_suffix
@@ -434,11 +424,6 @@ def native_only_input_paths(tool: ConfigSyncSource) -> frozenset[PurePosixPath]:
         for path in (item.script_path, item.carrier_path)
         if path is not None
     )
-
-
-def provisioning_placeholder_paths(tool: ConfigSyncSource) -> frozenset[PurePosixPath]:
-    """Return mount-source placeholders declared by the ownership matrix."""
-    return frozenset(OWNERSHIP_MATRIX[tool].provisioning_placeholders)
 
 
 def native_only_fragment_is_owned(

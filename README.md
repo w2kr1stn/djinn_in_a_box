@@ -255,11 +255,16 @@ select which agent `djinn run` or `djinn session` launches.
 
 The source stays in its native project-local root:
 
-| Tool | Authoritative root instructions | Generated companion | Native agents | Native commands |
-| --- | --- | --- | --- | --- |
-| Claude Code | `config/claude/CLAUDE.md` | `AGENTS.md` | `agents/*.md` | `commands/*.md` |
-| Codex | `config/codex/AGENTS.md` | `CLAUDE.md` | `agents/*.toml` | `skills/command-*/**` |
-| OpenCode | `config/opencode/AGENTS.md` | `CLAUDE.md` | `agents/*.md` | `commands/*.md` |
+| Tool | Authoritative root instructions | Native agents | Native commands |
+| --- | --- | --- | --- |
+| Claude Code | `config/claude/AGENTS.md` | `agents/*.md` | `commands/*.md` |
+| Codex | `config/codex/AGENTS.md` | `agents/*.toml` | `skills/command-*/**` |
+| OpenCode | `config/opencode/AGENTS.md` | `agents/*.md` | `commands/*.md` |
+
+All three tools use `AGENTS.md` for global instructions. Agent-relevant material
+for a working directory lives in that directory's `.agents/` directory and is
+read before working there. Global native skills, agents, commands, context, and
+scripts remain in their tool-native locations.
 
 The cross-tool projection surface also includes `skills/<name>/**`,
 `context/**`, and `scripts/**`. Hooks are native-only per tool: the known
@@ -338,8 +343,7 @@ an image marked `djinn.workflow.publisher=1`; an image without that label stops
 preparation with `Rebuild/recreate required.` before Compose starts or a
 running-container refresh executes.
 
-Compose Claude is the deliberate exception: it is manifestless and uses direct
-mounts, including both `CLAUDE.md` and the generated `AGENTS.md` companion,
+Compose Claude is manifestless and uses direct mounts, including `AGENTS.md`,
 together with the existing settings merge. The publisher never writes into the
 Compose Claude runtime root.
 
@@ -375,7 +379,7 @@ Only `djinn init` and `djinn doctor --fix` copy missing seed targets from
 
 | Seed source | Local target | Purpose |
 | --- | --- | --- |
-| `templates/seed/config/claude/CLAUDE.md` | `config/claude/CLAUDE.md` | neutral Claude Code instruction starting point |
+| `templates/seed/config/claude/AGENTS.md` | `config/claude/AGENTS.md` | neutral global instructions with the per-directory `.agents/` convention |
 | `templates/seed/config/claude/settings.json` | `config/claude/settings.json` | minimal Claude Code settings |
 | `templates/seed/config/claude/skills/` | `config/claude/skills/` | empty local skills directory |
 | `templates/seed/config/claude/commands/` | `config/claude/commands/` | empty local commands directory |
@@ -392,7 +396,7 @@ Existing targets are left alone when they already have the expected type. This
 means seed files are starting points, not managed config.
 
 Bring your own native workflow in the root selected by `config_sync.source`.
-The seeded Claude `CLAUDE.md`, `settings.json`, `mcp-servers.json`, and empty
+The seeded Claude `AGENTS.md`, `settings.json`, `mcp-servers.json`, and empty
 local directories are deliberately minimal. Replace the selected source with
 your own instructions, settings, commands, skills, hooks, or subagents as
 needed; MCP entries remain separate.
@@ -523,7 +527,7 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `~/.ssh` | `/home/dev/.ssh:ro` | Read-only SSH access |
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
-| `./config/claude/CLAUDE.md` and `AGENTS.md` | matching files in `/home/dev/.claude` | Direct Compose-Claude instruction mounts |
+| `./config/claude/AGENTS.md` | `/home/dev/.claude/AGENTS.md` | Direct Compose-Claude instruction mount |
 | `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |

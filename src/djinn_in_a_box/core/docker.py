@@ -30,7 +30,6 @@ from djinn_in_a_box.core.exceptions import (
     ZoneRootValidationError,
 )
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
-from djinn_in_a_box.core.seeding import workflow_root_is_uninitialized
 
 DJINN_NETWORK: str = "djinn-network"
 """Docker network name for Djinn containers."""
@@ -76,7 +75,6 @@ _COMPOSE_DEV_MOUNT_TARGETS = (
     Path("/home/dev/.claude/agents"),
     Path("/home/dev/.claude/context"),
     Path("/home/dev/.claude/scripts"),
-    Path("/home/dev/.claude/CLAUDE.md"),
     Path("/home/dev/.claude/AGENTS.md"),
     Path("/home/dev/.opencode/seed"),
     Path("/home/dev/.djinn-canonical"),
@@ -1582,13 +1580,6 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
         for zone in ("local", "shared"):
             for relative_path in by_zone[zone]:
                 _ensure_zone_target(root, agent, relative_path)
-
-    claude_root = get_project_root() / "config" / "claude"
-    companion = claude_root / "AGENTS.md"
-    if not workflow_root_is_uninitialized(claude_root) and not (
-        companion.exists() or companion.is_symlink()
-    ):
-        companion.touch(exist_ok=False)
 
     djinn_dir = Path.home() / ".djinn"
     for sub in ("sessions", "backups"):

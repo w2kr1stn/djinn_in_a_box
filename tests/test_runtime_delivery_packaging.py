@@ -20,6 +20,7 @@ def test_runtime_delivery_packaging_uses_shared_publisher_and_canonical_mount() 
     assert "opencode-workflow" + "-delivery.py" not in dockerfile
     assert "./config:/home/dev/.djinn-canonical:ro" in compose
     assert "./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md" in compose
+    assert ":/home/dev/.claude/CLAUDE.md" not in compose
     assert "/home/dev/workflow-publisher.py" in entrypoint
     assert "--canonical-root \"$CANONICAL_CONFIG_ROOT\"" in entrypoint
     assert "/home/dev/workflow-publisher.py" in session

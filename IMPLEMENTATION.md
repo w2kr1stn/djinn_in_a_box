@@ -304,11 +304,11 @@ exclusive lock on the existing `config/` directory.
 The workflow source is deployment-wide, including the shared demo deployment.
 The implementation has no per-tenant source selector. Canonical native roots
 remain under the ignored project-local `config/{claude,codex,opencode}` tree.
-Only the selected tool's native instruction form is authoritative:
+Only the selected tool's `AGENTS.md` is authoritative:
 
 | Category          | Claude Code                                         | Codex                                            | OpenCode                             |
 | ----------------- | --------------------------------------------------- | ------------------------------------------------ | ------------------------------------ |
-| Root instructions | `CLAUDE.md` plus managed `AGENTS.md`                | `AGENTS.md` plus managed `CLAUDE.md`             | `AGENTS.md` plus managed `CLAUDE.md` |
+| Root instructions | `AGENTS.md`                                         | `AGENTS.md`                                      | `AGENTS.md`                          |
 | Agents            | `agents/*.md`                                       | `agents/*.toml`                                  | `agents/*.md`                        |
 | Skills            | `skills/<name>/**`                                  | `skills/<name>/**`                               | `skills/<name>/**`                   |
 | Commands          | `commands/*.md`                                     | `skills/command-<name>/**`                       | `commands/*.md`                      |
@@ -433,14 +433,14 @@ local root-level `config/`, `packages.txt`, and `tools/tools.txt` locations.
 It also ensures empty `config/claude`, `config/codex`, and `config/opencode`
 workflow roots. The source-aware `seed_config(..., source=...)` entry point only
 installs the Claude baseline when Claude is selected and that root is
-uninitialized; generated instruction companions are not seed files.
+uninitialized.
 `seed_config()` is called only by `djinn init` and `djinn doctor --fix`, before
 `ensure_host_env()`. Status, audit, sync, and workflow preflight never seed or
 repair a source root.
 
 `SEED_MANIFEST` defines every seed source, target, and kind:
 
-- `config/claude/CLAUDE.md`
+- `config/claude/AGENTS.md`
 - `config/claude/settings.json`
 - `config/claude/skills`
 - `config/claude/commands`
@@ -452,6 +452,10 @@ repair a source root.
 - `config/agents.toml.example`
 - `tools.txt` copied to `tools/tools.txt`
 - `packages.txt`
+
+The seeded `AGENTS.md` instructs agents to read agent-relevant material from a
+working directory's `.agents/` directory before working there. Djinn provides no
+additional per-directory discovery, mounting, or synchronization.
 
 `seed_config(project_root)` is copy-if-absent. Existing targets of the correct
 type are never overwritten. Wrong-type targets are repaired by `_repair_wrong_type()`.
@@ -485,7 +489,7 @@ publication.
   recursive merge keys, so stale plugin entries do not persist.
 - `claude_settings_merge(seed_dir, target_settings_file)`: merges the tracked
   Claude settings baseline with optional `settings.local.json`. It has a
-  minimal-seed guard: if `CLAUDE.md` or `settings.json` is missing, it prints a
+  minimal-seed guard: if `AGENTS.md` or `settings.json` is missing, it prints a
   repair hint and skips the merge rather than writing incomplete state. The
   baseline wins for the owned `SessionStart`, `PreToolUse`, and `Stop` hook
   fragments; neighboring settings remain overlay-controlled.
@@ -577,7 +581,7 @@ section while remaining on stderr.
 
 For Claude, `docker-compose.yml` mounts selected directories and files from
 root-level `config/claude` directly into the live `~/.claude` tree, including
-both `CLAUDE.md` and the generated `AGENTS.md` companion. Only settings are
+`AGENTS.md` as the root instruction file. Only settings are
 merged. This Compose-Claude runtime is manifestless: the publisher never writes
 to `${DJINN_CONFIG_ROOT}/claude`. In-session settings changes are reverse-synced
 to `config/claude/settings.local.json`, not to the tracked baseline template.
@@ -628,7 +632,7 @@ Common mounts include:
   metadata
 - read-only `~/.ssh` and `~/.gitconfig`
 - the writable `config/claude` seed mount plus nested direct mounts for its
-  managed files, including `CLAUDE.md` and `AGENTS.md`
+  workflow files, including `AGENTS.md`
 - the read-only canonical `./config` mount at `/home/dev/.djinn-canonical` for
   the shared publisher
 - `${CODE_DIR}` to `/home/dev/projects`

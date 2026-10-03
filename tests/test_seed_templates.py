@@ -11,6 +11,11 @@ from djinn_in_a_box.core.seeding import SEED_MANIFEST
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SEED_ROOT = PROJECT_ROOT / "templates" / "seed"
 PRIVATE_TOKENS_PATH = PROJECT_ROOT / "config" / "private-tokens.txt"
+_DIRECTORY_CONTEXT = (
+    "Agent-relevant material for a working directory lives in that directory's `.agents/` "
+    "directory. Before working in a directory, read the relevant material in its `.agents/` "
+    "directory."
+)
 
 
 def _seed_files() -> list[Path]:
@@ -86,9 +91,22 @@ def test_manifest_sources_exist_in_seed_templates() -> None:
 
 
 def test_seed_claude_references_no_unshipped_surfaces() -> None:
-    text = (SEED_ROOT / "config" / "claude" / "CLAUDE.md").read_text(encoding="utf-8")
-    lowered = text.lower()
+    text = (SEED_ROOT / "config" / "claude" / "AGENTS.md").read_text(encoding="utf-8")
+    lowered = text.replace(_DIRECTORY_CONTEXT, "").lower()
 
     for token in ("skills/", "commands/", "agents/", "scripts/", "hook"):
         assert token not in lowered
     assert re.search(r"\b[\w.-]+\.(?:py|sh)\b", text) is None
+
+
+def test_seed_global_instructions_explain_directory_context() -> None:
+    root = SEED_ROOT / "config" / "claude"
+    instructions = root / "AGENTS.md"
+
+    assert instructions.is_file()
+    text = instructions.read_text(encoding="utf-8")
+    assert text.startswith("# Global Agent Instructions\n")
+    assert "This is your global agent instructions file." in text
+    assert _DIRECTORY_CONTEXT in text
+    assert {path.name for path in root.glob("*.md")} == {"AGENTS.md"}
+    assert not (root / "CLAUDE.md").exists()
