@@ -356,8 +356,7 @@ djinn doctor
 
 The doctor command checks Docker, the Docker daemon, socket permissions, Compose
 v2, Buildx, the main config, the projects directory, the config root, the image, the
-Docker network, the optional Docker MCP plugin, desktop notification detection,
-and seed target presence.
+Docker network, desktop notification detection, and seed target presence.
 
 For idempotent local repairs:
 
@@ -769,9 +768,7 @@ Docker image, Docker volumes, config file, config root, backups, or sessions.
 
 MCP support is optional. The base compose file mounts the local
 `config/mcp-servers.json` registry into the container, and the entrypoint
-registers enabled entries for supported agents at startup. The separate
-`mcpgateway` CLI manages a Docker MCP gateway when you want one. See
-[mcp/README.md](mcp/README.md) for that workflow.
+registers enabled entries for supported agents at startup.
 
 ## Suite Mode
 

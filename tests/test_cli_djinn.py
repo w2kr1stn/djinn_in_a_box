@@ -2,6 +2,7 @@
 
 import errno
 import subprocess
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,12 @@ from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
 from djinn_in_a_box.core import config_lock
 
 runner = CliRunner()
+
+
+def test_project_scripts_are_exact() -> None:
+    with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as project_file:
+        project = tomllib.load(project_file)
+    assert set(project["project"]["scripts"]) == {"fmt", "test", "clean", "djinn"}
 
 
 def _patch_init_dependencies(
@@ -112,11 +119,10 @@ class TestInitCommand:
         assert config_file.exists()
         combined = result.stdout + result.output
         assert "Next steps" in combined
-        assert "optional" in combined
-        # Split assertions: Rich markup boundaries inject ANSI codes mid-line
-        # when color output is forced (FORCE_COLOR) — never assert across them.
-        assert "mcpgateway start" in combined
-        assert "# MCP tools — not required" in combined
+        assert "djinn build" in combined
+        assert "djinn migrate-zones" in combined
+        assert "djinn start" in combined
+        assert "(optional)" not in combined
         assert combined.index("djinn migrate-zones") < combined.index("djinn start")
 
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

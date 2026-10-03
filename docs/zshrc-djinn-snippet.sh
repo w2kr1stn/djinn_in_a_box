@@ -12,18 +12,14 @@
 #
 # 2. Remove old shell wrappers from ~/.zshrc or ~/.zshrc.local:
 #    - Delete the djinn() function
-#    - Delete the mcpgateway() function
 #    - Delete the _djinn_completion function
 #
 # 3. (Optional) Enable Typer shell completion:
 #    djinn --install-completion
-#    mcpgateway --install-completion
 #
 # The CLI commands are now directly available:
 #    djinn start
 #    djinn run claude "prompt"
-#    mcpgateway start
-#    mcpgateway enable duckduckgo
 #
 # =============================================================================
 

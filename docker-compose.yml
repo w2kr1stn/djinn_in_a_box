@@ -101,7 +101,6 @@ services:
     volumes: *common-volumes
     environment:
       <<: *common-environment
-      MCP_GATEWAY_URL: http://mcp-gateway:8811/
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
       DJINN_DETACHED: ${DJINN_DETACHED:-false}
     extra_hosts:

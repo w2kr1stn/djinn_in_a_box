@@ -204,10 +204,6 @@ def _image_built() -> bool:
     return _command_ok(["docker", "image", "inspect", _IMAGE])
 
 
-def _docker_mcp_ok() -> bool:
-    return _command_ok(["docker", "mcp", "--help"])
-
-
 def _old_sync_root_present(config: AppConfig | None) -> bool:
     """True if a legacy agent has content absent from every current zone.
 
@@ -623,16 +619,6 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             Status.PASS if net else Status.WARN,
             DJINN_NETWORK if net else "missing",
             "" if net else "Created automatically by `djinn start`.",
-        )
-    )
-
-    mcp = daemon and _docker_mcp_ok()
-    checks.append(
-        Check(
-            "docker mcp (optional)",
-            Status.PASS if mcp else Status.WARN,
-            "installed" if mcp else "not installed",
-            "" if mcp else "Optional: install the Docker MCP plugin to use `mcpgateway`.",
         )
     )
 

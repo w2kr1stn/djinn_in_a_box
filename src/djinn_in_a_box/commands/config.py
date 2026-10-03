@@ -253,10 +253,6 @@ def init_config(
         "  [muted]2.[/muted] djinn migrate-zones    [muted]# Create zone overlays[/muted]"
     )
     console.print("  [muted]3.[/muted] djinn start    [muted]# Start development shell[/muted]")
-    console.print(
-        "  [muted]4.[/muted] (optional) mcpgateway start   "
-        "[muted]# MCP tools — not required[/muted]"
-    )
     blank()
     console.print(
         "  [muted]Sign in to each CLI inside that shell — the tools print a URL and "

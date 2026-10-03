@@ -378,7 +378,7 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert "[warn] Firewall:     Disabled" in result.stderr
     assert "[warn] Docker Access: Disabled" in result.stderr
     assert "[info] Enable with: djinn start --docker" in result.stderr
-    assert "[warn] MCP Gateway:  Not connected" in result.stderr
+    assert "MCP Gateway" not in result.stderr
     persistent_settings = tmp_path / ".opencode" / ".opencode.json"
     assert json.loads(persistent_settings.read_bytes())["personal"] is True
     assert (opencode_seed / ".opencode.json").read_bytes() == legacy_opencode_settings
