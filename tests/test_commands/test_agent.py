@@ -17,6 +17,7 @@ from djinn_in_a_box.commands.agent import build_agent_command
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.agent_runner import UnknownAgentError
 from djinn_in_a_box.core.config_workflow import (
+    WorkflowDeliveryTarget,
     WorkflowPreparationProblem,
     WorkflowPreparationResult,
 )
@@ -175,7 +176,7 @@ class TestRunCommand:
         """Test run validates the agent name."""
         from djinn_in_a_box.commands.agent import run
 
-        unknown = UnknownAgentError("invalid", ("claude", "gemini"))
+        unknown = UnknownAgentError("invalid", ("claude", "codex", "opencode"))
         with (
             patch("djinn_in_a_box.commands.agent.run_headless_agent", side_effect=unknown),
             patch("djinn_in_a_box.commands.agent.load_config", return_value=object()),
@@ -522,7 +523,7 @@ class TestRunCommand:
         assert exc_info.value.exit_code == 1
         run_mocks["run"].assert_not_called()
 
-    def test_blocked_gemini_workflow_never_starts_runner_and_checks_image(
+    def test_blocked_codex_workflow_never_starts_runner_and_checks_image(
         self, run_mocks: dict[str, Any]
     ) -> None:
         from djinn_in_a_box.commands.agent import run
@@ -533,12 +534,12 @@ class TestRunCommand:
         )
 
         with pytest.raises(typer.Exit) as exc_info:
-            run(agent="gemini", prompt="test prompt")
+            run(agent="codex", prompt="test prompt")
 
         assert exc_info.value.exit_code == 1
         run_mocks["workflow"].assert_called_once_with(
             Path("/project"),
-            (),
+            (WorkflowDeliveryTarget("codex", Path("/runtime/codex")),),
             config_snapshot=run_mocks["config"],
             require_compose_host_env=True,
             container_image_compatibility=WorkflowImageCompatibility.COMPATIBLE,

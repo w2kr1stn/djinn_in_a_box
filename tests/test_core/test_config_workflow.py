@@ -648,7 +648,7 @@ def test_host_provisioning_failure_reports_the_path_not_workflow_drift(
     project, config_path, runtime = _workspace(tmp_path)
 
     def _refuse(_config: AppConfig) -> None:
-        raise PermissionError(13, "Permission denied", "/root-owned/gemini")
+        raise PermissionError(13, "Permission denied", "/root-owned/unused-agent")
 
     monkeypatch.setattr(
         workflow_module,
@@ -668,7 +668,7 @@ def test_host_provisioning_failure_reports_the_path_not_workflow_drift(
     assert not result.success
     problem = result.problems[0]
     assert problem.identifier == "host-provisioning-failed"
-    assert "/root-owned/gemini" in problem.message
+    assert "/root-owned/unused-agent" in problem.message
     assert "writable" in problem.remedy
     assert "portable" not in problem.remedy
 

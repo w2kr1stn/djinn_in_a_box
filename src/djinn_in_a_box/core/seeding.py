@@ -38,7 +38,6 @@ CLAUDE_BASELINE_SEEDS: tuple[SeedEntry, ...] = (
 )
 
 SHARED_SEEDS: tuple[SeedEntry, ...] = (
-    SeedEntry(Path("config/gemini"), Path("config/gemini"), "directory"),
     SeedEntry(Path("config/mcp-servers.json"), Path("config/mcp-servers.json"), "file"),
     SeedEntry(
         Path("config/agents.toml.example"),

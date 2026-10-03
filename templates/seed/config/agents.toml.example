@@ -25,13 +25,6 @@
 # json_flags = ["--output-format", "json"]
 # model_flag = "--model"
 #
-# [agents.gemini]
-# binary = "gemini"
-# description = "Google Gemini CLI"
-# headless_flags = ["-p"]
-# json_flags = ["--output-format", "json"]
-# model_flag = "-m"
-#
 # [agents.codex]
 # binary = "codex"
 # description = "OpenAI Codex CLI"

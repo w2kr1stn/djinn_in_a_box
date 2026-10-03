@@ -262,7 +262,7 @@ Agent definitions are loaded by `load_agents()` with this priority:
 2. `~/.config/djinn_in_a_box/agents.toml`
 3. `DEFAULT_AGENTS` from `config/defaults.py`
 
-The shipped defaults cover `claude`, `gemini`, `codex`, and `opencode`.
+The shipped defaults cover `claude`, `codex`, and `opencode`.
 
 ## Config Commands
 
@@ -457,7 +457,6 @@ repair a source root.
 - `config/claude/agents`
 - `config/claude/context`
 - `config/claude/scripts`
-- `config/gemini`
 - `config/opencode`
 - `config/mcp-servers.json`
 - `config/agents.toml.example`
@@ -469,10 +468,7 @@ type are never overwritten. Wrong-type targets are repaired by `_repair_wrong_ty
 Dangling symlinks are treated as existing targets because `Path.exists()` would
 otherwise miss them.
 
-The publisher, not `sync_seed`, is the only writer for publisher-managed
-workflow roots. `sync_seed` remains limited to the separate Gemini seed mount;
-its clean-sync behavior is never applied to a mixed or operator-owned workflow
-root.
+The publisher is the only writer for publisher-managed workflow roots.
 
 Copies are atomic:
 
@@ -497,10 +493,6 @@ publication.
 - `merge_settings(base, overlay, output)`: deep-merges JSON with overlay wins.
   `enabledPlugins` and `extraKnownMarketplaces` are replacement keys rather than
   recursive merge keys, so stale plugin entries do not persist.
-- `sync_seed(label, seed_dir, target_dir, config_file)`: clean-syncs managed
-  seed directories and root files into a persistent target, records a
-  `.seed-manifest`, deletes stale manifest-tracked files, and deep-merges
-  `settings.json` when requested.
 - `claude_settings_merge(seed_dir, target_settings_file)`: merges the tracked
   Claude settings baseline with optional `settings.local.json`. It has a
   minimal-seed guard: if `CLAUDE.md` or `settings.json` is missing, it prints a
@@ -521,7 +513,6 @@ container start
   +-- source seed-lib.sh
   +-- restore ~/.claude.json from the Claude volume when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
-  +-- sync_seed gemini   ~/.gemini_seed   -> ~/.gemini
   +-- settings-copy.py persists personal OpenCode settings only
   +-- opencode-credentials.sh migrates legacy OpenCode credential files and
       re-establishes volume-to-config-root symlinks on every start
@@ -625,14 +616,12 @@ callback is *needed*, so the container requires neither host networking nor a
 published port.
 
 Selecting that flow is not uniform. Claude Code and OpenCode prompt for a pasted
-code by default; Gemini CLI picks its code-paste path automatically because the
-image sets `DEBIAN_FRONTEND=noninteractive` (`Dockerfile`) and no display
-variable is present, which suppresses its browser launch. Codex is the
-exception: plain `codex login` starts a container-local login server that the
-host browser cannot reach, so users must run `codex login --device-auth` (or
-choose the remote/headless option in its TUI). README documents this.
+code by default. Codex is the exception: plain `codex login` starts a
+container-local login server that the host browser cannot reach, so users must
+run `codex login --device-auth` (or choose the remote/headless option in its
+TUI). README documents this.
 
-Claude Code, Gemini CLI, Codex, GitHub CLI, and OpenCode persist the resulting
+Claude Code, Codex, GitHub CLI, and OpenCode persist the resulting
 credentials in config-root bind mounts. At each container start, the entrypoint
 reconciles legacy OpenCode `auth.json` and `mcp-auth.json` files from the
 `djinn-opencode-data` volume: it migrates volume-only files, or preserves the
@@ -643,7 +632,6 @@ the config-root files.
 Common mounts include:
 
 - `${DJINN_CONFIG_ROOT}/claude` to `/home/dev/.claude`
-- `${DJINN_CONFIG_ROOT}/gemini` to `/home/dev/.gemini`
 - `${DJINN_CONFIG_ROOT}/codex` to `/home/dev/.codex`
 - `${DJINN_CONFIG_ROOT}/opencode` to `/home/dev/.opencode`
 - `${DJINN_CONFIG_ROOT}/gh` to `/home/dev/.config/gh`
@@ -659,7 +647,7 @@ Common mounts include:
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
 
 The base Compose environment sets `TZ`, `NO_COLOR`, `DJINN_TERM_WIDTH`,
-`UV_LINK_MODE=copy`, `LOCAL_ENDPOINT`, and `GEMINI_FORCE_FILE_STORAGE=true`.
+`UV_LINK_MODE=copy`, and `LOCAL_ENDPOINT`.
 `NO_COLOR` and `DJINN_TERM_WIDTH` propagate the host's plain-output and terminal
 width decisions into the container shell UI. Resource limits use the Compose
 variables rendered by `build_compose_env()`.
@@ -965,7 +953,7 @@ Category definitions come from `config/defaults.py`:
   `djinn-vscode-server`
 - `VOLUME_CATEGORIES["data"]`: `djinn-opencode-data`,
   `djinn-vscode-workspaces`
-- `SYNC_PATHS["credentials"]`: `claude`, `gemini`, `codex`, `opencode`, `gh`, `age`
+- `SYNC_PATHS["credentials"]`: `claude`, `codex`, `opencode`, `gh`, `age`
 - `SYNC_PATHS["repo-dotfiles"]`: `repo-dotfiles`
 
 `backup()` refuses to run while Djinn containers are active. It stages one

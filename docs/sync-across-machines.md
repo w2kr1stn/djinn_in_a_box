@@ -81,7 +81,7 @@ djinn restore
 ```
 
 By default, `djinn backup` archives the config-zone credential/config-root paths
-(`claude`, `gemini`, `codex`, `opencode`, `gh`, `age`), `repo-dotfiles`, and data
+(`claude`, `codex`, `opencode`, `gh`, `age`), `repo-dotfiles`, and data
 volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`). It does not archive
 the shared transcript zone or the local cache/scratch zone. Cache volumes are not
 included by default because they are rebuildable.

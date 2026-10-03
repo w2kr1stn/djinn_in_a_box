@@ -61,10 +61,6 @@ ALLOWED_DOMAINS=(
     # AI APIs (for direct API usage, not via MCP)
     "api.anthropic.com"
     "api.openai.com"
-    # Gemini CLI: model endpoint, plus the Code Assist backend it uses when
-    # signed in with a Google account rather than an API key.
-    "generativelanguage.googleapis.com"
-    "cloudcode-pa.googleapis.com"
     # OpenCode's own service (auth, updates). Third-party providers a user may
     # configure (openrouter, x.ai, …) are deliberately not listed — add the ones
     # you actually use.
@@ -85,11 +81,6 @@ ALLOWED_DOMAINS=(
     # OAuth endpoints (for authentication)
     "console.anthropic.com"
     "auth.openai.com"
-    # Google sign-in for Gemini CLI: consent screen, token exchange, and the
-    # host its pasted-code flow redirects to.
-    "accounts.google.com"
-    "oauth2.googleapis.com"
-    "codeassist.google.com"
     
     # Add project-specific domains below:
     # "api.example.com"

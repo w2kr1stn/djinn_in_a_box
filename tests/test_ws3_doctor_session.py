@@ -409,12 +409,14 @@ def test_loose_credential_dirs_skips_a_symlinked_name(tmp_path: Path) -> None:
 def test_loose_credential_dirs_ignores_files_and_unlisted_names(tmp_path: Path) -> None:
     """Only SYNC_PATHS["credentials"] names, and only directories."""
     root, config = _credential_root(tmp_path)
-    (root / "gemini").write_text("a file, not a directory")
+    (root / "unused-agent").write_text("a file, not a directory")
+    (root / "codex").write_text("a listed file, not a directory")
 
     loose = doctor_mod.loose_credential_dirs(config)
 
     names = [path.name for path in loose]
-    assert "gemini" not in names
+    assert "unused-agent" not in names
+    assert "codex" not in names
     assert "not-a-credential-dir" not in names
 
 

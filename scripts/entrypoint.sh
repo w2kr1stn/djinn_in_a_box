@@ -75,7 +75,7 @@ fi
 # Tool Configuration & Seed Sync
 # =============================================================================
 ui_section "Seed & Config"
-mkdir -p ~/.claude/{agents,skills,commands} ~/.gemini ~/.codex ~/.config/opencode/commands
+mkdir -p ~/.claude/{agents,skills,commands} ~/.codex ~/.config/opencode/commands
 SEED_LIB="${SEED_LIB:-/home/dev/seed-lib.sh}"
 if [[ ! -r "$SEED_LIB" ]]; then
     ui_err "seed library not found at $SEED_LIB — the image is stale or broken."
@@ -93,8 +93,6 @@ fi
 
 ui_info "[seed-sync] claude:"
 claude_settings_merge "$HOME/.claude_seed" "$HOME/.claude/settings.json" >&2
-
-sync_seed "gemini"   "$HOME/.gemini_seed"   "$HOME/.gemini"          "$HOME/.gemini/settings.json" >&2
 
 # OpenCode workflow files come from the canonical seed; personal settings live
 # beside that seed on the persistent parent mount and never flow back into it.
@@ -224,7 +222,6 @@ persist_session_state() {
     reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.json"
     # → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
     reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"
-    reverse_sync_file "$HOME/.gemini/settings.json"          "$HOME/.gemini_seed/settings.json"
     if ! python3 "$SETTINGS_COPY_HELPER" \
         --copy-settings "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
         --missing-ok >&2; then

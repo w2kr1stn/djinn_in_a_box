@@ -810,7 +810,7 @@ class TestCleanVolumesCommand:
         code_dir.mkdir()
         configured_root = tmp_path / "configured-root"
         env_root = tmp_path / "env-root"
-        (configured_root / "gemini").mkdir(parents=True)
+        (configured_root / "unused-agent").mkdir(parents=True)
         (env_root / "claude").mkdir(parents=True)
         monkeypatch.setenv("DJINN_CONFIG_ROOT", str(env_root))
         config_file = tmp_path / "config.toml"
@@ -823,12 +823,12 @@ class TestCleanVolumesCommand:
             ),
             patch.dict(
                 "djinn_in_a_box.commands.container.SYNC_PATHS",
-                {"credentials": ["claude", "gemini"]},
+                {"credentials": ["claude", "unused-agent"]},
                 clear=True,
             ),
             patch.dict(
                 "djinn_in_a_box.core.docker.SYNC_PATHS",
-                {"credentials": ["claude", "gemini"]},
+                {"credentials": ["claude", "unused-agent"]},
                 clear=True,
             ),
             patch(
@@ -1018,7 +1018,7 @@ class TestCleanAllCommand:
         code_dir.mkdir()
         configured_root = tmp_path / "configured-root"
         env_root = tmp_path / "env-root"
-        (configured_root / "gemini").mkdir(parents=True)
+        (configured_root / "unused-agent").mkdir(parents=True)
         (env_root / "claude").mkdir(parents=True)
         monkeypatch.setenv("DJINN_CONFIG_ROOT", str(env_root))
         config_file = tmp_path / "config.toml"
@@ -1036,12 +1036,12 @@ class TestCleanAllCommand:
             patch.dict("djinn_in_a_box.commands.container.VOLUME_CATEGORIES", {}, clear=True),
             patch.dict(
                 "djinn_in_a_box.commands.container.SYNC_PATHS",
-                {"credentials": ["claude", "gemini"]},
+                {"credentials": ["claude", "unused-agent"]},
                 clear=True,
             ),
             patch.dict(
                 "djinn_in_a_box.core.docker.SYNC_PATHS",
-                {"credentials": ["claude", "gemini"]},
+                {"credentials": ["claude", "unused-agent"]},
                 clear=True,
             ),
             patch("djinn_in_a_box.commands.container.delete_volumes", return_value={}),

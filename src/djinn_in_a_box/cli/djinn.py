@@ -57,7 +57,7 @@ def main(
     """Djinn in a Box CLI - Manage AI development containers.
 
     The Djinn in a Box provides a containerized development environment
-    with pre-configured CLI coding agents (Claude, Gemini, Codex, OpenCode).
+    with pre-configured CLI coding agents (Claude, Codex, OpenCode).
 
     [info.bold]Quick start:[/info.bold]
 

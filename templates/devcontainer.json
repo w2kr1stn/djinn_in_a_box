@@ -25,7 +25,6 @@
     "mounts": [
         // Tool credentials & cache (Docker volumes)
         "source=djinn-claude-config,target=/home/dev/.claude,type=volume",
-        "source=djinn-gemini-config,target=/home/dev/.gemini,type=volume",
         "source=djinn-codex-config,target=/home/dev/.codex,type=volume",
         "source=djinn-opencode-config,target=/home/dev/.opencode,type=volume",
         "source=djinn-uv-cache,target=/home/dev/.cache/uv,type=volume",

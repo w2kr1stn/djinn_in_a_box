@@ -9,7 +9,7 @@ agents with isolated credentials and a managed container lifecycle.
 
 It ships the mechanism:
 
-- a Docker image with Claude Code, Gemini CLI, Codex CLI, and OpenCode
+- a Docker image with Claude Code, Codex CLI, and OpenCode
 - a Python CLI named `djinn`
 - Docker Compose files for the base container, proxied Docker access, and direct
   Docker access
@@ -38,11 +38,11 @@ Djinn gives you one repeatable container image and several ways to use it:
 - Back up and restore the managed volumes and config-root directories with
   `djinn backup` and `djinn restore`.
 
-Credentials are separated by CLI. By default, Claude Code, Gemini CLI, Codex CLI,
-OpenCode, and the GitHub CLI each get their own host directory under the
-configured Djinn config root. The container sees those directories at the paths
-each CLI expects. An `age` encryption identity directory is provisioned the same
-way and appears at `~/.config/age`, so plain `age` keys persist across runs
+Credentials are separated by CLI. By default, Claude Code, Codex CLI, OpenCode,
+and the GitHub CLI each get their own host directory under the configured Djinn
+config root. The container sees those directories at the paths each CLI
+expects. An `age` encryption identity directory is provisioned the same way and
+appears at `~/.config/age`, so plain `age` keys persist across runs
 (`age -i ~/.config/age/keys.txt`).
 
 For SOPS, point Djinn at a key file that stays on this machine instead:
@@ -136,10 +136,10 @@ following its prompts. Every bundled CLI can sign in without a loopback
 callback: the tool prints a URL, you open it in your host browser, and you paste
 the resulting code back into the container.
 
-Claude Code, Gemini CLI, and OpenCode select that flow on their own inside the
-container. **Codex needs to be told:** plain `codex login` starts a login server
-on a container-local port that your host browser cannot reach, and the sign-in
-never completes. Use the device flow instead:
+Claude Code and OpenCode select that flow on their own inside the container.
+**Codex needs to be told:** plain `codex login` starts a login server on a
+container-local port that your host browser cannot reach, and the sign-in never
+completes. Use the device flow instead:
 
 ```sh
 codex login --device-auth
@@ -156,7 +156,7 @@ this once per tool:
 
 | Tool | Credential location | Backup category |
 | --- | --- | --- |
-| Claude Code, Gemini CLI, Codex, OpenCode, GitHub CLI | your configured config root | `credentials` |
+| Claude Code, Codex, OpenCode, GitHub CLI | your configured config root | `credentials` |
 
 `djinn backup` includes both categories by default. If you back up selectively,
 copy the matching credential category.
@@ -385,7 +385,6 @@ Only `djinn init` and `djinn doctor --fix` copy missing seed targets from
 | `templates/seed/config/claude/agents/` | `config/claude/agents/` | empty local Claude subagent directory |
 | `templates/seed/config/claude/context/` | `config/claude/context/` | empty local context directory |
 | `templates/seed/config/claude/scripts/` | `config/claude/scripts/` | empty local scripts directory |
-| `templates/seed/config/gemini/` | `config/gemini/` | empty Gemini seed directory |
 | `templates/seed/config/opencode/` | `config/opencode/` | empty OpenCode seed directory |
 | `templates/seed/config/mcp-servers.json` | `config/mcp-servers.json` | empty local MCP registry |
 | `templates/seed/config/agents.toml.example` | `config/agents.toml.example` | documentation-only agent override example |
@@ -414,12 +413,11 @@ seed/config-root setup path, so credentials and seed files would be skipped.
 
 ## Agents
 
-Djinn has four built-in agent definitions:
+Djinn has three built-in agent definitions:
 
 | Agent name | Binary | Default headless mode | Notes |
 | --- | --- | --- | --- |
 | `claude` | `claude` | `claude -p` | read-only uses `--permission-mode plan`; write mode uses `--dangerously-skip-permissions` |
-| `gemini` | `gemini` | `gemini -p` | model flag is `-m` |
 | `codex` | `codex` | `codex exec` | write mode uses `--full-auto` |
 | `opencode` | `opencode` | `opencode run` | read-only uses `--agent plan`; model flag is `-m` |
 
@@ -481,7 +479,7 @@ Common `start` options:
 ### What `--firewall` allows
 
 The firewall denies outbound traffic by default and permits a fixed domain list
-in `scripts/init-firewall.sh`: package registries, the four bundled CLIs' API and
+in `scripts/init-firewall.sh`: package registries, the three bundled CLIs' API and
 sign-in endpoints, GitHub, and the Docker networks. Every address a domain
 resolves to is permitted.
 
@@ -526,7 +524,6 @@ Bind mounts are host paths that you can inspect and manage directly:
 | Host path | Container path | Purpose |
 | --- | --- | --- |
 | `${DJINN_CONFIG_ROOT}/claude` | `/home/dev/.claude` | Claude Code credentials and state |
-| `${DJINN_CONFIG_ROOT}/gemini` | `/home/dev/.gemini` | Gemini CLI credentials and state |
 | `${DJINN_CONFIG_ROOT}/codex` | `/home/dev/.codex` | Codex CLI credentials and state |
 | `${DJINN_CONFIG_ROOT}/opencode` | `/home/dev/.opencode` | OpenCode state |
 | `${DJINN_CONFIG_ROOT}/gh` | `/home/dev/.config/gh` | GitHub CLI state |
@@ -537,7 +534,6 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
 | `./config/claude/CLAUDE.md` and `AGENTS.md` | matching files in `/home/dev/.claude` | Direct Compose-Claude instruction mounts |
-| `./config/gemini` | `/home/dev/.gemini_seed` | Local Gemini seed source |
 | `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
@@ -652,8 +648,8 @@ djinn backup
 
 By default, this backs up:
 
-- `credentials`: config-root directories for Claude Code, Gemini CLI, Codex CLI,
-  OpenCode, the GitHub CLI, and the `age` encryption identity store
+- `credentials`: config-root directories for Claude Code, Codex CLI, OpenCode,
+  the GitHub CLI, and the `age` encryption identity store
 - `repo-dotfiles`: the optional config-root `repo-dotfiles` directory if present
 - `data`: the OpenCode data and VS Code workspace named volumes
 

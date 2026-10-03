@@ -1,6 +1,6 @@
 # =============================================================================
 # Djinn in a Box Image
-# Minimal base with: fnm (Node), uv (Python), Claude Code, Codex, Gemini CLI, OpenCode
+# Minimal base with: fnm (Node), uv (Python), Claude Code, Codex, OpenCode
 # + Docker CLI for container management (optionally enabled)
 # =============================================================================
 FROM debian:bookworm-slim
@@ -90,7 +90,6 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
 # CLI Agent versions - update with: ./scripts/update-agents.sh
 ARG CLAUDE_CODE_VERSION=2.1.287
-ARG GEMINI_CLI_VERSION=0.62.0
 ARG CODEX_VERSION=0.160.0
 ARG OPENCODE_VERSION=1.18.34
 
@@ -118,7 +117,6 @@ RUN check-build-dns.sh && \
     pyright \
     prettier \
     eslint \
-    @google/gemini-cli@${GEMINI_CLI_VERSION} \
     @openai/codex@${CODEX_VERSION} \
     opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force
@@ -154,7 +152,7 @@ export COLORTERM=truecolor
 EOF
 
 # Prepare persistent config directories
-RUN mkdir -p ~/.claude ~/.codex ~/.gemini ~/.config/gh ~/.config/uv ~/.config \
+RUN mkdir -p ~/.claude ~/.codex ~/.config/gh ~/.config/uv ~/.config \
     ~/.opencode ~/.local/share/opencode \
     && echo '{"name": "opencode-workspace", "private": true}' > ~/.opencode/package.json \
     && ln -sfn ~/.claude ~/.config/claude \

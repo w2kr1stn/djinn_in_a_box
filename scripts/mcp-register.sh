@@ -205,10 +205,8 @@ register_mcp_servers() {
 
     ui_info "[mcp] Registering servers from $mcp_config_name..."
 
-    local gemini_config=~/.gemini/settings.json
     local opencode_config=~/.config/opencode/.opencode.json
-    mkdir -p "${gemini_config:h}" "${opencode_config:h}"
-    [[ ! -f "$gemini_config" ]] && echo '{}' > "$gemini_config"
+    mkdir -p "${opencode_config:h}"
     [[ ! -f "$opencode_config" ]] && echo '{}' > "$opencode_config"
 
     local registered=0
@@ -275,8 +273,6 @@ register_mcp_servers() {
             fi
             _codex_disable_server "$server"
             jq --arg name "$server" 'del(.mcpServers[$name])' \
-                "$gemini_config" > "$gemini_config.tmp" && mv "$gemini_config.tmp" "$gemini_config"
-            jq --arg name "$server" 'del(.mcpServers[$name])' \
                 "$opencode_config" > "$opencode_config.tmp" && mv "$opencode_config.tmp" "$opencode_config"
             ui_item "-" "${server} (disabled)"
             (( ++disabled ))
@@ -296,10 +292,6 @@ register_mcp_servers() {
             _mcp_run_boxed "claude mcp" claude mcp remove --scope user "$server" || true
             _mcp_run_boxed "claude mcp" claude mcp add --transport "$claude_transport" --scope user "$server" "$url" || true
         fi
-
-        jq --arg name "$server" --arg url "$url" \
-            '.mcpServers[$name] = {"httpUrl": $url}' \
-            "$gemini_config" > "$gemini_config.tmp" && mv "$gemini_config.tmp" "$gemini_config"
 
         opencode_transport="$transport"
         [[ "$transport" == "streamable-http" ]] && opencode_transport="http"

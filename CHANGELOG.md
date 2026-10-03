@@ -120,6 +120,11 @@ Versioning before and after the first stable release.
 
 ### Removed
 
+- The bundled Gemini CLI: the `gemini` built-in agent, its image install and
+  `GEMINI_CLI_VERSION` pin, the `~/.gemini` config and seed mounts, settings
+  seeding and MCP registration for it, its zone, config-root and credential
+  entries, and its five Google endpoints in the firewall allowlist.
+
 - The Docker MCP Gateway: the `mcpgateway` CLI, its Compose stack under `mcp/`,
   the gateway rows in startup output, `djinn status` and `djinn doctor`, and the
   `docker-gateway` special case in MCP registration.

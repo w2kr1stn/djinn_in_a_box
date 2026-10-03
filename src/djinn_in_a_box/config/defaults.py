@@ -23,7 +23,6 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
 SYNC_PATHS: Final[dict[str, list[str]]] = {
     "credentials": [
         "claude",
-        "gemini",
         "codex",
         "opencode",
         "gh",
@@ -74,10 +73,6 @@ DEFAULT_ZONES: Final[dict[str, dict[str, list[str]]]] = {
     "opencode": {
         "local": ["node_modules", "native"],
         "shared": [],
-    },
-    "gemini": {
-        "local": ["tmp"],
-        "shared": ["history"],
     },
     "gh": {
         "local": [],
@@ -159,7 +154,6 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
             ".gitignore",
         }
     ),
-    "gemini": frozenset({"settings.json", "installation_id"}),
     "gh": frozenset({"hosts.yml"}),
     "age": frozenset({"keys.txt"}),
 }
@@ -175,13 +169,6 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         write_flags=["--dangerously-skip-permissions"],
         json_flags=["--output-format", "json"],
         model_flag="--model",
-    ),
-    "gemini": AgentConfig(
-        binary="gemini",
-        description="Google Gemini CLI",
-        headless_flags=["-p"],
-        json_flags=["--output-format", "json"],
-        model_flag="-m",
     ),
     "codex": AgentConfig(
         binary="codex",
