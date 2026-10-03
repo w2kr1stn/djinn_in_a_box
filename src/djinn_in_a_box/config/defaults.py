@@ -55,6 +55,8 @@ DEFAULT_ZONES: Final[dict[str, dict[str, list[str]]]] = {
             "daemon",
             "plugins/marketplaces",
             "plugins/cache",
+            "state",
+            "feedback",
         ],
         "shared": ["projects", "transcripts"],
     },
@@ -67,6 +69,11 @@ DEFAULT_ZONES: Final[dict[str, dict[str, list[str]]]] = {
             "mcp-oauth-locks",
             "shell_snapshots",
             "plugins/cache",
+            "packages",
+            "app-server-daemon",
+            "app-server-control",
+            "thread-writer-locks",
+            "tui-thread-reference-capabilities",
         ],
         "shared": ["sessions"],
     },
@@ -111,6 +118,12 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
             ".last-cleanup",
             ".last-update-result.json",
             "plugin-catalog-cache.json",
+            "daemon-auth-cooldown",
+            "daemon-auth-status.json",
+            "policy-limits.json",
+            "policy-limits.json.stamp.json",
+            "remote-settings.json",
+            "security_warnings_state_*.json",
         }
     ),
     "codex": frozenset(
@@ -133,10 +146,10 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
             "CLAUDE.md",
             "AGENTS.md",
             "backups",
-            "logs_2.sqlite",
-            "state_5.sqlite",
-            "goals_1.sqlite",
-            "memories_1.sqlite",
+            "*.sqlite",
+            "*.sqlite-wal",
+            "*.sqlite-shm",
+            ".sqlite-maintenance.lock",
             "models_cache.json",
             "history.jsonl",
             "session_index.jsonl",
@@ -154,10 +167,10 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
             ".gitignore",
         }
     ),
-    "gh": frozenset({"hosts.yml"}),
+    "gh": frozenset({"hosts.yml", "config.yml"}),
     "age": frozenset({"keys.txt"}),
 }
-"""Known top-level agent configuration entries retained in the config zone."""
+"""Known top-level config-zone entries as exact names or shell-style patterns."""
 
 
 DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
