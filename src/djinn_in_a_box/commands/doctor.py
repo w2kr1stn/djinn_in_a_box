@@ -10,6 +10,7 @@ it provisions later through compose workflow preparation instead.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import stat
@@ -288,7 +289,8 @@ def _zone_drift_entries(config: AppConfig, assignments: ZoneAssignments) -> tupl
         agent_root = roots.config_root / agent
         if not agent_root.is_dir() or agent_root.is_symlink():
             continue
-        accounted = set(KNOWN_CONFIG_ROOT_ENTRIES[agent])
+        known_entries = KNOWN_CONFIG_ROOT_ENTRIES[agent]
+        accounted = set(known_entries)
         for zone in ("local", "shared"):
             accounted.update(path.parts[0] for path in by_zone[zone])
         try:
@@ -299,6 +301,7 @@ def _zone_drift_entries(config: AppConfig, assignments: ZoneAssignments) -> tupl
             child
             for child in children
             if child.name not in accounted
+            and not any(fnmatch.fnmatchcase(child.name, entry) for entry in known_entries)
         )
     return tuple(drift)
 

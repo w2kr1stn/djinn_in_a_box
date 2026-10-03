@@ -98,6 +98,10 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Default zone assignments put machine-local Codex and Claude runtime directories
+  (package cache, daemon and socket state, locks, local caches and drafts) in the
+  local zone, and the doctor's known config-root entries cover current agent
+  runtime files, including shell-style patterns.
 - `djinn build` now shows the build log while the build runs. It previously
   captured the whole output and returned it only when the process exited, so a
   build that stopped making progress displayed nothing at all — and on failure

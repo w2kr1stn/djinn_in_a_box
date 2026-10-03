@@ -38,6 +38,26 @@ def test_drift_accounts_for_intermediate_assignment_segments(zone_config: AppCon
     assert str(agent_root / "plugins") not in row.detail
 
 
+def test_drift_accounts_for_pattern_entries_but_reports_unmatched_names(
+    zone_config: AppConfig,
+) -> None:
+    roots = resolve_zone_roots(zone_config)
+    codex_root = roots.config_root / "codex"
+    codex_root.mkdir(parents=True)
+    (codex_root / "state_12.sqlite").touch()
+    (codex_root / "state_12.sqlite-wal").touch()
+    unexpected = codex_root / "unrecognized-runtime-file"
+    unexpected.touch()
+
+    checks = doctor_mod.run_checks(zone_config)
+
+    row = _check_named(checks, "Zone drift")
+    assert row.status is doctor_mod.Status.WARN
+    assert str(unexpected) in row.detail
+    assert str(codex_root / "state_12.sqlite") not in row.detail
+    assert str(codex_root / "state_12.sqlite-wal") not in row.detail
+
+
 def test_doctor_reports_large_direct_files_and_loose_zone_permissions(
     zone_config: AppConfig,
 ) -> None:
