@@ -173,3 +173,80 @@ class TestBuildNetwork:
         """
         with pytest.raises(ValidationError):
             BuildConfig.model_validate({"network": mode})
+
+
+@pytest.mark.parametrize(
+    ("name", "entry", "cause"),
+    [
+        ("archive", {"source": "/unplugged", "target": "/archive"}, None),
+        ("archive.disk", {"volume": True, "target": "/data", "backup": "none"}, None),
+        ("bad name", {"source": "/src", "target": "/dst"}, "name"),
+        ("x", {"target": "/dst"}, "source"),
+        ("x", {"source": "/src"}, "target"),
+        ("x", {"source": "relative", "target": "/dst"}, "absolute"),
+        ("x", {"source": "/src:bad", "target": "/dst"}, "colon"),
+        ("x", {"source": "/src", "target": "relative"}, "absolute"),
+        ("x", {"volume": False, "target": "/dst", "backup": "data"}, "true"),
+        ("x", {"volume": 1, "target": "/dst", "backup": "data"}, "true"),
+        ("x", {"volume": "true", "target": "/dst", "backup": "data"}, "true"),
+        ("x", {"volume": True, "target": "/dst"}, "backup"),
+        ("x", {"volume": True, "target": "/dst", "backup": "bad"}, "backup"),
+        ("x", {"volume": True, "source": "/src", "target": "/dst", "backup": "data"}, "source"),
+        ("x", {"volume": True, "marker": "m", "target": "/dst", "backup": "data"}, "marker"),
+        ("x", {"source": "/src", "target": "/dst", "backup": "data"}, "backup"),
+        ("x", {"source": "/src", "target": "/dst", "unknown": True}, "unknown"),
+        *[
+            ("x", {"source": "/src", "target": "/dst", "marker": marker}, "marker")
+            for marker in ("", ".", "..", "sub/m", "sub\\m")
+        ],
+        *[
+            ("x", {**{"source": "/src", "target": "/dst"}, field: value}, "NUL")
+            for field, value in [("source", "/bad\0"), ("target", "/bad\0"), ("marker", "bad\0")]
+        ],
+        ("x", {"source": 1, "target": "/dst"}, "string"),
+        ("x", {"source": "/src", "target": 1}, "string"),
+    ],
+    ids=[
+        "offline-bind",
+        "volume",
+        "name",
+        "source-required",
+        "target-required",
+        "source-absolute",
+        "source-colon",
+        "target-absolute",
+        "false",
+        "integer",
+        "coerced",
+        "backup-required",
+        "backup-category",
+        "volume-source",
+        "volume-marker",
+        "bind-backup",
+        "unsupported",
+        "marker-empty",
+        "marker-dot",
+        "marker-dotdot",
+        "marker-slash",
+        "marker-backslash",
+        "source-nul",
+        "target-nul",
+        "marker-nul",
+        "source-string",
+        "target-string",
+    ],
+)
+def test_declaration_schema(tmp_path, name, entry, cause):
+    from pydantic import ValidationError
+
+    if cause is None:
+        config = AppConfig(code_dir=tmp_path, mounts={name: entry})
+        assert config.mounts[name].target == entry["target"]
+        assert not (tmp_path / "unplugged").exists()
+    else:
+        # Values and identities must be useful without relying on Pydantic punctuation.
+        with pytest.raises(ValidationError) as exc:
+            AppConfig(code_dir=tmp_path, mounts={name: entry})
+        text = str(exc.value).lower()
+        assert name in text
+        assert ("contain" if cause == "colon" else cause.lower()) in text

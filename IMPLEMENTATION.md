@@ -208,6 +208,8 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 - `resources: ResourceLimits`
 - `shell: ShellConfig`
 - `config_sync: ConfigSyncConfig`
+- `mounts: dict[str, BindDeclaration | VolumeDeclaration]`: empty by default
+- `environment: dict[str, str]`: empty by default, literal dev-container values
 - `build: BuildConfig`: `network: BuildNetwork` (`default` | `host`, default
   `default`) — reaches compose as `DJINN_BUILD_NETWORK`, which
   `docker-compose.yml` interpolates into `build.network`. `host` trades the
@@ -248,6 +250,37 @@ it does not select an agent for `run` or `session`.
 
 The TOML layout stores top-level application fields under `[general]`, while
 `resources`, `shell`, and `config_sync` remain structured sections.
+Declarations remain root `[mounts.<name>]` and `[environment]` tables; they are
+never nested under `[general]`. For example:
+
+```toml
+[mounts.archive]
+source = "/mnt/archive"
+target = "/home/dev/archive"
+marker = ".drive-ready"
+
+[mounts.journal]
+volume = true
+target = "/home/dev/journal"
+backup = "data" # also cache or none
+
+[environment]
+CDP_HOST = "192.0.2.1"
+CDP_PORT = "9222"
+EXAMPLE_LITERAL = "${HOST_VALUE}"
+```
+
+`config/declarations.py` owns frozen, strict, extra-forbid declaration models.
+Only literal `volume = true` selects `VolumeDeclaration`, with required absolute
+`target` and `backup = "data" | "cache" | "none"`; binds require absolute
+`source`/`target` and optionally a marker filename. Mixed shapes, unsupported
+fields, NUL in any declared string, invalid names/keys and non-string environment
+values fail model validation. Names match `[a-z0-9][a-z0-9_.-]*` and keys match
+`[A-Za-z_][A-Za-z0-9_]*`. Quoted dotted table components serialize as one name;
+duplicate TOML tables/keys are parse errors. Model loading performs no bind host
+inspection. Directory binds are writable; file binds and read-only declared
+binds are outside this format.
+
 `load_config()` flattens
 `[general]` into the `AppConfig` constructor and raises:
 
@@ -257,6 +290,9 @@ The TOML layout stores top-level application fields under `[general]`, while
 `save_config()` serializes back to nested TOML and writes atomically with
 `tempfile.mkstemp()` plus `os.replace()`.
 The `workspace` key is saved under `[general]` beside `code_dir`.
+Saving preserves declaration values, omits an absent marker and discards TOML
+comments. Parseable schema failures attach per-entry diagnostics to
+`ConfigValidationError` for doctor; no partially valid `AppConfig` is returned.
 
 Agent definitions are loaded by `load_agents()` with this priority:
 
@@ -285,6 +321,12 @@ or `~/projects`. It then uses progressive disclosure for
 advanced resource and shell settings. The simple path accepts suggested
 resources from `core/hostinfo.py`; advanced prompts allow explicit CPU, memory,
 and shell-mount choices.
+It asks no declaration questions; `init --force` replaces the whole file,
+including declarations. Declaration maintenance uses `config edit`, whose
+post-editor checks cover syntax/model validation. There is no new CLI writer or
+migration: existing Compose edits and data transfers are handled by hand.
+Every scalar `config set` preserves mounts/environment through `_build_config`,
+but loses comments through serialization. Text and JSON `config show` include both.
 
 `core/hostinfo.detect_timezone()` reads `/etc/localtime` when it is an IANA
 timezone symlink and falls back to `UTC`. `suggest_resources()` reads
@@ -772,6 +814,64 @@ user mount that supplies `--workdir`. Doctor reports current assignment validity
 skipped defaults, zone drift, private-directory modes and large direct files
 that cannot be overlaid.
 
+Declared mounts follow the three-layer configuration boundary: fixed built-ins
+(credentials, seeds, workflow and cache targets), built-ins with a config value
+(workspace, config root, SOPS key file, OMP theme), then additive declarations.
+Declarations never replace, redirect, disable or remove built-ins.
+
+`resolve_declared_entries()` is shared by `compose_run()` (interactive and
+headless) and `compose_up_detached()`, before any creation subprocess or temporary
+override. It resolves bind symlinks, checks that the absolute colon-free source
+exists as a directory, and inspects an optional marker directly under it with
+`lstat`: a regular file passes; a missing marker, directory or symlink refuses
+creation with the declaration name. There is no marker content/identity check.
+The resolver never creates sources or markers, repairs binds or adds declared
+paths to `ensure_host_env`. Existing built-in provisioning precedes validation
+and retains its behavior even on a path overlapping a declared source. Validation
+can race a disappearing drive; there is no mount-liveness protocol.
+
+Targets use the existing canonicalizer and `_reserved_mount_targets`, with the
+union of all Docker modes for declarations in start/run/doctor. Equality and
+declared ancestors of built-in/reserved/zone/active-workspace/invocation targets
+are refused; declared pairs cannot nest. Children otherwise remain allowed,
+except at or below the five recursively repaired Djinn-managed roots:
+`/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`, `/home/dev/.local/share/fnm`,
+`/home/dev/.vscode-server`, `/home/dev/workspaces`. The Python constant is checked
+against the unchanged entrypoint repair list. Actual volume names are
+`djinn-<name>` and cannot collide with the built-in volume registry.
+
+The single reserved-environment registry covers all Compose service modes and
+everything the repository ships into the image or runs at startup: Python,
+scripts, tools, Dockerfile ENV/ARG/RUN and generated shell startup content.
+Actual caller keys also reserve that invocation's keys. Mounted host shell
+startup files and third-party tools outside the repository are outside this
+boundary. Environment values are literal strings with no host override or
+interpolation. Literal endpoints, including a CDP gateway, need manual edits
+when the host gateway changes.
+
+Both creators serialize the same temporary Compose fragment: long-form binds
+with `bind.create_host_path: false`, volumes with actual sources and top-level
+`volumes: {djinn-<name>: {name: djinn-<name>}}`, and a dev environment mapping.
+Each `$` is escaped as `$$` in Compose-bound strings without mutating config.
+The override is removed in `finally` on success, failure and timeout. Existing
+invocation flags and working-directory selection remain independent of declarations.
+Declarations apply only to dev creation, not builds, proxy or raw archive helpers.
+`session` and `enter` inherit the running container; edits affect the next
+creation, with no running-mount comparison or attach-time update.
+
+The fragment also carries `DJINN_DECLARED_VOLUME_TARGETS`, an escaped JSON array
+of canonical volume targets (`[]` when empty). After its unchanged fixed repair,
+the entrypoint invokes `scripts/ownership-repair.py` directly as dev with one
+quoted JSON argument. The helper checks writability with dev credentials and
+enumerates only direct root entries (dotfiles count). If enumeration is denied,
+it uses read-only `sudo ls -A`. Only an empty, unwritable root receives
+`sudo chown -h` of the root itself; no recursion or existing-content changes.
+A populated, unwritable root warns with a manual ownership remedy. Malformed
+transport or a failing privileged call stops startup; warnings do not.
+Dockerfile delivery of this helper requires an image rebuild (`djinn build`).
+Doctor reports exactly one PASS/FAIL per declared mount/environment key using
+the same diagnostics; it never repairs declared sources, markers or volumes.
+
 ## Image Build
 
 The Dockerfile refuses a build network it cannot resolve names on:
@@ -903,13 +1003,27 @@ backed by named volumes.
   passes `--remove-orphans`, without which Compose skips the one-off containers
   that `start` and `run` create and also leaves a proxy from `--docker` behind.
 - `clean_volumes()`: lists or deletes named volume categories and clears
-  config-root sync paths by category.
+  config-root sync paths by category. Its cache/data flags include existing
+  declared volumes of the category; credentials/repo-dotfiles keep their paths.
+  `none` has no selector and is deleted only by `clean all` or actual name.
+  Name cleanup retains its config-free gate accepting any existing `djinn-*`
+  name, without logical-name aliases or narrowing to the registry.
 - `clean_all()`: stops containers, deletes all known named volumes, clears all
   config-zone sync paths, and deletes the network. It does not clear shared or
   local zone data.
+  It attempts deletion of every built-in and declared volume, including absent
+  ones and `none`. Default `clean` keeps all volumes and declared binds.
 - `audit()`: prints Docker proxy logs.
 - `update()`: runs `scripts/update-agents.sh`.
 - `enter()`: opens a zsh shell in the first running Djinn container.
+
+Status and `clean volumes` listing group declared data/cache/none volumes and
+mark absent declared volumes `not created`. They load one optional config;
+missing config keeps built-ins (status retains `config = None` initialization).
+Invalid config aborts destructive category/all callers before cleanup.
+Declared binds/markers, arbitrary binds, workspace, SSH and shared/local zones
+never join destructive sets. Existing confirmations, down and self-teardown
+behavior are preserved; there is no Docker prefix scan.
 
 `_sync_build_files(config)` copies `packages.txt` and `tools.txt` from
 `get_config_root(config)/repo-dotfiles` into the build context when those local
@@ -1028,6 +1142,14 @@ Category definitions come from `config/defaults.py`:
 - `SYNC_PATHS["credentials"]`: `claude`, `codex`, `opencode`, `gh`, `age`
 - `SYNC_PATHS["repo-dotfiles"]`: `repo-dotfiles`
 
+`volume_categories(config=None)` copies every built-in list and adds only
+`VolumeDeclaration` actual names by category, including `none`, rejecting
+built-in name collisions before returning. Constants are never mutated and no
+bind host checks run: an unplugged declared drive cannot block volume backup
+or cleanup. `get_existing_volumes_by_category` receives the config snapshot.
+Only the four existing backup selectors are accepted; `none` is storage
+metadata, never a backup/cleanup category selector.
+
 `backup()` refuses to run while Djinn containers are active. It stages one
 archive per selected named volume or config-root subdirectory, then encrypts the
 outer tar with `age --passphrase` into a `0600` temporary file in
@@ -1036,12 +1158,33 @@ outer tar with `age --passphrase` into a `0600` temporary file in
 `0700`; the default flow keeps only the newest archive across encrypted and
 cleartext formats. `--no-encrypt` is the explicit cleartext opt-out and
 uses the same atomic publication path.
+Declared data volumes join default or explicit data backup; declared cache
+volumes join only explicit cache backup. Only existing selected volumes are
+archived; `none` and declared bind contents/markers are never backed up.
+Declared volume archives are staged as
+`declared-volumes/<actual-name>.tar.gz`, included in the outer tar; built-in
+archives keep their root names/layout. The existing raw Docker volume helper
+uses the selected actual name and mounts the backup source read-only.
 
 `restore()` also refuses to run while containers are active. It identifies an
 age archive from its `age-encryption.org/v1` header, decrypts it into a separate
 restore-staging subdirectory, then extracts the outer tar. Cleartext gzip
-archives written with `--no-encrypt` remain supported. Restore routes config-root
-archives by filename prefix and named volumes by validated volume name.
+archives written with `--no-encrypt` remain supported. Discovery covers root
+archives and `declared-volumes/*.tar.gz`. Classification order is binding:
+
+1. Declared namespace: restore into the actual volume name only if currently
+   declared as data/cache; removed or current `none` warns by name and skips
+   without creating or clearing a volume. A data/cache category change does
+   not affect restore: the archive contents determine selection, with no selector.
+2. Root `djinn-sync-*`: existing config-root sync route, unchanged.
+3. Other root members: existing validated volume-name route, unchanged.
+
+The raw volume restore helper receives the declared subdirectory as its archive
+source; it gets no dev mounts/environment. No current-declaration filter applies
+to root members: a `sync-claude` declaration at `none` skips its namespaced
+volume archive while root `djinn-sync-claude.tar.gz` still restores credentials.
+There is no manifest, arbitrary-bind restore, compatibility adapter or migration.
+`none` means excluded from backup/restore, without protection from `clean all`.
 
 Cache volumes are intentionally excluded from default backups because they are
 large and rebuildable.

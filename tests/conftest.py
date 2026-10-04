@@ -53,3 +53,32 @@ def mock_app_config(tmp_path: Path) -> AppConfig:
         resources=ResourceLimits(),
         shell=ShellConfig(),
     )
+
+
+@pytest.fixture
+def declared_app_config(mock_app_config: AppConfig, tmp_path: Path) -> AppConfig:
+    """Declared storage alongside sync paths and host data that must survive cleanup."""
+    config_root = mock_app_config.config_root
+    for name in ("claude", "codex", "opencode", "gh", "age", "repo-dotfiles"):
+        path = config_root / name
+        path.mkdir(parents=True)
+        (path / "sentinel").write_text(name)
+    for root in (tmp_path / "shared", tmp_path / "local", tmp_path / "external"):
+        root.mkdir()
+        (root / "sentinel").write_text(root.name)
+    (tmp_path / "external" / ".drive-ready").touch()
+    return AppConfig.model_validate({
+        **mock_app_config.model_dump(),
+        "shared_root": tmp_path / "shared",
+        "local_root": tmp_path / "local",
+        "mounts": {
+            "journal": {"volume": True, "target": "/home/dev/journal", "backup": "data"},
+            "scratch": {"volume": True, "target": "/home/dev/scratch", "backup": "cache"},
+            "worker": {"volume": True, "target": "/home/dev/worker", "backup": "none"},
+            "archive": {
+                "source": str(tmp_path / "external"),
+                "target": "/home/dev/archive",
+                "marker": ".drive-ready",
+            },
+        },
+    })

@@ -10,7 +10,12 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from djinn_in_a_box.config.declarations import (
+    MountDeclaration,
+    inspect_declarations,
+)
 
 
 def validate_memory_format(value: str) -> str:
@@ -234,6 +239,21 @@ class AppConfig(BaseModel):
 
     build: BuildConfig = Field(default_factory=BuildConfig)
     """Image-build settings."""
+
+    mounts: dict[str, MountDeclaration] = Field(default_factory=dict)
+    environment: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("mounts", "environment", mode="before")
+    @classmethod
+    def validate_declarations(cls, value: object, info: ValidationInfo) -> object:
+        entries = inspect_declarations(
+            value if info.field_name == "mounts" else {},
+            value if info.field_name == "environment" else {},
+        )
+        for diagnostic in entries.diagnostics:
+            if diagnostic.error:
+                raise ValueError(diagnostic.error)
+        return entries.mounts if info.field_name == "mounts" else entries.environment
 
     @property
     def workspace_target(self) -> Path:

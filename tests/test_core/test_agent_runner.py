@@ -226,3 +226,50 @@ def test_run_headless_agent_cleans_proxy_after_execution_error(
         )
 
     runner_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, runner_mocks["app_config"])
+
+
+def test_headless_config_carries_declarations(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import MagicMock
+
+    from djinn_in_a_box.core import agent_runner, docker
+
+    config = AppConfig(
+        code_dir=tmp_path,
+        mounts={
+            "archive": {"source": str(tmp_path), "target": "/archive"},
+            "worker": {"volume": True, "target": "/worker", "backup": "none"},
+        },
+        environment={"CDP_HOST": "$HOST"},
+    )
+    monkeypatch.setattr(
+        agent_runner,
+        "load_config",
+        MagicMock(side_effect=AssertionError("must use supplied snapshot")),
+    )
+    monkeypatch.setattr(agent_runner, "load_agents", lambda: {"codex": AgentConfig(binary="codex")})
+    monkeypatch.setattr(agent_runner, "ensure_network", lambda: True)
+    monkeypatch.setattr(agent_runner, "cleanup_docker_proxy", lambda *args: None)
+    for name in (
+        "get_shell_mount_args",
+        "get_audio_mount_args",
+        "get_dbus_mount_args",
+        "get_sops_age_key_mount_args",
+    ):
+        monkeypatch.setattr(docker, name, lambda *args: [])
+    monkeypatch.setattr(docker, "_zone_overlay_mount_args_and_targets", lambda *args: ([], ()))
+    captured = []
+
+    def capture(cmd, **kwargs):
+        path = Path(cmd[max(i for i, arg in enumerate(cmd) if arg == "-f") + 1])
+        captured.append((cmd, json.loads(path.read_text())))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker.subprocess, "run", capture)
+    result = run_headless_agent("codex", "real prompt", resolved_mounts=(), app_config=config)
+    assert result.returncode == 0
+    cmd, fragment = captured[0]
+    assert "AGENT_PROMPT=real prompt" in cmd
+    assert {m["type"] for m in fragment["services"]["dev"]["volumes"]} == {"bind", "volume"}
+    assert fragment["services"]["dev"]["environment"]["CDP_HOST"] == "$$HOST"
+    assert fragment["volumes"] == {"djinn-worker": {"name": "djinn-worker"}}

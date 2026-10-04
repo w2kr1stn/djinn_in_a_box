@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Final
 
-from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.config.declarations import VolumeDeclaration, declaration_error
+from djinn_in_a_box.config.models import AgentConfig, AppConfig
+from djinn_in_a_box.core.exceptions import ConfigValidationError
 
 VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     "cache": [
@@ -18,6 +20,23 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     ],
 }
 """Named-volume categories (host-local, not synced across machines)."""
+
+
+def volume_categories(config: AppConfig | None = None) -> dict[str, list[str]]:
+    """Copy the built-ins and add declared volumes without inspecting bind sources."""
+    categories = {category: list(names) for category, names in VOLUME_CATEGORIES.items()}
+    builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}
+    if config is not None:
+        for name, declaration in config.mounts.items():
+            if isinstance(declaration, VolumeDeclaration):
+                actual_name = f"djinn-{name}"
+                if actual_name in builtins:
+                    raise ConfigValidationError(declaration_error(
+                        "mounts", name,
+                        f"volume '{actual_name}' conflicts with built-in volume '{actual_name}'",
+                    ))
+                categories.setdefault(declaration.backup, []).append(actual_name)
+    return categories
 
 
 SYNC_PATHS: Final[dict[str, list[str]]] = {

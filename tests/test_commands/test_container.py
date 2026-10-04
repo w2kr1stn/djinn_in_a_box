@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import container
+from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.config_workflow import (
@@ -37,6 +38,156 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.theme import DJINN_THEME
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("command", ["status", "listing"])
+@pytest.mark.parametrize("configured", [True, False], ids=["configured", "missing-config"])
+def test_status_declared_volume_categories(
+    command: str, configured: bool, declared_app_config: AppConfig,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    expected = {
+        "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"],
+        "data": ["djinn-opencode-data", "djinn-vscode-workspaces"],
+    }
+    if configured:
+        expected["data"].append("djinn-journal")
+        expected["cache"].append("djinn-scratch (not created)")
+        expected["none"] = ["djinn-worker"]
+    with (
+        patch.object(container, "load_config", return_value=declared_app_config) as load,
+        patch.object(container.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, stdout="",
+        )),
+        patch("djinn_in_a_box.core.docker.volume_exists",
+              side_effect=lambda name: name != "djinn-scratch"),
+        patch.object(container, "_print_resource_table",
+                     wraps=container._print_resource_table) as table,
+        patch.object(container, "get_existing_sync_paths_by_category", return_value=[]),
+        patch.object(container, "is_container_running", return_value=False),
+        patch("djinn_in_a_box.core.docker.resolve_declared_entries") as resolve,
+    ):
+        if not configured:
+            load.side_effect = ConfigNotFoundError(tmp_path / "missing-config.toml")
+        result = runner.invoke(app, ["status"] if command == "status" else ["clean", "volumes"])
+    assert result.exit_code == 0, result.output
+    load.assert_called_once()
+    table.assert_called_once_with("Djinn Volumes", "Volume", expected)
+    resolve.assert_not_called()
+    for names in expected.values():
+        for name in names:
+            assert name in result.output
+    if configured:
+        assert "None" in result.output
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["cache", "data", "credentials", "repo-dotfiles", "all", "default", "name"],
+)
+def test_declared_cleanup_sets(
+    operation: str, declared_app_config: AppConfig, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    config = declared_app_config
+    builtins_cache = {"djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"}
+    builtins_data = {"djinn-opencode-data", "djinn-vscode-workspaces"}
+    expected_volumes = {
+        "cache": {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch"},
+        "data": {"djinn-opencode-data", "djinn-journal"},
+        "all": builtins_cache | builtins_data | {"djinn-journal", "djinn-scratch", "djinn-worker"},
+        "name": {"djinn-worker"},
+    }.get(operation, set())
+    sync_names = {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}
+    expected_sync = {
+        "credentials": sync_names - {"repo-dotfiles"},
+        "repo-dotfiles": {"repo-dotfiles"},
+        "all": sync_names,
+    }.get(operation, set())
+    args = {
+        "all": ["clean", "all", "--force"], "default": ["clean"],
+        "name": ["clean", "volumes", "djinn-worker"],
+    }.get(operation, ["clean", "volumes", f"--{operation}", "--force"])
+    with (
+        patch.object(container, "load_config", return_value=config) as load,
+        patch.object(container, "compose_down", return_value=RunResult(0)) as down,
+        patch("djinn_in_a_box.core.docker.volume_exists", side_effect=lambda name: name not in {
+            "djinn-vscode-server", "djinn-vscode-workspaces",
+        }),
+        patch.object(container, "volume_exists", return_value=True),
+        patch.object(container, "delete_volumes",
+                     side_effect=lambda names: dict.fromkeys(names, True)) as delete,
+        patch.object(container, "delete_volume", return_value=True) as delete_one,
+        patch.object(container, "clear_sync_path", wraps=container.clear_sync_path) as clear,
+        patch.object(container, "network_exists", return_value=False),
+    ):
+        if operation in {"name", "default"}:
+            load.side_effect = AssertionError("This cleanup path must remain config-free")
+        result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    actual_volumes = [name for call in delete.call_args_list for name in call.args[0]]
+    actual_volumes.extend(call.args[0] for call in delete_one.call_args_list)
+    assert set(actual_volumes) == expected_volumes
+    assert len(actual_volumes) == len(expected_volumes)
+    assert {call.args[0] for call in clear.call_args_list} == {
+        config.config_root / name for name in expected_sync
+    }
+    assert len(clear.call_args_list) == len(expected_sync)
+    if operation in {"name", "default"}:
+        load.assert_not_called()
+    else:
+        load.assert_called_once()
+    if operation in {"all", "default"}:
+        down.assert_called_once_with()
+    else:
+        down.assert_not_called()
+    for name in sync_names:
+        assert (config.config_root / name).is_dir()
+        assert (config.config_root / name / "sentinel").exists() == (name not in expected_sync)
+    for name in ("external", "shared", "local"):
+        assert (tmp_path / name / "sentinel").read_text() == name
+    assert (tmp_path / "external" / ".drive-ready").is_file()
+
+
+@pytest.mark.parametrize("operation", ["cache", "all"])
+def test_declared_cleanup_refuses_builtin_volume_collision(
+    operation: str, declared_app_config: AppConfig,
+) -> None:
+    config = AppConfig.model_validate({
+        **declared_app_config.model_dump(),
+        "mounts": {"uv-cache": {"volume": True, "target": "/home/dev/extra", "backup": "data"}},
+    })
+    original = {category: list(names) for category, names in VOLUME_CATEGORIES.items()}
+    with (
+        patch.object(container, "load_config", return_value=config),
+        patch.object(container, "compose_down") as down,
+        patch.object(container, "delete_volumes") as delete,
+        patch.object(container, "clear_sync_path") as clear,
+        patch.object(container, "network_exists", return_value=False),
+        patch("djinn_in_a_box.core.docker.volume_exists") as exists,
+    ):
+        result = runner.invoke(app, ["clean", "all", "--force"] if operation == "all" else [
+            "clean", "volumes", "--cache", "--force",
+        ])
+    assert result.exit_code == 1, result.output
+    assert "uv-cache" in result.output and "built-in volume" in result.output
+    down.assert_not_called()
+    delete.assert_not_called()
+    clear.assert_not_called()
+    exists.assert_not_called()
+    assert original == VOLUME_CATEGORIES
+
+
+def test_declared_cleanup_has_no_none_selector(declared_app_config: AppConfig) -> None:
+    with (
+        patch.object(container, "load_config", return_value=declared_app_config),
+        patch.object(container, "get_existing_volumes_by_category", return_value=[]),
+    ):
+        result = runner.invoke(app, ["clean", "volumes", "--none"])
+    assert result.exit_code == 2
+    assert "No such option" in result.output
 
 
 class TestBuildCommand:
@@ -892,7 +1043,7 @@ class TestCleanVolumesCommand:
         ):
             container.clean_volumes(cache=True)
 
-            mock_get.assert_called_with("cache")
+            mock_get.assert_called_with("cache", mock_app_config)
             mock_delete.assert_called_once()
 
     def test_clean_volumes_deletes_specific_volume(self) -> None:
@@ -940,7 +1091,7 @@ class TestCleanAllCommand:
         with (
             patch("djinn_in_a_box.commands.container.load_config", return_value=mock_app_config),
             patch("djinn_in_a_box.commands.container.compose_down") as mock_down,
-            patch("djinn_in_a_box.commands.container.VOLUME_CATEGORIES", {}),
+            patch("djinn_in_a_box.commands.container.volume_categories", return_value={}),
             patch("djinn_in_a_box.commands.container.SYNC_PATHS", {}),
             patch("djinn_in_a_box.commands.container.network_exists", return_value=False),
         ):
@@ -1284,3 +1435,20 @@ class TestResourceTable:
         result = capture_container_stdout.getvalue()
         assert "Credentials" in result
         assert "/home/user/.djinn/sync/claude" in result
+
+
+def test_enter_does_not_inject_declarations(monkeypatch):
+    from djinn_in_a_box.core import docker
+
+    forbidden = MagicMock(side_effect=AssertionError("exec must inherit"))
+    monkeypatch.setattr(docker, "resolve_declared_entries", forbidden)
+    monkeypatch.setattr(container, "load_config", forbidden)
+    monkeypatch.setattr(container.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(container, "get_running_containers", lambda prefix: ["djinn"])
+    run = MagicMock(return_value=MagicMock(returncode=0))
+    monkeypatch.setattr(container.subprocess, "run", run)
+    with pytest.raises(typer.Exit) as exc:
+        container.enter()
+    assert exc.value.exit_code == 0
+    assert run.call_args.args[0] == ["docker", "exec", "-it", "djinn", "zsh"]
+    forbidden.assert_not_called()

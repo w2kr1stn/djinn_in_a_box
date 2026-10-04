@@ -16,11 +16,176 @@ from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import backup as backup_module
+from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES, volume_categories
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.docker import RunResult
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected_volumes", "expected_sync"),
+    [
+        ("default", {"djinn-opencode-data", "djinn-journal"},
+         {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
+        ("data", {"djinn-opencode-data", "djinn-journal"}, set()),
+        ("cache", {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch"}, set()),
+        ("combined", {"djinn-opencode-data", "djinn-journal", "djinn-uv-cache",
+                      "djinn-tools-cache", "djinn-scratch"},
+         {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
+        ("credentials", set(), {"claude", "codex", "opencode", "gh", "age"}),
+        ("repo-dotfiles", set(), {"repo-dotfiles"}),
+        ("unplugged-bind", {"djinn-opencode-data", "djinn-journal"},
+         {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
+        ("none", set(), set()),
+    ],
+    ids=["default", "data", "cache", "combined", "credentials", "repo-dotfiles",
+         "unplugged-bind", "none"],
+)
+def test_declared_backup_categories(
+    selection: str, expected_volumes: set[str], expected_sync: set[str],
+    declared_app_config: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = declared_app_config
+    if selection == "unplugged-bind":
+        data = config.model_dump()
+        data["mounts"]["archive"]["source"] = str(tmp_path / "unplugged")
+        config = AppConfig.model_validate(data)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    original = {category: list(names) for category, names in VOLUME_CATEGORIES.items()}
+    snapshot = volume_categories(config)
+    assert snapshot == {
+        "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server", "djinn-scratch"],
+        "data": ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-journal"],
+        "none": ["djinn-worker"],
+    }
+    snapshot["data"].clear()
+    assert original == VOLUME_CATEGORIES
+    assert volume_categories(config)["data"] == [
+        "djinn-opencode-data", "djinn-vscode-workspaces", "djinn-journal",
+    ]
+    assert volume_categories() == original
+
+    def write_volume(name: str, dest: Path) -> RunResult:
+        with tarfile.open(dest / f"{name}.tar.gz", "w:gz"):
+            pass
+        return RunResult(0)
+
+    def write_sync(path: Path, dest: Path) -> RunResult:
+        with tarfile.open(dest / f"djinn-sync-{path.name}.tar.gz", "w:gz"):
+            pass
+        return RunResult(0)
+
+    backups_dir = tmp_path / "backups"
+    selected = {
+        "default": [], "unplugged-bind": [],
+        "combined": ["data", "cache", "credentials", "repo-dotfiles"],
+    }.get(selection, [selection])
+    args = ["backup", "--no-encrypt"]
+    for category in selected:
+        args.extend(["--categories", category])
+    with (
+        patch.object(backup_module, "load_config", return_value=config) as load,
+        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch("djinn_in_a_box.core.docker.volume_exists", side_effect=lambda name: name not in {
+            "djinn-vscode-server", "djinn-vscode-workspaces",
+        }),
+        patch.object(backup_module, "backup_volume", side_effect=write_volume) as volumes,
+        patch.object(backup_module, "backup_sync_path", side_effect=write_sync) as sync,
+        patch.object(backup_module, "BACKUPS_DIR", backups_dir),
+    ):
+        result = runner.invoke(app, args)
+    load.assert_called_once()
+    if selection == "none":
+        assert result.exit_code == 1, result.output
+        assert "Unknown category: 'none'" in result.output
+        volumes.assert_not_called()
+        sync.assert_not_called()
+        assert not backups_dir.exists()
+        return
+    assert result.exit_code == 0, result.output
+    assert {call.args[0] for call in volumes.call_args_list} == expected_volumes
+    assert {call.args[0] for call in sync.call_args_list} == {
+        config.config_root / name for name in expected_sync
+    }
+    with tarfile.open(next(backups_dir.glob("*.tar.gz"))) as outer:
+        members = {member.name for member in outer.getmembers() if member.isfile()}
+    assert members == {
+        (f"declared-volumes/{name}.tar.gz" if name in {"djinn-journal", "djinn-scratch"}
+         else f"{name}.tar.gz") for name in expected_volumes
+    } | {f"djinn-sync-{name}.tar.gz" for name in expected_sync}
+    assert not (tmp_path / "unplugged").exists()
+    assert (tmp_path / "external" / ".drive-ready").is_file()
+    assert (tmp_path / "external" / "sentinel").read_text() == "external"
+
+
+@pytest.mark.parametrize(
+    ("case", "members", "mounts", "expected_volumes", "expected_sync", "skipped"),
+    [
+        ("data", ["declared-volumes/djinn-journal.tar.gz"], {}, {"djinn-journal"}, set(), set()),
+        ("cache", ["declared-volumes/djinn-scratch.tar.gz"], {}, {"djinn-scratch"}, set(), set()),
+        ("sync-project", ["declared-volumes/djinn-sync-project.tar.gz"],
+         {"sync-project": "data"}, {"djinn-sync-project"}, set(), set()),
+        ("changed-category", ["declared-volumes/djinn-journal.tar.gz"],
+         {"journal": "cache"}, {"djinn-journal"}, set(), set()),
+        ("none", ["declared-volumes/djinn-worker.tar.gz"], {}, set(), set(), {"djinn-worker"}),
+        ("removed", ["declared-volumes/djinn-removed.tar.gz"], {}, set(), set(), {"djinn-removed"}),
+        ("built-in", ["djinn-opencode-data.tar.gz", "djinn-sync-codex.tar.gz"], {},
+         {"djinn-opencode-data"}, {"codex"}, set()),
+        ("sync-claude-pair", ["djinn-sync-claude.tar.gz",
+                             "declared-volumes/djinn-sync-claude.tar.gz"],
+         {"sync-claude": "none"}, set(), {"claude"}, {"djinn-sync-claude"}),
+    ],
+    ids=["data", "cache", "sync-project", "changed-category", "none", "removed",
+         "built-in", "sync-claude-pair"],
+)
+def test_declared_volume_restore_namespace(
+    case: str, members: list[str], mounts: dict[str, str], expected_volumes: set[str],
+    expected_sync: set[str], skipped: set[str], declared_app_config: AppConfig,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    data = declared_app_config.model_dump()
+    for name, category in mounts.items():
+        data["mounts"][name] = {
+            "volume": True, "target": f"/home/dev/{name}", "backup": category,
+        }
+    config = AppConfig.model_validate(data)
+    if case == "sync-project":
+        # Let a prefix-first mutation reach the routing assertions, not a missing-path error.
+        (config.config_root / "project").mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    inner = tmp_path / "inner.tar.gz"
+    with tarfile.open(inner, "w:gz"):
+        pass
+    with tarfile.open(backups_dir / "djinn-backup-2026-10-04.tar.gz", "w:gz") as outer:
+        for member in members:
+            outer.add(inner, arcname=member)
+    with (
+        patch.object(backup_module, "load_config", return_value=config),
+        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(backup_module, "BACKUPS_DIR", backups_dir),
+        patch.object(backup_module, "restore_volume", return_value=RunResult(0)) as volume,
+        patch.object(backup_module, "restore_sync_path", return_value=RunResult(0)) as sync,
+    ):
+        result = runner.invoke(app, ["restore"], input="y\n")
+    assert result.exit_code == 0, (case, result.output)
+    assert {call.args[0] for call in volume.call_args_list} == expected_volumes
+    assert {call.args[0] for call in sync.call_args_list} == expected_sync
+    assert len(volume.call_args_list) == len(expected_volumes)
+    assert len(sync.call_args_list) == len(expected_sync)
+    for call in volume.call_args_list:
+        declared = f"declared-volumes/{call.args[0]}.tar.gz" in members
+        assert (call.args[1].name == "declared-volumes") == declared
+    for call in sync.call_args_list:
+        assert call.args[1].name != "declared-volumes"
+        assert call.args[2] is config
+    for name in skipped:
+        assert name in result.output and "Skipping declared volume" in result.output
+    assert (tmp_path / "external" / ".drive-ready").is_file()
+    assert (tmp_path / "external" / "sentinel").read_text() == "external"
 
 
 @pytest.fixture(autouse=True)
@@ -366,7 +531,9 @@ class TestBackupCommand:
                 backup_module.backup()
             assert exc_info.value.exit_code == 1
 
-    def test_backup_with_categories_flag(self, tmp_path: Path) -> None:
+    def test_backup_with_categories_flag(
+        self, tmp_path: Path, mock_app_config: AppConfig
+    ) -> None:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
         backups_dir = tmp_path / "backups"
@@ -391,7 +558,7 @@ class TestBackupCommand:
 
             backup_module.backup(categories=["cache"])
 
-            mock_get.assert_called_once_with("cache")
+            mock_get.assert_called_once_with("cache", mock_app_config)
 
     def test_backup_collects_sync_paths_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

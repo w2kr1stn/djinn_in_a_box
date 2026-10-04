@@ -2593,7 +2593,7 @@ class TestComposeUpDetached:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_omits_the_override_when_nothing_is_dynamic(
+    def test_empty_declarations_still_use_a_scoped_override(
         self,
         mock_run: MagicMock,
         mock_root: MagicMock,
@@ -2607,7 +2607,8 @@ class TestComposeUpDetached:
         compose_up_detached(mock_app_config, ContainerOptions())
 
         cmd = mock_run.call_args.args[0]
-        assert not any("djinn-detach-" in arg for arg in cmd)
+        override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+        assert not override.exists()
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -2708,6 +2709,7 @@ class TestComposeUpDetached:
         assert service["environment"] == {
             "PULSE_SERVER": "unix:/run/user/1000/pulse/native",
             "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+            "DJINN_DECLARED_VOLUME_TARGETS": "[]",
         }
         assert "/run/user/1000/pulse/native:/run/user/1000/pulse/native" in service["volumes"]
 
@@ -2819,3 +2821,274 @@ class TestRunningContainerProbeFailure:
         monkeypatch.setattr(docker_mod.subprocess, "run", empty_run)
 
         assert docker_mod.get_running_containers() == []
+
+
+@pytest.fixture
+def declared_creator(tmp_path, monkeypatch):
+    from djinn_in_a_box.config.models import AppConfig
+    from djinn_in_a_box.core import docker
+
+    source = tmp_path / "archive$disk"
+    source.mkdir()
+    (source / ".ready").touch()
+    monkeypatch.delenv("CDP_HOST", raising=False)
+    config = AppConfig(
+        code_dir=tmp_path,
+        mounts={
+            "archive.disk": {"source": str(source), "target": "/archive$disk", "marker": ".ready"},
+            "worker": {"volume": True, "target": "/worker\n space$cash", "backup": "none"},
+        },
+        environment={"CDP_HOST": "$HOST ${HOST:-fallback}\n[brackets]", "EMPTY": ""},
+    )
+    for name in (
+        "get_shell_mount_args",
+        "get_audio_mount_args",
+        "get_dbus_mount_args",
+        "get_sops_age_key_mount_args",
+    ):
+        monkeypatch.setattr(docker, name, lambda *args: [])
+    monkeypatch.setattr(docker, "_zone_overlay_mount_args_and_targets", lambda *args: ([], ()))
+    monkeypatch.setattr(docker, "is_background_process_group", lambda: False)
+    return config
+
+
+def _call_declared_creator(kind, config, options=None, **kwargs):
+    from djinn_in_a_box.core import docker
+
+    options = options or ContainerOptions()
+    if kind == "detached":
+        return docker.compose_up_detached(config, options, **kwargs)
+    return docker.compose_run(config, options, interactive=kind == "interactive", **kwargs)
+
+
+@pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+def test_declared_entries_on_every_creator(tmp_path, monkeypatch, declared_creator, kind):
+    from djinn_in_a_box.core import docker
+
+    payloads, commands = [], []
+
+    def capture(cmd, **kwargs):
+        overrides = [Path(cmd[i + 1]) for i, arg in enumerate(cmd) if arg == "-f"]
+        assert overrides[-1].name.startswith("djinn-")
+        payloads.append(json.loads(overrides[-1].read_text()))
+        commands.append((cmd, kwargs))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker.subprocess, "run", capture)
+    invocation = ContainerMount(tmp_path, Path("/invocation"))
+    _call_declared_creator(
+        kind,
+        declared_creator,
+        ContainerOptions(mounts=(invocation,)),
+        env={"AGENT_PROMPT": "prompt"},
+    )
+    fragment = payloads[0]
+    service = fragment["services"]["dev"]
+    binds = [m for m in service["volumes"] if isinstance(m, dict) and m["type"] == "bind"]
+    volumes = [m for m in service["volumes"] if isinstance(m, dict) and m["type"] == "volume"]
+    assert binds == [
+        {
+            "type": "bind",
+            "source": str(tmp_path / "archive$$disk"),
+            "target": "/archive$$disk",
+            "bind": {"create_host_path": False},
+        }
+    ]
+    assert volumes == [
+        {"type": "volume", "source": "djinn-worker", "target": "/worker\n space$$cash"}
+    ]
+    assert fragment["volumes"] == {"djinn-worker": {"name": "djinn-worker"}}
+    assert service["environment"]["CDP_HOST"] == "$$HOST $${HOST:-fallback}\n[brackets]"
+    assert service["environment"]["EMPTY"] == ""
+    assert service["environment"]["DJINN_DECLARED_VOLUME_TARGETS"] == json.dumps(
+        ["/worker\n space$cash"]
+    ).replace("$", "$$")
+    assert declared_creator.environment["CDP_HOST"] == "$HOST ${HOST:-fallback}\n[brackets]"
+    cmd, kwargs = commands[0]
+    assert "CDP_HOST" not in kwargs["env"]
+    if kind == "detached":
+        assert service["working_dir"] == "/invocation"
+        assert service["environment"]["AGENT_PROMPT"] == "prompt"
+        assert kwargs["env"]["DJINN_DETACHED"] == "true"
+    else:
+        assert cmd[cmd.index("--workdir") + 1] == "/invocation"
+        assert "AGENT_PROMPT=prompt" in cmd
+        assert not any(arg.startswith("CDP_HOST=") for arg in cmd)
+        assert cmd.index("run") > max(i for i, arg in enumerate(cmd) if arg == "-f")
+    assert all(
+        not Path(cmd[i + 1]).exists()
+        for i, arg in enumerate(cmd)
+        if arg == "-f" and "djinn-" in cmd[i + 1]
+    )
+
+
+@pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize(
+    "cause", ["missing", "marker", "target", "volume", "environment", "schema", "caller", "socket"]
+)
+def test_declaration_refusal_precedes_creation(
+    tmp_path, monkeypatch, declared_creator, kind, cause
+):
+    from djinn_in_a_box.core import docker
+    from djinn_in_a_box.core.exceptions import DeclarationSpecificationError
+
+    entry = {"source": str(tmp_path), "target": "/archive"}
+    env, caller = {}, {}
+    if cause == "missing":
+        entry["source"] = str(tmp_path / "missing")
+    elif cause == "marker":
+        entry["marker"] = ".missing"
+    elif cause in ("target", "socket"):
+        entry["target"] = "/home/dev/.codex" if cause == "target" else "/var/run/docker.sock"
+    elif cause == "schema":
+        entry["backup"] = "data"
+    elif cause == "volume":
+        entry = {"volume": True, "target": "/extra", "backup": "none"}
+    elif cause == "environment":
+        env = {"DOCKER_HOST": "do not echo"}
+    else:
+        env = {"CDP_HOST": "do not echo"}
+        caller = {"CDP_HOST": "caller"}
+    name = "uv-cache" if cause == "volume" else "archive"
+    config = declared_creator.model_copy(update={"mounts": {name: entry}, "environment": env})
+    run = MagicMock()
+    allocation = MagicMock()
+    monkeypatch.setattr(docker.subprocess, "run", run)
+    monkeypatch.setattr(docker.tempfile, "mkstemp", allocation)
+    with pytest.raises(DeclarationSpecificationError) as exc:
+        _call_declared_creator(kind, config, env=caller)
+    text = str(exc.value)
+    assert (
+        "DOCKER_HOST" if cause == "environment" else "CDP_HOST" if cause == "caller" else name
+    ) in text
+    assert {
+        "missing": "does not exist",
+        "marker": "marker",
+        "target": "conflict",
+        "socket": "conflict",
+        "volume": "built-in volume",
+        "environment": "reserved",
+        "schema": "backup",
+        "caller": "caller",
+    }[cause] in text
+    assert "do not echo" not in text
+    run.assert_not_called()
+    allocation.assert_not_called()
+    assert not (tmp_path / "missing").exists() and not (tmp_path / ".missing").exists()
+
+
+@pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("outcome", ["success", "exception", "timeout"])
+def test_declaration_override_cleanup(monkeypatch, declared_creator, kind, outcome):
+    from djinn_in_a_box.core import docker
+
+    paths = []
+
+    def run(cmd, **kwargs):
+        paths.extend(
+            Path(cmd[i + 1]) for i, arg in enumerate(cmd) if arg == "-f" and "djinn-" in cmd[i + 1]
+        )
+        assert paths and paths[-1].exists()
+        if outcome == "exception":
+            raise RuntimeError("Docker failed")
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 1)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker.subprocess, "run", run)
+    if outcome == "exception" or (outcome == "timeout" and kind == "detached"):
+        with pytest.raises((RuntimeError, subprocess.TimeoutExpired)):
+            _call_declared_creator(
+                kind, declared_creator, **({"timeout": 1} if kind != "detached" else {})
+            )
+    else:
+        _call_declared_creator(
+            kind, declared_creator, **({"timeout": 1} if kind != "detached" else {})
+        )
+    assert paths and all(not path.exists() for path in paths)
+
+
+def test_compose_reservations_match(tmp_path, monkeypatch):
+    import socket
+
+    import yaml
+
+    from djinn_in_a_box.config.declarations import COMPOSE_ENV_KEYS, RESERVED_ENVIRONMENT
+    from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
+    from djinn_in_a_box.core import docker, session
+
+    root = Path(__file__).resolve().parents[1]
+    keys, names = set(), set()
+    for path in root.glob("docker-compose*.yml"):
+        data = yaml.safe_load(path.read_text())
+        for service in data["services"].values():
+            environment = service.get("environment", {})
+            keys.update(
+                environment
+                if isinstance(environment, dict)
+                else (item.split("=", 1)[0] for item in environment)
+            )
+        names.update(volume["name"] for volume in data.get("volumes", {}).values())
+    assert keys == COMPOSE_ENV_KEYS
+    assert names == {v for values in VOLUME_CATEGORIES.values() for v in values}
+    assert set(docker.build_compose_env(None)) <= RESERVED_ENVIRONMENT.keys()
+    pulse = tmp_path / "pulse" / "native"
+    pulse.parent.mkdir()
+    pulse.touch()
+    key = tmp_path / "age-key"
+    key.touch()
+    key.chmod(0o600)
+    config = AppConfig(code_dir=tmp_path, sops_age_key_file=key)
+    assert set(docker.build_compose_env(config)) <= RESERVED_ENVIRONMENT.keys()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as bus:
+        bus.bind(str(tmp_path / "bus"))
+        runtime_args = [
+            *docker.get_audio_mount_args(),
+            *docker.get_dbus_mount_args(),
+            *docker.get_sops_age_key_mount_args(config),
+        ]
+    emitted = docker._env_pairs_from_mount_args(runtime_args)
+    assert emitted.keys() == {"PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS", "SOPS_AGE_KEY_FILE"}
+    assert emitted.keys() <= RESERVED_ENVIRONMENT.keys()
+    assert set(session._SESSION_ENV) <= RESERVED_ENVIRONMENT.keys()
+    assert {
+        "AGENT_PROMPT",
+        "PULSE_SERVER",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "SOPS_AGE_KEY_FILE",
+        "DJINN_DECLARED_VOLUME_TARGETS",
+    } <= RESERVED_ENVIRONMENT.keys()
+
+
+def test_startup_environment_class_guard():
+    import re
+
+    from djinn_in_a_box.config.declarations import RESERVED_ENVIRONMENT
+
+    root = Path(__file__).resolve().parents[1]
+    paths = [root / "Dockerfile", *(root / "scripts").rglob("*"), *(root / "tools").rglob("*")]
+    assigned = set()
+    pattern = (
+        r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*=|\bexport\s+([A-Z_][A-Z0-9_]*)|"
+        r"\$\{([A-Z_][A-Z0-9_]*):-|^(?:ENV|ARG)\s+([A-Z_][A-Z0-9_]*)"
+    )
+    for path in paths:
+        if path.is_file() and "__pycache__" not in path.parts:
+            # Comments are not executable assignments; heredoc content is included.
+            text = "\n".join(
+                line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")
+            )
+            assigned.update(
+                next(part for part in match if part) for match in re.findall(pattern, text, re.M)
+            )
+    # Underscore-prefixed names below are local helper internals, never caller env.
+    exceptions = {
+        "_OUTPUT_LIB_DEFAULT",
+        "_MCP_REGISTER_DIR",
+        "_OUTPUT_LIB",
+        "_DJINN_STATE_PERSISTED",
+        "_DJINN_OUTPUT_LIB_LOADED",
+        "ALL",  # sudoers ALL=(ALL) grammar, not an environment assignment.
+    }
+    assert assigned - RESERVED_ENVIRONMENT.keys() - exceptions == set()

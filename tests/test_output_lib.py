@@ -281,6 +281,7 @@ def test_entrypoint_continues_with_plain_startup_messages_when_output_lib_absent
         "HOME": str(tmp_path),
         "OUTPUT_LIB": str(missing_output_lib),
         "SEED_LIB": str(missing_seed_lib),
+        "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
         "ENABLE_FIREWALL": "false",
     }
 
@@ -345,6 +346,7 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
         "SEED_LIB": str(ROOT / "scripts" / "seed-lib.sh"),
         "MCP_REGISTER": str(ROOT / "scripts" / "mcp-register.sh"),
         "SETTINGS_COPY_HELPER": str(ROOT / "scripts" / "settings-copy.py"),
+        "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
         "OPENCODE_CREDENTIALS_HELPER": str(
             ROOT / "scripts" / "opencode-credentials.sh"
         ),

@@ -184,6 +184,75 @@ djinn config edit
 `djinn config edit` opens `$EDITOR` or `vi`, then validates the file after the
 editor exits.
 
+Additional mounts and environment variables are maintained only through
+`djinn config edit`, in root TOML tables:
+
+```toml
+[mounts.archive]
+source = "/mnt/archive"
+target = "/home/dev/archive"
+marker = ".drive-ready"
+
+[mounts.journal]
+volume = true
+target = "/home/dev/journal"
+backup = "data"
+
+[mounts.scratch]
+volume = true
+target = "/home/dev/scratch"
+backup = "cache"
+
+[mounts.worker]
+volume = true
+target = "/home/dev/worker"
+backup = "none"
+
+[environment]
+CDP_HOST = "192.0.2.1"
+CDP_PORT = "9222"
+EXAMPLE_LITERAL = "${HOST_VALUE}"
+```
+
+Declarations add to the built-ins; they cannot replace, redirect, disable or
+remove them. Names must match `[a-z0-9][a-z0-9_.-]*` and are unique across both
+mount kinds. A dotted name needs quotes, for example `[mounts."archive.disk"]`.
+Volumes are created by Compose as `djinn-<name>`; names colliding with built-in
+volumes are refused. `volume = true`, `target` and `backup` are required for a
+volume; `source` and `target` are required for a bind, with optional `marker`.
+Other fields and mixed shapes are refused.
+
+A bind source must be an existing absolute host directory without `:`; source
+symlinks are resolved. The optional marker is a single filename directly inside
+that directory and must be a regular file, never a symlink. A missing drive,
+missing marker or wrong marker type refuses creation and names the declaration;
+`djinn doctor` reports one PASS/FAIL row per declared mount or environment key.
+Djinn never provisions a source or marker because it is declared, checks no marker
+contents or identity, and never backs up, restores or cleans declared bind data.
+Use your host backup for it. Existing built-in provisioning still runs before
+validation, including when a declared source overlaps a built-in provisioning path.
+There is no mount-liveness protocol: a drive can disappear after validation.
+The no-create bind setting prevents accidental host directory creation.
+
+Environment keys must match `[A-Za-z_][A-Za-z0-9_]*`; values must be strings and
+are literal, so `${HOST_VALUE}` above stays exactly that text. Host values do not
+override them. Reserved keys cover every Docker mode and everything the repository
+ships into the image or runs at startup: Compose, Python, scripts, tools and
+Dockerfile exports or generated shell configuration. Keys set by mounted host
+shell startup files or third-party tools outside the repository are outside this
+reservation boundary. Declarations affect only the dev container, not builds,
+the proxy or host execution. No declared string may contain NUL.
+
+`djinn config show` (text or JSON) includes declarations. `djinn config set`
+preserves their values but rewrites the file and loses TOML comments.
+`djinn init` asks no declaration questions; `djinn init --force` replaces the whole
+file, including declarations. Changes take effect at the next container creation
+through `start` (foreground or detached) or `run`; `session` and `enter` inherit
+the running container. There is no comparison with running mounts or attach-time
+update. Literal endpoints such as CDP_HOST must be edited manually when the host
+gateway changes. Existing Compose edits and volume data must be moved by hand;
+there is no migration command.
+
 Supported `djinn config set` keys are:
 
 | Key | Meaning | Default or source |
@@ -539,6 +608,12 @@ Docker socket access, especially direct access.
 
 Djinn uses both bind mounts and named volumes. They serve different purposes.
 
+Mount configuration has three layers: fixed built-ins for credentials, seeds,
+workflow and cache targets; built-ins with a config value for the workspace,
+config root, SOPS key file and OMP theme; and declared additional mounts and
+environment variables. Use the existing config keys to configure the second
+layer; declarations extend the set and keep the tracked Compose files unchanged.
+
 Bind mounts are host paths that you can inspect and manage directly:
 
 | Host path | Container path | Purpose |
@@ -586,6 +661,39 @@ Named volumes are Docker-managed and host-local:
 The backup command includes credentials, repo-dotfiles, and data by default. It
 does not include cache volumes unless you explicitly request the `cache`
 category.
+
+Declared targets must be absolute. They cannot equal or contain a built-in,
+reserved, assigned zone, active workspace or `--mount`/`--here` target; nested
+declared targets are refused too. Target reservations cover all Docker modes,
+even inactive ones. Children of built-in, reserved, zone or invocation targets
+are allowed, with one exception: no declared mount may sit at or below the
+Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
+`/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
+Their existing recursive ownership repair remains in place. Declared mounts
+support writable directory binds and named volumes only, without file binds or
+a read-only declaration option; invocation `--mount ...:ro` remains available.
+
+At startup an empty declared-volume root that the dev user cannot write receives
+one ownership repair of the root itself. Existing contents are never changed;
+a populated, unwritable root produces a warning and needs manual ownership repair.
+Ownership-helper errors stop startup. This helper requires rebuilding the image
+with `djinn build` when upgrading to declaration support.
+
+`djinn status` and `djinn clean volumes` list declared volumes by category,
+including `none`, and show absent declared volumes as `not created`.
+
+| Declared volume category | Backup and restore | Cleanup |
+| --- | --- | --- |
+| `data` | Default backup, or explicit `--categories data`; restore while currently declared as data/cache | `clean volumes --data`, `clean all`, or by actual name |
+| `cache` | Only with `--categories cache`; restore while currently declared as data/cache | `clean volumes --cache`, `clean all`, or by actual name |
+| `none` | Never backed up or restored; no backup selector | Only `clean all` or by actual name; no `--none` selector |
+
+Backup includes only existing selected volumes. Declared archives use
+`declared-volumes/<actual-name>.tar.gz`; built-in archive names and layout stay
+unchanged. Restore uses the archive contents, skips removed or currently `none`
+declarations with a warning, and accepts a change between `data` and `cache`.
+Root `djinn-sync-*` archives still restore credentials/config-root paths, even
+when a declared volume has the same name in the separate namespace.
 
 ## Credential Security
 
@@ -719,6 +827,11 @@ Remove running Djinn containers while keeping volumes, config, and the network:
 ```sh
 djinn clean
 ```
+
+This keeps every declared volume and bind. Category cleanup includes declared
+volumes of that category. `backup = "none"` excludes backup and restore; it offers
+no protection from `clean all`. Declared bind sources and markers, arbitrary host
+binds, the workspace, SSH and shared/local zone data are outside the cleanup sets.
 
 List managed volumes and config-root paths:
 
