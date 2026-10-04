@@ -11,7 +11,7 @@ import typer
 from rich.table import Table
 
 from djinn_in_a_box.commands.doctor import preflight
-from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
+from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.banner import banner
@@ -388,10 +388,18 @@ def _print_docker_table(title: str, columns: list[str], output: str) -> bool:
     return True
 
 
-def _list_existing_volumes() -> dict[str, list[str]]:
-    return {
-        cat: vols for cat in VOLUME_CATEGORIES if (vols := get_existing_volumes_by_category(cat))
-    }
+def _list_existing_volumes(config: AppConfig | None = None) -> dict[str, list[str]]:
+    entries: dict[str, list[str]] = {}
+    builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}
+    for category, names in volume_categories(config).items():
+        existing = get_existing_volumes_by_category(category, config)
+        missing = [
+            f"{name} (not created)"
+            for name in names if name not in builtins and name not in existing
+        ]
+        if existing or missing:
+            entries[category] = existing + missing
+    return entries
 
 
 def _list_existing_sync_paths(config: AppConfig | None = None) -> dict[str, list[str]]:
@@ -468,7 +476,7 @@ def status() -> None:
 
     # Volumes
     rule("Volumes")
-    volume_entries = _list_existing_volumes()
+    volume_entries = _list_existing_volumes(config)
     if volume_entries:
         _print_resource_table("Djinn Volumes", "Volume", volume_entries)
     else:
@@ -566,11 +574,11 @@ def clean_volumes(
     ] = False,
     cache: Annotated[
         bool,
-        typer.Option("--cache", help="Delete cache volumes (uv-cache, tools-cache, vscode-server)"),
+        typer.Option("--cache", help="Delete built-in and declared cache volumes"),
     ] = False,
     data: Annotated[
         bool,
-        typer.Option("--data", help="Delete data volumes (opencode-data, vscode-workspaces)"),
+        typer.Option("--data", help="Delete built-in and declared data volumes"),
     ] = False,
     force: Annotated[
         bool,
@@ -588,7 +596,8 @@ def clean_volumes(
     bind-mount directories under $DJINN_CONFIG_ROOT — if you mirror this directory
     across machines, the deletion will propagate.
     Volume categories (cache, data) delete Docker named volumes locally.
-    With a volume name argument, deletes that specific named volume.
+    Declared none volumes are deleted only by name or clean all.
+    With an actual djinn-* volume name argument, deletes that specific named volume.
 
     Examples:
         djinn clean volumes                    # List volumes and sync paths
@@ -626,7 +635,7 @@ def clean_volumes(
         config = _load_optional_config()
         rule("Volumes by category")
         blank()
-        volume_entries = _list_existing_volumes()
+        volume_entries = _list_existing_volumes(config)
         if volume_entries:
             _print_resource_table("Djinn Volumes", "Volume", volume_entries)
         else:
@@ -656,9 +665,10 @@ def clean_volumes(
             abort=True,
         )
 
+    categories = volume_categories(config)
     for category in selected:
-        if category in VOLUME_CATEGORIES:
-            volumes = get_existing_volumes_by_category(category)
+        if category in categories:
+            volumes = get_existing_volumes_by_category(category, config)
             if not volumes:
                 warning(f"No existing volumes in category '{category}'")
                 continue
@@ -694,7 +704,7 @@ def clean_all(
 
     This is a destructive operation that removes:
     - All djinn containers
-    - All djinn named volumes (cache, data)
+    - All built-in and declared named volumes (cache, data, none)
     - Contents of config-zone sync paths under $DJINN_CONFIG_ROOT — if you
       mirror them across machines the deletion will propagate. Shared and local
       zone data are not removed.
@@ -713,6 +723,7 @@ def clean_all(
             raise typer.Exit(0)
 
     config = _load_optional_config()
+    categories = volume_categories(config)
 
     info("Stopping and removing containers...")
     down_result = compose_down()
@@ -721,7 +732,7 @@ def clean_all(
         warning("Proceeding with cleanup despite container stop failure")
 
     info("Deleting all volumes...")
-    all_volumes = [v for vols in VOLUME_CATEGORIES.values() for v in vols]
+    all_volumes = [v for vols in categories.values() for v in vols]
     results = delete_volumes(all_volumes)
     for vol, deleted in results.items():
         if deleted:

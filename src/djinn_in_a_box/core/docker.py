@@ -30,7 +30,7 @@ from djinn_in_a_box.config.declarations import (
     declaration_error,
     inspect_declarations,
 )
-from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
+from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
     DeclarationSpecificationError,
@@ -1627,8 +1627,10 @@ def delete_volumes(names: list[str]) -> dict[str, bool]:
     return {name: delete_volume(name) for name in names}
 
 
-def get_existing_volumes_by_category(category: str) -> list[str]:
-    defined_volumes = VOLUME_CATEGORIES.get(category, [])
+def get_existing_volumes_by_category(
+    category: str, config: AppConfig | None = None
+) -> list[str]:
+    defined_volumes = volume_categories(config).get(category, [])
     return [vol for vol in defined_volumes if volume_exists(vol)]
 
 

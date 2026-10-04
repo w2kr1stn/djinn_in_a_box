@@ -17,7 +17,7 @@ from typing import Annotated
 
 import typer
 
-from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
+from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.console import blank, error, info, success, warning
@@ -85,7 +85,7 @@ def _collect_items(
         if cat not in known:
             error(f"Unknown category: '{cat}'. Valid: {', '.join(sorted(known))}")
             raise typer.Exit(1)
-        volumes.extend(get_existing_volumes_by_category(cat))
+        volumes.extend(get_existing_volumes_by_category(cat, config))
         sync_paths.extend(get_existing_sync_paths_by_category(cat, config))
     return volumes, sync_paths
 
@@ -190,6 +190,7 @@ def backup(
     config = load_config()
     selected = categories or DEFAULT_CATEGORIES
     volumes, sync_paths = _collect_items(selected, config)
+    builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}
 
     if not volumes and not sync_paths:
         warning("No existing volumes or sync paths found for selected categories")
@@ -205,7 +206,11 @@ def backup(
     try:
         for vol in volumes:
             info(f"  {vol}")
-            result = backup_volume(vol, staging_dir)
+            dest_dir = staging_dir
+            if vol not in builtins:
+                dest_dir = staging_dir / "declared-volumes"
+                dest_dir.mkdir(exist_ok=True)
+            result = backup_volume(vol, dest_dir)
             if result.success:
                 success(f"  {vol}")
             else:
@@ -301,6 +306,12 @@ def restore() -> None:
     """
     _guard_no_containers_running()
     config = load_config()
+    categories = volume_categories(config)
+    builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}
+    declared_restorable = {
+        name for category in ("data", "cache") for name in categories.get(category, [])
+        if name not in builtins
+    }
 
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.chmod(0o700)
@@ -367,7 +378,11 @@ def restore() -> None:
             )
             raise typer.Exit(1) from exc
 
-        inner_archives = sorted(staging_dir.glob("*.tar.gz"))
+        declared_dir = staging_dir / "declared-volumes"
+        inner_archives = sorted([
+            *staging_dir.glob("*.tar.gz"),
+            *declared_dir.glob("*.tar.gz"),
+        ])
 
         if not inner_archives:
             error("Backup archive contains no volume archives")
@@ -376,7 +391,18 @@ def restore() -> None:
         failed = False
         for archive in inner_archives:
             hardening_error: OSError | None = None
-            if is_sync_archive(archive.name):
+            if archive.parent == declared_dir:
+                vol_name = archive.name.removesuffix(".tar.gz")
+                if vol_name not in declared_restorable:
+                    warning(
+                        f"Skipping declared volume '{vol_name}': no current data/cache declaration "
+                        "(removed or backup = 'none')."
+                    )
+                    continue
+                label = vol_name
+                info(f"  {label}")
+                result = restore_volume(vol_name, declared_dir)
+            elif is_sync_archive(archive.name):
                 path_name = extract_sync_path_name(archive.name)
                 label = f"sync/{path_name}"
                 info(f"  {label}")
