@@ -212,6 +212,33 @@ class TestInitCommand:
         assert "(optional)" not in combined
         assert combined.index("djinn build") < combined.index("djinn start")
 
+    def test_init_reprompts_for_invalid_workspace_modes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / ".config" / "djinn_in_a_box"
+        config_file = config_dir / "config.toml"
+        _patch_init_dependencies(monkeypatch, config_dir, config_file)
+
+        aios_root = tmp_path / "aios"
+        aios_root.mkdir()
+        monkeypatch.setattr(
+            "djinn_in_a_box.commands.config.save_config",
+            lambda config: save_config_file(config, config_file),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init"],
+            input=f"AIOS\nx\naios\n{aios_root}\nUTC\nn\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        combined = result.stdout + result.output
+        assert combined.count("Workspace mode (aios/projects)") >= 3
+        assert "'AIOS' is not one of: aios, projects." in combined
+        assert "'x' is not one of: aios, projects." in combined
+        assert load_config_file(config_file).workspace == "aios"
+
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
