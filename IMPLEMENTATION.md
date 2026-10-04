@@ -327,6 +327,58 @@ stale-removed. Missing native hooks are allowed.
 Repository-local instruction files, agents, skills, and commands are outside
 this global projection and are not rewritten.
 
+### Native-only workflow artifacts
+
+These tables list the closed native-only set. Script paths are relative to the
+selected workflow source root (`config/<tool>`); a dash means the matrix has no
+carrier or event for that artifact.
+
+#### Claude
+
+| Name | Kind | Script path in workflow source root | Carrier | Event |
+| --- | --- | --- | --- | --- |
+| startup | hook | `scripts/session-start-status.py` | `settings.json` | `SessionStart` |
+| security | hook | `security_reminder_hook.py` | `settings.json` | `PreToolUse` |
+| ready | hook | `ready_notify_hook.py` | `settings.json` | `Stop` |
+| codex-review | command | `commands/codex-review.md` | — | — |
+
+#### Codex
+
+| Name | Kind | Script path in workflow source root | Carrier | Event |
+| --- | --- | --- | --- | --- |
+| startup | hook | `scripts/session-start-status.py` | `hooks.json` | `SessionStart` |
+| security | hook | `hooks/security_guard.py` | `hooks.json` | `PreToolUse` |
+| ready | hook | `hooks/ready_notify.py` | `hooks.json` | `Stop` |
+
+#### OpenCode
+
+| Name | Kind | Script path in workflow source root | Carrier | Event |
+| --- | --- | --- | --- | --- |
+| startup | hook | `plugins/session-start-status.js` | — | — |
+| security | hook | `plugins/security-reminder.js` | — | — |
+| ready | hook | `plugins/ready-notify.js` | — | — |
+
+In the container, Claude registers startup with
+`uv run python3 ~/.claude/scripts/session-start-status.py` and root-level hook
+scripts with `uv run python3 ~/.claude_seed/<script>`. The `scripts/` subtree
+is directly mounted at `~/.claude/scripts/`. The host fallback rewrites
+Claude's root-level seed commands to `uv run python3 ~/.claude/<script>`.
+Codex hook commands use
+`bash -lc 'uv run python "${CODEX_HOME:-$HOME/.codex}/<script>"'`; the
+container mounts its Codex runtime root at `~/.codex`, which is the default
+when `CODEX_HOME` is unset. OpenCode has no hook command carrier: its plugin
+files are read from the mounted `~/.opencode/seed/<script>` workflow and
+published to `~/.config/opencode/<script>` for runtime use.
+
+For Claude and Codex hooks, the script and its carrier registration must
+coexist. If only one is present, validation reports `hook-incomplete`, marks
+the workflow invalid, and `djinn start` refuses to proceed. Restore the script
+at its spec path or remove a stale registration; if the script is present but
+its registration is missing, restore the registration or remove the script.
+Hooks a user registers beyond this managed set are personal and may live
+anywhere, including under `scripts/`; never move a managed script away from
+its spec path.
+
 Tool-owned runtime state inside a source root is not a workflow source.
 `workflow_publisher.runtime_residue_prefixes()` names the per-tool subtrees
 (`skills/synced/**` under a Claude source; none for Codex and OpenCode), and
