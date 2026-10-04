@@ -477,12 +477,13 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
 
     if config is not None:
         code_ok = config.code_dir.is_dir()
+        root_label = "AIOS root" if config.workspace == "aios" else "Projects dir"
         checks.append(
             Check(
-                "Projects dir",
+                root_label,
                 Status.PASS if code_ok else Status.FAIL,
                 str(config.code_dir),
-                "" if code_ok else "Create the directory or fix `code_dir` in config.toml.",
+                "" if code_ok else f"Create the {root_label} or fix `general.code_dir`.",
             )
         )
         root = get_config_root(config)
@@ -670,8 +671,8 @@ def doctor(
 ) -> None:
     """Diagnose the Djinn environment (report-only).
 
-    Reports PASS/WARN/FAIL for Docker, Compose, configuration, the projects
-    directory, the config root, the image, the network, and the optional MCP
+    Reports PASS/WARN/FAIL for Docker, Compose, configuration, the selected
+    workspace root, the config root, the image, the network, and the optional MCP
     plugin — each with a remedy. Exits non-zero if any hard check fails.
     """
     from djinn_in_a_box.config.loader import load_config
@@ -705,7 +706,7 @@ def doctor(
         glyph = _GLYPH[check.status]
         detail = (
             Text(check.detail, style="path")
-            if check.name in {"Projects dir", "Config root"}
+            if check.name in {"Projects dir", "AIOS root", "Config root"}
             else check.detail
         )
         table.add_row(

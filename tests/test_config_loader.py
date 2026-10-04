@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -173,7 +174,7 @@ class TestSaveConfig:
 
     def test_saves_config_to_file(self, tmp_path: Path, sample_code_dir: Path) -> None:
         """Should save AppConfig to TOML file."""
-        config = AppConfig(code_dir=sample_code_dir, timezone="UTC")
+        config = AppConfig(code_dir=sample_code_dir, workspace="aios", timezone="UTC")
         output_path = tmp_path / "output.toml"
 
         save_config(config, output_path)
@@ -184,6 +185,11 @@ class TestSaveConfig:
         assert "[config_sync]" in content
         assert 'source = "claude"' in content
         assert "UTC" in content
+        data = tomllib.loads(content)
+        assert data["general"]["workspace"] == "aios"
+        assert "workspace" not in data
+        assert "workspace_target" not in content
+        assert load_config(output_path) == config
 
     def test_creates_parent_directories(self, tmp_path: Path, sample_code_dir: Path) -> None:
         """Should create parent directories if they don't exist."""

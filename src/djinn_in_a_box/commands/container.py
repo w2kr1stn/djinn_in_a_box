@@ -226,7 +226,9 @@ def start(
     banner()
     rule("Environment")
 
-    status_line("Projects", str(config.code_dir), value_style="path")
+    root_label = "AIOS root" if config.workspace == "aios" else "Projects"
+    status_line(root_label, str(config.code_dir), value_style="path")
+    status_line("Workspace", f"{config.workspace} ({config.workspace_target})")
 
     if docker:
         status_line("Docker", "Enabled (via secure proxy)", "status.enabled")
@@ -435,6 +437,7 @@ def status() -> None:
     try:
         config = load_config()
         status_line("CODE_DIR", str(config.code_dir), value_style="path")
+        status_line("Workspace", f"{config.workspace} ({config.workspace_target})")
     except ConfigNotFoundError:
         warning("Configuration not found. Run 'djinn init' to create one.")
 

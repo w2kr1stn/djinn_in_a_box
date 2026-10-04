@@ -80,7 +80,6 @@ _COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
     Path("/home/dev/.opencode/seed"): "directory",
     Path("/home/dev/.djinn-canonical"): "directory",
     Path("/home/dev/.config/mcp-servers.json"): "file",
-    Path("/home/dev/projects"): "directory",
     Path("/home/dev/sessions"): "directory",
 }
 
@@ -448,19 +447,22 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
     These are the host-side ``${VAR}`` values the compose file interpolates at
     parse time (NOT container ``-e`` env). The two ``${...:?}``-guarded vars
     (CODE_DIR, DJINN_CONFIG_ROOT) are always rendered so compose never hard-fails.
+    DJINN_WORKSPACE_TARGET selects both the workspace mount target and its cwd.
 
-    ``config=None`` → best-effort placeholders for the two guarded vars only,
+    ``config=None`` → best-effort guarded vars and the default projects target,
     for teardown / by-name operations (down/stop/rm act by project/container name).
     """
     terminal_width = _host_terminal_width()
     if config is None:
         env = {
             "CODE_DIR": str(Path.home()),
+            "DJINN_WORKSPACE_TARGET": "/home/dev/projects",
             "DJINN_CONFIG_ROOT": str(get_config_root()),
         }
     else:
         env = {
             "CODE_DIR": str(config.code_dir),
+            "DJINN_WORKSPACE_TARGET": str(config.workspace_target),
             "DJINN_CONFIG_ROOT": str(get_config_root(config)),
             "TZ": config.timezone,
             "CPU_LIMIT": str(config.resources.cpu_limit),
@@ -741,7 +743,12 @@ def _reserved_mount_targets(
     """Return targets occupied by this particular ``dev`` container invocation."""
     if zone_overlay_targets is None:
         _, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
-    targets = [*_COMPOSE_DEV_MOUNT_TARGETS, *zone_overlay_targets, _MOUNT_ROOT]
+    targets = [
+        *_COMPOSE_DEV_MOUNT_TARGETS,
+        config.workspace_target,
+        *zone_overlay_targets,
+        _MOUNT_ROOT,
+    ]
     if docker_mode is DockerMode.DIRECT:
         targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     if shell_args is None:
@@ -1048,7 +1055,7 @@ def compose_run(
         cmd.extend(["-c", command])
 
     # Host interpolation env for the compose file's ${...} vars (CODE_DIR,
-    # DJINN_CONFIG_ROOT, TZ, resources). This is DISTINCT from the container
+    # DJINN_WORKSPACE_TARGET, DJINN_CONFIG_ROOT, TZ, resources). This is DISTINCT from the container
     # `-e` vars built above: docker compose interpolates the file at parse time
     # from the host subprocess environment, so it must be set here.
     host_env = _compose_host_env(config)

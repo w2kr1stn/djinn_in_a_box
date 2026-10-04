@@ -188,7 +188,8 @@ Supported `djinn config set` keys are:
 
 | Key | Meaning | Default or source |
 | --- | --- | --- |
-| `general.code_dir` | Host directory mounted as `/home/dev/projects` | chosen during `djinn init` |
+| `general.code_dir` | Host workspace root mounted at the path selected by `general.workspace` | chosen during `djinn init` |
+| `general.workspace` | `projects` mounts at `/home/dev/projects`; `aios` mounts at `/home/dev/aios` | `projects` |
 | `general.timezone` | IANA timezone passed as `TZ` | detected from host, fallback `UTC` |
 | `general.config_root` | Host root for credentials and local CLI state | `~/.djinn/config` |
 | `resources.cpu_limit` | Compose CPU limit | `4` |
@@ -199,6 +200,19 @@ Supported `djinn config set` keys are:
 | `shell.omp_theme_path` | Optional Oh My Posh theme file mounted read-only | unset |
 | `config_sync.source` | Native global workflow source: `claude`, `codex`, or `opencode` | `claude` |
 | `build.network` | Network for image-build steps: `default` or `host` | `default` |
+
+`djinn init` asks for the mode first, then the corresponding host directory.
+Set the mode and host root explicitly; mode values must be lowercase:
+
+```sh
+# Standalone projects directory
+djinn config set general.workspace projects
+djinn config set general.code_dir /path/to/projects
+
+# AIOS workspace root
+djinn config set general.workspace aios
+djinn config set general.code_dir /path/to/aios
+```
 
 Memory values must use Docker-style units such as `8G`, `4096M`, or `512K`.
 CPU values are positive integers. Reservations cannot exceed limits.
@@ -230,9 +244,13 @@ named Docker network is rejected by buildkit itself.
 
 `DJINN_CONFIG_ROOT` is not something you normally have to export. The CLI loads
 `config.toml` and injects Compose interpolation variables, including
-`DJINN_CONFIG_ROOT`, `CODE_DIR`, `TZ`, and the resource settings, into the
-`docker compose` subprocess environment. If you do export `DJINN_CONFIG_ROOT`,
+`DJINN_CONFIG_ROOT`, `CODE_DIR`, `DJINN_WORKSPACE_TARGET`, `TZ`, and the resource
+settings, into the `docker compose` subprocess environment. If you do export `DJINN_CONFIG_ROOT`,
 that environment value takes precedence for config-root resolution.
+
+`DJINN_WORKSPACE_TARGET` comes from the configured mode and controls both the
+workspace mount target and default working directory. Configured values override
+inherited `CODE_DIR` and `DJINN_WORKSPACE_TARGET`; changing mode needs no Compose edit.
 
 ## Global Agent Workflow Ownership
 
@@ -364,8 +382,8 @@ djinn doctor
 ```
 
 The doctor command checks Docker, the Docker daemon, socket permissions, Compose
-v2, Buildx, the main config, the projects directory, the config root, the image, the
-Docker network, desktop notification detection, and seed target presence.
+v2, Buildx, the main config, the selected workspace root, the config root, the
+image, the Docker network, desktop notification detection, and seed target presence.
 
 For idempotent local repairs:
 
@@ -461,7 +479,7 @@ value overrides `default_model` for that invocation.
 
 | Command | Container behavior | Workspace behavior | Main use |
 | --- | --- | --- | --- |
-| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
+| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
@@ -530,7 +548,7 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `${DJINN_CONFIG_ROOT}/opencode` | `/home/dev/.opencode` | OpenCode state |
 | `${DJINN_CONFIG_ROOT}/gh` | `/home/dev/.config/gh` | GitHub CLI state |
 | `${DJINN_CONFIG_ROOT}/age` | `/home/dev/.config/age` | age encryption identities (`keys.txt`) |
-| `${CODE_DIR}` | `/home/dev/projects` | Your projects directory |
+| `${CODE_DIR}` | `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) | One configured workspace root; AIOS's `projects/` appears at `/home/dev/aios/projects` |
 | `${HOME}/.djinn/sessions` | `/home/dev/sessions` | Session workspaces |
 | `~/.ssh` | `/home/dev/.ssh:ro` | Read-only SSH access |
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
@@ -547,7 +565,11 @@ Bind mounts are host paths that you can inspect and manage directly:
 `/home/dev/mount/<basename>`, and `:ro` makes that mount read-only. The working
 directory is `/home/dev/workspace` with `--here`, otherwise the first mount target;
 `djinn start` without mounts passes no `--workdir`, so the Compose service default
-`working_dir: /home/dev/projects` applies.
+`working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` applies: `/home/dev/projects`
+in projects mode or `/home/dev/aios` in aios mode.
+User mounts cannot equal or contain the active workspace target; children remain
+valid. The unused root is available for explicit user mounts. Djinn creates only
+the selected workspace bind.
 `djinn run` without `--mount` and without `--here` keeps its implicit `--here`
 behavior.
 
@@ -804,7 +826,7 @@ djinn build
 
 ## Typical Workflows
 
-Interactive shell in your configured projects directory:
+Interactive shell in your configured workspace root:
 
 ```sh
 djinn start
