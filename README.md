@@ -278,6 +278,10 @@ author-owned, validated there when present, never projected to another tool,
 and never stale-removed. The Claude-only `/codex-review` command follows the
 same source-only rule. Repository-local instructions, agents, skills, and
 commands remain outside this global feature and are never rewritten.
+Djinn checks that managed hook scripts stay at their specified source paths and
+that Claude and Codex registrations remain paired with those scripts. See
+[Native-only workflow artifacts](IMPLEMENTATION.md#native-only-workflow-artifacts)
+for the per-tool tables, container paths, and validation behavior.
 
 ### Tool-Owned Runtime State
 
