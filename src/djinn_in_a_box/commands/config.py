@@ -8,10 +8,9 @@ import re
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast, get_args
 
 import typer
-from click import Choice
 from pydantic import ValidationError
 from rich.table import Table
 from rich.text import Text
@@ -23,6 +22,7 @@ from djinn_in_a_box.config.models import (
     ConfigSyncConfig,
     ResourceLimits,
     ShellConfig,
+    WorkspaceMode,
 )
 from djinn_in_a_box.core.config_lock import ConfigDirectoryLockError, config_directory_lock
 from djinn_in_a_box.core.config_sync import (
@@ -130,11 +130,13 @@ def init_config(
     info("Djinn in a Box Configuration Setup")
     console.print()
 
-    workspace = typer.prompt(
-        "Workspace mode (aios/projects)",
-        default="projects",
-        type=Choice(["aios", "projects"]),
-    )
+    workspace_modes = get_args(WorkspaceMode)
+    while True:
+        answer = typer.prompt("Workspace mode (aios/projects)", default="projects")
+        if answer in workspace_modes:
+            workspace = cast(WorkspaceMode, answer)
+            break
+        error(f"{answer!r} is not one of: {', '.join(workspace_modes)}.")
     root_label = "AIOS root" if workspace == "aios" else "Projects directory"
     code_dir = typer.prompt(
         f"{root_label} (mounted as /home/dev/{workspace})",

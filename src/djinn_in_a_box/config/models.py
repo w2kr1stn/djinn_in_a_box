@@ -183,6 +183,9 @@ class BuildConfig(BaseModel):
     """
 
 
+WorkspaceMode = Literal["aios", "projects"]
+
+
 class AppConfig(BaseModel):
     """Main application configuration for Djinn in a Box.
 
@@ -196,7 +199,7 @@ class AppConfig(BaseModel):
     code_dir: Path
     """Host workspace root selected by the workspace mode. Required."""
 
-    workspace: Literal["aios", "projects"] = "projects"
+    workspace: WorkspaceMode = "projects"
     """Select an AIOS root or a standalone projects directory."""
 
     timezone: str = "UTC"
