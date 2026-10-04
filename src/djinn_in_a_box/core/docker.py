@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
@@ -56,33 +56,33 @@ _IMAGE_PATH_ALIASES = {
     Path("/home/dev/.config/claude"): Path("/home/dev/.claude"),
 }
 _DIRECT_DOCKER_SOCKET_TARGETS = (Path("/run/docker.sock"),)
-_COMPOSE_DEV_MOUNT_TARGETS = (
-    Path("/home/dev/.claude"),
-    Path("/home/dev/.codex"),
-    Path("/home/dev/.opencode"),
-    Path("/home/dev/.local/share/opencode"),
-    Path("/home/dev/.config/gh"),
-    Path("/home/dev/.config/age"),
-    Path("/home/dev/.cache/uv"),
-    Path("/home/dev/.cache/djinn-tools"),
-    Path("/home/dev/.vscode-server"),
-    Path("/home/dev/workspaces"),
-    Path("/home/dev/.ssh"),
-    Path("/home/dev/.gitconfig"),
-    Path("/home/dev/.claude_seed"),
-    Path("/home/dev/.claude/skills"),
-    Path("/home/dev/.claude/commands"),
-    Path("/home/dev/.claude/agents"),
-    Path("/home/dev/.claude/context"),
-    Path("/home/dev/.claude/scripts"),
-    Path("/home/dev/.claude/AGENTS.md"),
-    Path("/home/dev/.claude/CLAUDE.md"),
-    Path("/home/dev/.opencode/seed"),
-    Path("/home/dev/.djinn-canonical"),
-    Path("/home/dev/.config/mcp-servers.json"),
-    Path("/home/dev/projects"),
-    Path("/home/dev/sessions"),
-)
+_COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
+    Path("/home/dev/.claude"): "directory",
+    Path("/home/dev/.codex"): "directory",
+    Path("/home/dev/.opencode"): "directory",
+    Path("/home/dev/.local/share/opencode"): "directory",
+    Path("/home/dev/.config/gh"): "directory",
+    Path("/home/dev/.config/age"): "directory",
+    Path("/home/dev/.cache/uv"): "directory",
+    Path("/home/dev/.cache/djinn-tools"): "directory",
+    Path("/home/dev/.vscode-server"): "directory",
+    Path("/home/dev/workspaces"): "directory",
+    Path("/home/dev/.ssh"): "directory",
+    Path("/home/dev/.gitconfig"): "file",
+    Path("/home/dev/.claude_seed"): "directory",
+    Path("/home/dev/.claude/skills"): "directory",
+    Path("/home/dev/.claude/commands"): "directory",
+    Path("/home/dev/.claude/agents"): "directory",
+    Path("/home/dev/.claude/context"): "directory",
+    Path("/home/dev/.claude/scripts"): "directory",
+    Path("/home/dev/.claude/AGENTS.md"): "file",
+    Path("/home/dev/.claude/CLAUDE.md"): "file",
+    Path("/home/dev/.opencode/seed"): "directory",
+    Path("/home/dev/.djinn-canonical"): "directory",
+    Path("/home/dev/.config/mcp-servers.json"): "file",
+    Path("/home/dev/projects"): "directory",
+    Path("/home/dev/sessions"): "directory",
+}
 
 
 def repo_owned_submount_targets(agent_root: Path) -> tuple[Path, ...]:
@@ -1463,7 +1463,7 @@ def _ensure_zone_root(root: Path) -> None:
         raise ZoneRootValidationError(msg) from error
 
 
-def _ensure_zone_target(config_root: Path, agent: str, relative_path: Path) -> None:
+def _ensure_bind_target_directory(config_root: Path, agent: str, relative_path: Path) -> None:
     directory = config_root / agent
     for component in relative_path.parts:
         directory /= component
@@ -1474,18 +1474,43 @@ def _ensure_zone_target(config_root: Path, agent: str, relative_path: Path) -> N
                 directory.mkdir(mode=0o700, exist_ok=True)
                 info = directory.lstat()
             except OSError as error:
-                msg = f"Cannot create zone target {directory}: {error}"
+                msg = f"Cannot create bind-mount target {directory}: {error}"
                 raise ZoneRootValidationError(msg) from error
         except OSError as error:
-            msg = f"Cannot inspect zone target {directory}: {error}"
+            msg = f"Cannot inspect bind-mount target {directory}: {error}"
             raise ZoneRootValidationError(msg) from error
 
         if stat.S_ISLNK(info.st_mode):
-            msg = f"Zone target must not be a symlink: {directory}"
+            msg = f"Bind-mount target must not be a symlink: {directory}"
             raise ZoneRootValidationError(msg)
         if not stat.S_ISDIR(info.st_mode):
-            msg = f"Zone target is not a directory: {directory}"
+            msg = f"Bind-mount target is not a directory: {directory}"
             raise ZoneRootValidationError(msg)
+
+
+def _ensure_bind_target_file(config_root: Path, agent: str, relative_path: Path) -> None:
+    _ensure_bind_target_directory(config_root, agent, relative_path.parent)
+    target = config_root / agent / relative_path
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(descriptor)
+            info = target.lstat()
+        except OSError as error:
+            msg = f"Cannot create bind-mount target {target}: {error}"
+            raise ZoneRootValidationError(msg) from error
+    except OSError as error:
+        msg = f"Cannot inspect bind-mount target {target}: {error}"
+        raise ZoneRootValidationError(msg) from error
+
+    if stat.S_ISLNK(info.st_mode):
+        msg = f"Bind-mount target must not be a symlink: {target}"
+        raise ZoneRootValidationError(msg)
+    if not stat.S_ISREG(info.st_mode):
+        msg = f"Bind-mount target is not a regular file: {target}"
+        raise ZoneRootValidationError(msg)
 
 
 def workflow_image_compatible(
@@ -1537,7 +1562,7 @@ def _docker_daemon_reachable() -> bool:
 
 
 def ensure_host_env(config: AppConfig | None = None) -> None:
-    """Idempotently create the unconditional host bind-mount sources.
+    """Idempotently create host bind-mount sources and nested config-root targets.
 
     The compose file mounts these paths unconditionally; if a source is missing
     when ``docker compose`` runs, the root Docker daemon auto-creates it
@@ -1549,15 +1574,15 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     out of the *preflight* provisioning only (``provision_host=False``) — it
     still provisions through that workflow path before Compose runs.
 
-    Provisions every assigned zone overlay source and target (the source in its
-    zone root and the target in the config root), compose-mounted credential
+    Provisions every assigned zone overlay source and every nested bind-mount
+    target inside a config-root agent mount, compose-mounted credential
     subdir (``SYNC_PATHS['credentials']``) and the fixed extras. ``repo-dotfiles``
     is intentionally NOT provisioned: it is a host-side input read by
     ``_sync_build_files`` (a no-op when absent), not a compose bind-mount, so it
     cannot trigger the root-owned-mount footgun.
     """
     # Zone resolution imports this module; load assignments at the runtime boundary.
-    from djinn_in_a_box.config.zones import load_zone_assignments
+    from djinn_in_a_box.config.zones import ZONE_CONTAINER_TARGETS, load_zone_assignments
 
     roots = ensure_zone_roots(config)
     assignments = load_zone_assignments(config)
@@ -1577,10 +1602,18 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)
 
-    for agent, by_zone in assignments.by_agent.items():
-        for zone in ("local", "shared"):
-            for relative_path in by_zone[zone]:
-                _ensure_zone_target(root, agent, relative_path)
+    for agent, agent_root in ZONE_CONTAINER_TARGETS.items():
+        target_kinds = {
+            target.relative_to(agent_root): _COMPOSE_DEV_MOUNT_TARGETS[target]
+            for target in repo_owned_submount_targets(agent_root)
+        }
+        for relative_paths in assignments.by_agent[agent].values():
+            target_kinds.update(dict.fromkeys(relative_paths, "directory"))
+        for relative_path, kind in target_kinds.items():
+            if kind == "file":
+                _ensure_bind_target_file(root, agent, relative_path)
+            else:
+                _ensure_bind_target_directory(root, agent, relative_path)
 
     djinn_dir = Path.home() / ".djinn"
     for sub in ("sessions", "backups"):

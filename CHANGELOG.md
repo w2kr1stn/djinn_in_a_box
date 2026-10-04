@@ -154,6 +154,8 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Host provisioning creates every nested bind-mount target inside the config
+  root, so Docker no longer creates root-owned directories or files there.
 - Claude Code loads the global `AGENTS.md` again: Djinn provides
   `~/.claude/CLAUDE.md` as a read-only bridge that imports it, in the container and
   on the host fallback.
