@@ -43,7 +43,8 @@ class TestBuildNetworkKey:
         carry over reverts to its default without a word — and the next build
         would fail exactly the way this setting exists to prevent.
         """
-        config = AppConfig(code_dir=tmp_path, build=BuildConfig(network="host"))
+        config = AppConfig(code_dir=tmp_path, workspace="aios", build=BuildConfig(network="host"))
         after = _set_config_value(config, "general.timezone", "Europe/Berlin")
         assert after.timezone == "Europe/Berlin"
         assert after.build.network == "host"
+        assert after.workspace == "aios"

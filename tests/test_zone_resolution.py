@@ -204,13 +204,17 @@ def _provisioning_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> App
     return _config(tmp_path)
 
 
-def _compose_nested_bind_targets() -> dict[tuple[str, Path], str]:
+def _compose_nested_bind_targets(workspace: str = "projects") -> dict[tuple[str, Path], str]:
     project = Path(__file__).parents[1]
     compose = yaml.safe_load((project / "docker-compose.yml").read_text())
     mounts: list[tuple[str, Path]] = []
     for volume in compose["services"]["dev"]["volumes"]:
+        volume = volume.replace(
+            "${DJINN_WORKSPACE_TARGET:-/home/dev/projects}", f"/home/dev/{workspace}"
+        )
         match = re.fullmatch(r"(.+):(/[^:]+)(?::(?:ro|rw))?", volume)
         assert match is not None, f"Unexpected Compose mount: {volume}"
+        assert "$" not in match.group(2), f"Unresolved Compose target: {volume}"
         mounts.append((match.group(1), Path(match.group(2))))
     agent_roots = {
         source.rsplit("/", 1)[1]: target
@@ -234,14 +238,15 @@ def _compose_nested_bind_targets() -> dict[tuple[str, Path], str]:
     return nested
 
 
-def test_nested_bind_target_definitions_match_compose_sources_and_kinds() -> None:
+@pytest.mark.parametrize("workspace", ["projects", "aios"])
+def test_nested_bind_target_definitions_match_compose_sources_and_kinds(workspace: str) -> None:
     defined = {
         (agent, target.relative_to(agent_root)): docker_mod._COMPOSE_DEV_MOUNT_TARGETS[target]
         for agent, agent_root in ZONE_CONTAINER_TARGETS.items()
         for target in docker_mod.repo_owned_submount_targets(agent_root)
     }
 
-    assert defined == _compose_nested_bind_targets()
+    assert defined == _compose_nested_bind_targets(workspace)
 
 
 def _nested_bind_targets(config: AppConfig) -> dict[Path, str]:

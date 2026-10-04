@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from click import Choice
 from pydantic import ValidationError
 from rich.table import Table
 from rich.text import Text
@@ -49,6 +50,7 @@ from djinn_in_a_box.core.seeding import SeedingError, seed_config
 
 ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "general.code_dir",
+    "general.workspace",
     "general.timezone",
     "general.config_root",
     "general.shared_root",
@@ -128,9 +130,15 @@ def init_config(
     info("Djinn in a Box Configuration Setup")
     console.print()
 
+    workspace = typer.prompt(
+        "Workspace mode (aios/projects)",
+        default="projects",
+        type=Choice(["aios", "projects"]),
+    )
+    root_label = "AIOS root" if workspace == "aios" else "Projects directory"
     code_dir = typer.prompt(
-        "Projects directory (mounted as ~/projects in container)",
-        default=str(Path.home() / "projects"),
+        f"{root_label} (mounted as /home/dev/{workspace})",
+        default=str(Path.home() / workspace),
     )
 
     timezone = typer.prompt(
@@ -178,19 +186,19 @@ def init_config(
         resources = suggested_resources
         shell = ShellConfig()
 
-    # Validate code_dir exists or offer to create it
+    # Validate the selected workspace root exists or offer to create it
     code_path = Path(code_dir).expanduser()
     if not code_path.exists():
         if typer.confirm(f"Directory {code_path} does not exist. Create it?"):
             try:
                 code_path.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                error(f"Failed to create projects directory {code_path}: {e}")
+                error(f"Failed to create {root_label} {code_path}: {e}")
                 warning(f"Check that {code_path.parent} is writable, then retry.")
                 raise typer.Exit(1) from e
             success(f"Created directory: {code_path}")
         else:
-            error("Cannot proceed without a valid projects directory.")
+            error(f"Cannot proceed without a valid {root_label}.")
             raise typer.Exit(1)
 
     # Create configuration — surface validation errors (e.g. a non-IANA timezone)
@@ -198,6 +206,7 @@ def init_config(
     try:
         config = AppConfig(
             code_dir=code_path,
+            workspace=workspace,
             timezone=timezone,
             resources=resources,
             shell=shell,
@@ -285,6 +294,7 @@ def _build_config(
     config: AppConfig,
     *,
     code_dir: Path | None = None,
+    workspace: str | None = None,
     timezone: str | None = None,
     config_root: Path | None = None,
     shared_root: Path | None | _Unset = _UNSET,
@@ -295,29 +305,35 @@ def _build_config(
     config_sync: ConfigSyncConfig | None = None,
     build: BuildConfig | None = None,
 ) -> AppConfig:
-    return AppConfig(
-        code_dir=config.code_dir if code_dir is None else code_dir,
-        timezone=config.timezone if timezone is None else timezone,
-        config_root=config.config_root if config_root is None else config_root,
-        shared_root=config.shared_root if isinstance(shared_root, _Unset) else shared_root,
-        local_root=config.local_root if isinstance(local_root, _Unset) else local_root,
-        sops_age_key_file=(
-            config.sops_age_key_file
-            if isinstance(sops_age_key_file, _Unset)
-            else sops_age_key_file
-        ),
-        resources=config.resources if resources is None else resources,
-        shell=config.shell if shell is None else shell,
-        config_sync=config.config_sync if config_sync is None else config_sync,
-        build=config.build if build is None else build,
+    return AppConfig.model_validate(
+        {
+            "code_dir": config.code_dir if code_dir is None else code_dir,
+            "workspace": config.workspace if workspace is None else workspace,
+            "timezone": config.timezone if timezone is None else timezone,
+            "config_root": config.config_root if config_root is None else config_root,
+            "shared_root": config.shared_root if isinstance(shared_root, _Unset) else shared_root,
+            "local_root": config.local_root if isinstance(local_root, _Unset) else local_root,
+            "sops_age_key_file": (
+                config.sops_age_key_file
+                if isinstance(sops_age_key_file, _Unset)
+                else sops_age_key_file
+            ),
+            "resources": config.resources if resources is None else resources,
+            "shell": config.shell if shell is None else shell,
+            "config_sync": config.config_sync if config_sync is None else config_sync,
+            "build": config.build if build is None else build,
+        }
     )
 
 
 def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
+    if key == "general.workspace":
+        return _build_config(config, workspace=value)
     if key == "general.code_dir":
         code_dir = Path(value).expanduser()
         if not code_dir.is_dir():
-            error(f"Projects directory does not exist or is not a directory: {code_dir}")
+            root_label = "AIOS root" if config.workspace == "aios" else "Projects directory"
+            error(f"{root_label} does not exist or is not a directory: {code_dir}")
             warning(f"Create it first: mkdir -p {code_dir}")
             warning("Or run `djinn init` to create it interactively.")
             raise typer.Exit(1)
@@ -416,6 +432,8 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
 
 
 def _format_config_value(config: AppConfig, key: str) -> str:
+    if key == "general.workspace":
+        return config.workspace
     if key == "general.code_dir":
         return str(config.code_dir)
     if key == "general.timezone":
@@ -564,6 +582,7 @@ def config_show(
             "General",
             [
                 ("code_dir", config.code_dir),
+                ("workspace", config.workspace),
                 ("timezone", config.timezone),
                 ("config_root", roots.config_root),
                 ("shared_root", roots.shared_root),

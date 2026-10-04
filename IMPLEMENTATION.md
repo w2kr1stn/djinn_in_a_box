@@ -195,7 +195,9 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 
 `AppConfig` fields:
 
-- `code_dir: Path`: required project directory mounted as `/home/dev/projects`
+- `code_dir: Path`: required host root for the selected workspace mode
+- `workspace: Literal["aios", "projects"]`: default `projects`; mounts the root
+  at `/home/dev/aios` or `/home/dev/projects`, respectively
 - `timezone: str`: IANA timezone, default `UTC`
 - `config_root: Path`: local credential/config bind-mount root, default
   `~/.djinn/config`
@@ -212,6 +214,10 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
   build's network isolation for the host's resolver path. Buildkit's third mode,
   `none`, is not offered: no layer of this image builds without a network. A named
   network buildkit rejects itself.
+
+`AppConfig.workspace_target` derives that fixed container path as a plain
+property, excluded from JSON and TOML. Djinn does not infer the mode from the
+host path or validate AIOS subdirectories.
 
 `ResourceLimits` defaults are:
 
@@ -250,6 +256,7 @@ The TOML layout stores top-level application fields under `[general]`, while
 
 `save_config()` serializes back to nested TOML and writes atomically with
 `tempfile.mkstemp()` plus `os.replace()`.
+The `workspace` key is saved under `[general]` beside `code_dir`.
 
 Agent definitions are loaded by `load_agents()` with this priority:
 
@@ -272,7 +279,9 @@ The shipped defaults cover `claude`, `codex`, and `opencode`.
 - `config_sync()` exposed as `djinn config sync`
 
 `djinn init` is the entry point. It creates the app config directory, prompts
-for the projects directory and timezone, then uses progressive disclosure for
+for workspace mode (`aios` or `projects`, default `projects`), then the host root
+with its mode-specific container path and timezone. Suggested roots are `~/aios`
+or `~/projects`. It then uses progressive disclosure for
 advanced resource and shell settings. The simple path accepts suggested
 resources from `core/hostinfo.py`; advanced prompts allow explicit CPU, memory,
 and shell-mount choices.
@@ -285,6 +294,7 @@ the `ResourceLimits` bounds, and falls back to model defaults on probe failure.
 `ALLOWED_CONFIG_KEYS` controls `djinn config set`:
 
 - `general.code_dir`
+- `general.workspace`
 - `general.timezone`
 - `general.config_root`
 - `resources.cpu_limit`
@@ -294,6 +304,10 @@ the `ResourceLimits` bounds, and falls back to model defaults on probe failure.
 - `shell.skip_mounts`
 - `shell.omp_theme_path`
 - `config_sync.source`
+
+`general.workspace` accepts only exact lowercase values. `_build_config()`
+validates the rebuilt frozen model and carries workspace through unrelated
+updates. Human and JSON `config show` both include the mode.
 
 `config_edit()` runs `$EDITOR` or `vi`, then reloads and validates the file.
 Changes that may select a different workflow source coordinate through the
@@ -455,13 +469,18 @@ credential/config bind mounts. `core/docker.py` resolves it through
 3. default `~/.djinn/config`
 
 The Compose files use host-side interpolation variables such as
-`${CODE_DIR}`, `${DJINN_CONFIG_ROOT}`, `${TZ}`, and resource variables. Those are
-not the same as `docker compose run -e` container variables. Djinn centralizes
-host interpolation through:
+`${CODE_DIR}`, `${DJINN_WORKSPACE_TARGET}`, `${DJINN_CONFIG_ROOT}`, `${TZ}`, and
+resource variables. Those are not the same as `docker compose run -e` container
+variables. Djinn centralizes host interpolation through:
 
 - `build_compose_env(config)` renders Compose variables from `AppConfig`
 - `_compose_host_env(config)` overlays them onto `os.environ`
 - `_run_compose(args, config, cwd)` is the captured `docker compose` choke-point
+
+`DJINN_WORKSPACE_TARGET` derives from the mode and drives both the configured
+workspace bind target and default cwd. Rendered `CODE_DIR` and workspace target
+override stale inherited values. With `config=None`, teardown/parser calls use
+the home-directory source placeholder and `/home/dev/projects` target default.
 
 Captured Compose calls such as `compose_down()` and Docker proxy cleanup route
 through `_run_compose()`. `compose_build()` is no compose call — it runs
@@ -691,7 +710,9 @@ Common mounts include:
 - the read-only `templates/claude/CLAUDE.md` bridge at `/home/dev/.claude/CLAUDE.md`
 - the read-only canonical `./config` mount at `/home/dev/.djinn-canonical` for
   the shared publisher
-- `${CODE_DIR}` to `/home/dev/projects`
+- `${CODE_DIR}` to `${DJINN_WORKSPACE_TARGET:-/home/dev/projects}`: one workspace
+  root at `/home/dev/projects` or `/home/dev/aios`; AIOS's `projects/` is then at
+  `/home/dev/aios/projects`
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
 
 The base Compose environment sets `TZ`, `NO_COLOR`, `DJINN_TERM_WIDTH`,
@@ -731,12 +752,17 @@ The same module owns the repeatable user-mount contract:
   zone-overlay, and user mounts. Equal targets and user targets that are
   ancestors of an occupied target raise `MountCollisionError`; child targets
   remain valid except that assigned zone targets are reserved too.
+  The typed static Compose target table excludes the workspace root;
+  `_reserved_mount_targets()` adds only the active `config.workspace_target`.
+  The unused workspace root remains available for explicit user mounts.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
   `MountCollisionError` reports the two involved mounts and the conflict path.
 
 When a mount exists, `compose_run()` uses the first mount target as
 `--workdir`. With no mount it omits `--workdir`, so the Compose service's
-`working_dir: /home/dev/projects` remains effective.
+`working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` remains effective,
+using the same selected target as the workspace bind. This also applies to
+mount-less detached starts.
 
 `config/zones.py` resolves additive shipped and user `zones.toml` assignments.
 `ensure_host_env` creates every assigned local/shared overlay directory before
@@ -1027,7 +1053,7 @@ First run:
 ```text
 djinn init
   |
-  +-- prompt for code_dir and timezone
+  +-- prompt for workspace mode, mode-specific code_dir, and timezone
   +-- optionally prompt for resources and shell mounts
   +-- save ~/.config/djinn_in_a_box/config.toml atomically
   +-- seed_config(project_root)
@@ -1047,7 +1073,7 @@ AppConfig
   +-- build_compose_env(config)
   +-- _compose_host_env(config)
   v
-docker compose parses ${CODE_DIR}, ${DJINN_CONFIG_ROOT}, TZ, NO_COLOR,
+docker compose parses ${CODE_DIR}, ${DJINN_WORKSPACE_TARGET}, ${DJINN_CONFIG_ROOT}, TZ, NO_COLOR,
 DJINN_TERM_WIDTH, resources
   |
   v
@@ -1060,7 +1086,7 @@ Container startup:
 djinn start
   |
   +-- banner()
-  +-- Environment rule: Projects, Docker, Firewall, Workspace, Shell, Audio
+  +-- Environment rule: Projects or AIOS root, workspace mode/target, Docker, Firewall, mounts, Shell, Audio
   +-- Container rule
   v
 entrypoint.sh

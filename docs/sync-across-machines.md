@@ -23,12 +23,23 @@ explicit `shared_root` or `local_root` values, apply the same policy to those
 paths instead of the derived siblings.
 
 `~/.config/djinn_in_a_box/config.toml` may contain host-specific paths. If
-`code_dir` differs between machines, keep separate copies or edit it after sync
-with:
+`code_dir` or the workspace mode differs between machines, keep separate copies
+or set both explicitly after sync. For a standalone projects directory:
 
 ```bash
+djinn config set general.workspace projects
 djinn config set general.code_dir /path/to/projects
 ```
+
+For an AIOS root (its `projects/` appears at `/home/dev/aios/projects`):
+
+```bash
+djinn config set general.workspace aios
+djinn config set general.code_dir /path/to/aios
+```
+
+Both modes use one workspace bind and need no Compose edit. Djinn does not
+autodetect the mode or move files when the setting changes.
 
 If you want a non-default credential/config root, set it per host:
 

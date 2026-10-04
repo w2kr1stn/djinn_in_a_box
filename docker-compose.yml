@@ -50,8 +50,8 @@ x-common-volumes: &common-volumes
   - ./config:/home/dev/.djinn-canonical:ro
   # Shared MCP server registry (all CLI tools, local-only)
   - ./config/mcp-servers.json:/home/dev/.config/mcp-servers.json:ro
-  # Projects directory
-  - ${CODE_DIR:?Run 'djinn init' to set CODE_DIR}:/home/dev/projects
+  # Selected workspace root
+  - ${CODE_DIR:?Run 'djinn init' to set CODE_DIR}:${DJINN_WORKSPACE_TARGET:-/home/dev/projects}
   # Consumer session workspaces (bidirectional bind-mount)
   - ${HOME}/.djinn/sessions:/home/dev/sessions
 
@@ -104,7 +104,7 @@ services:
     cap_add:
       - NET_ADMIN
     deploy: *resource-limits
-    working_dir: /home/dev/projects
+    working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}
 
 networks:
   djinn-network:

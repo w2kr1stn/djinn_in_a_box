@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 import djinn_in_a_box.config.zones as zones_mod
 import djinn_in_a_box.core.docker as docker_mod
@@ -434,6 +435,36 @@ class TestMountTargetCollisions:
 
         validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
 
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("docker_mode", list(DockerMode))
+    def test_workspace_mount_collisions_follow_mode(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str,
+        docker_mode: DockerMode,
+    ) -> None:
+        self._without_runtime_mounts(monkeypatch)
+        config = AppConfig.model_validate({"code_dir": tmp_path, "workspace": workspace})
+        active = Path("/home/dev") / workspace
+        inactive = Path("/home/dev/aios" if workspace == "projects" else "/home/dev/projects")
+        for target in (str(active), f"{active}/../{workspace}", str(active.parent)):
+            mounts = resolve_container_mounts((f"{tmp_path}:{target}",))
+            with pytest.raises(MountCollisionError, match="conflicts with reserved mount"):
+                validate_container_mounts(mounts, config, docker_mode)
+
+        for target in (active / "child", inactive, inactive / "child"):
+            mounts = resolve_container_mounts((f"{tmp_path}:{target}",))
+            validate_container_mounts(mounts, config, docker_mode)
+        monkeypatch.chdir(tmp_path)
+        mounts = resolve_container_mounts((str(tmp_path),), here=True)
+        assert mounts[0].target == Path("/home/dev/workspace")
+        assert mounts[1].target.is_relative_to(Path("/home/dev/mount"))
+        validate_container_mounts(mounts, config, docker_mode)
+        reserved = docker_mod._reserved_mount_targets(config, docker_mode)
+        assert active in reserved
+        assert inactive not in reserved
+
     def test_rejects_reserved_automatic_mount_root(
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -678,22 +709,33 @@ class TestMountTargetCollisions:
                 dbus_args=[],
             )
 
-    def test_static_targets_match_the_dev_compose_volume_anchor(self) -> None:
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    def test_static_targets_match_the_dev_compose_volume_anchor(self, workspace: str) -> None:
         compose_lines = (Path(__file__).parents[1] / "docker-compose.yml").read_text().splitlines()
         anchor_start = compose_lines.index("x-common-volumes: &common-volumes")
         anchor_end = compose_lines.index("x-common-environment: &common-environment")
         dev_start = compose_lines.index("  dev:")
         networks_start = compose_lines.index("networks:")
         targets: list[Path] = []
+        workspace_target = Path("/home/dev") / workspace
         for line in compose_lines[anchor_start + 1 : anchor_end]:
+            if not line.strip().startswith("- "):
+                continue
+            line = line.replace(
+                "${DJINN_WORKSPACE_TARGET:-/home/dev/projects}", str(workspace_target)
+            )
             match = re.fullmatch(r"\s*-\s+.*:(/[^:\s]+)(?::(?:ro|rw))?", line)
-            if match:
-                targets.append(Path(match.group(1)))
+            assert match is not None, f"Unexpected Compose mount: {line}"
+            assert "$" not in match.group(1), f"Unresolved Compose target: {line}"
+            targets.append(Path(match.group(1)))
 
         anchor_lines = compose_lines[anchor_start + 1 : anchor_end]
         _assert_compose_anchor_uses_short_form(anchor_lines)
         assert "    volumes: *common-volumes" in compose_lines[dev_start:networks_start]
-        assert tuple(targets) == tuple(docker_mod._COMPOSE_DEV_MOUNT_TARGETS)
+        assert targets.count(workspace_target) == 1
+        assert tuple(t for t in targets if t != workspace_target) == tuple(
+            docker_mod._COMPOSE_DEV_MOUNT_TARGETS
+        )
 
     def test_compose_anchor_watcher_rejects_reordered_long_form(self) -> None:
         with pytest.raises(AssertionError):
@@ -770,17 +812,26 @@ class TestMountTargetCollisions:
         with pytest.raises(AssertionError, match="matched no symlink lines"):
             _assert_dockerfile_aliases_are_reserved("# no links\n", reserved)
 
-    def test_dev_service_keeps_its_compose_working_dir(self) -> None:
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    def test_dev_service_keeps_its_compose_working_dir(self, workspace: str) -> None:
         """Without a mount no ``--workdir`` is passed, so this line decides where
         a plain ``djinn start`` lands. Deleting it would silently move every
-        mount-less start from /home/dev/projects to the image default /home/dev.
+        mount-less start from the selected workspace to the image default /home/dev.
         """
         compose_lines = (Path(__file__).parents[1] / "docker-compose.yml").read_text().splitlines()
         dev_start = compose_lines.index("  dev:")
         networks_start = compose_lines.index("networks:")
         dev_block = "\n".join(compose_lines[dev_start:networks_start])
 
-        assert "working_dir: /home/dev/projects" in dev_block
+        expression = "${DJINN_WORKSPACE_TARGET:-/home/dev/projects}"
+        assert f"working_dir: {expression}" in dev_block
+        compose = yaml.safe_load("\n".join(compose_lines))
+        dev = compose["services"]["dev"]
+        workspace_binds = [v for v in dev["volumes"] if v.startswith("${CODE_DIR:")]
+        assert len(workspace_binds) == 1
+        target = workspace_binds[0].split("}:", 1)[1]
+        assert target == dev["working_dir"] == expression
+        assert target.replace(expression, f"/home/dev/{workspace}") == f"/home/dev/{workspace}"
 
 
 class TestEnsureNetwork:
@@ -907,6 +958,45 @@ class TestGetComposeFiles:
 
 class TestBuildComposeEnv:
     """Tests for docker compose host interpolation environment."""
+
+    @pytest.mark.parametrize("workspace", ["projects", "aios", None])
+    def test_workspace_env_selects_compose_mount_and_cwd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str | None,
+    ) -> None:
+        config = (
+            AppConfig.model_validate({"code_dir": tmp_path, "workspace": workspace})
+            if workspace is not None
+            else None
+        )
+        monkeypatch.setenv("CODE_DIR", "/stale/source")
+        monkeypatch.setenv("DJINN_WORKSPACE_TARGET", "/stale/target")
+        env = build_compose_env(config)
+        host_env = docker_mod._compose_host_env(config)
+        expected_target = f"/home/dev/{workspace or 'projects'}"
+        expected_source = str(tmp_path if config is not None else Path.home())
+        assert env["CODE_DIR"] == host_env["CODE_DIR"] == expected_source
+        assert (
+            env["DJINN_WORKSPACE_TARGET"] == host_env["DJINN_WORKSPACE_TARGET"] == expected_target
+        )
+        compose = yaml.safe_load((Path(__file__).parents[1] / "docker-compose.yml").read_text())
+        dev = compose["services"]["dev"]
+        workspace_binds = [v for v in dev["volumes"] if v.startswith("${CODE_DIR:")]
+        assert len(workspace_binds) == 1
+        expression = "${DJINN_WORKSPACE_TARGET:-/home/dev/projects}"
+        assert workspace_binds[0].endswith(f":{expression}")
+        assert dev["working_dir"] == expression
+        assert workspace_binds[0].replace(
+            "${CODE_DIR:?Run 'djinn init' to set CODE_DIR}", host_env["CODE_DIR"]
+        ).replace(expression, host_env["DJINN_WORKSPACE_TARGET"]) == (
+            f"{expected_source}:{expected_target}"
+        )
+        assert (
+            dev["working_dir"].replace(expression, host_env["DJINN_WORKSPACE_TARGET"])
+            == expected_target
+        )
 
     def test_sets_terminal_width_when_output_is_tty(self, tmp_path: Path) -> None:
         config = AppConfig(code_dir=tmp_path)
@@ -2419,9 +2509,10 @@ class TestVolumeSpecsFromMountArgs:
     """``up`` takes no ``-v`` flags, so specs are lifted out of the run-style args."""
 
     def test_extracts_specs_after_volume_flags(self) -> None:
-        assert docker_mod._volume_specs_from_mount_args(
-            ["-v", "/a:/b", "-v", "/c:/d:ro"]
-        ) == ["/a:/b", "/c:/d:ro"]
+        assert docker_mod._volume_specs_from_mount_args(["-v", "/a:/b", "-v", "/c:/d:ro"]) == [
+            "/a:/b",
+            "/c:/d:ro",
+        ]
 
     def test_ignores_unrelated_arguments(self) -> None:
         assert docker_mod._volume_specs_from_mount_args(["--rm", "-e", "X=1"]) == []

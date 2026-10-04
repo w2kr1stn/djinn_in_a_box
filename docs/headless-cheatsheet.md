@@ -142,6 +142,12 @@ workdir. `--here` can be combined with repeatable mounts; the workspace remains
 the first mount and therefore the workdir. Without `--here`, the first explicit
 mount target is the workdir. A target-free mount uses `/home/dev/mount/<basename>`.
 
+The configured `general.code_dir` is always mounted as one workspace root:
+`general.workspace = "projects"` (default) selects `/home/dev/projects`, while
+`"aios"` selects `/home/dev/aios`. `--here` and the first user mount still decide
+the run's workdir. A user target cannot equal or contain the active workspace
+target; children and explicit mounts at the unused root remain valid.
+
 ---
 
 ## Session Headless Mode

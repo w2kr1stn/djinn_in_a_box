@@ -154,7 +154,7 @@ class TestInitCommand:
         projects_dir = mock_home / "projects"
         projects_dir.mkdir()
 
-        result = runner.invoke(app, ["init"], input=f"{projects_dir}\nUTC\nn\n")
+        result = runner.invoke(app, ["init"], input=f"projects\n{projects_dir}\nUTC\nn\n")
 
         assert result.exit_code == 0, result.output
         instructions = project / "config/claude/AGENTS.md"
@@ -173,21 +173,39 @@ class TestInitCommand:
         assert stat.S_ISREG(instructions.lstat().st_mode)
         assert instructions.read_text() == content
 
+    @pytest.mark.parametrize("workspace", ["projects", "aios", None])
     def test_init_creates_config_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str | None,
     ) -> None:
         config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
         _patch_init_dependencies(monkeypatch, config_dir, config_file)
 
-        projects_dir = tmp_path / "projects"
+        selected = workspace or "projects"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        projects_dir = tmp_path / selected
         projects_dir.mkdir()
 
-        result = runner.invoke(app, ["init"], input=f"{projects_dir}\nUTC\nn\n")
+        monkeypatch.setattr(
+            "djinn_in_a_box.commands.config.save_config",
+            lambda config: save_config_file(config, config_file),
+        )
+        result = runner.invoke(app, ["init"], input=f"AIOS\n{workspace or ''}\n\nUTC\nn\n")
 
         assert result.exit_code == 0
         assert config_file.exists()
         combined = result.stdout + result.output
+        assert "'AIOS' is not one of" in combined
+        root_label = "AIOS root" if selected == "aios" else "Projects directory"
+        assert f"{root_label} (mounted as /home/dev/{selected})" in combined
+        assert f"[{projects_dir}]" in combined
+        assert combined.index("Workspace mode") < combined.index(root_label)
+        saved = load_config_file(config_file)
+        assert saved.workspace == selected
+        assert saved.code_dir == projects_dir
         assert "Next steps" in combined
         assert "djinn build" in combined
         assert "djinn start" in combined
@@ -204,7 +222,9 @@ class TestInitCommand:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
 
-        result = runner.invoke(app, ["init", "--force"], input=f"{projects_dir}\nUTC\nn\n")
+        result = runner.invoke(
+            app, ["init", "--force"], input=f"projects\n{projects_dir}\nUTC\nn\n"
+        )
 
         assert result.exit_code == 0
         assert config_file.exists()
@@ -219,7 +239,7 @@ class TestInitCommand:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
 
-        result = runner.invoke(app, ["init"], input=f"{projects_dir}\nBerlin\nn\n")
+        result = runner.invoke(app, ["init"], input=f"projects\n{projects_dir}\nBerlin\nn\n")
 
         assert result.exit_code == 1
         combined = result.stdout + result.output
@@ -265,26 +285,31 @@ class TestInitCommand:
 
         nonexistent = tmp_path / "new_projects"
 
-        result = runner.invoke(app, ["init"], input=f"{nonexistent}\nUTC\nn\ny\n")
+        result = runner.invoke(app, ["init"], input=f"projects\n{nonexistent}\nUTC\nn\ny\n")
 
         assert result.exit_code == 0
         assert nonexistent.exists()
 
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
     def test_init_project_dir_create_error_exits_cleanly(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str,
     ) -> None:
         config_dir = tmp_path / ".config" / "djinn_in_a_box"
         config_file = config_dir / "config.toml"
         _patch_init_dependencies(monkeypatch, config_dir, config_file)
         blocked_parent = tmp_path / "blocked"
         blocked_parent.write_text("not a directory")
-        projects_dir = blocked_parent / "projects"
+        projects_dir = blocked_parent / workspace
 
-        result = runner.invoke(app, ["init"], input=f"{projects_dir}\nUTC\nn\ny\n")
+        result = runner.invoke(app, ["init"], input=f"{workspace}\n{projects_dir}\nUTC\nn\ny\n")
 
         assert result.exit_code == 1
         combined = result.stdout + result.output
-        assert "Failed to create projects directory" in combined
+        root_label = "AIOS root" if workspace == "aios" else "Projects directory"
+        assert f"Failed to create {root_label}" in combined
         assert "writable" in combined
         assert "Traceback" not in combined
 
@@ -302,7 +327,7 @@ class TestInitCommand:
         result = runner.invoke(
             app,
             ["init"],
-            input=f"{projects_dir}\nUTC\ny\n2\n4G\n1\n1G\ny\n",
+            input=f"projects\n{projects_dir}\nUTC\ny\n2\n4G\n1\n1G\ny\n",
         )
 
         assert result.exit_code == 0
@@ -318,13 +343,18 @@ class TestInitCommand:
 class TestConfigShowCommand:
     """Tests for the config show command."""
 
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
     def test_config_show_displays_values(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str,
     ) -> None:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         mock_config = AppConfig(
             code_dir=projects_dir,
+            **{"workspace": workspace},
             timezone="UTC",
             resources=ResourceLimits(),
             shell=ShellConfig(),
@@ -341,15 +371,23 @@ class TestConfigShowCommand:
         # whitespace so a break mid-word cannot split the expected token.
         unwrapped = "".join(combined.split())
         assert "projects" in unwrapped
+        assert f"workspace{workspace}" in unwrapped
         assert "UTC" in unwrapped
         assert "ConfigSync" in unwrapped
         assert "claude" in unwrapped
 
-    def test_config_show_json_output(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    def test_config_show_json_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str,
+    ) -> None:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         mock_config = AppConfig(
             code_dir=projects_dir,
+            **{"workspace": workspace},
             timezone="UTC",
             resources=ResourceLimits(),
             shell=ShellConfig(),
@@ -365,6 +403,8 @@ class TestConfigShowCommand:
         data = json.loads(result.stdout)
         assert "code_dir" in data
         assert "timezone" in data
+        assert data["workspace"] == workspace
+        assert "workspace_target" not in data
         assert data["config_sync"] == {"source": "claude"}
 
     def test_config_show_missing_config_error(
@@ -388,6 +428,61 @@ class TestConfigShowCommand:
 
 class TestConfigSetCommand:
     """Tests for the config set command."""
+
+    @pytest.mark.parametrize(
+        "value", ["projects", "aios", "both", "", "AIOS", "PROJECTS", " aios "]
+    )
+    def test_config_set_workspace_round_trip_and_rejection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        config_file = tmp_path / "config.toml"
+        config = AppConfig.model_validate(
+            {
+                "code_dir": tmp_path,
+                "workspace": "aios",
+                "resources": {"cpu_limit": 6, "memory_limit": "8G"},
+                "shell": {"skip_mounts": True},
+                "config_sync": {"source": "codex"},
+                "build": {"network": "host"},
+            }
+        )
+        save_config_file(config, config_file)
+        original = config_file.read_bytes()
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+        result = runner.invoke(app, ["config", "set", "general.workspace", value])
+        if value not in {"projects", "aios"}:
+            assert result.exit_code == 1, result.output
+            assert "Traceback" not in result.output
+            assert config_file.read_bytes() == original
+            return
+
+        assert result.exit_code == 0, result.output
+        assert f"general.workspace = {value}" in result.output
+        data = tomllib.loads(config_file.read_text())
+        assert data["general"]["workspace"] == value
+        assert "workspace" not in data
+        expected = {**config.model_dump(mode="json"), "workspace": value}
+        assert load_config_file(config_file).model_dump(mode="json") == expected
+        shown = runner.invoke(app, ["config", "show", "--json"])
+        assert shown.exit_code == 0, shown.output
+        import json
+
+        assert json.loads(shown.stdout) == expected
+        shown = runner.invoke(app, ["config", "show"])
+        assert shown.exit_code == 0, shown.output
+        assert f"workspace{value}" in "".join(shown.output.split())
+        changed = runner.invoke(app, ["config", "set", "general.timezone", "Europe/Berlin"])
+        assert changed.exit_code == 0, changed.output
+        assert load_config_file(config_file).model_dump(mode="json") == {
+            **expected,
+            "timezone": "Europe/Berlin",
+        }
+        unknown = runner.invoke(app, ["config", "set", "unknown.key", "value"])
+        assert unknown.exit_code == 1, unknown.output
+        assert "general.workspace" in "".join(unknown.output.split())
 
     def test_config_set_round_trips_valid_value(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -480,13 +575,20 @@ class TestConfigSetCommand:
         assert "Traceback" not in result.output
         assert config_file.read_bytes() == original
 
+    @pytest.mark.parametrize("workspace", ["projects", "aios"])
     def test_config_set_code_dir_requires_existing_directory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        workspace: str,
     ) -> None:
         config_file = tmp_path / "config.toml"
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
-        _write_test_config(config_file, projects_dir)
+        save_config_file(
+            AppConfig.model_validate({"code_dir": projects_dir, "workspace": workspace}),
+            config_file,
+        )
         monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
 
         missing = tmp_path / "missing-projects"
@@ -495,7 +597,8 @@ class TestConfigSetCommand:
 
         assert result.exit_code == 1
         combined = result.stdout + result.output
-        assert "Projects directory does not exist" in combined
+        root_label = "AIOS root" if workspace == "aios" else "Projects directory"
+        assert f"{root_label} does not exist" in combined
         assert "mkdir -p" in combined
         assert str(missing) in combined
         assert "djinn init" in combined

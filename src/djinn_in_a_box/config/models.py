@@ -187,14 +187,17 @@ class AppConfig(BaseModel):
     """Main application configuration for Djinn in a Box.
 
     This is the root configuration model that combines all settings:
-    project directory, timezone, resource limits, shell options, and
+    workspace root, timezone, resource limits, shell options, and
     optionally agent overrides.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     code_dir: Path
-    """Projects directory to mount as ~/projects in the container. Required."""
+    """Host workspace root selected by the workspace mode. Required."""
+
+    workspace: Literal["aios", "projects"] = "projects"
+    """Select an AIOS root or a standalone projects directory."""
 
     timezone: str = "UTC"
     """Container timezone (TZ environment variable)."""
@@ -228,6 +231,11 @@ class AppConfig(BaseModel):
 
     build: BuildConfig = Field(default_factory=BuildConfig)
     """Image-build settings."""
+
+    @property
+    def workspace_target(self) -> Path:
+        """Fixed container mount target and default working directory."""
+        return Path("/home/dev") / self.workspace
 
     @field_validator("timezone", mode="after")
     @classmethod

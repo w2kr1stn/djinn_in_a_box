@@ -130,7 +130,8 @@ class TestAppConfig:
         with pytest.raises(ValidationError, match="code_dir is not a directory"):
             AppConfig(code_dir=file_path)
 
-    def test_nested_model_from_dict(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("workspace", [None, "projects", "aios"])
+    def test_nested_model_from_dict(self, tmp_path: Path, workspace: str | None) -> None:
         """Test creating AppConfig from nested dictionary (TOML-like)."""
         data = {
             "code_dir": str(tmp_path),
@@ -143,9 +144,14 @@ class TestAppConfig:
                 "skip_mounts": True,
             },
         }
+        if workspace is not None:
+            data["workspace"] = workspace
         config = AppConfig.model_validate(data)
         assert config.resources.cpu_limit == 4
         assert config.shell.skip_mounts is True
+        assert config.workspace == (workspace or "projects")
+        assert config.workspace_target == Path(f"/home/dev/{workspace or 'projects'}")
+        assert "workspace_target" not in config.model_dump(mode="json")
 
 
 class TestBuildNetwork:
