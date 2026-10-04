@@ -693,7 +693,7 @@ class TestMountTargetCollisions:
         anchor_lines = compose_lines[anchor_start + 1 : anchor_end]
         _assert_compose_anchor_uses_short_form(anchor_lines)
         assert "    volumes: *common-volumes" in compose_lines[dev_start:networks_start]
-        assert tuple(targets) == docker_mod._COMPOSE_DEV_MOUNT_TARGETS
+        assert tuple(targets) == tuple(docker_mod._COMPOSE_DEV_MOUNT_TARGETS)
 
     def test_compose_anchor_watcher_rejects_reordered_long_form(self) -> None:
         with pytest.raises(AssertionError):

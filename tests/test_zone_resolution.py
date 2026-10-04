@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 import djinn_in_a_box.config.zones as zones_mod
@@ -202,6 +204,60 @@ def _provisioning_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> App
     return _config(tmp_path)
 
 
+def _compose_nested_bind_targets() -> dict[tuple[str, Path], str]:
+    project = Path(__file__).parents[1]
+    compose = yaml.safe_load((project / "docker-compose.yml").read_text())
+    mounts: list[tuple[str, Path]] = []
+    for volume in compose["services"]["dev"]["volumes"]:
+        match = re.fullmatch(r"(.+):(/[^:]+)(?::(?:ro|rw))?", volume)
+        assert match is not None, f"Unexpected Compose mount: {volume}"
+        mounts.append((match.group(1), Path(match.group(2))))
+    agent_roots = {
+        source.rsplit("/", 1)[1]: target
+        for source, target in mounts
+        if source.startswith("${DJINN_CONFIG_ROOT")
+    }
+    assert agent_roots == ZONE_CONTAINER_TARGETS
+    nested: dict[tuple[str, Path], str] = {}
+    for agent, agent_root in agent_roots.items():
+        for source, target in mounts:
+            if target == agent_root or not target.is_relative_to(agent_root):
+                continue
+            assert source.startswith("./"), f"Expected a nested bind mount: {source}"
+            source_path = project / source
+            if source.startswith("./config/"):
+                source_path = project / "templates" / "seed" / source
+            assert source_path.is_file() or source_path.is_dir(), source_path
+            nested[agent, target.relative_to(agent_root)] = (
+                "file" if source_path.is_file() else "directory"
+            )
+    return nested
+
+
+def test_nested_bind_target_definitions_match_compose_sources_and_kinds() -> None:
+    defined = {
+        (agent, target.relative_to(agent_root)): docker_mod._COMPOSE_DEV_MOUNT_TARGETS[target]
+        for agent, agent_root in ZONE_CONTAINER_TARGETS.items()
+        for target in docker_mod.repo_owned_submount_targets(agent_root)
+    }
+
+    assert defined == _compose_nested_bind_targets()
+
+
+def _nested_bind_targets(config: AppConfig) -> dict[Path, str]:
+    root = resolve_zone_roots(config).config_root
+    targets = {
+        root / agent / relative_path: kind
+        for (agent, relative_path), kind in _compose_nested_bind_targets().items()
+    }
+    for agent, by_zone in load_zone_assignments(config).by_agent.items():
+        for relative_paths in by_zone.values():
+            targets.update(
+                dict.fromkeys((root / agent / path for path in relative_paths), "directory")
+            )
+    return targets
+
+
 def _overlay_directories(config: AppConfig) -> set[Path]:
     roots = resolve_zone_roots(config)
     directories: set[Path] = set()
@@ -228,11 +284,12 @@ def _host_tree(root: Path) -> dict[Path, tuple[int, int, int, int, bytes | None]
     }
 
 
-def test_host_provisioning_creates_every_assigned_overlay_empty_private_and_user_owned(
+def test_host_provisioning_creates_every_overlay_and_nested_bind_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _provisioning_config(tmp_path, monkeypatch)
     expected = _overlay_directories(config)
+    expected_targets = _nested_bind_targets(config)
 
     ensure_host_env(config)
 
@@ -244,14 +301,27 @@ def test_host_provisioning_creates_every_assigned_overlay_empty_private_and_user
         assert stat.S_ISDIR(metadata.st_mode)
         assert stat.S_IMODE(metadata.st_mode) == 0o700
         assert (metadata.st_uid, metadata.st_gid) == (os.getuid(), os.getgid())
+    for target, kind in expected_targets.items():
+        metadata = target.lstat()
+        assert (metadata.st_uid, metadata.st_gid) == (os.getuid(), os.getgid())
+        if kind == "file":
+            assert stat.S_ISREG(metadata.st_mode)
+            assert stat.S_IMODE(metadata.st_mode) == 0o600
+            assert target.read_bytes() == b""
+        else:
+            assert stat.S_ISDIR(metadata.st_mode)
+            assert stat.S_IMODE(metadata.st_mode) == 0o700
+        for parent in target.parents:
+            if parent == roots.config_root:
+                break
+            metadata = parent.lstat()
+            assert stat.S_ISDIR(metadata.st_mode)
+            assert stat.S_IMODE(metadata.st_mode) == 0o700
+            assert (metadata.st_uid, metadata.st_gid) == (os.getuid(), os.getgid())
     for agent, by_zone in load_zone_assignments(config).by_agent.items():
         for zone, root in (("local", roots.local_root), ("shared", roots.shared_root)):
             for relative_path in by_zone[zone]:
                 assert list((root / agent / relative_path).iterdir()) == []
-                target = roots.config_root / agent / relative_path
-                metadata = target.lstat()
-                assert stat.S_ISDIR(metadata.st_mode)
-                assert metadata.st_uid == os.getuid()
 
 
 def test_host_provisioning_preserves_existing_zone_and_config_content(
@@ -263,13 +333,15 @@ def test_host_provisioning_preserves_existing_zone_and_config_content(
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     for agent in SYNC_PATHS["credentials"]:
         (roots.config_root / agent).mkdir(mode=0o700)
-    assignments = load_zone_assignments(config)
-    for agent, by_zone in assignments.by_agent.items():
-        for zone in ("local", "shared"):
-            for relative_path in by_zone[zone]:
-                (roots.config_root / agent / relative_path).mkdir(
-                    parents=True, exist_ok=True, mode=0o700
-                )
+    for target, kind in _nested_bind_targets(config).items():
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if kind == "file":
+            target.write_bytes(b"existing instruction content\n")
+            target.chmod(0o640)
+        else:
+            target.mkdir(exist_ok=True)
+            target.chmod(0o755)
+            (target / "sentinel.bin").write_bytes(b"existing target data")
     home = Path.home()
     for directory in (home / ".djinn" / "sessions", home / ".djinn" / "backups", home / ".ssh"):
         directory.mkdir(parents=True, mode=0o700)
@@ -292,6 +364,61 @@ def test_host_provisioning_preserves_existing_zone_and_config_content(
     assert _host_tree(tmp_path) == before
     assert stat.S_IMODE(preserved_target.lstat().st_mode) == 0o755
     assert (preserved_target / "sentinel.bin").read_bytes() == b"existing target data"
+
+
+@pytest.mark.parametrize("invalid_entry", ("wrong-kind", "symlink", "dangling-symlink"))
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "kind"),
+    [(agent, path, kind) for (agent, path), kind in _compose_nested_bind_targets().items()],
+)
+def test_host_provisioning_refuses_invalid_nested_bind_targets_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    relative_path: Path,
+    kind: str,
+    invalid_entry: str,
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    target = resolve_zone_roots(config).config_root / agent / relative_path
+    target.parent.mkdir(parents=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    outside = outside_root / "target"
+    if invalid_entry == "wrong-kind":
+        if kind == "file":
+            target.mkdir(mode=0o755)
+            (target / "sentinel.bin").write_bytes(b"untouched")
+        else:
+            target.write_bytes(b"untouched")
+            target.chmod(0o640)
+    else:
+        if invalid_entry == "symlink":
+            if kind == "file":
+                outside.write_bytes(b"untouched")
+                outside.chmod(0o640)
+            else:
+                outside.mkdir(mode=0o755)
+                (outside / "sentinel.bin").write_bytes(b"untouched")
+        target.symlink_to(outside, target_is_directory=kind == "directory")
+    before = target.lstat()
+    outside_before = _host_tree(outside_root)
+    expected_error = kind if invalid_entry == "wrong-kind" else "symlink"
+
+    with pytest.raises(ZoneRootValidationError, match=expected_error):
+        ensure_host_env(config)
+
+    after = target.lstat()
+    assert (after.st_ino, after.st_uid, after.st_gid, after.st_mode) == (
+        before.st_ino, before.st_uid, before.st_gid, before.st_mode,
+    )
+    assert _host_tree(outside_root) == outside_before
+    if invalid_entry == "wrong-kind":
+        content = target / "sentinel.bin" if kind == "file" else target
+        assert content.read_bytes() == b"untouched"
+    else:
+        assert target.is_symlink()
+        assert target.readlink() == outside
 
 
 def test_host_provisioning_is_idempotent_for_all_overlay_assignments(
