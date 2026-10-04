@@ -1284,3 +1284,20 @@ class TestResourceTable:
         result = capture_container_stdout.getvalue()
         assert "Credentials" in result
         assert "/home/user/.djinn/sync/claude" in result
+
+
+def test_enter_does_not_inject_declarations(monkeypatch):
+    from djinn_in_a_box.core import docker
+
+    forbidden = MagicMock(side_effect=AssertionError("exec must inherit"))
+    monkeypatch.setattr(docker, "resolve_declared_entries", forbidden)
+    monkeypatch.setattr(container, "load_config", forbidden)
+    monkeypatch.setattr(container.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(container, "get_running_containers", lambda prefix: ["djinn"])
+    run = MagicMock(return_value=MagicMock(returncode=0))
+    monkeypatch.setattr(container.subprocess, "run", run)
+    with pytest.raises(typer.Exit) as exc:
+        container.enter()
+    assert exc.value.exit_code == 0
+    assert run.call_args.args[0] == ["docker", "exec", "-it", "djinn", "zsh"]
+    forbidden.assert_not_called()

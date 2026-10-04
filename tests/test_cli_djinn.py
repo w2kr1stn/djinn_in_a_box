@@ -955,3 +955,91 @@ class TestConfigPathCommand:
 
         assert result.exit_code == 0
         assert str(config_file) in result.stdout
+
+
+@pytest.mark.parametrize("format_name", ["text", "json"])
+def test_show_declarations(tmp_path, monkeypatch, format_name):
+    import json
+
+    config = AppConfig(
+        code_dir=tmp_path,
+        mounts={
+            "archive.disk": {"source": "/offline", "target": "/archive", "marker": ".ready"},
+            "worker": {"volume": True, "target": "/worker", "backup": "none"},
+        },
+        environment={
+            "CDP_HOST": "[bold]$HOST", "EMPTY": "", "LINES": "first\nsecond",
+            "LONG_LITERAL": "x" * 240,
+        },
+    )
+    monkeypatch.setattr("djinn_in_a_box.commands.config.load_config", lambda: config)
+    result = runner.invoke(app, ["config", "show", *(["--json"] if format_name == "json" else [])])
+    assert result.exit_code == 0, result.output
+    if format_name == "json":
+        data = json.loads(result.output)
+        assert data["mounts"] == config.model_dump(mode="json")["mounts"]
+        assert data["environment"] == config.environment
+    else:
+        for value in (
+            "Mounts",
+            "Environment",
+            "archive.disk",
+            "bind",
+            ".ready",
+            "worker",
+            "backup=none",
+            "[bold]$HOST",
+            "EMPTY=",
+            "first",
+            "second",
+        ):
+            assert value in result.output
+
+
+@pytest.mark.parametrize("case", ["offline", "schema", "environment"])
+def test_edit_validates_declarations(tmp_path, monkeypatch, config_edit_project, case):
+    path = tmp_path / "config.toml"
+    save_config_file(AppConfig(code_dir=tmp_path), path)
+    monkeypatch.setattr("djinn_in_a_box.commands.config.CONFIG_FILE", path)
+    monkeypatch.setattr(
+        "djinn_in_a_box.commands.config.load_config", lambda: load_config_file(path)
+    )
+
+    def editor(*args, **kwargs):
+        suffix = '\n[mounts.archive]\nsource="/offline"\ntarget="/archive"\n'
+        if case == "schema":
+            suffix += 'backup="data"\n'
+        elif case == "environment":
+            suffix += "\n[environment]\nCDP_HOST=123\n"
+        # Start from a file without empty collections, so the appended tables are unique.
+        path.write_text(f'[general]\ncode_dir="{tmp_path}"\n' + suffix)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("djinn_in_a_box.commands.config.subprocess.run", editor)
+    result = runner.invoke(app, ["config", "edit"])
+    assert result.exit_code == 0, result.output
+    assert ("Configuration problem" in result.output) is (case != "offline")
+    assert not (tmp_path / "offline").exists()
+
+
+def test_init_force_resets_declarations(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    save_config_file(
+        AppConfig(
+            code_dir=tmp_path,
+            mounts={
+                "worker": {"volume": True, "target": "/worker", "backup": "none"},
+            },
+            environment={"CDP_HOST": "old"},
+        ),
+        path,
+    )
+    _patch_init_dependencies(monkeypatch, tmp_path, path)
+    monkeypatch.setattr(
+        "djinn_in_a_box.commands.config.save_config", lambda config: save_config_file(config, path)
+    )
+    result = runner.invoke(app, ["init", "--force"], input=f"\n{tmp_path}\n\n\n\n\n\n\n\n\n")
+    assert result.exit_code == 0, result.output
+    config = load_config_file(path)
+    assert config.mounts == {} and config.environment == {}
+    assert "marker" not in result.output.lower() and "declaration" not in result.output.lower()

@@ -1,6 +1,11 @@
 """Exception types shared across Djinn's core layers."""
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from djinn_in_a_box.config.declarations import DeclarationSet
+    from djinn_in_a_box.config.models import AppConfig
 
 
 class ConfigNotFoundError(FileNotFoundError):
@@ -12,7 +17,13 @@ class ConfigNotFoundError(FileNotFoundError):
 
 
 class ConfigValidationError(ValueError):
-    pass
+    def __init__(
+        self, message: str, *, declarations: DeclarationSet | None = None,
+        reservation_config: AppConfig | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.declarations = declarations
+        self.reservation_config = reservation_config
 
 
 class ZoneConfigurationError(ConfigValidationError):
@@ -29,6 +40,10 @@ class MountSpecificationError(ValueError):
 
 class SopsAgeKeyFileError(MountSpecificationError):
     """Raised when the configured SOPS age identity file cannot be mounted safely."""
+
+
+class DeclarationSpecificationError(MountSpecificationError):
+    """Raised before creation when a configured declaration cannot be applied."""
 
 
 class RuntimeMountSpecificationError(RuntimeError):

@@ -24,6 +24,7 @@ import typer
 from rich.table import Table
 from rich.text import Text
 
+from djinn_in_a_box.config.declarations import DeclarationSet
 from djinn_in_a_box.config.defaults import KNOWN_CONFIG_ROOT_ENTRIES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import (
@@ -31,6 +32,7 @@ from djinn_in_a_box.config.zones import (
     ZoneAssignments,
     load_zone_assignments,
 )
+from djinn_in_a_box.core import docker as docker_core
 from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.docker import (
@@ -388,6 +390,25 @@ def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> 
 # -----------------------------------------------------------------------------
 # Check assembly
 # -----------------------------------------------------------------------------
+def declaration_checks(
+    config: AppConfig | None, declarations: DeclarationSet | None = None,
+) -> list[Check]:
+    """Inspect declarations even if an unrelated optional mount builder fails."""
+    targets, warnings = docker_core.declaration_reservation_context(config)
+    checks = [Check(f"Declaration context: {name}", Status.WARN, message)
+              for name, message in warnings]
+    resolved = docker_core.resolve_declared_entries(
+        config, docker_core.ContainerOptions(), runtime_targets=targets, caller_env=None,
+        declarations=declarations,
+    )
+    checks.extend(Check(
+        diagnostic.identity, Status.FAIL if diagnostic.error else Status.PASS,
+        diagnostic.error or "valid declaration",
+        "Fix config.toml or the declared host path." if diagnostic.error else "",
+    ) for diagnostic in resolved.diagnostics)
+    return checks
+
+
 def run_checks(config: AppConfig | None, config_error: str | None = None) -> list[Check]:
     """Run every diagnostic and return the results (no side effects)."""
     checks: list[Check] = []
@@ -521,6 +542,9 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
                     "Fix the zone roots or zones.toml, then re-run `djinn doctor`.",
                 )
             )
+
+    if config is not None:
+        checks.extend(declaration_checks(config))
 
     image = daemon and _image_built()
     checks.append(
@@ -681,6 +705,7 @@ def doctor(
     # a malformed config must report FAIL, never a misleading PASS.
     config: AppConfig | None = None
     config_error: str | None = None
+    invalid_config: ConfigValidationError | None = None
     try:
         config = load_config()
     except ConfigNotFoundError:
@@ -688,10 +713,15 @@ def doctor(
     except ConfigValidationError as e:
         config = None
         config_error = str(e)
+        invalid_config = e
 
     rule("Djinn Doctor")
 
     checks = run_checks(config, config_error)
+    if invalid_config is not None and invalid_config.declarations is not None:
+        checks.extend(declaration_checks(
+            invalid_config.reservation_config, invalid_config.declarations,
+        ))
     table = Table(
         title="Djinn Doctor",
         title_style="table.title",
@@ -707,10 +737,10 @@ def doctor(
         detail = (
             Text(check.detail, style="path")
             if check.name in {"Projects dir", "AIOS root", "Config root"}
-            else check.detail
+            else Text(check.detail)
         )
         table.add_row(
-            check.name,
+            Text(check.name),
             Text(f"{glyph} {_LABEL[check.status]}", style=_STYLE[check.status]),
             detail,
             check.remedy,

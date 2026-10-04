@@ -16,6 +16,7 @@ from pathlib import Path
 import tomli_w
 from pydantic import ValidationError
 
+from djinn_in_a_box.config.declarations import inspect_declarations
 from djinn_in_a_box.config.defaults import DEFAULT_AGENTS
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
@@ -58,13 +59,24 @@ def load_config(path: Path | None = None) -> AppConfig:
 
     # Transform nested TOML structure to flat Pydantic model
     # [general] -> top-level, [shell] -> shell, [resources] -> resources
+    general = data.get("general", {})
+    config_dict = {**general, **{k: v for k, v in data.items() if k != "general"}}
     try:
-        general = data.get("general", {})
-        config_dict = {**general, **{k: v for k, v in data.items() if k != "general"}}
         return AppConfig(**config_dict)
     except ValidationError as e:
+        declarations = inspect_declarations(
+            config_dict.get("mounts", {}), config_dict.get("environment", {})
+        )
+        reservation_config = None
+        # The config error is retained; only a fully valid reservation context is used.
+        with contextlib.suppress(ValidationError):
+            reservation_config = AppConfig.model_validate(
+                {**config_dict, "mounts": {}, "environment": {}}
+            )
         raise ConfigValidationError(
-            f"Configuration validation failed for {config_path}:\n{_format_validation_errors(e)}"
+            f"Configuration validation failed for {config_path}:\n{_format_validation_errors(e)}",
+            declarations=declarations,
+            reservation_config=reservation_config,
         ) from e
 
 

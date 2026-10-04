@@ -12,17 +12,28 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, Required, TypedDict
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
 
+from djinn_in_a_box.config.declarations import (
+    BindDeclaration,
+    DeclarationDiagnostic,
+    DeclarationSet,
+    VolumeDeclaration,
+    declaration_error,
+    inspect_declarations,
+)
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
+    DeclarationSpecificationError,
     MountSpecificationError,
     RuntimeMountSpecificationError,
     SopsAgeKeyFileError,
@@ -56,6 +67,13 @@ _IMAGE_PATH_ALIASES = {
     Path("/home/dev/.config/claude"): Path("/home/dev/.claude"),
 }
 _DIRECT_DOCKER_SOCKET_TARGETS = (Path("/run/docker.sock"),)
+MANAGED_VOLUME_REPAIR_TARGETS = (
+    Path("/home/dev/.cache/uv"),
+    Path("/home/dev/.cache/djinn-tools"),
+    Path("/home/dev/.local/share/fnm"),
+    Path("/home/dev/.vscode-server"),
+    Path("/home/dev/workspaces"),
+)
 _COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
     Path("/home/dev/.claude"): "directory",
     Path("/home/dev/.codex"): "directory",
@@ -731,7 +749,7 @@ def _canonicalize_runtime_mount_args(args: list[str]) -> list[str]:
 
 
 def _reserved_mount_targets(
-    config: AppConfig,
+    config: AppConfig | None,
     docker_mode: DockerMode,
     *,
     shell_args: list[str] | None = None,
@@ -741,24 +759,24 @@ def _reserved_mount_targets(
     zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> list[Path]:
     """Return targets occupied by this particular ``dev`` container invocation."""
-    if zone_overlay_targets is None:
+    if zone_overlay_targets is None and config is not None:
         _, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     targets = [
         *_COMPOSE_DEV_MOUNT_TARGETS,
-        config.workspace_target,
-        *zone_overlay_targets,
+        *([config.workspace_target] if config else []),
+        *(zone_overlay_targets or ()),
         _MOUNT_ROOT,
     ]
     if docker_mode is DockerMode.DIRECT:
         targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     if shell_args is None:
-        shell_args = get_shell_mount_args(config)
+        shell_args = get_shell_mount_args(config) if config else []
     if audio_args is None:
         audio_args = get_audio_mount_args()
     if dbus_args is None:
         dbus_args = get_dbus_mount_args()
     if sops_args is None:
-        sops_args = get_sops_age_key_mount_args(config)
+        sops_args = get_sops_age_key_mount_args(config) if config else []
     runtime_targets = [
         *_mount_targets_from_args(shell_args),
         *_mount_targets_from_args(audio_args),
@@ -825,6 +843,236 @@ def validate_container_mounts(
         occupied.append(
             (mount_target, f"mount {mount.source} -> {mount_target}", mount_target)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedDeclaration:
+    name: str
+    kind: Literal["bind", "volume"]
+    source: str
+    target: Path
+
+
+@dataclass(slots=True)
+class ResolvedDeclarations:
+    mounts: list[ResolvedDeclaration]
+    environment: dict[str, str]
+    diagnostics: list[DeclarationDiagnostic]
+
+    def require_valid(self) -> None:
+        for diagnostic in self.diagnostics:
+            if diagnostic.error:
+                raise DeclarationSpecificationError(diagnostic.error)
+
+    def compose_fragment(self) -> ComposeFragment:
+        volumes: list[str | dict[str, object]] = []
+        volume_map: dict[str, dict[str, str]] = {}
+        targets: list[str] = []
+        for mount in self.mounts:
+            entry: dict[str, object] = {
+                "type": mount.kind,
+                "source": mount.source.replace("$", "$$"),
+                "target": str(mount.target).replace("$", "$$"),
+            }
+            if mount.kind == "bind":
+                entry["bind"] = {"create_host_path": False}
+            else:
+                volume_map[mount.source] = {"name": mount.source}
+                targets.append(str(mount.target))
+            volumes.append(entry)
+        environment = {
+            **self.environment,
+            "DJINN_DECLARED_VOLUME_TARGETS": json.dumps(targets),
+        }
+        fragment: ComposeFragment = {
+            "services": {
+                "dev": {
+                    "volumes": volumes,
+                    "environment": {
+                        key: value.replace("$", "$$") for key, value in environment.items()
+                    },
+                }
+            },
+        }
+        if volume_map:
+            fragment["volumes"] = volume_map
+        return fragment
+
+
+class ComposeService(TypedDict, total=False):
+    volumes: list[str | dict[str, object]]
+    environment: dict[str, str]
+    working_dir: str
+
+
+class ComposeFragment(TypedDict, total=False):
+    services: Required[dict[str, ComposeService]]
+    volumes: dict[str, dict[str, str]]
+
+
+def _declared_bind_source(mount: BindDeclaration) -> str:
+    try:
+        # Non-strict pathlib resolution can suppress symlink loops on newer Python.
+        Path(mount.source).resolve(strict=True)
+        source = resolve_mount_path(mount.source)
+    except FileNotFoundError as exc:
+        raise ValueError(f"source '{mount.source}' does not exist") from exc
+    except NotADirectoryError as exc:
+        raise ValueError(f"source '{mount.source}' is not a directory") from exc
+    except MountSpecificationError as exc:
+        raise ValueError(f"source '{mount.source}' cannot be resolved: {exc}") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"source '{mount.source}' cannot be resolved: {exc}") from exc
+        raise ValueError(f"cannot inspect source '{mount.source}': {exc}") from exc
+    if ":" in str(source):
+        raise ValueError("invalid source: resolved source must not contain ':'")
+    if mount.marker is not None:
+        marker = source / mount.marker
+        try:
+            mode = marker.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise ValueError(f"marker '{mount.marker}' is missing in source '{source}'") from exc
+        except OSError as exc:
+            raise ValueError(f"cannot inspect marker '{marker}': {exc}") from exc
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"marker '{mount.marker}' in source '{source}' is not a regular file")
+    return str(source)
+
+
+def declaration_reservation_context(
+    config: AppConfig | None,
+) -> tuple[list[Path], list[tuple[str, str]]]:
+    """Collect available runtime reservations and report optional inspection failures."""
+    warnings: list[tuple[str, str]] = []
+    runtime_args: dict[str, list[str]] = {}
+    builders = {
+        "shell_args": lambda: get_shell_mount_args(config) if config else [],
+        "audio_args": get_audio_mount_args,
+        "dbus_args": get_dbus_mount_args,
+        "sops_args": lambda: get_sops_age_key_mount_args(config) if config else [],
+    }
+    for name, builder in builders.items():
+        try:
+            runtime_args[name] = _canonicalize_runtime_mount_args(builder())
+        except (ValueError, RuntimeError, OSError) as exc:
+            warnings.append((name, str(exc)))
+            runtime_args[name] = []
+    zones: tuple[Path, ...] = ()
+    if config:
+        try:
+            _, zones = _zone_overlay_mount_args_and_targets(config)
+        except (ValueError, RuntimeError, OSError) as exc:
+            warnings.append(("zones", str(exc)))
+    try:
+        targets = _reserved_mount_targets(
+            config,
+            DockerMode.DIRECT,
+            **runtime_args,
+            zone_overlay_targets=zones,
+        )
+    except RuntimeError as exc:
+        warnings.append(("targets", str(exc)))
+        targets = _reserved_mount_targets(
+            config,
+            DockerMode.DIRECT,
+            shell_args=[],
+            audio_args=[],
+            dbus_args=[],
+            sops_args=[],
+            zone_overlay_targets=zones,
+        )
+    return targets, warnings
+
+
+def resolve_declared_entries(
+    config: AppConfig | None,
+    options: ContainerOptions,
+    *,
+    runtime_targets: list[Path],
+    caller_env: dict[str, str] | None,
+    declarations: DeclarationSet | None = None,
+) -> ResolvedDeclarations:
+    """Resolve every declaration, retaining one diagnostic per named entry."""
+    entries = declarations or inspect_declarations(
+        config.mounts if config else {}, config.environment if config else {}
+    )
+    errors = {d.identity: d.error for d in entries.diagnostics}
+    targets: dict[str, Path] = {}
+    resolved: list[ResolvedDeclaration] = []
+    for name, mount in entries.mounts.items():
+        identity = f"mounts.{name}"
+        try:
+            target = _normalize_mount_target(mount.target)
+            targets[name] = target
+            if isinstance(mount, VolumeDeclaration):
+                source = f"djinn-{name}"
+                if source in {v for values in VOLUME_CATEGORIES.values() for v in values}:
+                    raise ValueError(f"volume '{source}' conflicts with built-in volume '{source}'")
+                kind = "volume"
+            else:
+                source = _declared_bind_source(mount)
+                kind = "bind"
+            resolved.append(ResolvedDeclaration(name, kind, source, target))
+        except (ValueError, MountSpecificationError) as exc:
+            errors[identity] = declaration_error("mounts", name, str(exc))
+
+    occupied = [
+        (target, "built-in mount" if target in _COMPOSE_DEV_MOUNT_TARGETS else "reserved mount")
+        for target in runtime_targets
+    ]
+    occupied.extend(
+        (_normalize_mount_target(m.target), f"--mount/--here source '{m.source}'")
+        for m in options.mounts
+    )
+    for name, target in targets.items():
+        if errors.get(f"mounts.{name}"):
+            continue
+        for repair in MANAGED_VOLUME_REPAIR_TARGETS:
+            if target == repair or target.is_relative_to(repair):
+                errors[f"mounts.{name}"] = declaration_error(
+                    "mounts",
+                    name,
+                    f"target '{target}' conflicts with built-in mount '{repair}' "
+                    "(Djinn-managed volume root)",
+                )
+                break
+        comparisons = [
+            *occupied,
+            *((t, f"declared mount '{n}'") for n, t in targets.items() if n != name),
+        ]
+        for other, owner in comparisons:
+            if target == other or other.is_relative_to(target):
+                errors.setdefault(f"mounts.{name}", None)
+                if errors[f"mounts.{name}"] is None:
+                    errors[f"mounts.{name}"] = declaration_error(
+                        "mounts", name, f"target '{target}' conflicts with {owner} at '{other}'"
+                    )
+                break
+    for key in entries.environment:
+        if caller_env and key in caller_env:
+            errors[f"environment.{key}"] = declaration_error(
+                "environment", key, "key is reserved by caller environment"
+            )
+    diagnostics = [
+        DeclarationDiagnostic(d.collection, d.name, errors[d.identity]) for d in entries.diagnostics
+    ]
+    return ResolvedDeclarations(resolved, dict(entries.environment), diagnostics)
+
+
+@contextmanager
+def _compose_override(
+    fragment: ComposeFragment, *, prefix: str = "djinn-detach-"
+) -> Iterator[Path]:
+    """Keep one override alive only for its Compose invocation."""
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=".yml")
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(fragment, handle)
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
 _BUILD_PROGRESS_MODES: Final[frozenset[str]] = frozenset(
@@ -1018,6 +1266,16 @@ def compose_run(
     )
     sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
     zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+    declarations = resolve_declared_entries(
+        config, options,
+        runtime_targets=_reserved_mount_targets(
+            config, DockerMode.DIRECT, shell_args=shell_args, audio_args=audio_args,
+            dbus_args=dbus_args, sops_args=sops_args,
+            zone_overlay_targets=zone_overlay_targets,
+        ),
+        caller_env=env,
+    )
+    declarations.require_valid()
     validate_container_mounts(
         mounts,
         config,
@@ -1059,53 +1317,58 @@ def compose_run(
     # `-e` vars built above: docker compose interpolates the file at parse time
     # from the host subprocess environment, so it must be set here.
     host_env = _compose_host_env(config)
-    try:
-        if interactive:
-            # Interactive mode: inherit stdin/stdout/stderr
+    fragment: ComposeFragment = (
+        declarations.compose_fragment() if service == "dev" else {"services": {service: {}}}
+    )
+    with _compose_override(fragment, prefix="djinn-run-") as override_path:
+        cmd[2 + len(compose_files):2 + len(compose_files)] = ["-f", str(override_path)]
+        try:
+            if interactive:
+                # Interactive mode: inherit stdin/stdout/stderr
+                result = subprocess.run(
+                    cmd,
+                    cwd=project_root,
+                    env=host_env,
+                    check=False,
+                )
+                return RunResult(
+                    returncode=result.returncode,
+                )
+
+            # Headless mode: capture output with optional timeout. stdin must be
+            # closed explicitly: agent CLIs such as `codex exec` block waiting for
+            # stdin when they inherit an open terminal descriptor.
             result = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
                 cwd=project_root,
                 env=host_env,
+                timeout=timeout,
                 check=False,
             )
             return RunResult(
                 returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
             )
-
-        # Headless mode: capture output with optional timeout. stdin must be
-        # closed explicitly: agent CLIs such as `codex exec` block waiting for
-        # stdin when they inherit an open terminal descriptor.
-        result = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            cwd=project_root,
-            env=host_env,
-            timeout=timeout,
-            check=False,
-        )
-        return RunResult(
-            returncode=result.returncode,
-            stdout=result.stdout,
-            stderr=result.stderr,
-        )
-    except subprocess.TimeoutExpired as e:
-        assert timeout is not None  # TimeoutExpired only raised when timeout is set
-        stdout, stderr = _decode_timeout_output(e, timeout)
-        return RunResult(returncode=124, stdout=stdout, stderr=stderr)
-    except FileNotFoundError as e:
-        return RunResult(
-            returncode=127,
-            stdout="",
-            stderr=f"Docker command not found: {e}",
-        )
-    except PermissionError as e:
-        return RunResult(
-            returncode=126,
-            stdout="",
-            stderr=f"Permission denied: {e}",
-        )
+        except subprocess.TimeoutExpired as e:
+            assert timeout is not None  # TimeoutExpired only raised when timeout is set
+            stdout, stderr = _decode_timeout_output(e, timeout)
+            return RunResult(returncode=124, stdout=stdout, stderr=stderr)
+        except FileNotFoundError as e:
+            return RunResult(
+                returncode=127,
+                stdout="",
+                stderr=f"Docker command not found: {e}",
+            )
+        except PermissionError as e:
+            return RunResult(
+                returncode=126,
+                stdout="",
+                stderr=f"Permission denied: {e}",
+            )
 
 
 def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
@@ -1189,6 +1452,16 @@ def compose_up_detached(
     )
     sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
     zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+    declarations = resolve_declared_entries(
+        config, options,
+        runtime_targets=_reserved_mount_targets(
+            config, DockerMode.DIRECT, shell_args=shell_args, audio_args=audio_args,
+            dbus_args=dbus_args, sops_args=sops_args,
+            zone_overlay_targets=zone_overlay_targets,
+        ),
+        caller_env=env,
+    )
+    declarations.require_valid()
     validate_container_mounts(
         mounts,
         config,
@@ -1216,23 +1489,23 @@ def compose_up_detached(
     # the derived values.
     environment = {**_env_pairs_from_mount_args(runtime_args), **(env or {})}
 
-    service_override: dict[str, object] = {}
+    service_override: ComposeService = {}
     if volume_specs:
-        service_override["volumes"] = volume_specs
+        service_override["volumes"] = list(volume_specs)
     if mounts:
         service_override["working_dir"] = str(mounts[0].target)
     if environment:
         service_override["environment"] = environment
 
-    override_path: Path | None = None
-    try:
-        args = [*compose_files]
-        if service_override:
-            handle_fd, override_name = tempfile.mkstemp(prefix="djinn-detach-", suffix=".yml")
-            override_path = Path(override_name)
-            with os.fdopen(handle_fd, "w") as handle:
-                json.dump({"services": {service: service_override}}, handle)
-            args.extend(["-f", str(override_path)])
+    fragment: ComposeFragment = (
+        declarations.compose_fragment() if service == "dev" else {"services": {service: {}}}
+    )
+    declared_service = fragment["services"][service]
+    service_override["volumes"] = [*volume_specs, *declared_service.get("volumes", [])]
+    service_override["environment"] = {**environment, **declared_service.get("environment", {})}
+    fragment["services"][service] = service_override
+    with _compose_override(fragment) as override_path:
+        args = [*compose_files, "-f", str(override_path)]
         args.extend(["up", "-d", service])
         # ENABLE_FIREWALL rides the compose file's ${ENABLE_FIREWALL:-false}
         # interpolation, because `up` has no per-invocation `-e` flag to carry it.
@@ -1247,9 +1520,6 @@ def compose_up_detached(
                 "DJINN_DETACHED": "true",
             },
         )
-    finally:
-        if override_path is not None:
-            override_path.unlink(missing_ok=True)
 
 
 SELF_TEARDOWN_ERROR = (

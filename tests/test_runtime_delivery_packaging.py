@@ -8,6 +8,15 @@ from djinn_in_a_box.core.docker import repo_owned_submount_targets
 _ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_declared_ownership_helper_is_packaged():
+    dockerfile = (_ROOT / 'Dockerfile').read_text()
+    assert (
+        'COPY --chown=dev:dev scripts/ownership-repair.py /home/dev/ownership-repair.py'
+        in dockerfile
+    )
+    assert (_ROOT / 'scripts/ownership-repair.py').is_file()
+
+
 def test_runtime_delivery_packaging_uses_shared_publisher_and_canonical_mount() -> None:
     dockerfile = (_ROOT / "Dockerfile").read_text()
     compose = (_ROOT / "docker-compose.yml").read_text()

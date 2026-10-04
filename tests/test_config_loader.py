@@ -199,3 +199,46 @@ class TestSaveConfig:
         save_config(config, output_path)
 
         assert output_path.exists()
+
+
+@pytest.mark.parametrize(
+    "kind", ["populated", "empty", "duplicate-table", "duplicate-key", "unquoted-dot"]
+)
+def test_declarations_round_trip(tmp_path, kind):
+    import tomllib
+
+    from djinn_in_a_box.core.exceptions import ConfigValidationError
+
+    path = tmp_path / "config.toml"
+    mounts = (
+        {
+            "archive.disk": {"source": "/offline", "target": "/archive", "marker": ".ready"},
+            "plain": {"source": "/offline2", "target": "/plain"},
+            "worker": {"volume": True, "target": "/worker", "backup": "none"},
+        }
+        if kind != "empty"
+        else {}
+    )
+    environment = {"CDP_HOST": "$HOST\n[value]", "EMPTY": ""} if kind != "empty" else {}
+    config = AppConfig(code_dir=tmp_path, mounts=mounts, environment=environment)
+    save_config(config, path)
+    assert load_config(path) == config
+    raw = tomllib.loads(path.read_text())
+    assert raw["mounts"] == config.model_dump(exclude_none=True)["mounts"]
+    assert raw["environment"] == environment
+    assert "mounts" not in raw["general"] and "environment" not in raw["general"]
+    if kind == "populated":
+        assert "marker" not in raw["mounts"]["plain"]
+        assert set(raw["mounts"]["worker"]) == {"volume", "target", "backup"}
+    if kind == "duplicate-table":
+        path.write_text(path.read_text() + '\n[environment]\nX="x"\n')
+    elif kind == "duplicate-key":
+        path.write_text(path.read_text() + '\nCDP_HOST="duplicate"\n')
+    elif kind == "unquoted-dot":
+        path.write_text(
+            f'[general]\ncode_dir="{tmp_path}"\n[mounts.archive.disk]\nsource="/x"\ntarget="/y"\n'
+        )
+    else:
+        return
+    with pytest.raises(ConfigValidationError):
+        load_config(path)

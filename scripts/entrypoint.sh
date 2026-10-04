@@ -56,6 +56,9 @@ for dir in ~/.cache/uv ~/.cache/djinn-tools ~/.local/share/fnm ~/.vscode-server 
     fi
 done
 
+OWNERSHIP_REPAIR_HELPER="${OWNERSHIP_REPAIR_HELPER:-/home/dev/ownership-repair.py}"
+python3 "$OWNERSHIP_REPAIR_HELPER" --targets "${DJINN_DECLARED_VOLUME_TARGETS:-[]}"
+
 # =============================================================================
 # Git Configuration (container-specific paths)
 # =============================================================================

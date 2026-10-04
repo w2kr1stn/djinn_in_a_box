@@ -773,3 +773,37 @@ class TestSessionModelResolution:
         command = session_mgr._build_host_interactive_command(config, "gpt-5.6", None)
 
         assert command == ["codex", "--model", "gpt-5.6"]
+
+
+@pytest.mark.parametrize("mode", ["container", "host"])
+def test_declarations_inherit_without_creation(tmp_path, monkeypatch, session_mgr, mode):
+    from djinn_in_a_box.core import docker
+
+    forbidden = MagicMock(side_effect=AssertionError("attachment must not create or resolve"))
+    monkeypatch.setattr(docker, "resolve_declared_entries", forbidden)
+    monkeypatch.setattr(docker, "compose_run", forbidden)
+    monkeypatch.setattr(docker, "compose_up_detached", forbidden)
+    monkeypatch.setattr(session_mgr, "_git_init_workspace", lambda workspace: None)
+    monkeypatch.setattr(
+        session_mgr, "_resolve_container_workdir", lambda workspace: "/home/dev/projects"
+    )
+    calls = []
+
+    def capture(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("djinn_in_a_box.core.session.subprocess.run", capture)
+    monkeypatch.setenv("CDP_HOST", "host-literal")
+    result = session_mgr.run_interactive(
+        workspace_dir=tmp_path,
+        target=SessionTarget(container_id="running" if mode == "container" else None),
+    )
+    assert result.returncode == 0 and len(calls) == 1
+    cmd, kwargs = calls[0]
+    if mode == "container":
+        assert cmd[:3] == ["docker", "exec", "-it"]
+        assert not any("CDP_HOST=" in arg or "DJINN_DECLARED_" in arg for arg in cmd)
+    else:
+        assert cmd[0] == "claude" and kwargs["env"]["CDP_HOST"] == "host-literal"
+    forbidden.assert_not_called()

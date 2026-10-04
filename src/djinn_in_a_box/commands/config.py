@@ -98,14 +98,15 @@ def init_config(
         typer.Option(
             "--force",
             "-f",
-            help="Overwrite existing configuration without prompting.",
+            help="Replace the entire configuration, including mounts and environment.",
         ),
     ] = False,
 ) -> None:
     """Initialize configuration in ~/.config/djinn_in_a_box/.
 
     Creates config.toml with user-provided settings through interactive prompts.
-    Run this once before using other commands.
+    Run this once before using other commands. --force replaces all settings,
+    including declared mounts and environment; init asks only for built-in settings.
 
     [info.bold]Example:[/info.bold]
 
@@ -309,6 +310,7 @@ def _build_config(
 ) -> AppConfig:
     return AppConfig.model_validate(
         {
+            **config.model_dump(),
             "code_dir": config.code_dir if code_dir is None else code_dir,
             "workspace": config.workspace if workspace is None else workspace,
             "timezone": config.timezone if timezone is None else timezone,
@@ -514,7 +516,7 @@ def _set_and_save_config_value(key: str, value: str) -> AppConfig:
 
 @handle_config_errors
 def config_edit() -> None:
-    """Open the configuration file in $EDITOR and validate it afterward."""
+    """Edit configuration and validate syntax/schema; doctor/start check host paths."""
     config_dir = get_project_root() / "config"
     with config_directory_lock(config_dir, exclusive=True):
         _edit_config_file()
@@ -570,7 +572,7 @@ def config_show(
     if json_output:
         # Output as JSON (mode="json" ensures Path objects are serialized as strings)
         output = json.dumps(config.model_dump(mode="json"), indent=2)
-        console.print(output, highlight=False)
+        console.print(Text(output), highlight=False, soft_wrap=True)
     else:
         roots = resolve_zone_roots(config)
         # Human-readable output
@@ -618,6 +620,21 @@ def config_show(
         console.print()
 
         _print_config_table("Build", [("network", config.build.network)])
+
+        rule("Mounts")
+        from djinn_in_a_box.config.declarations import BindDeclaration
+
+        for name, mount in config.mounts.items():
+            if isinstance(mount, BindDeclaration):
+                detail = f"bind source={mount.source} target={mount.target}"
+                if mount.marker is not None:
+                    detail += f" marker={mount.marker}"
+            else:
+                detail = f"volume target={mount.target} backup={mount.backup}"
+            console.print(Text(f"  {name}: {detail}"))
+        rule("Environment")
+        for key, value in config.environment.items():
+            console.print(Text(f"  {key}={value}"))
 
 
 def config_path() -> None:
