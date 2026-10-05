@@ -1324,7 +1324,6 @@ def _downstream_probe(
                     "--rm",
                     "-T",
                     "--no-deps",
-                    "--no-build",
                     "--pull",
                     "never",
                     "--name",

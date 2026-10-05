@@ -28,12 +28,18 @@ store = pathlib.Path({str(objects)!r})
 log = pathlib.Path({str(log)!r})
 data = json.loads(store.read_text())
 args = sys.argv[1:]
+# Docker 29 daemon messages for missing objects; volumes use lower case.
+MISSING = {{
+    'container': 'No such container: %s',
+    'image': 'No such image: %s',
+    'volume': 'get %s: no such volume',
+}}
 with log.open('a') as stream:
     stream.write(json.dumps(args) + '\\n')
 if len(args) > 1 and args[1] == 'inspect':
     name = args[2]
     if name not in data:
-        print('No such object', file=sys.stderr)
+        print('Error response from daemon: ' + MISSING[args[0]] % name, file=sys.stderr)
         sys.exit(1)
     print(json.dumps([data[name]]))
 elif args[0] == 'ps':
