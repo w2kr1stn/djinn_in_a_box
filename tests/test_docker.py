@@ -2916,3 +2916,16 @@ def test_startup_environment_class_guard():
         "FLOOR",  # Image-owned Python constants, never environment.
     }
     assert assigned - RESERVED_ENVIRONMENT.keys() - exceptions == set()
+
+
+def test_captured_runs_never_read_the_terminal(monkeypatch):
+    # A Compose prompt must not wait on the caller's terminal until the timeout.
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", run)
+    assert docker_mod._run_captured(["docker", "version"]).success
+    assert seen["stdin"] is subprocess.DEVNULL

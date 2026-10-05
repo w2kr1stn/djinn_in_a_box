@@ -562,6 +562,36 @@ def test_downstream_probe_uses_supported_compose_run_flags(tmp_path, monkeypatch
         assert re.search(rf"(^|\s){re.escape(flag)}(,|\s)", help_text.stdout, re.M), flag
 
 
+def test_downstream_probe_declares_the_helper_volume(tmp_path, monkeypatch):
+    # A differing volume definition makes Compose ask whether to recreate the volume.
+    fragments = []
+
+    def run(args, **kwargs):
+        fragments.append(json.loads(Path(args[args.index("run") - 1]).read_text()))
+        return SimpleNamespace(success=True, stderr="")
+
+    monkeypatch.setattr(
+        host_runtime,
+        "inspect_object",
+        lambda name, path, resource="container", **kwargs: (
+            {"Id": "sha256:dev"} if resource == "image" else None
+        ),
+    )
+    monkeypatch.setattr(docker, "_run_compose", run)
+    docker._downstream_probe(
+        AppConfig(code_dir=tmp_path),
+        docker.ContainerOptions(),
+        endpoint(),
+        SimpleNamespace(generation="generation"),
+    )
+    assert fragments[0]["volumes"] == {
+        "desktop-dbus": {
+            "name": "djinn-desktop-dbus",
+            "labels": {host_runtime.GENERATION_LABEL: "generation"},
+        }
+    }
+
+
 def test_root_bootstrap_only_hands_over_directories():
     # Without CAP_FOWNER/CAP_DAC_OVERRIDE root can neither chmod nor write a directory
     # it has chowned to UID 1000, so all preparation runs after the privilege drop.
