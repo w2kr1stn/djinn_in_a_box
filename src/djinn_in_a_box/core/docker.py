@@ -353,10 +353,12 @@ def _run_captured(
     timeout: float | None = None,
 ) -> RunResult:
     try:
+        # A prompt (e.g. Compose asking to recreate a volume) must not wait on the terminal.
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             cwd=cwd,
             env=env,
             check=False,
@@ -1263,6 +1265,17 @@ def _helper_evidence(
     return cast(dict[str, Any], data)
 
 
+def _desktop_volumes(endpoint: desktop.DesktopEndpoint, generation: str) -> dict[str, Any]:
+    # Every Compose call must declare the volume identically: a diverging definition
+    # makes Compose ask whether to recreate it.
+    return {
+        f"desktop-{endpoint.channel}": {
+            "name": endpoint.volume,
+            "labels": {host_runtime.GENERATION_LABEL: generation},
+        }
+    }
+
+
 def _downstream_probe(
     config: AppConfig,
     options: ContainerOptions,
@@ -1311,7 +1324,8 @@ def _downstream_probe(
                     }
                 ],
             }
-        }
+        },
+        "volumes": _desktop_volumes(endpoint, owner.generation),
     }
     try:
         with _compose_override(fragment, prefix="djinn-probe-") as path:
@@ -1412,12 +1426,7 @@ def _prepare_companions(
             helper = desktop.helper_fragment(
                 endpoint, str(image["Id"]), owner.generation, host_runtime.GENERATION_LABEL
             )
-            helper["volumes"] = {
-                f"desktop-{endpoint.channel}": {
-                    "name": endpoint.volume,
-                    "labels": {host_runtime.GENERATION_LABEL: owner.generation},
-                }
-            }
+            helper["volumes"] = _desktop_volumes(endpoint, owner.generation)
             fragment["services"].update(helper["services"])
             fragment.setdefault("volumes", {}).update(helper["volumes"])
             with _compose_override(fragment) as path:
