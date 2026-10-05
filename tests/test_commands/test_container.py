@@ -50,11 +50,12 @@ def test_status_declared_volume_categories(
     expected = {
         "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"],
         "data": ["djinn-opencode-data", "djinn-vscode-workspaces"],
+        "none": ["djinn-desktop-dbus", "djinn-desktop-audio"],
     }
     if configured:
         expected["data"].append("djinn-journal")
         expected["cache"].append("djinn-scratch (not created)")
-        expected["none"] = ["djinn-worker"]
+        expected["none"].append("djinn-worker")
     with (
         patch.object(container, "load_config", return_value=declared_app_config) as load,
         patch.object(container.subprocess, "run", return_value=subprocess.CompletedProcess(
@@ -308,8 +309,6 @@ class TestStartCommand:
             ) as mock_running,
             patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
-            patch("djinn_in_a_box.commands.container.get_audio_mount_args", return_value=[]),
-            patch("djinn_in_a_box.commands.container.get_dbus_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.banner") as mock_banner,
             patch(
                 "djinn_in_a_box.commands.container.prepare_config_workflow",
@@ -390,7 +389,9 @@ class TestStartCommand:
         options = start_mocks["run"].call_args[0][1]
         assert options.docker_mode is DockerMode.PROXY
         start_mocks["banner"].assert_called_once_with()
-        start_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, start_mocks["config"])
+        start_mocks["cleanup"].assert_called_once_with(
+            DockerMode.PROXY, start_mocks["config"], owner=None
+        )
 
     def test_start_with_firewall_flag(self, start_mocks: dict[str, Any]) -> None:
         with pytest.raises(typer.Exit):
@@ -416,16 +417,10 @@ class TestStartCommand:
         was pinned, the delivery of the arguments to it was not.
         """
         shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
-        audio_args = ["-v", "/host/pulse:/run/pulse", "-e", "PULSE_SERVER=unix:/run/pulse"]
-        dbus_args = ["-v", "/host/bus:/run/bus:ro"]
         with (
             patch(
                 "djinn_in_a_box.commands.container.get_shell_mount_args", return_value=shell_args
             ),
-            patch(
-                "djinn_in_a_box.commands.container.get_audio_mount_args", return_value=audio_args
-            ),
-            patch("djinn_in_a_box.commands.container.get_dbus_mount_args", return_value=dbus_args),
             patch(
                 "djinn_in_a_box.commands.container.resolve_container_mounts",
                 return_value=(ContainerMount(Path("/host/here"), Path("/home/dev/workspace")),),
@@ -439,8 +434,6 @@ class TestStartCommand:
         assert options.firewall_enabled is True
         assert options.mounts[0].target == Path("/home/dev/workspace")
         assert kwargs["shell_mount_args"] == shell_args
-        assert kwargs["audio_mount_args"] == audio_args
-        assert kwargs["dbus_mount_args"] == dbus_args
 
     def test_start_detached_stays_silent_when_up_failed(
         self, start_mocks: dict[str, Any]
@@ -516,20 +509,10 @@ class TestStartCommand:
         self, start_mocks: dict[str, Any]
     ) -> None:
         shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
-        audio_args = ["-v", "/host/pulse:/run/user/1000/pulse/native"]
-        dbus_args = ["-v", "/host/bus:/run/user/1000/bus:ro"]
         with (
             patch(
                 "djinn_in_a_box.commands.container.get_shell_mount_args",
                 return_value=shell_args,
-            ),
-            patch(
-                "djinn_in_a_box.commands.container.get_audio_mount_args",
-                return_value=audio_args,
-            ),
-            patch(
-                "djinn_in_a_box.commands.container.get_dbus_mount_args",
-                return_value=dbus_args,
             ),
             pytest.raises(typer.Exit),
         ):
@@ -537,8 +520,6 @@ class TestStartCommand:
 
         kwargs = start_mocks["run"].call_args.kwargs
         assert kwargs["shell_mount_args"] is shell_args
-        assert kwargs["audio_mount_args"] is audio_args
-        assert kwargs["dbus_mount_args"] is dbus_args
 
     def test_start_with_here_flag(
         self, start_mocks: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -631,7 +612,9 @@ class TestStartCommand:
 
         assert exc_info.value.exit_code == 1
         assert "mount collision detail" in start_mocks["err_output"].getvalue()
-        start_mocks["cleanup"].assert_called_once_with(DockerMode.NONE, start_mocks["config"])
+        start_mocks["cleanup"].assert_called_once_with(
+            DockerMode.NONE, start_mocks["config"], owner=None
+        )
 
     def test_start_reports_a_mount_specification_error_from_the_core(
         self, start_mocks: dict[str, Any]
@@ -717,7 +700,9 @@ class TestStartCommand:
             container.start(docker_direct=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.docker_mode is DockerMode.DIRECT
-        start_mocks["cleanup"].assert_called_once_with(DockerMode.DIRECT, start_mocks["config"])
+        start_mocks["cleanup"].assert_called_once_with(
+            DockerMode.DIRECT, start_mocks["config"], owner=None
+        )
 
     def test_start_renders_environment_and_container_rules(
         self, start_mocks: dict[str, Any]
@@ -837,7 +822,7 @@ class TestCleanVolumesCommand:
             container.clean_volumes()
 
             # Volume categories: cache, data (2)
-            assert mock_vol.call_count == 2
+            assert mock_vol.call_count == 3
             # Sync categories: credentials, repo-dotfiles (2)
             assert mock_sync.call_count == 2
 
@@ -1274,7 +1259,7 @@ class TestAuditCommand:
 
             # Should have called docker logs
             call_args = mock_run.call_args[0][0]
-            assert "docker" in call_args
+            assert container.DOCKER_EXECUTABLE in call_args
             assert "logs" in call_args
 
     def test_audit_with_tail_option(self) -> None:
@@ -1396,7 +1381,7 @@ class TestEnterCommand:
 
             assert exc_info.value.exit_code == 0
             call_args = mock_run.call_args[0][0]
-            assert "docker" in call_args
+            assert container.DOCKER_EXECUTABLE in call_args
             assert "exec" in call_args
             assert "-it" in call_args
             assert "zsh" in call_args
@@ -1450,5 +1435,5 @@ def test_enter_does_not_inject_declarations(monkeypatch):
     with pytest.raises(typer.Exit) as exc:
         container.enter()
     assert exc.value.exit_code == 0
-    assert run.call_args.args[0] == ["docker", "exec", "-it", "djinn", "zsh"]
+    assert run.call_args.args[0] == [container.DOCKER_EXECUTABLE, "exec", "-it", "djinn", "zsh"]
     forbidden.assert_not_called()

@@ -12,6 +12,47 @@ the request path is tightly restricted and monitored.
 
 ---
 
+## Desktop access and trusted host inputs
+
+The dev container receives a filtered D-Bus endpoint and a locked PulseAudio
+relay instead of the host's raw desktop sockets. The two helpers hold the upstream
+sockets privately; dev mounts only their output directories read-only.
+
+D-Bus uses `xdg-dbus-proxy --filter` with `--call` and `--broadcast` rules for
+`org.freedesktop.Notifications`, limited to the `org.freedesktop.Notifications`
+interface on `/org/freedesktop/Notifications`, plus the proxy's bus bookkeeping
+and the client's own unique ID. Other interfaces and objects of the process that
+owns the notification name (often the desktop shell) are refused. Arbitrary
+notification hints, including sound hints, still reach the desktop service.
+Content is not sanitized; desktop notification sound depends on the host
+service. Other names, including systemd1 and the Secret Service, are not allowed. The build requires Debian's fixed
+`xdg-dbus-proxy` package revision `0.1.6-1+deb13u3` or later, and doctor reports
+the installed revision.
+
+Audio uses exactly the native Unix listener and playback/capture tunnels to the
+host defaults. PulseAudio disables module loading and daemon exit after startup.
+Its fresh relay cookie is distinct from the optional host cookie; only the relay
+credential reaches dev. Playback and microphone capture remain available:
+an agent can listen to the microphone. Module denial is not a microphone privacy
+control. Neither helper receives Docker authority, host namespaces or devices.
+
+Helpers and ordinary health clients run as UID/GID 1000. Unsupported host UIDs,
+namespace mappings or authentication failures omit the affected endpoint and warn
+at start. Host absence leaves the channel off; there is never a raw fallback.
+Recreate dev after a host desktop or audio restart. Plain restart retains the
+existing mounts; a bus leaf bind can retain the old socket inode until recreation.
+
+Install Djinn outside dev-writable workspaces. Keep everything Djinn executes or
+reads to execute on the host outside writable container binds: its installation
+and Python environment, build context, Docker CLI, Docker configuration and plugin
+directories (Compose/Buildx), and every host PATH directory. Pinning the Docker
+executable and comparing local image IDs do not establish trust in writable
+command inputs. The future #76 sealed check enforces this host execution-chain
+rule alongside Docker authority and home/root/data-root mount checks; the desktop
+inspector supplies only desktop evidence. This work does not implement that check
+or claim a hardened escape boundary. Host-mode workflow execution remains a
+separate boundary under #81.
+
 ## Implemented Security Architecture
 
 ```text

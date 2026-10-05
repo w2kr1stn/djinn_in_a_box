@@ -452,7 +452,9 @@ djinn doctor
 
 The doctor command checks Docker, the Docker daemon, socket permissions, Compose
 v2, Buildx, the main config, the selected workspace root, the config root, the
-image, the Docker network, desktop notification detection, and seed target presence.
+image, the Docker network, actual desktop helper delivery, and seed target presence.
+Desktop rows report off, filtered/locked, missing, or unknown; the raw-socket row
+checks the running dev container's actual mounts. Doctor never starts helpers.
 
 For idempotent local repairs:
 
@@ -463,6 +465,21 @@ djinn doctor --fix
 `--fix` provisions expected host directories, repairs missing seed targets, and
 creates the Docker network when possible. It does not install Docker, repair an
 invalid config file, or build the image.
+
+## Desktop integration
+
+Desktop notifications, playback and microphone capture use two isolated helpers,
+built with `djinn build`. Only their read-only output directories reach dev.
+Creation through foreground start, detached start or `djinn run` prepares each
+available host endpoint independently. A failed helper produces a warning and
+starts dev without that endpoint. `djinn clean` removes their runtime volumes;
+backup and restore exclude them.
+
+After rebuilding, recreate dev through the normal start/run path. Recreate after
+a host desktop session or audio server restart too; plain container restart keeps
+the existing mounts and cannot restore an endpoint omitted during creation.
+See [desktop access and trusted host inputs](DOCKER-SOCKET-SECURITY.md#desktop-access-and-trusted-host-inputs)
+for the policy and its limits.
 
 ## The Blank-Space and Seed Model
 

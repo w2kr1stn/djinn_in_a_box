@@ -1,0 +1,48 @@
+# Host endpoints are supplied only to explicitly selected helpers by Djinn.
+x-desktop-build: &desktop-build
+  context: .
+  dockerfile: helpers/desktop/Dockerfile
+  network: ${DJINN_BUILD_NETWORK:-default}
+
+x-desktop: &desktop
+  image: djinn-desktop-helper:1
+  profiles: [desktop]
+  working_dir: /
+  read_only: true
+  network_mode: none
+  cap_drop: [ALL]
+  cap_add: [CHOWN, SETUID, SETGID, SETPCAP]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /runtime:rw,nosuid,nodev,noexec,size=16m
+    - /tmp:rw,nosuid,nodev,noexec,size=16m
+  restart: on-failure
+
+services:
+  dbus-helper:
+    <<: *desktop
+    build: *desktop-build
+    command: [python3, -I, /etc/djinn/helper.py, dbus]
+    volumes:
+      - desktop-dbus:/out
+    healthcheck:
+      test: [CMD, python3, -I, /etc/djinn/health.py, dbus]
+      interval: 2s
+      timeout: 8s
+      retries: 3
+  audio-helper:
+    <<: *desktop
+    command: [python3, -I, /etc/djinn/helper.py, audio]
+    volumes:
+      - desktop-audio:/out
+    healthcheck:
+      test: [CMD, python3, -I, /etc/djinn/health.py, audio]
+      interval: 2s
+      timeout: 12s
+      retries: 3
+
+volumes:
+  desktop-dbus:
+    name: djinn-desktop-dbus
+  desktop-audio:
+    name: djinn-desktop-audio

@@ -182,31 +182,11 @@ def test_run_checks_reports_buildx_row(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "djinn build" in buildx.remedy
 
 
-def test_run_checks_reports_dbus_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    _quiet_doctor_probes(monkeypatch)
-    monkeypatch.setattr(doctor_mod, "get_project_root", MagicMock(side_effect=FileNotFoundError))
-
-    monkeypatch.setattr(doctor_mod, "get_dbus_mount_args", lambda: ["-v", "/run/user/1000/bus"])
-    checks = doctor_mod.run_checks(None)
-    assert all("mcp" not in check.name.lower() for check in checks)
-    dbus = _check_named(checks, "D-Bus session")
-    assert dbus.status is doctor_mod.Status.PASS
-    assert dbus.detail == "desktop notifications available"
-
-    monkeypatch.setattr(doctor_mod, "get_dbus_mount_args", _no_dbus_mount_args)
-    checks = doctor_mod.run_checks(None)
-    dbus = _check_named(checks, "D-Bus session")
-    assert dbus.status is doctor_mod.Status.PASS
-    assert dbus.detail == "not detected — desktop notifications off"
-    assert dbus.remedy == ""
-
-
 def test_run_checks_reports_seed_completeness(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     _quiet_doctor_probes(monkeypatch)
-    monkeypatch.setattr(doctor_mod, "get_dbus_mount_args", _no_dbus_mount_args)
     monkeypatch.setattr(doctor_mod, "get_project_root", lambda: tmp_path)
     _write_seed_targets(tmp_path)
 
@@ -227,7 +207,6 @@ def test_run_checks_reports_seed_completeness(
 
 def test_run_checks_warns_seed_row_outside_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     _quiet_doctor_probes(monkeypatch)
-    monkeypatch.setattr(doctor_mod, "get_dbus_mount_args", _no_dbus_mount_args)
     monkeypatch.setattr(doctor_mod, "get_project_root", MagicMock(side_effect=FileNotFoundError))
 
     checks = doctor_mod.run_checks(None)

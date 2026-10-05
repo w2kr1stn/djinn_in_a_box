@@ -17,7 +17,12 @@ from typing import Annotated
 
 import typer
 
-from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
+from djinn_in_a_box.config.defaults import (
+    DESKTOP_RUNTIME_VOLUMES,
+    SYNC_PATHS,
+    VOLUME_CATEGORIES,
+    volume_categories,
+)
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.console import blank, error, info, success, warning
@@ -85,7 +90,10 @@ def _collect_items(
         if cat not in known:
             error(f"Unknown category: '{cat}'. Valid: {', '.join(sorted(known))}")
             raise typer.Exit(1)
-        volumes.extend(get_existing_volumes_by_category(cat, config))
+        if cat == "none":
+            continue
+        volumes.extend(v for v in get_existing_volumes_by_category(cat, config)
+                       if v not in DESKTOP_RUNTIME_VOLUMES)
         sync_paths.extend(get_existing_sync_paths_by_category(cat, config))
     return volumes, sync_paths
 
@@ -390,6 +398,9 @@ def restore() -> None:
 
         failed = False
         for archive in inner_archives:
+            if archive.name.removesuffix(".tar.gz") in DESKTOP_RUNTIME_VOLUMES:
+                warning(f"Skipping desktop runtime archive: {archive.name}")
+                continue
             hardening_error: OSError | None = None
             if archive.parent == declared_dir:
                 vol_name = archive.name.removesuffix(".tar.gz")

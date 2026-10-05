@@ -193,8 +193,6 @@ def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
             command=command,
             interactive=False,
             shell_mount_args=[],
-            audio_mount_args=[],
-            dbus_mount_args=[],
             service=service,
             timeout=30,
         )

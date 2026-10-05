@@ -18,10 +18,10 @@ RUN chmod +x /usr/local/bin/check-build-dns.sh
 
 RUN check-build-dns.sh && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg openssh-client git zsh jq python3 build-essential iptables sudo unzip locales \
-    libpulse0 pulseaudio-utils alsa-utils libasound2-plugins sox \
+    libpulse0 pulseaudio-utils alsa-utils libasound2-plugins sox libnotify-bin dbus-bin \
     && rm -rf /var/lib/apt/lists/*
 
-# Audio client config (routes ALSA through PulseAudio socket from host)
+# Audio client config (routes ALSA through the locked desktop relay)
 RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf \
     && mkdir -p /etc/pulse \
     && printf 'autospawn = no\ndaemon-binary = /bin/true\nenable-shm = false\n' > /etc/pulse/client.conf

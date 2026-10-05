@@ -6,7 +6,6 @@ import re
 import socket
 import subprocess
 import tarfile
-from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -38,10 +37,8 @@ from djinn_in_a_box.core.docker import (
     delete_volumes,
     ensure_network,
     extract_sync_path_name,
-    get_audio_mount_args,
     get_compose_files,
     get_config_root,
-    get_dbus_mount_args,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
     get_running_containers,
@@ -316,8 +313,6 @@ class TestMountTargetCollisions:
     @staticmethod
     def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
 
     def test_mount_targets_from_args_accepts_long_volume_flag(self) -> None:
         assert docker_mod._mount_targets_from_args(
@@ -365,8 +360,6 @@ class TestMountTargetCollisions:
                 mock_app_config,
                 DockerMode.NONE,
                 shell_args=["-v", "/host:/home/dev/.claude"],
-                audio_args=[],
-                dbus_args=[],
             )
 
     @pytest.mark.parametrize("specification", ["/host:relative", "/host:/proc/../dev"])
@@ -384,8 +377,6 @@ class TestMountTargetCollisions:
                 mock_app_config,
                 DockerMode.NONE,
                 shell_args=["-v", specification],
-                audio_args=[],
-                dbus_args=[],
             )
 
     @pytest.mark.parametrize("target", ["/proc", "/sys/kernel", "/dev"])
@@ -498,8 +489,6 @@ class TestMountTargetCollisions:
             "get_shell_mount_args",
             MagicMock(return_value=["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]),
         )
-        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
 
         with pytest.raises(MountCollisionError, match=r"conflict path: /home/dev/\.zshrc\.local"):
             validate_container_mounts(
@@ -545,8 +534,8 @@ class TestMountTargetCollisions:
     @pytest.mark.parametrize(
         "target",
         [
-            f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native",
-            f"/var/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native",
+            "/run/djinn/audio/native",
+            "/var/run/djinn/audio/native",
         ],
     )
     def test_rejects_active_audio_socket_target_and_alias(
@@ -568,8 +557,7 @@ class TestMountTargetCollisions:
             with pytest.raises(
                 MountCollisionError,
                 match=re.escape(
-                    f"conflict path: /run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}"
-                    "/pulse/native"
+                    "conflict path: /run/djinn/audio"
                 ),
             ):
                 validate_container_mounts(
@@ -583,8 +571,8 @@ class TestMountTargetCollisions:
     @pytest.mark.parametrize(
         "target",
         [
-            f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus",
-            f"/var/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus",
+            "/run/djinn/dbus/bus",
+            "/var/run/djinn/dbus/bus",
         ],
     )
     def test_rejects_active_dbus_socket_target_and_alias(
@@ -604,7 +592,7 @@ class TestMountTargetCollisions:
             with pytest.raises(
                 MountCollisionError,
                 match=re.escape(
-                    f"conflict path: /run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus"
+                    "conflict path: /run/djinn/dbus"
                 ),
             ):
                 validate_container_mounts(
@@ -714,8 +702,6 @@ class TestMountTargetCollisions:
                 mock_app_config,
                 DockerMode.DIRECT,
                 shell_args=[],
-                audio_args=[],
-                dbus_args=[],
             )
 
     @pytest.mark.parametrize("workspace", ["projects", "aios"])
@@ -863,7 +849,7 @@ class TestEnsureNetwork:
         assert result is True
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        assert "docker" in call_args
+        assert docker_mod.DOCKER_EXECUTABLE in call_args
         assert "network" in call_args
         assert "create" in call_args
 
@@ -884,7 +870,7 @@ class TestWorkflowImageCompatibility:
 
         assert workflow_image_compatible() is WorkflowImageCompatibility.COMPATIBLE
         assert run.call_args.args[0] == [
-            "docker",
+            docker_mod.DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "djinn-in-a-box:latest",
@@ -908,7 +894,7 @@ class TestWorkflowImageCompatibility:
         )
 
         assert workflow_image_compatible() is WorkflowImageCompatibility.MISSING
-        assert run.call_args_list[1].args[0] == ["docker", "info"]
+        assert run.call_args_list[1].args[0] == [docker_mod.DOCKER_EXECUTABLE, "info"]
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_inspect_failure_is_unknown_when_daemon_is_unreachable(
@@ -937,7 +923,7 @@ class TestGetComposeFiles:
         """Test returns only base compose file when docker_mode=NONE."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.NONE)
-        assert len(files) == 2  # ["-f", "path"]
+        assert len(files) == 4
         assert files[0] == "-f"
         assert "docker-compose.yml" in files[1]
         assert "docker-compose.docker.yml" not in str(files)
@@ -947,8 +933,8 @@ class TestGetComposeFiles:
         """Test returns both compose files when docker_mode=PROXY."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.PROXY)
-        assert len(files) == 4  # ["-f", "path1", "-f", "path2"]
-        assert files.count("-f") == 2
+        assert len(files) == 6
+        assert files.count("-f") == 3
         # Check both files are present
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
@@ -959,7 +945,7 @@ class TestGetComposeFiles:
         """Test returns docker-direct compose file when docker_mode=DIRECT."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.DIRECT)
-        assert len(files) == 4
+        assert len(files) == 6
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker-direct.yml" in f for f in file_paths)
@@ -1118,111 +1104,6 @@ class TestGetShellMountArgs:
         assert any(".zsh-theme.omp.json:ro" in arg for arg in args)
 
 
-class TestGetAudioMountArgs:
-    """Tests for get_audio_mount_args function."""
-
-    @pytest.fixture()
-    def pulse_socket(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Create a fake PulseAudio socket and set XDG_RUNTIME_DIR."""
-        pulse_dir = tmp_path / "pulse"
-        pulse_dir.mkdir()
-        socket = pulse_dir / "native"
-        socket.touch()
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        return socket
-
-    def test_returns_mount_args_when_socket_exists(self, pulse_socket: Path) -> None:
-        args = get_audio_mount_args()
-        assert "-v" in args
-        assert "-e" in args
-        assert any("pulse/native" in a for a in args)
-        assert any("PULSE_SERVER=" in a for a in args)
-
-    def test_returns_empty_when_no_socket(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        assert get_audio_mount_args() == []
-
-    def test_returns_empty_when_xdg_runtime_missing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "nonexistent"))
-        assert get_audio_mount_args() == []
-
-    def test_fallback_when_xdg_runtime_dir_unset(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setattr("os.getuid", lambda: 99999)
-        assert get_audio_mount_args() == []
-
-    def test_volume_mount_maps_to_container_path(self, pulse_socket: Path) -> None:
-        args = get_audio_mount_args()
-        v_idx = args.index("-v")
-        mount_arg = args[v_idx + 1]
-        assert mount_arg.endswith(
-            f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native"
-        )
-        assert ":ro" not in mount_arg
-
-    def test_pulse_server_env_points_to_container_socket(self, pulse_socket: Path) -> None:
-        args = get_audio_mount_args()
-        e_idx = args.index("-e")
-        env_arg = args[e_idx + 1]
-        assert env_arg == (
-            "PULSE_SERVER=unix:/run/user/"
-            f"{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native"
-        )
-
-
-class TestGetDbusMountArgs:
-    """Tests for get_dbus_mount_args function."""
-
-    @pytest.fixture()
-    def dbus_socket(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> Generator[Path]:
-        """Create a real Unix socket at the bus path and set XDG_RUNTIME_DIR."""
-        import socket as socket_mod
-
-        bus_path = tmp_path / "bus"
-        server = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
-        server.bind(str(bus_path))
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        yield bus_path
-        server.close()
-
-    def test_returns_mount_args_when_socket_exists(self, dbus_socket: Path) -> None:
-        args = get_dbus_mount_args()
-        assert "-v" in args
-        assert "-e" in args
-        container_bus = f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus"
-        assert f"{dbus_socket}:{container_bus}:ro" in args
-        assert f"DBUS_SESSION_BUS_ADDRESS=unix:path={container_bus}" in args
-
-    def test_returns_empty_when_no_socket(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        assert get_dbus_mount_args() == []
-
-    def test_returns_empty_for_stale_regular_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # A stale non-socket at the bus path must not inject a broken mount.
-        (tmp_path / "bus").touch()
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        assert get_dbus_mount_args() == []
-
-    def test_fallback_when_xdg_runtime_dir_unset(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setattr("os.getuid", lambda: 99999)
-        assert get_dbus_mount_args() == []
-
-
 class TestIsContainerRunning:
     """Tests for is_container_running function."""
 
@@ -1306,7 +1187,7 @@ class TestComposeBuild:
         result = compose_build()
         assert result.success is True
         cmd = mock_run.call_args[0][0]
-        assert cmd[:3] == ["docker", "buildx", "bake"]
+        assert cmd[:3] == [docker_mod.DOCKER_EXECUTABLE, "buildx", "bake"]
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -1390,8 +1271,9 @@ class TestStreamedBuildPath:
         compose_build()
         argv = mock_run.call_args.args[0]
         assert argv == [
-            "docker", "buildx", "bake", "-f", "/project/docker-compose.yml",
-            "--progress", "plain", "--load",
+            docker_mod.DOCKER_EXECUTABLE, "buildx", "bake", "-f", "/project/docker-compose.yml",
+            "-f", "/project/docker-compose.desktop.yml",
+            "--progress", "plain", "--load", "dev", "dbus-helper",
         ]
         assert mock_run.call_args.kwargs["cwd"] == Path("/project")
 
@@ -1615,8 +1497,6 @@ class TestComposeRun:
     @staticmethod
     def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -1728,8 +1608,6 @@ class TestComposeRun:
                 mock_app_config,
                 DockerMode.NONE,
                 shell_args=[],
-                audio_args=[],
-                dbus_args=[],
             )
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
@@ -1791,17 +1669,11 @@ class TestComposeRun:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         shell_args = ["-v", "/host/.zshrc:/home/dev/.zshrc.local:ro"]
         shell = MagicMock(return_value=shell_args)
-        audio = MagicMock(return_value=[])
-        dbus = MagicMock(return_value=[])
         monkeypatch.setattr(docker_mod, "get_shell_mount_args", shell)
-        monkeypatch.setattr(docker_mod, "get_audio_mount_args", audio)
-        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", dbus)
 
         compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
 
         shell.assert_called_once_with(mock_app_config)
-        audio.assert_called_once_with()
-        dbus.assert_called_once_with()
         assert shell_args[1] in mock_run.call_args.args[0]
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
@@ -1822,8 +1694,6 @@ class TestComposeRun:
             command="echo",
             interactive=False,
             shell_mount_args=shell_args,
-            audio_mount_args=[],
-            dbus_mount_args=[],
         )
 
         cmd = mock_run.call_args.args[0]
@@ -1989,13 +1859,8 @@ class TestCleanupDockerProxy:
         mock_root.return_value = Path("/project")
         mock_run.return_value = MagicMock(returncode=0)
         cleanup_docker_proxy(DockerMode.PROXY)
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 0
         # First call: stop docker-proxy
-        first_call = mock_run.call_args_list[0][0][0]
-        assert first_call[-2:] == ["stop", "docker-proxy"]
-        # Second call: rm docker-proxy
-        second_call = mock_run.call_args_list[1][0][0]
-        assert second_call[-3:] == ["rm", "-f", "docker-proxy"]
 
 
 class TestComposeRunErrorHandling:
@@ -2284,7 +2149,7 @@ class TestBackupVolume:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         backup_volume("djinn-opencode-data", Path("/tmp/staging"))
         args = mock_run.call_args[0][0]
-        assert args[0:3] == ["docker", "run", "--rm"]
+        assert args[0:3] == [docker_mod.DOCKER_EXECUTABLE, "run", "--rm"]
         assert "djinn-opencode-data:/source:ro" in args[4]
         assert "/tmp/staging:/backup" in args[6]
         assert "alpine" in args
@@ -2349,8 +2214,6 @@ class TestBackgroundProcessGroupGuard:
     @staticmethod
     def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
 
     @staticmethod
     def _stdin_state(
@@ -2550,8 +2413,6 @@ class TestComposeUpDetached:
     @staticmethod
     def _without_runtime_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_audio_mount_args", _empty_mount_args)
-        monkeypatch.setattr(docker_mod, "get_dbus_mount_args", _empty_mount_args)
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -2569,7 +2430,7 @@ class TestComposeUpDetached:
         compose_up_detached(mock_app_config, ContainerOptions())
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[:2] == ["docker", "compose"]
+        assert cmd[:2] == [docker_mod.DOCKER_EXECUTABLE, "compose"]
         assert cmd[-3:] == ["up", "-d", "dev"]
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
@@ -2685,83 +2546,6 @@ class TestComposeUpDetached:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_carries_the_env_half_of_the_runtime_mount_pairs(
-        self,
-        mock_run: MagicMock,
-        mock_root: MagicMock,
-        mock_app_config: AppConfig,
-    ) -> None:
-        """A mounted socket is useless without the variable that points at it.
-
-        Deliberately does not stub the runtime mount builders: passing real
-        `-v`/`-e` pairs is the input class that exposes a dropped `-e` half.
-        """
-        mock_root.return_value = Path("/project")
-        payload: dict[str, object] = {}
-
-        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
-            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
-            payload.update(json.loads(override.read_text()))
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        mock_run.side_effect = _read_override
-
-        compose_up_detached(
-            mock_app_config,
-            ContainerOptions(),
-            shell_mount_args=[],
-            audio_mount_args=[
-                "-v", "/run/user/1000/pulse/native:/run/user/1000/pulse/native",
-                "-e", "PULSE_SERVER=unix:/run/user/1000/pulse/native",
-            ],
-            dbus_mount_args=[
-                "-v", "/run/user/1000/bus:/run/user/1000/bus:ro",
-                "-e", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-            ],
-        )
-
-        service = payload["services"]["dev"]  # type: ignore[index]
-        assert service["environment"] == {
-            "PULSE_SERVER": "unix:/run/user/1000/pulse/native",
-            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
-            "DJINN_DECLARED_VOLUME_TARGETS": "[]",
-        }
-        assert "/run/user/1000/pulse/native:/run/user/1000/pulse/native" in service["volumes"]
-
-    @patch("djinn_in_a_box.core.docker.get_project_root")
-    @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_explicit_env_overrides_the_derived_pairs(
-        self,
-        mock_run: MagicMock,
-        mock_root: MagicMock,
-        mock_app_config: AppConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        self._without_runtime_mounts(monkeypatch)
-        mock_root.return_value = Path("/project")
-        payload: dict[str, object] = {}
-
-        def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
-            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
-            payload.update(json.loads(override.read_text()))
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        mock_run.side_effect = _read_override
-
-        compose_up_detached(
-            mock_app_config,
-            ContainerOptions(),
-            env={"PULSE_SERVER": "explicit"},
-            audio_mount_args=["-v", "/host:/sock", "-e", "PULSE_SERVER=derived"],
-            shell_mount_args=[],
-            dbus_mount_args=[],
-        )
-
-        service = payload["services"]["dev"]  # type: ignore[index]
-        assert service["environment"]["PULSE_SERVER"] == "explicit"
-
-    @patch("djinn_in_a_box.core.docker.get_project_root")
-    @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_carries_the_firewall_flag_through_compose_interpolation(
         self,
         mock_run: MagicMock,
@@ -2857,8 +2641,8 @@ def declared_creator(tmp_path, monkeypatch):
     )
     for name in (
         "get_shell_mount_args",
-        "get_audio_mount_args",
-        "get_dbus_mount_args",
+
+
         "get_sops_age_key_mount_args",
     ):
         monkeypatch.setattr(docker, name, lambda *args: [])
@@ -3011,7 +2795,7 @@ def test_declaration_override_cleanup(monkeypatch, declared_creator, kind, outco
         return MagicMock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(docker.subprocess, "run", run)
-    if outcome == "exception" or (outcome == "timeout" and kind == "detached"):
+    if outcome == "exception":
         with pytest.raises((RuntimeError, subprocess.TimeoutExpired)):
             _call_declared_creator(
                 kind, declared_creator, **({"timeout": 1} if kind != "detached" else {})
@@ -3030,7 +2814,7 @@ def test_compose_reservations_match(tmp_path, monkeypatch):
 
     from djinn_in_a_box.config.declarations import COMPOSE_ENV_KEYS, RESERVED_ENVIRONMENT
     from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
-    from djinn_in_a_box.core import docker, session
+    from djinn_in_a_box.core import desktop, docker, session
 
     root = Path(__file__).resolve().parents[1]
     keys, names = set(), set()
@@ -3059,14 +2843,31 @@ def test_compose_reservations_match(tmp_path, monkeypatch):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as bus:
         bus.bind(str(tmp_path / "bus"))
         runtime_args = [
-            *docker.get_audio_mount_args(),
-            *docker.get_dbus_mount_args(),
             *docker.get_sops_age_key_mount_args(config),
         ]
     emitted = docker._env_pairs_from_mount_args(runtime_args)
-    assert emitted.keys() == {"PULSE_SERVER", "DBUS_SESSION_BUS_ADDRESS", "SOPS_AGE_KEY_FILE"}
+    assert emitted.keys() == {"SOPS_AGE_KEY_FILE"}
     assert emitted.keys() <= RESERVED_ENVIRONMENT.keys()
     assert set(session._SESSION_ENV) <= RESERVED_ENVIRONMENT.keys()
+    for channel in ("dbus", "audio"):
+        endpoint = desktop.DesktopEndpoint(channel, tmp_path / channel, True)
+        fragment = desktop.helper_fragment(endpoint, "sha256:local", "generation", "generation")
+        fragment["services"]["dev"] = {"environment": dict.fromkeys(desktop.MANAGED_ENV)}
+        desktop.add_delivery(fragment, endpoint)
+        delivery = fragment["services"]["dev"]
+        assert set(delivery["environment"]) <= RESERVED_ENVIRONMENT.keys()
+        assert endpoint.volume in VOLUME_CATEGORIES["none"]
+        assert delivery["volumes"] == [
+            {
+                "type": "volume",
+                "source": f"desktop-{channel}",
+                "target": endpoint.target,
+                "read_only": True,
+            }
+        ]
+        assert {
+            key: delivery["environment"][key] for key in endpoint.environment
+        } == endpoint.environment
     assert {
         "AGENT_PROMPT",
         "PULSE_SERVER",
@@ -3082,7 +2883,12 @@ def test_startup_environment_class_guard():
     from djinn_in_a_box.config.declarations import RESERVED_ENVIRONMENT
 
     root = Path(__file__).resolve().parents[1]
-    paths = [root / "Dockerfile", *(root / "scripts").rglob("*"), *(root / "tools").rglob("*")]
+    paths = [
+        root / "Dockerfile",
+        *(root / "scripts").rglob("*"),
+        *(root / "tools").rglob("*"),
+        *(root / "helpers").rglob("*"),
+    ]
     assigned = set()
     pattern = (
         r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*=|\bexport\s+([A-Z_][A-Z0-9_]*)|"
@@ -3097,7 +2903,7 @@ def test_startup_environment_class_guard():
             assigned.update(
                 next(part for part in match if part) for match in re.findall(pattern, text, re.M)
             )
-    # Underscore-prefixed names below are local helper internals, never caller env.
+    # These names are local script/Python constants, never caller environment.
     exceptions = {
         "_OUTPUT_LIB_DEFAULT",
         "_MCP_REGISTER_DIR",
@@ -3105,5 +2911,8 @@ def test_startup_environment_class_guard():
         "_DJINN_STATE_PERSISTED",
         "_DJINN_OUTPUT_LIB_LOADED",
         "ALL",  # sudoers ALL=(ALL) grammar, not an environment assignment.
+        "POLICY",
+        "DROP",
+        "FLOOR",  # Image-owned Python constants, never environment.
     }
     assert assigned - RESERVED_ENVIRONMENT.keys() - exceptions == set()

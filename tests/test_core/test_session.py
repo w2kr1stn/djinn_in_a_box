@@ -13,6 +13,7 @@ import pytest
 
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
 from djinn_in_a_box.core.workflow_publisher import (
     PUBLISHER_LOCK_ERROR_PREFIX,
@@ -159,7 +160,7 @@ class TestRefreshOpenCodeWorkflow:
         assert result.success is True
         run.assert_called_once_with(
             [
-                "docker",
+                DOCKER_EXECUTABLE,
                 "exec",
                 "stable-container-id",
                 "python3",
@@ -534,7 +535,7 @@ class TestRunInteractiveContainer:
             result = session_mgr.run_interactive(workspace_dir=Path("/tmp/ws"))
 
             cmd = mock_run.call_args[0][0]
-            assert cmd[0:3] == ["docker", "exec", "-it"]
+            assert cmd[0:3] == [DOCKER_EXECUTABLE, "exec", "-it"]
             assert "abc123" in cmd
             assert "bash" in cmd
             assert result.returncode == 0
@@ -614,7 +615,7 @@ class TestRunHeadlessContainer:
 
             cmd = mock_run.call_args[0][0]
             assert "-it" not in cmd
-            assert cmd[0] == "docker"
+            assert cmd[0] == DOCKER_EXECUTABLE
             assert cmd[1] == "exec"
             assert result.stdout == "output"
 
@@ -802,7 +803,7 @@ def test_declarations_inherit_without_creation(tmp_path, monkeypatch, session_mg
     assert result.returncode == 0 and len(calls) == 1
     cmd, kwargs = calls[0]
     if mode == "container":
-        assert cmd[:3] == ["docker", "exec", "-it"]
+        assert cmd[:3] == [DOCKER_EXECUTABLE, "exec", "-it"]
         assert not any("CDP_HOST=" in arg or "DJINN_DECLARED_" in arg for arg in cmd)
     else:
         assert cmd[0] == "claude" and kwargs["env"]["CDP_HOST"] == "host-literal"
