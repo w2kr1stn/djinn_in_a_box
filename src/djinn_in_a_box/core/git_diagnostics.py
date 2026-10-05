@@ -11,7 +11,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from djinn_in_a_box.config.declarations import BindDeclaration
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core.git_agent import agent_keys
 from djinn_in_a_box.core.host_runtime import inspect_dev, process_token, runtime_root
@@ -31,6 +30,14 @@ class GitDiagnostic:
     remedy: str = ""
 
 
+@dataclass(frozen=True)
+class RepositoryScan:
+    repositories: list[Path]
+    directories_not_scanned: int
+    unreadable_root: bool
+    limit_reached: bool = False
+
+
 def public_selector(value: str, names: set[str]) -> bool:
     path = value.replace("${HOME}", "/home/dev").replace("$HOME", "/home/dev")
     if path.startswith("~/"):
@@ -38,22 +45,23 @@ def public_selector(value: str, names: set[str]) -> bool:
     return str(Path(path).parent) == str(SSH_TARGET) and Path(path).name in names
 
 
-def repository_roots(config: AppConfig) -> tuple[list[Path], list[str]]:
+def repository_roots(config: AppConfig) -> RepositoryScan:
     roots = [config.code_dir, Path.home() / ".djinn" / "sessions"]
-    roots.extend(
-        Path(m.source).expanduser()
-        for m in config.mounts.values()
-        if isinstance(m, BindDeclaration)
-    )
     repositories: list[Path] = []
-    unknown: list[str] = []
     visited = 0
+    directories_not_scanned = 0
+    unreadable_root = False
+    limit_reached = False
     for root in dict.fromkeys(roots):
-        if not root.is_dir():
-            unknown.append(f"{root}: missing/uninspected")
-            continue
-        errors: list[OSError] = []
-        for directory, children, _ in os.walk(root, followlinks=False, onerror=errors.append):
+        def record_error(error: OSError, scan_root: Path = root) -> None:
+            nonlocal directories_not_scanned, unreadable_root
+            if isinstance(error, FileNotFoundError):
+                return
+            directories_not_scanned += 1
+            if error.filename and Path(error.filename) == scan_root:
+                unreadable_root = True
+
+        for directory, children, _ in os.walk(root, followlinks=False, onerror=record_error):
             visited += 1
             current = Path(directory)
             if (current / ".git").exists() or (
@@ -62,14 +70,15 @@ def repository_roots(config: AppConfig) -> tuple[list[Path], list[str]]:
                 repositories.append(current)
             children[:] = [c for c in children if c not in {".git", ".venv", "node_modules"}]
             if len(current.relative_to(root).parts) >= 4:
-                if children:
-                    unknown.append(f"{current}: depth limit (4)")
+                directories_not_scanned += len(children)
                 children.clear()
             if visited >= 1000 or len(repositories) >= 100:
-                unknown.append(f"{root}: discovery limit (1000 directories/100 repositories)")
+                directories_not_scanned += len(children)
+                limit_reached = True
                 break
-        unknown.extend(str(error) for error in errors)
-    return list(dict.fromkeys(repositories)), unknown
+    return RepositoryScan(
+        list(dict.fromkeys(repositories)), directories_not_scanned, unreadable_root, limit_reached
+    )
 
 
 def git_references(
@@ -82,9 +91,18 @@ def git_references(
     command.extend(["config", "--includes", "--show-origin", "--null"])
     if repository is None:
         command.append("--global")
+    else:
+        command.append("--local")
     command.append("--list")
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            cwd=Path("/") if repository is None else None,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return [GitDiagnostic(f"Git references: {label}", "warn", f"uninspected: {exc}")]
     if result.returncode:
@@ -161,7 +179,9 @@ def git_references(
                         "Edit repository/global config manually.",
                     )
                 )
-    return rows or [
+    if rows or repository is not None:
+        return rows
+    return [
         GitDiagnostic(
             f"Git references: {label}", "pass", "no incompatible inspected key-file references"
         )
@@ -329,10 +349,17 @@ def git_diagnostics(config: AppConfig) -> list[GitDiagnostic]:
     except (OSError, ValueError, KeyError, GitSSHError, EOFError) as exc:
         rows.append(GitDiagnostic("Git agent", "warn", f"unknown/uninspected: {exc}"))
     rows.extend(git_references(None, names, config.git.allowed_signers_file is not None))
-    repos, unknown = repository_roots(config)
-    for repository in repos:
+    scan = repository_roots(config)
+    for repository in scan.repositories:
         rows.extend(git_references(repository, names, config.git.allowed_signers_file is not None))
-    for message in unknown:
-        rows.append(GitDiagnostic("Git discovery", "warn", message))
+    detail = (
+        f"{len(scan.repositories)} repositories scanned; "
+        f"{scan.directories_not_scanned} directories not scanned"
+    )
+    if scan.limit_reached:
+        detail += "; discovery limit reached (1000 directories/100 repositories)"
+    rows.append(
+        GitDiagnostic("Git discovery", "warn" if scan.unreadable_root else "pass", detail)
+    )
     rows.extend(ssh_references(Path.home() / ".ssh" / "config", names))
     return rows
