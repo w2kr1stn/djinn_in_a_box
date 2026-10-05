@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import os
+import pwd
 import signal
 import stat
 import subprocess
@@ -48,17 +49,8 @@ def private_directory(path: Path) -> Path:
 
 
 def runtime_root(*, create: bool = False) -> Path:
-    xdg = os.environ.get("XDG_RUNTIME_DIR")
-    if xdg:
-        base = Path(xdg)
-        if not base.is_absolute():
-            raise GitSSHError("XDG_RUNTIME_DIR must be an absolute owner-only directory")
-        info = base.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise GitSSHError("XDG_RUNTIME_DIR must be an owner-only directory (0700)")
-        root = base / "djinn" / "git-agent"
-    else:
-        root = Path.home() / ".local" / "state" / "djinn" / "runtime" / "git-agent"
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    root = home / ".local" / "state" / "djinn" / "runtime" / "git-agent"
     if create:
         private_directory(root.parent)
         private_directory(root)
@@ -248,6 +240,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                 runtime.observer = subprocess.Popen(
                     [
                         sys.executable,
+                        "-I",
                         "-m",
                         "djinn_in_a_box.core.host_runtime",
                         str(root),
@@ -258,6 +251,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                     stderr=log,
                     start_new_session=True,
                     pass_fds=(lock_fd,),
+                    cwd="/",
                 )
 
         runtime.agent = start_agent(
