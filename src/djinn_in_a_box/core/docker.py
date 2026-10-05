@@ -12,12 +12,13 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, Required, TypedDict
+from typing import TYPE_CHECKING, Any, Final, Literal, Required, TypedDict, cast
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
@@ -30,9 +31,15 @@ from djinn_in_a_box.config.declarations import (
     declaration_error,
     inspect_declarations,
 )
-from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
-from djinn_in_a_box.core import host_runtime
+from djinn_in_a_box.config.defaults import (
+    DESKTOP_RUNTIME_VOLUMES,
+    SYNC_PATHS,
+    VOLUME_CATEGORIES,
+    volume_categories,
+)
+from djinn_in_a_box.core import desktop, host_runtime
 from djinn_in_a_box.core.console import warning
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.exceptions import (
     DeclarationSpecificationError,
     MountSpecificationError,
@@ -317,6 +324,7 @@ class RunResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+    owner: host_runtime.GitRuntime | None = field(default=None, compare=False, repr=False)
 
     @property
     def success(self) -> bool:
@@ -326,7 +334,10 @@ class RunResult:
 def _docker_inspect(resource: str, name: str) -> bool:
     try:
         result = subprocess.run(
-            ["docker", resource, "inspect", name], capture_output=True, text=True, check=False,
+            [DOCKER_EXECUTABLE, resource, "inspect", name],
+            capture_output=True,
+            text=True,
+            check=False,
         )
     except FileNotFoundError:
         warning("Docker is not installed")
@@ -335,17 +346,29 @@ def _docker_inspect(resource: str, name: str) -> bool:
 
 
 def _run_captured(
-    cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> RunResult:
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=cwd, env=env, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env=env,
+            check=False,
+            timeout=timeout,
         )
         return RunResult(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
     except FileNotFoundError as e:
         return RunResult(returncode=127, stdout="", stderr=f"Command not found: {e}")
     except PermissionError as e:
         return RunResult(returncode=126, stdout="", stderr=f"Permission denied: {e}")
+    except subprocess.TimeoutExpired:
+        return RunResult(returncode=124, stderr="Docker operation timed out")
 
 
 def _run_streamed(
@@ -419,7 +442,7 @@ def network_exists(name: str = DJINN_NETWORK) -> bool:
 
 
 def delete_network(name: str) -> bool:
-    result = _run_captured(["docker", "network", "rm", name])
+    result = _run_captured([DOCKER_EXECUTABLE, "network", "rm", name])
     if not result.success:
         detail = result.stderr.strip() or f"exit code {result.returncode}"
         warning(f"Failed to delete network '{name}': {detail}")
@@ -429,7 +452,7 @@ def delete_network(name: str) -> bool:
 def ensure_network(name: str = DJINN_NETWORK) -> bool:
     if _docker_inspect("network", name):
         return True
-    result = _run_captured(["docker", "network", "create", name])
+    result = _run_captured([DOCKER_EXECUTABLE, "network", "create", name])
     if not result.success:
         detail = result.stderr.strip() or f"exit code {result.returncode}"
         warning(f"Failed to create Docker network '{name}': {detail}")
@@ -440,6 +463,8 @@ def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
     """Get compose file arguments ["-f", "file.yml", ...] based on Docker mode."""
     project_root = get_project_root()
     files = ["-f", str(project_root / "docker-compose.yml")]
+
+    files.extend(["-f", str(project_root / "docker-compose.desktop.yml")])
 
     if docker_mode is DockerMode.PROXY:
         files.extend(["-f", str(project_root / "docker-compose.docker.yml")])
@@ -496,7 +521,8 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
 
 def _compose_host_env(config: AppConfig | None) -> dict[str, str]:
     """Full host environment for a compose subprocess: inherited env + rendered vars."""
-    return {**os.environ, **build_compose_env(config)}
+    inherited = {key: value for key, value in os.environ.items() if key not in desktop.MANAGED_ENV}
+    return {**inherited, **build_compose_env(config)}
 
 
 def _run_compose(
@@ -505,6 +531,7 @@ def _run_compose(
     config: AppConfig | None,
     cwd: Path,
     extra_env: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> RunResult:
     """Single choke-point for non-interactive ``docker compose`` calls.
 
@@ -519,7 +546,7 @@ def _run_compose(
     env = _compose_host_env(config)
     if extra_env:
         env.update(extra_env)
-    return _run_captured(["docker", "compose", *args], cwd=cwd, env=env)
+    return _run_captured([DOCKER_EXECUTABLE, "compose", *args], cwd=cwd, env=env, timeout=timeout)
 
 
 def get_shell_mount_args(config: AppConfig) -> list[str]:
@@ -553,41 +580,6 @@ def get_shell_mount_args(config: AppConfig) -> list[str]:
         args.extend(["-v", f"{omz_custom}:/home/dev/.oh-my-zsh/custom:ro"])
 
     return args
-
-
-def get_audio_mount_args() -> list[str]:
-    """Build PulseAudio socket mount arguments for audio passthrough.
-
-    Auto-detects the PulseAudio/PipeWire socket on the host.
-    Returns empty list if no audio socket is found.
-    """
-    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    pulse_socket = Path(xdg_runtime) / "pulse" / "native"
-
-    if not pulse_socket.exists():
-        return []
-
-    container_socket = f"/run/user/{host_runtime.CONTAINER_USER_UID}/pulse/native"
-    return [
-        "-v", f"{pulse_socket}:{container_socket}",
-        "-e", f"PULSE_SERVER=unix:{container_socket}",
-    ]
-
-
-def get_dbus_mount_args() -> list[str]:
-    """Build D-Bus session socket mount arguments when the host socket exists."""
-    host_bus = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "bus"
-
-    # A stale file/dir at the bus path must not inject a broken mount — only a
-    # real Unix socket counts as a session bus.
-    if not host_bus.is_socket():
-        return []
-
-    container_bus = f"/run/user/{host_runtime.CONTAINER_USER_UID}/bus"
-    return [
-        "-v", f"{host_bus}:{container_bus}:ro",
-        "-e", f"DBUS_SESSION_BUS_ADDRESS=unix:path={container_bus}",
-    ]
 
 
 def sops_age_key_file_problem(path: Path) -> str | None:
@@ -753,8 +745,6 @@ def _reserved_mount_targets(
     docker_mode: DockerMode,
     *,
     shell_args: list[str] | None = None,
-    audio_args: list[str] | None = None,
-    dbus_args: list[str] | None = None,
     sops_args: list[str] | None = None,
     zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> list[Path]:
@@ -764,6 +754,7 @@ def _reserved_mount_targets(
     targets = [
         *_COMPOSE_DEV_MOUNT_TARGETS,
         *MANAGED_SSH_TARGETS,
+        *desktop.MANAGED_TARGETS,
         *([config.workspace_target] if config else []),
         *(zone_overlay_targets or ()),
         _MOUNT_ROOT,
@@ -772,16 +763,10 @@ def _reserved_mount_targets(
         targets.extend(_DIRECT_DOCKER_SOCKET_TARGETS)
     if shell_args is None:
         shell_args = get_shell_mount_args(config) if config else []
-    if audio_args is None:
-        audio_args = get_audio_mount_args()
-    if dbus_args is None:
-        dbus_args = get_dbus_mount_args()
     if sops_args is None:
         sops_args = get_sops_age_key_mount_args(config) if config else []
     runtime_targets = [
         *_mount_targets_from_args(shell_args),
-        *_mount_targets_from_args(audio_args),
-        *_mount_targets_from_args(dbus_args),
         *_mount_targets_from_args(sops_args),
     ]
     accepted_runtime_targets: list[Path] = []
@@ -805,8 +790,6 @@ def validate_container_mounts(
     docker_mode: DockerMode,
     *,
     shell_args: list[str] | None = None,
-    audio_args: list[str] | None = None,
-    dbus_args: list[str] | None = None,
     sops_args: list[str] | None = None,
     zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> None:
@@ -820,8 +803,6 @@ def validate_container_mounts(
         config,
         docker_mode,
         shell_args=shell_args,
-        audio_args=audio_args,
-        dbus_args=dbus_args,
         sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
@@ -835,16 +816,20 @@ def validate_container_mounts(
     for mount in normalized_mounts:
         mount_target = mount.target
         for target, description, display_target in occupied:
-            if (mount_target == target or target.is_relative_to(mount_target)
-                    or (target in MANAGED_SSH_TARGETS and mount_target.is_relative_to(target))):
+            if (
+                mount_target == target
+                or target.is_relative_to(mount_target)
+                or (
+                    target in (*MANAGED_SSH_TARGETS, *desktop.MANAGED_TARGETS)
+                    and mount_target.is_relative_to(target)
+                )
+            ):
                 msg = (
                     f"Mount {mount.source} -> {mount_target} conflicts with {description} "
                     f"(conflict path: {display_target})"
                 )
                 raise MountCollisionError(msg)
-        occupied.append(
-            (mount_target, f"mount {mount.source} -> {mount_target}", mount_target)
-        )
+        occupied.append((mount_target, f"mount {mount.source} -> {mount_target}", mount_target))
 
 
 @dataclass(frozen=True, slots=True)
@@ -868,7 +853,7 @@ class ResolvedDeclarations:
 
     def compose_fragment(self) -> ComposeFragment:
         volumes: list[str | dict[str, object]] = []
-        volume_map: dict[str, dict[str, str]] = {}
+        volume_map: dict[str, dict[str, object]] = {}
         targets: list[str] = []
         for mount in self.mounts:
             entry: dict[str, object] = {
@@ -903,14 +888,21 @@ class ResolvedDeclarations:
 
 class ComposeService(TypedDict, total=False):
     volumes: list[str | dict[str, object]]
-    environment: dict[str, str]
+    environment: dict[str, str | None]
     labels: dict[str, str]
     working_dir: str
+    image: str
+    command: list[str]
+    entrypoint: list[str]
+    user: str
+    network_mode: str
+    profiles: list[str]
+    depends_on: dict[str, object]
 
 
 class ComposeFragment(TypedDict, total=False):
     services: Required[dict[str, ComposeService]]
-    volumes: dict[str, dict[str, str]]
+    volumes: dict[str, dict[str, object]]
 
 
 def _declared_bind_source(mount: BindDeclaration) -> str:
@@ -951,8 +943,6 @@ def declaration_reservation_context(
     runtime_args: dict[str, list[str]] = {}
     builders = {
         "shell_args": lambda: get_shell_mount_args(config) if config else [],
-        "audio_args": get_audio_mount_args,
-        "dbus_args": get_dbus_mount_args,
         "sops_args": lambda: get_sops_age_key_mount_args(config) if config else [],
     }
     for name, builder in builders.items():
@@ -980,8 +970,6 @@ def declaration_reservation_context(
             config,
             DockerMode.DIRECT,
             shell_args=[],
-            audio_args=[],
-            dbus_args=[],
             sops_args=[],
             zone_overlay_targets=zones,
         )
@@ -1034,7 +1022,11 @@ def resolve_declared_entries(
     for name, target in targets.items():
         if errors.get(f"mounts.{name}"):
             continue
-        for repair in (*MANAGED_VOLUME_REPAIR_TARGETS, *MANAGED_SSH_TARGETS):
+        for repair in (
+            *MANAGED_VOLUME_REPAIR_TARGETS,
+            *MANAGED_SSH_TARGETS,
+            *desktop.MANAGED_TARGETS,
+        ):
             if target == repair or target.is_relative_to(repair):
                 errors[f"mounts.{name}"] = declaration_error(
                     "mounts",
@@ -1138,13 +1130,19 @@ def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) ->
     project_root = get_project_root()
     env = _compose_host_env(config)
     cmd = [
-        "docker", "buildx", "bake", *get_compose_files(),
-        "--progress", _build_progress(), "--load",
+        DOCKER_EXECUTABLE,
+        "buildx",
+        "bake",
+        *get_compose_files(),
+        "--progress",
+        _build_progress(),
+        "--load",
     ]
     if no_cache:
         cmd.append("--no-cache")
     if env.get(BUILD_NETWORK_VAR) == "host":
         cmd.extend(["--allow", "network.host"])
+    cmd.extend(["dev", "dbus-helper"])
     return _run_streamed(cmd, cwd=project_root, env=env)
 
 
@@ -1203,6 +1201,319 @@ def is_background_process_group() -> bool:
         return False
 
 
+def _validate_desktop_env(env: dict[str, str] | None) -> None:
+    if env and (keys := desktop.MANAGED_ENV.intersection(env)):
+        raise RuntimeMountSpecificationError(
+            "Desktop endpoint environment is managed by Djinn: " + ", ".join(sorted(keys))
+        )
+
+
+def _operation_timeout(deadline: float | None, maximum: float) -> float:
+    remaining = maximum if deadline is None else min(maximum, deadline - time.monotonic())
+    if remaining <= 0:
+        raise RuntimeError("desktop overall readiness timeout")
+    return remaining
+
+
+def _service_inspect(service: str, deadline: float | None = None) -> dict[str, Any] | None:
+    result = _run_captured(
+        [
+            DOCKER_EXECUTABLE,
+            "ps",
+            "-aq",
+            "--filter",
+            "label=com.docker.compose.project=djinn-in-a-box",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+        ],
+        timeout=_operation_timeout(deadline, 5),
+    )
+    if not result.success:
+        raise RuntimeError(result.stderr or "Docker service inspection failed")
+    ids = result.stdout.split()
+    if not ids:
+        return None
+    if len(ids) != 1:
+        raise RuntimeError(f"ambiguous {service} ownership")
+    return host_runtime.inspect_object(ids[0], DOCKER_EXECUTABLE,
+                                       timeout=_operation_timeout(deadline, 5))
+
+
+def _helper_evidence(
+    actual: dict[str, Any], channel: str, deadline: float | None = None
+) -> dict[str, Any]:
+    result = _run_captured(
+        [
+            DOCKER_EXECUTABLE,
+            "exec",
+            str(actual["Id"]),
+            "python3",
+            "-I",
+            "/etc/djinn/health.py",
+            channel,
+        ],
+        cwd=Path("/"),
+        timeout=_operation_timeout(deadline, 12),
+    )
+    if not result.success:
+        raise RuntimeError(result.stderr or "helper package/health query failed")
+    data = json.loads(result.stdout)
+    if not isinstance(data, dict):
+        raise ValueError("helper evidence is not an object")
+    return cast(dict[str, Any], data)
+
+
+def _downstream_probe(
+    config: AppConfig,
+    options: ContainerOptions,
+    endpoint: desktop.DesktopEndpoint,
+    owner: host_runtime.GitRuntime,
+    deadline: float | None = None,
+) -> None:
+    image = host_runtime.inspect_object(_WORKFLOW_IMAGE, DOCKER_EXECUTABLE, "image",
+                                        timeout=_operation_timeout(deadline, 5))
+    if image is None:
+        raise RuntimeError("dev image is missing")
+    name = f"djinn-desktop-probe-{owner.generation}-{endpoint.channel}"
+    # Base dev uses UID 1000, default IPC/user namespace and NET_ADMIN. The probe
+    # uses those same credentials/namespaces, with only the read-only output.
+    argv = (
+        [
+            "dbus-send",
+            f"--bus={endpoint.environment['DBUS_SESSION_BUS_ADDRESS']}",
+            "--type=method_call",
+            "--print-reply",
+            "--reply-timeout=1500",
+            "--dest=org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.GetId",
+        ]
+        if endpoint.channel == "dbus"
+        else ["pactl", "info"]
+    )
+    fragment: ComposeFragment = {
+        "services": {
+            name: {
+                "image": str(image["Id"]),
+                "user": "1000:1000",
+                "entrypoint": argv,
+                "command": [],
+                "environment": dict(endpoint.environment),
+                "network_mode": "none",
+                "profiles": ["desktop"],
+                "labels": {host_runtime.GENERATION_LABEL: owner.generation},
+                "volumes": [
+                    {
+                        "type": "volume",
+                        "source": f"desktop-{endpoint.channel}",
+                        "target": endpoint.target,
+                        "read_only": True,
+                    }
+                ],
+            }
+        }
+    }
+    try:
+        with _compose_override(fragment, prefix="djinn-probe-") as path:
+            result = _run_compose(
+                [
+                    *get_compose_files(options.docker_mode),
+                    "-f",
+                    str(path),
+                    "run",
+                    "--rm",
+                    "-T",
+                    "--no-deps",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "--name",
+                    name,
+                    name,
+                ],
+                config=config,
+                cwd=get_project_root(),
+                timeout=_operation_timeout(deadline, 5),
+            )
+        if not result.success:
+            raise RuntimeError(result.stderr or "downstream credentials probe failed")
+    finally:
+        actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE)
+        if actual is not None:
+            labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
+            if labels.get(host_runtime.GENERATION_LABEL) == owner.generation:
+                result = _run_captured(
+                    [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])], timeout=5
+                )
+                if not result.success:
+                    raise RuntimeError("failed to remove invocation-owned downstream probe")
+
+
+def _prepare_companions(
+    config: AppConfig,
+    options: ContainerOptions,
+    fragment: ComposeFragment,
+    owner: host_runtime.GitRuntime,
+) -> None:
+    # This runs only after declarations/caller mounts/env and ownership were checked.
+    if options.docker_mode is DockerMode.PROXY:
+        if _service_inspect("docker-proxy") is not None:
+            raise RuntimeError("existing proxy has no invocation ownership; clean from the host")
+        fragment["services"]["docker-proxy"] = {
+            "labels": {host_runtime.GENERATION_LABEL: owner.generation},
+        }
+        with _compose_override(fragment) as path:
+            result = _run_compose(
+                [
+                    *get_compose_files(options.docker_mode),
+                    "-f",
+                    str(path),
+                    "up",
+                    "-d",
+                    "--no-deps",
+                    "--force-recreate",
+                    "docker-proxy",
+                ],
+                config=config,
+                cwd=get_project_root(),
+                timeout=15,
+            )
+        actual = _service_inspect("docker-proxy")
+        if actual is not None:
+            owner.register("docker-proxy", actual)
+        if not result.success:
+            raise RuntimeError(result.stderr or "Docker proxy failed to start")
+    endpoints = desktop.discover_desktop_endpoints()
+    for endpoint in endpoints:
+        if endpoint.available is False:
+            continue
+        deadline = time.monotonic() + desktop.HELPER_SECONDS
+        actual = None
+        try:
+            if endpoint.error:
+                raise RuntimeError(endpoint.error)
+            if os.getuid() != host_runtime.CONTAINER_USER_UID:
+                raise RuntimeError("desktop helpers require host UID 1000; unsupported credentials")
+            if owner.observer is None or owner.observer.poll() is not None:
+                raise RuntimeError("host observer unavailable")
+            image = host_runtime.inspect_object(desktop.HELPER_IMAGE, DOCKER_EXECUTABLE, "image",
+                timeout=_operation_timeout(deadline, 5))
+            if image is None:
+                raise RuntimeError("helper image missing; run djinn build")
+            if _service_inspect(endpoint.service, deadline) is not None:
+                raise RuntimeError(
+                    "existing helper has no invocation ownership; clean from the host"
+                )
+            volume = host_runtime.inspect_object(endpoint.volume, DOCKER_EXECUTABLE, "volume",
+                timeout=_operation_timeout(deadline, 5))
+            if volume is not None:
+                raise RuntimeError(
+                    "existing desktop volume has no invocation ownership; clean from the host"
+                )
+            helper = desktop.helper_fragment(
+                endpoint, str(image["Id"]), owner.generation, host_runtime.GENERATION_LABEL
+            )
+            helper["volumes"] = {
+                f"desktop-{endpoint.channel}": {
+                    "name": endpoint.volume,
+                    "labels": {host_runtime.GENERATION_LABEL: owner.generation},
+                }
+            }
+            fragment["services"].update(helper["services"])
+            fragment.setdefault("volumes", {}).update(helper["volumes"])
+            with _compose_override(fragment) as path:
+                result = _run_compose(
+                    [
+                        *get_compose_files(options.docker_mode),
+                        "-f",
+                        str(path),
+                        "up",
+                        "-d",
+                        "--no-deps",
+                        "--no-build",
+                        "--pull",
+                        "never",
+                        "--force-recreate",
+                        endpoint.service,
+                    ],
+                    config=config,
+                    cwd=get_project_root(),
+                    timeout=_operation_timeout(deadline, desktop.HELPER_SECONDS),
+                )
+            owner.register_volume(endpoint.volume, timeout=_operation_timeout(deadline, 5))
+            actual = _service_inspect(endpoint.service, deadline)
+            if actual is not None:
+                owner.register(endpoint.service, actual, endpoint.volume)
+            if not result.success or actual is None:
+                raise RuntimeError(result.stderr or "helper creation failed")
+            while True:
+                actual = host_runtime.inspect_object(str(actual["Id"]), DOCKER_EXECUTABLE,
+                                                     timeout=_operation_timeout(deadline, 5))
+                if actual is None or not actual.get("State", {}).get("Running"):
+                    raise RuntimeError("helper is not running")
+                health = actual["State"].get("Health", {}).get("Status")
+                if health == "healthy":
+                    break
+                if health == "unhealthy" or time.monotonic() >= deadline:
+                    raise RuntimeError(f"helper health {health or 'unknown'} (readiness timeout)")
+                time.sleep(0.1)
+            evidence = _helper_evidence(actual, endpoint.channel, deadline)
+            reasons = desktop.helper_verification_reasons(
+                endpoint, actual, image, evidence, desktop.image_policy()
+            )
+            if reasons:
+                raise RuntimeError("; ".join(reasons))
+            _downstream_probe(config, options, endpoint, owner, deadline)
+            desktop.add_delivery(fragment, endpoint)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            warning(f"Desktop {endpoint.channel} missing: {exc}; starting without this endpoint")
+            # Only resources already proven invocation-owned may be removed here.
+            record = owner.resources.get(endpoint.service)
+            if record is not None:
+                try:
+                    if host_runtime.inspect_owned_resource(
+                        record, owner.generation, DOCKER_EXECUTABLE
+                    ):
+                        result = _run_captured(
+                            [DOCKER_EXECUTABLE, "rm", "-f", record["id"]], timeout=5
+                        )
+                        if result.success:
+                            owner.forget(endpoint.service)
+                        else:
+                            warning(f"Failed to remove desktop helper: {result.stderr}")
+                except (
+                    OSError, ValueError, RuntimeError, subprocess.SubprocessError
+                ) as cleanup_error:
+                    warning(f"Desktop cleanup preserved resources: {cleanup_error}")
+            try:
+                owner.discard_volume(endpoint.volume)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as cleanup_error:
+                warning(f"Desktop volume cleanup preserved resources: {cleanup_error}")
+            fragment["services"].pop(endpoint.service, None)
+
+
+def inspect_running_desktop() -> desktop.DesktopInspection:
+    endpoints = desktop.discover_desktop_endpoints()
+    helpers: dict[str, dict[str, Any] | None] = {}
+    versions: dict[str, dict[str, Any]] = {}
+    try:
+        dev = host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE)
+        image = host_runtime.inspect_object(desktop.HELPER_IMAGE, DOCKER_EXECUTABLE, "image")
+        for endpoint in endpoints:
+            actual = _service_inspect(endpoint.service)
+            helpers[endpoint.service] = actual
+            if actual is not None and actual.get("State", {}).get("Running"):
+                try:
+                    versions[endpoint.service] = _helper_evidence(actual, endpoint.channel)
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    versions[endpoint.service] = {}
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        dev, image = None, None
+    return desktop.inspect_desktop_endpoints(
+        dev, helpers, {desktop.HELPER_IMAGE: image}, endpoints, versions
+    )
+
+
 def compose_run(
     config: AppConfig,
     options: ContainerOptions,
@@ -1213,8 +1524,6 @@ def compose_run(
     service: str = "dev",
     timeout: int | None = None,
     shell_mount_args: list[str] | None = None,
-    audio_mount_args: list[str] | None = None,
-    dbus_mount_args: list[str] | None = None,
 ) -> RunResult:
     """Run a container via docker compose.
 
@@ -1233,6 +1542,7 @@ def compose_run(
     if interactive and is_background_process_group():
         return RunResult(returncode=1, stderr=BACKGROUND_START_ERROR)
 
+    _validate_desktop_env(env)
     project_root = get_project_root()
 
     # Build compose command
@@ -1240,8 +1550,7 @@ def compose_run(
     # Map service to fixed container name (matches container_name in compose YAML)
     container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
 
-    cmd = ["docker", "compose", *compose_files, "run", "--rm",
-           "--name", container_name]
+    cmd = [DOCKER_EXECUTABLE, "compose", *compose_files, "run", "--rm", "--name", container_name]
 
     # TTY handling
     if not interactive:
@@ -1264,19 +1573,16 @@ def compose_run(
     shell_args = _canonicalize_runtime_mount_args(
         get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
     )
-    audio_args = _canonicalize_runtime_mount_args(
-        get_audio_mount_args() if audio_mount_args is None else audio_mount_args
-    )
-    dbus_args = _canonicalize_runtime_mount_args(
-        get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
-    )
     sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
     zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     declarations = resolve_declared_entries(
-        config, options,
+        config,
+        options,
         runtime_targets=_reserved_mount_targets(
-            config, DockerMode.DIRECT, shell_args=shell_args, audio_args=audio_args,
-            dbus_args=dbus_args, sops_args=sops_args,
+            config,
+            DockerMode.DIRECT,
+            shell_args=shell_args,
+            sops_args=sops_args,
             zone_overlay_targets=zone_overlay_targets,
         ),
         caller_env=env,
@@ -1287,8 +1593,6 @@ def compose_run(
         config,
         options.docker_mode,
         shell_args=shell_args,
-        audio_args=audio_args,
-        dbus_args=dbus_args,
         sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
@@ -1307,8 +1611,6 @@ def compose_run(
     # Shell mounts (skip_mounts check is inside get_shell_mount_args)
     cmd.extend(zone_overlay_args)
     cmd.extend(shell_args)
-    cmd.extend(audio_args)
-    cmd.extend(dbus_args)
     cmd.extend(sops_args)
 
     # Service name
@@ -1326,11 +1628,18 @@ def compose_run(
     fragment: ComposeFragment = (
         declarations.compose_fragment() if service == "dev" else {"services": {service: {}}}
     )
-    with git_runtime(config, container_name) as git_delivery:
-        if service == "dev":
+    if service == "dev":
+        fragment["services"]["dev"].setdefault("environment", {}).update(
+            dict.fromkeys(desktop.MANAGED_ENV)
+        )
+    owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
+    with owner_context as git_delivery:
+        if git_delivery is not None:
             git_delivery.add_to_fragment(fragment)
+            _prepare_companions(config, options, fragment, git_delivery)
+            git_delivery.begin_creation()
         with _compose_override(fragment, prefix="djinn-run-") as override_path:
-            cmd[2 + len(compose_files):2 + len(compose_files)] = ["-f", str(override_path)]
+            cmd[2 + len(compose_files) : 2 + len(compose_files)] = ["-f", str(override_path)]
             try:
                 if interactive:
                     # Interactive mode: inherit stdin/stdout/stderr
@@ -1342,6 +1651,7 @@ def compose_run(
                     )
                     return RunResult(
                         returncode=result.returncode,
+                        owner=git_delivery,
                     )
 
                 # Headless mode: capture output with optional timeout. stdin must be
@@ -1359,25 +1669,29 @@ def compose_run(
                 )
                 return RunResult(
                     returncode=result.returncode,
+                    owner=git_delivery,
                     stdout=result.stdout,
                     stderr=result.stderr,
                 )
             except subprocess.TimeoutExpired as e:
                 assert timeout is not None  # TimeoutExpired only raised when timeout is set
                 stdout, stderr = _decode_timeout_output(e, timeout)
-                return RunResult(returncode=124, stdout=stdout, stderr=stderr)
+                return RunResult(returncode=124, stdout=stdout, stderr=stderr, owner=git_delivery)
             except FileNotFoundError as e:
                 return RunResult(
                     returncode=127,
+                    owner=git_delivery,
                     stdout="",
                     stderr=f"Docker command not found: {e}",
                 )
             except PermissionError as e:
                 return RunResult(
                     returncode=126,
+                    owner=git_delivery,
                     stdout="",
                     stderr=f"Permission denied: {e}",
                 )
+
 
 def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
     """Pull the ``src:dst[:mode]`` specs out of a ``["-v", spec, ...]`` list."""
@@ -1396,8 +1710,7 @@ def _env_pairs_from_mount_args(args: list[str]) -> dict[str, str]:
     """Pull the ``KEY=VALUE`` pairs out of a ``["-e", pair, ...]`` list.
 
     The runtime mount builders emit a socket *and* the variable that points at
-    it — ``get_audio_mount_args`` pairs its bind with ``PULSE_SERVER``, and
-    ``get_dbus_mount_args`` with ``DBUS_SESSION_BUS_ADDRESS``. Keeping only the
+    it — the SOPS identity pairs its bind with ``SOPS_AGE_KEY_FILE``. Keeping only the
     ``-v`` half mounts the socket and leaves every client unable to find it, so
     the detached path has to carry these across too.
     """
@@ -1420,8 +1733,6 @@ def compose_up_detached(
     env: dict[str, str] | None = None,
     service: str = "dev",
     shell_mount_args: list[str] | None = None,
-    audio_mount_args: list[str] | None = None,
-    dbus_mount_args: list[str] | None = None,
 ) -> RunResult:
     """Start the container in the background via ``docker compose up -d``.
 
@@ -1442,6 +1753,7 @@ def compose_up_detached(
     file, so the interactive zsh ending the entrypoint stays alive with nothing
     attached. Attach afterwards with ``djinn enter``.
     """
+    _validate_desktop_env(env)
     project_root = get_project_root()
     compose_files = get_compose_files(options.docker_mode)
 
@@ -1452,19 +1764,16 @@ def compose_up_detached(
     shell_args = _canonicalize_runtime_mount_args(
         get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
     )
-    audio_args = _canonicalize_runtime_mount_args(
-        get_audio_mount_args() if audio_mount_args is None else audio_mount_args
-    )
-    dbus_args = _canonicalize_runtime_mount_args(
-        get_dbus_mount_args() if dbus_mount_args is None else dbus_mount_args
-    )
     sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
     zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     declarations = resolve_declared_entries(
-        config, options,
+        config,
+        options,
         runtime_targets=_reserved_mount_targets(
-            config, DockerMode.DIRECT, shell_args=shell_args, audio_args=audio_args,
-            dbus_args=dbus_args, sops_args=sops_args,
+            config,
+            DockerMode.DIRECT,
+            shell_args=shell_args,
+            sops_args=sops_args,
             zone_overlay_targets=zone_overlay_targets,
         ),
         caller_env=env,
@@ -1475,8 +1784,6 @@ def compose_up_detached(
         config,
         options.docker_mode,
         shell_args=shell_args,
-        audio_args=audio_args,
-        dbus_args=dbus_args,
         sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
@@ -1490,7 +1797,7 @@ def compose_up_detached(
         volume_specs.append(spec)
     # Detached startup mounts every assigned overlay so writes reach its host zone.
     volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
-    runtime_args = [*shell_args, *audio_args, *dbus_args, *sops_args]
+    runtime_args = [*shell_args, *sops_args]
     volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
     # The `-e` half of those same pairs has to ride along, or the sockets (and
     # the SOPS identity) are mounted but unreachable. Explicit `env` wins over
@@ -1503,19 +1810,26 @@ def compose_up_detached(
     if mounts:
         service_override["working_dir"] = str(mounts[0].target)
     if environment:
-        service_override["environment"] = environment
+        service_override["environment"] = dict(environment)
 
     fragment: ComposeFragment = (
         declarations.compose_fragment() if service == "dev" else {"services": {service: {}}}
     )
+    if service == "dev":
+        fragment["services"]["dev"].setdefault("environment", {}).update(
+            dict.fromkeys(desktop.MANAGED_ENV)
+        )
     declared_service = fragment["services"][service]
     service_override["volumes"] = [*volume_specs, *declared_service.get("volumes", [])]
     service_override["environment"] = {**environment, **declared_service.get("environment", {})}
     fragment["services"][service] = service_override
     container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
-    with git_runtime(config, container_name) as git_delivery:
-        if service == "dev":
+    owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
+    with owner_context as git_delivery:
+        if git_delivery is not None:
             git_delivery.add_to_fragment(fragment)
+            _prepare_companions(config, options, fragment, git_delivery)
+            git_delivery.begin_creation()
         with _compose_override(fragment) as override_path:
             args = [*compose_files, "-f", str(override_path)]
             args.extend(["up", "-d", service])
@@ -1532,7 +1846,7 @@ def compose_up_detached(
                     "DJINN_DETACHED": "true",
                 },
             )
-            if result.success:
+            if result.success and git_delivery is not None:
                 git_delivery.retain()
             return result
 
@@ -1568,62 +1882,77 @@ def is_own_container(name: str) -> bool:
 
 
 def compose_down(config: AppConfig | None = None) -> RunResult:
-    """Stop and remove the project's containers.
-
-    ``--remove-orphans`` is required for correctness, not tidiness, and the
-    load-bearing reason is easy to miss: Compose classifies containers created
-    by ``compose run`` as one-off and skips them on a plain ``down`` — and that
-    is exactly how ``start`` and ``run`` create the dev container. Without the
-    flag, ``djinn clean`` reports success while the live session survives, and
-    ``djinn backup``'s stop-all-containers guard then keeps refusing the very
-    thing the user was just told to do.
-
-    It additionally reaps containers the project owns but this file does not
-    declare, such as a proxy left by ``--docker``. Do not drop the flag
-    on the reasoning that ``cleanup_docker_proxy`` already covers the proxy.
-
-    Refuses outright when the container it would reap is the one this process runs
-    in — that is always self-destruction, never intent.
-    """
-    if is_own_container(_SERVICE_CONTAINER_NAMES.get("dev", "djinn")):
+    """Config-independent teardown under the same guard, dev before helpers."""
+    if is_own_container("djinn"):
         return RunResult(returncode=1, stderr=SELF_TEARDOWN_ERROR)
+    observer_identity = None
+    try:
+        with host_runtime.creation_guard() as root:
+            state = host_runtime.read_state(root)
+            actual = host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE)
+            if actual is not None:
+                labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
+                if labels.get("com.docker.compose.project") != "djinn-in-a-box":
+                    return RunResult(1, stderr="dev ownership is unknown; preserving resources")
+                result = _run_captured(
+                    [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])], timeout=10
+                )
+                if not result.success:
+                    return result
+                if host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE) is not None:
+                    return RunResult(1, stderr="dev termination could not be verified")
+            result = _run_compose(
+                [*get_compose_files(), "down", "--remove-orphans"],
+                config=None,
+                cwd=get_project_root(),
+                timeout=15,
+            )
+            if not result.success:
+                return result
+            if state is not None:
+                if not host_runtime.cleanup_owned(root, state["generation"], DOCKER_EXECUTABLE):
+                    return RunResult(1, stderr="runtime ownership changed during clean")
+                observer_identity = (state["observer_pid"], state["observer_token"])
+                if state.get("agent_pid", -1) > 0:
+                    host_runtime.stop_owned_process(state["agent_pid"], state["agent_token"])
+                host_runtime.clear_state(root, state["generation"])
+            for name in DESKTOP_RUNTIME_VOLUMES:
+                host_runtime.remove_runtime_volume(name, DOCKER_EXECUTABLE)
+        # The observer's final cleanup needs the guard; never join it while locked.
+        if observer_identity is not None:
+            host_runtime.stop_owned_process(*observer_identity)
+        return result
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        return RunResult(1, stderr=f"Cleanup preserved resources: {exc}")
 
-    project_root = get_project_root()
-    compose_files = get_compose_files()
-    return _run_compose(
-        [*compose_files, "down", "--remove-orphans"], config=config, cwd=project_root
-    )
 
-
-def cleanup_docker_proxy(docker_mode: DockerMode, config: AppConfig | None = None) -> None:
-    if docker_mode is not DockerMode.PROXY:
+def cleanup_docker_proxy(
+    docker_mode: DockerMode,
+    config: AppConfig | None = None,
+    *,
+    owner: host_runtime.GitRuntime | None = None,
+) -> None:
+    """Caller finally can clean only its acquired generation, never by service name."""
+    if docker_mode is not DockerMode.PROXY or owner is None or owner.root is None:
         return
-
-    project_root = get_project_root()
-    compose_files = get_compose_files(DockerMode.PROXY)
-
-    stop_result = _run_compose(
-        [*compose_files, "stop", "docker-proxy"], config=config, cwd=project_root,
-    )
-    if not stop_result.success:
-        detail = stop_result.stderr.strip() or f"exit code {stop_result.returncode}"
-        warning(f"Failed to stop docker-proxy: {detail}")
-
-    rm_result = _run_compose(
-        [*compose_files, "rm", "-f", "docker-proxy"], config=config, cwd=project_root,
-    )
-    if not rm_result.success:
-        detail = rm_result.stderr.strip() or f"exit code {rm_result.returncode}"
-        warning(f"Failed to remove docker-proxy: {detail}")
+    try:
+        with host_runtime.creation_guard(owner.root):
+            host_runtime.cleanup_owned(owner.root, owner.generation, owner.docker_path)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        warning(f"Proxy cleanup preserved resources: {exc}")
 
 
 def is_container_running(name: str) -> bool:
-    names = _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"])
+    names = _docker_list(
+        [DOCKER_EXECUTABLE, "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"]
+    )
     return names is not None and name in names
 
 
 def get_running_containers(prefix: str = "djinn") -> list[str] | None:
-    return _docker_list(["docker", "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"])
+    return _docker_list(
+        [DOCKER_EXECUTABLE, "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"]
+    )
 
 
 def volume_exists(name: str) -> bool:
@@ -1631,7 +1960,17 @@ def volume_exists(name: str) -> bool:
 
 
 def delete_volume(name: str) -> bool:
-    result = _run_captured(["docker", "volume", "rm", name])
+    if name in DESKTOP_RUNTIME_VOLUMES:
+        try:
+            with host_runtime.creation_guard():
+                if host_runtime.inspect_dev("djinn", DOCKER_EXECUTABLE) is not None:
+                    raise RuntimeError("dev still owns desktop runtime")
+                host_runtime.remove_runtime_volume(name, DOCKER_EXECUTABLE)
+            return True
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            warning(f"Preserving runtime volume '{name}': {exc}")
+            return False
+    result = _run_captured([DOCKER_EXECUTABLE, "volume", "rm", name])
     if not result.success:
         detail = result.stderr.strip() or f"exit code {result.returncode}"
         warning(f"Failed to delete volume '{name}': {detail}")
@@ -1650,13 +1989,24 @@ def get_existing_volumes_by_category(
 
 
 def backup_volume(name: str, dest_dir: Path) -> RunResult:
-    return _run_captured([
-        "docker", "run", "--rm",
-        "-v", f"{name}:/source:ro",
-        "-v", f"{dest_dir}:/backup",
-        "alpine",
-        "tar", "czf", f"/backup/{name}.tar.gz", "-C", "/source", ".",
-    ])
+    return _run_captured(
+        [
+            DOCKER_EXECUTABLE,
+            "run",
+            "--rm",
+            "-v",
+            f"{name}:/source:ro",
+            "-v",
+            f"{dest_dir}:/backup",
+            "alpine",
+            "tar",
+            "czf",
+            f"/backup/{name}.tar.gz",
+            "-C",
+            "/source",
+            ".",
+        ]
+    )
 
 
 def restore_volume(name: str, source_dir: Path) -> RunResult:
@@ -1664,15 +2014,24 @@ def restore_volume(name: str, source_dir: Path) -> RunResult:
     if not archive_path.exists():
         return RunResult(returncode=1, stdout="", stderr=f"Archive not found: {archive_path}")
 
-    return _run_captured([
-        "docker", "run", "--rm",
-        "-v", f"{name}:/data",
-        "-v", f"{source_dir}:/backup:ro",
-        "alpine",
-        # Clear volume (.[!.]* matches dotfiles except . and ..) then extract backup
-        "sh", "-c", 'rm -rf /data/* /data/.[!.]* && tar xzf "/backup/$1.tar.gz" -C /data',
-        "--", name,
-    ])
+    return _run_captured(
+        [
+            DOCKER_EXECUTABLE,
+            "run",
+            "--rm",
+            "-v",
+            f"{name}:/data",
+            "-v",
+            f"{source_dir}:/backup:ro",
+            "alpine",
+            # Clear volume (.[!.]* matches dotfiles except . and ..) then extract backup
+            "sh",
+            "-c",
+            'rm -rf /data/* /data/.[!.]* && tar xzf "/backup/$1.tar.gz" -C /data',
+            "--",
+            name,
+        ]
+    )
 
 
 # =============================================================================
@@ -1813,12 +2172,12 @@ def workflow_image_compatible(
     try:
         result = subprocess.run(
             [
-                "docker",
+                DOCKER_EXECUTABLE,
                 "image",
                 "inspect",
                 image,
                 "--format",
-                "{{ index .Config.Labels \"djinn.workflow.publisher\" }}",
+                '{{ index .Config.Labels "djinn.workflow.publisher" }}',
             ],
             capture_output=True,
             text=True,
@@ -1844,7 +2203,7 @@ def _docker_daemon_reachable() -> bool:
     """Return whether Docker responds after an image-inspect failure."""
     try:
         result = subprocess.run(
-            ["docker", "info"],
+            [DOCKER_EXECUTABLE, "info"],
             capture_output=True,
             text=True,
             timeout=_WORKFLOW_IMAGE_INSPECT_TIMEOUT,

@@ -203,6 +203,7 @@ def test_volume_name_collision(tmp_path, actual):
         result.require_valid()
         assert result.mounts[0].source == actual
     else:
+        assert result.diagnostics, "built-in volume must produce a collision diagnostic"
         assert (
             actual in result.diagnostics[0].error
             and "built-in volume" in result.diagnostics[0].error
@@ -223,6 +224,7 @@ def test_literal_environment(tmp_path, monkeypatch, key):
         result.require_valid()
         assert result.environment == {key: literal}
     else:
+        assert result.diagnostics, "invalid environment must produce a diagnostic"
         error = result.diagnostics[0].error
         assert error and key in error
         assert literal not in error
@@ -245,8 +247,8 @@ def test_declared_dynamic_reservations(tmp_path, monkeypatch, case):
     docker.ensure_host_env(config)
     for name in (
         "get_shell_mount_args",
-        "get_audio_mount_args",
-        "get_dbus_mount_args",
+
+
         "get_sops_age_key_mount_args",
     ):
         monkeypatch.setattr(docker, name, lambda *args: [])

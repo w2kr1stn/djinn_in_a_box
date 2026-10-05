@@ -11,9 +11,15 @@ import typer
 from rich.table import Table
 
 from djinn_in_a_box.commands.doctor import preflight
-from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
+from djinn_in_a_box.config.defaults import (
+    DESKTOP_RUNTIME_VOLUMES,
+    SYNC_PATHS,
+    VOLUME_CATEGORIES,
+    volume_categories,
+)
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core import host_runtime
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
@@ -46,9 +52,7 @@ from djinn_in_a_box.core.docker import (
     delete_volume,
     delete_volumes,
     ensure_network,
-    get_audio_mount_args,
     get_config_root,
-    get_dbus_mount_args,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
     get_running_containers,
@@ -59,6 +63,7 @@ from djinn_in_a_box.core.docker import (
     resolve_docker_mode,
     volume_exists,
 )
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.exceptions import (
     ConfigNotFoundError,
     ConfigValidationError,
@@ -259,14 +264,6 @@ def start(
     else:
         status_line("Shell", "No host config found", "status.disabled")
 
-    # Audio passthrough status
-    audio_args = get_audio_mount_args()
-    dbus_args = get_dbus_mount_args()
-    if audio_args:
-        status_line("Audio", "PulseAudio forwarding enabled", "status.enabled")
-    else:
-        status_line("Audio", "No audio device detected", "status.disabled")
-
     # The mount itself is built (and refused when unsafe) by the compose layer.
     if config.sops_age_key_file is not None:
         status_line("SOPS", f"{config.sops_age_key_file} (read-only)", value_style="path")
@@ -289,14 +286,13 @@ def start(
         mounts=mounts,
     )
 
+    result = None
     try:
         if detach:
             result = compose_up_detached(
                 config,
                 options,
                 shell_mount_args=shell_args,
-                audio_mount_args=audio_args,
-                dbus_mount_args=dbus_args,
             )
         else:
             result = compose_run(
@@ -304,8 +300,6 @@ def start(
                 options,
                 interactive=True,
                 shell_mount_args=shell_args,
-                audio_mount_args=audio_args,
-                dbus_mount_args=dbus_args,
             )
     except (MountCollisionError, MountSpecificationError) as e:
         error(str(e))
@@ -317,8 +311,9 @@ def start(
         # A detached container outlives this process, so the proxy it talks to has
         # to stay up. Only the foreground path owns the proxy's lifetime.
         if not detach:
-            cleanup_docker_proxy(docker_mode, config)
+            cleanup_docker_proxy(docker_mode, config, owner=result.owner if result else None)
 
+    assert result is not None
     if result.stderr:
         # Captured Docker output is data, not markup. Rich would silently delete
         # every bracketed token — `[internal]`, `[auth]`, `[dev 3/25]` — which is
@@ -429,7 +424,7 @@ def status() -> None:
     # Check Docker availability
     try:
         docker_check = subprocess.run(
-            ["docker", "info"],
+            [DOCKER_EXECUTABLE, "info"],
             capture_output=True,
             check=False,
         )
@@ -455,7 +450,7 @@ def status() -> None:
     rule("Containers")
     result = subprocess.run(
         [
-            "docker",
+            DOCKER_EXECUTABLE,
             "ps",
             "-a",
             "--filter",
@@ -499,7 +494,7 @@ def status() -> None:
     rule("Networks")
     result = subprocess.run(
         [
-            "docker",
+            DOCKER_EXECUTABLE,
             "network",
             "ls",
             "--filter",
@@ -539,7 +534,7 @@ def clean_default(ctx: typer.Context) -> None:
     """Remove containers only (default action when no subcommand given).
 
     Runs `docker compose down` to stop and remove containers.
-    Volumes and networks are preserved.
+    Desktop runtime volumes are removed; data/cache volumes and networks are preserved.
 
     """
     if ctx.invoked_subcommand is None:
@@ -729,31 +724,42 @@ def clean_all(
     down_result = compose_down()
     if not down_result.success:
         warning(f"Failed to stop containers: {down_result.stderr.strip() or 'unknown error'}")
-        warning("Proceeding with cleanup despite container stop failure")
+        raise typer.Exit(down_result.returncode)
 
-    info("Deleting all volumes...")
-    all_volumes = [v for vols in categories.values() for v in vols]
-    results = delete_volumes(all_volumes)
-    for vol, deleted in results.items():
-        if deleted:
-            success(f"  Deleted: {vol}")
-        else:
-            warning(f"  Failed: {vol}")
+    try:
+        with host_runtime.creation_guard():
+            if host_runtime.inspect_dev("djinn", host_runtime.DOCKER_EXECUTABLE) is not None:
+                raise RuntimeMountSpecificationError(
+                    "A replacement dev owns the runtime; retry clean"
+                )
+            info("Deleting all volumes...")
+            all_volumes = [v for vols in categories.values() for v in vols
+                           if v not in DESKTOP_RUNTIME_VOLUMES]
+            results = delete_volumes(all_volumes)
+            for vol, deleted in results.items():
+                if deleted:
+                    success(f"  Deleted: {vol}")
+                else:
+                    warning(f"  Failed: {vol}")
 
-    info("Clearing all sync paths...")
-    for category in SYNC_PATHS:
-        for path in get_existing_sync_paths_by_category(category, config):
-            if clear_sync_path(path):
-                success(f"  Cleared: {path}")
+            info("Clearing all sync paths...")
+            for category in SYNC_PATHS:
+                for path in get_existing_sync_paths_by_category(category, config):
+                    if clear_sync_path(path):
+                        success(f"  Cleared: {path}")
+                    else:
+                        warning(f"  Failed: {path}")
+
+            info("Removing network...")
+            if network_exists(DJINN_NETWORK):
+                if delete_network(DJINN_NETWORK):
+                    success(f"  Deleted: {DJINN_NETWORK}")
             else:
-                warning(f"  Failed: {path}")
+                err_console.print(f"  {DJINN_NETWORK} does not exist")
 
-    info("Removing network...")
-    if network_exists(DJINN_NETWORK):
-        if delete_network(DJINN_NETWORK):
-            success(f"  Deleted: {DJINN_NETWORK}")
-    else:
-        err_console.print(f"  {DJINN_NETWORK} does not exist")
+    except (RuntimeMountSpecificationError, OSError, subprocess.SubprocessError) as exc:
+        error(f"Cleanup preserved resources: {exc}")
+        raise typer.Exit(1) from None
 
     blank()
     success("Cleanup complete.")
@@ -775,7 +781,7 @@ def audit(
     blank()
 
     result = subprocess.run(
-        ["docker", "logs", "--tail", str(tail), "djinn-docker-proxy"],
+        [DOCKER_EXECUTABLE, "logs", "--tail", str(tail), "djinn-docker-proxy"],
         check=False,
     )
     if result.returncode != 0:
@@ -829,7 +835,7 @@ def enter() -> None:
     blank()
 
     result = subprocess.run(
-        ["docker", "exec", "-it", container, "zsh"],
+        [DOCKER_EXECUTABLE, "exec", "-it", container, "zsh"],
         check=False,
     )
     raise typer.Exit(result.returncode)

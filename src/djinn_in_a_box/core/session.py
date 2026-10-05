@@ -23,6 +23,7 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.docker import (
     workflow_image_compatible as inspect_workflow_image,
 )
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.workflow_publisher import (
     PUBLISHER_LOCK_ERROR_PREFIX,
     PUBLISHER_WRITE_ERROR_PREFIX,
@@ -133,7 +134,7 @@ class SessionManager:
             msg = f"Unhandled workflow image compatibility: {image_compatibility!r}"
             raise AssertionError(msg)
         command = [
-            "docker",
+            DOCKER_EXECUTABLE,
             "exec",
             target.container_id,
             "python3",
@@ -175,7 +176,7 @@ class SessionManager:
             return WorkflowImageCompatibility.UNKNOWN
         try:
             container = subprocess.run(
-                ["docker", "inspect", target.container_id, "--format", "{{.Image}}"],
+                [DOCKER_EXECUTABLE, "inspect", target.container_id, "--format", "{{.Image}}"],
                 capture_output=True,
                 text=True,
                 timeout=_EXEC_TIMEOUT,
@@ -206,7 +207,7 @@ class SessionManager:
             agent_cmd = self._build_interactive_command(agent_config, model, initial_prompt)
             full_cmd = f"cd {shlex.quote(cwd)} && git init -q 2>/dev/null; {agent_cmd}"
 
-            cmd: list[str] = ["docker", "exec", "-it"]
+            cmd: list[str] = [DOCKER_EXECUTABLE, "exec", "-it"]
             for key, value in _SESSION_ENV.items():
                 cmd.extend(["-e", f"{key}={value}"])
             cmd.extend(["-w", cwd])
@@ -264,7 +265,7 @@ class SessionManager:
             agent_cmd = build_agent_command(agent_config, model=model)
             full_cmd = f"cd {shlex.quote(cwd)} && git init -q 2>/dev/null; {agent_cmd}"
 
-            cmd: list[str] = ["docker", "exec"]
+            cmd: list[str] = [DOCKER_EXECUTABLE, "exec"]
             cmd.extend(["-e", f"AGENT_PROMPT={prompt}"])
             for key, value in _SESSION_ENV.items():
                 cmd.extend(["-e", f"{key}={value}"])
@@ -371,7 +372,7 @@ class SessionManager:
         try:
             result = subprocess.run(
                 [
-                    "docker",
+                    DOCKER_EXECUTABLE,
                     "ps",
                     "--filter",
                     f"name=^{_DJINN_CONTAINER_NAME}$",

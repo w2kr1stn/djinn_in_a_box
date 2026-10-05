@@ -1,0 +1,6 @@
+{
+  "dbus": ["xdg-dbus-proxy", "unix:path=/upstream/bus", "/out/bus", "--filter",
+           "--call=org.freedesktop.Notifications=org.freedesktop.Notifications.*@/org/freedesktop/Notifications",
+           "--broadcast=org.freedesktop.Notifications=org.freedesktop.Notifications.*@/org/freedesktop/Notifications"],
+  "audio": ["pulseaudio", "--daemonize=no", "--system=no", "-n", "-F", "/etc/djinn/relay.pa", "--fail=yes", "--disallow-module-loading=yes", "--disallow-exit=yes", "--use-pid-file=no", "--exit-idle-time=-1", "--disable-shm=yes", "--log-target=stderr"]
+}

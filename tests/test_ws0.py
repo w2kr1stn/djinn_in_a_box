@@ -129,7 +129,7 @@ class TestComposeEnvBridge:
     ) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)
-        self._assert_guarded(self._env_of(mock_run), mock_app_config)
+        assert self._env_of(mock_run)["CODE_DIR"] == str(Path.home())
 
     # Teardown from the host: the self-teardown guard is not what this pins, and
     # the suite may well be running inside the container it would refuse to reap.
@@ -160,7 +160,7 @@ class TestComposeEnvBridge:
     ) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         cleanup_docker_proxy(DockerMode.PROXY, mock_app_config)
-        assert mock_run.call_count == 2  # stop + rm
+        assert mock_run.call_count == 0  # A caller without ownership cannot touch the proxy.
         for call in mock_run.call_args_list:
             env = call.kwargs.get("env")
             assert env is not None

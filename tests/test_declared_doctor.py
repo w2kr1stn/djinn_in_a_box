@@ -34,8 +34,6 @@ CDP_HOST="literal"
         path.write_text(path.read_text() + "[\n")
     monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", path)
     monkeypatch.setattr(docker, "get_shell_mount_args", lambda config: [])
-    monkeypatch.setattr(docker, "get_audio_mount_args", lambda: [])
-    monkeypatch.setattr(docker, "get_dbus_mount_args", lambda: [])
     monkeypatch.setattr(docker, "get_sops_age_key_mount_args", lambda config: [])
     if case == "optional-context":
 

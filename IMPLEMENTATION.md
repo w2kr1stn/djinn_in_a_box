@@ -814,11 +814,22 @@ manual declarations, `includeIf` wiring and repository changes. Doctor inspects
 configuration with origins and bounded repository discovery, and parses SSH
 Includes without executing `Match exec`; it never loads keys or repairs Git/SSH config.
 
-`core/docker.py` also auto-detects optional host mounts:
+`core/desktop.py` discovers only standard runtime Unix sockets, renders helper
+delivery, and exposes `inspect_desktop_endpoints()` for doctor and the future
+#76 sealed check. `core/docker.py` executes bounded helper preparation and a
+downstream probe from the dev image. Only healthy, authenticated endpoints receive
+read-only volume mounts at `/run/djinn/dbus` or `/run/djinn/audio` and their paired
+environment. Failed channels warn and remain absent, with no raw fallback.
 
-- `get_audio_mount_args()` mounts the PulseAudio/PipeWire socket when present
-- `get_dbus_mount_args()` mounts the session bus only when the host path is an
-  actual Unix socket
+`core/host_runtime.py` always takes the canonical creation guard, including without
+Git identities. Generation labels, actual container IDs and persisted ownership
+coordinate creation, clean, and the detached observer's helper stop/start/remove
+transitions. Docker's absolute executable is resolved once and passed to the
+isolated observer. Empty Git identities still create no agent, keys or SSH mounts.
+Unknown Docker state and replacement generations authorize no resource cleanup.
+
+`core/docker.py` also auto-detects optional shell mounts:
+
 - `get_shell_mount_args(config)` mounts `.zshrc`, an explicit Oh My Posh theme,
   and the host shell custom directory unless `shell.skip_mounts` is true
 
@@ -836,7 +847,8 @@ The same module owns the repeatable user-mount contract:
   `dev` invocation, including Compose, image-alias, runtime, Direct-socket,
   zone-overlay, and user mounts. Equal targets and user targets that are
   ancestors of an occupied target raise `MountCollisionError`; child targets
-  remain valid except that assigned zone targets are reserved too.
+  remain valid except that assigned zone targets and managed SSH/desktop directories
+  (including descendants and `/var/run` aliases) are reserved too.
   The typed static Compose target table excludes the workspace root;
   `_reserved_mount_targets()` adds only the active `config.workspace_target`.
   The unused workspace root remains available for explicit user mounts.
@@ -966,9 +978,18 @@ solve in the daemon running, so a timeout here would report a cancellation it
 cannot perform.
 
 `Dockerfile` builds from `debian:bookworm-slim`. It installs base packages,
-audio client support, optional packages from `packages.txt`, Docker CLI,
+audio clients, `notify-send`, D-Bus clients, optional packages from `packages.txt`, Docker CLI,
 Compose plugin, GitHub CLI, uv, a non-root `dev` user, zsh setup, Node via fnm,
 and the supported coding agent CLIs.
+
+`docker-compose.desktop.yml` defines two independent profiled helper services.
+Bake explicitly selects `dev` and the shared `dbus-helper` build target; both
+helpers use `djinn-desktop-helper:1`, resolved to a local image ID at preparation.
+`helpers/desktop/Dockerfile` pins Debian trixie by manifest digest and asserts the
+Debian proxy package is at least `0.1.6-1+deb13u3`. Image-owned policy and bootstrap
+scripts drop to UID/GID 1000, clear supplementary groups and capabilities, and
+run isolated Python from `/`. Helper-local health uses ordinary client credentials;
+the independent dev-image probe checks downstream authentication before delivery.
 
 The Python `djinn` CLI and its parser dependencies run on the host. The image
 copies the stdlib-only `workflow_publisher.py` to
@@ -1093,7 +1114,7 @@ only the preflight provisioning, not provisioning as such.
 
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,
-image, network, D-Bus session availability, and seed
+image, network, actual D-Bus/audio delivery and raw desktop exposure, and seed
 config presence. It also includes the read-only `Config workflow` audit, which
 is `PASS` when clean and `WARN` when drift or validation needs attention.
 

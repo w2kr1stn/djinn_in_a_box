@@ -21,10 +21,10 @@ from djinn_in_a_box.core.paths import get_project_root
 
 
 @pytest.fixture(autouse=True)
-def _isolate_legacy_compose_subprocess_tests(request, monkeypatch):
+def _isolate_legacy_compose_subprocess_tests(request, monkeypatch, tmp_path):
     """Legacy Compose tests mock Docker. Dedicated Git tests exercise the real lifecycle."""
-    legacy = {"test_docker", "test_ws0", "test_sops_age_identity"}
-    if request.module.__name__.split(".")[-1] not in legacy:
+    dedicated = {"test_git_runtime", "test_desktop", "test_desktop_runtime", "test_desktop_live"}
+    if request.module.__name__.split(".")[-1] in dedicated:
         return
     from djinn_in_a_box.core import docker
 
@@ -33,6 +33,11 @@ def _isolate_legacy_compose_subprocess_tests(request, monkeypatch):
         yield MagicMock()
 
     monkeypatch.setattr(docker, "git_runtime", isolated)
+    monkeypatch.setattr(docker, "_prepare_companions", lambda *args: None)
+    runtime = tmp_path / "runtime-owner"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(docker.host_runtime, "runtime_root", lambda **kwargs: runtime)
+    monkeypatch.setattr(docker.host_runtime, "inspect_object", lambda *args: None)
 
 
 @pytest.fixture

@@ -171,8 +171,6 @@ class TestComposeRun:
             command="echo",
             interactive=False,
             shell_mount_args=[],
-            audio_mount_args=[],
-            dbus_mount_args=[],
         )
 
         cmd = mock_run.call_args.args[0]
@@ -189,8 +187,6 @@ class TestComposeRun:
                 command="echo",
                 interactive=False,
                 shell_mount_args=[],
-                audio_mount_args=[],
-                dbus_mount_args=[],
             )
         mock_run.assert_not_called()
 
@@ -207,8 +203,6 @@ class TestComposeRun:
                 command="echo",
                 interactive=False,
                 shell_mount_args=[],
-                audio_mount_args=[],
-                dbus_mount_args=[],
             )
         mock_run.assert_not_called()
 
@@ -231,8 +225,6 @@ def test_detached_start_carries_mount_and_env_in_the_override(
         _with_key(mock_app_config, key_file),
         ContainerOptions(),
         shell_mount_args=[],
-        audio_mount_args=[],
-        dbus_mount_args=[],
     )
 
     service = payload["services"]["dev"]  # type: ignore[index]

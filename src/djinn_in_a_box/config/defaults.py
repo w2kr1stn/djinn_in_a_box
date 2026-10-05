@@ -8,7 +8,10 @@ from djinn_in_a_box.config.declarations import VolumeDeclaration, declaration_er
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.exceptions import ConfigValidationError
 
+DESKTOP_RUNTIME_VOLUMES: Final = ("djinn-desktop-dbus", "djinn-desktop-audio")
+
 VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
+    "none": list(DESKTOP_RUNTIME_VOLUMES),
     "cache": [
         "djinn-uv-cache",
         "djinn-tools-cache",

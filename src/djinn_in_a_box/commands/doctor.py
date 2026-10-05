@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import shutil
 import stat
 import subprocess
 from dataclasses import dataclass
@@ -42,11 +41,11 @@ from djinn_in_a_box.core.docker import (
     ensure_host_env,
     ensure_network,
     get_config_root,
-    get_dbus_mount_args,
     network_exists,
     resolve_zone_roots,
     sops_age_key_file_problem,
 )
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
@@ -164,7 +163,7 @@ def _sops_age_key_check(config: AppConfig, config_root: Path) -> Check | None:
 # Low-level probes (each degrades to a boolean; never raises)
 # -----------------------------------------------------------------------------
 def _docker_installed() -> bool:
-    return shutil.which("docker") is not None
+    return Path(DOCKER_EXECUTABLE).is_file() and os.access(DOCKER_EXECUTABLE, os.X_OK)
 
 
 def _command_ok(args: list[str]) -> bool:
@@ -177,7 +176,7 @@ def _command_ok(args: list[str]) -> bool:
 
 def docker_daemon_ok() -> bool:
     """True if the Docker daemon is reachable."""
-    return _command_ok(["docker", "info"])
+    return _command_ok([DOCKER_EXECUTABLE, "info"])
 
 
 def _docker_socket_ok() -> bool:
@@ -190,16 +189,16 @@ def _docker_socket_ok() -> bool:
 
 def compose_v2_ok() -> bool:
     """True if Docker Compose v2 is available (``docker compose``)."""
-    return _command_ok(["docker", "compose", "version"])
+    return _command_ok([DOCKER_EXECUTABLE, "compose", "version"])
 
 
 def buildx_ok() -> bool:
     """True if Docker Buildx is available (``docker buildx``), which builds the image."""
-    return _command_ok(["docker", "buildx", "version"])
+    return _command_ok([DOCKER_EXECUTABLE, "buildx", "version"])
 
 
 def _image_built() -> bool:
-    return _command_ok(["docker", "image", "inspect", _IMAGE])
+    return _command_ok([DOCKER_EXECUTABLE, "image", "inspect", _IMAGE])
 
 
 def _seed_target_has_expected_type(path: Path, kind: str) -> bool:
@@ -547,8 +546,10 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
         checks.extend(declaration_checks(config))
         from djinn_in_a_box.core.git_diagnostics import git_diagnostics
 
-        checks.extend(Check(row.name, Status(row.status), row.detail, row.remedy)
-                      for row in git_diagnostics(config))
+        checks.extend(
+            Check(row.name, Status(row.status), row.detail, row.remedy)
+            for row in git_diagnostics(config)
+        )
 
     image = daemon and _image_built()
     checks.append(
@@ -570,14 +571,37 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
         )
     )
 
-    dbus_available = bool(get_dbus_mount_args())
+    inspection = docker_core.inspect_running_desktop()
+    for row in inspection.channels:
+        status = (
+            Status.FAIL
+            if row.state == "raw"
+            else Status.PASS
+            if row.state in {"off", "filtered", "locked"}
+            else Status.WARN
+        )
+        detail = row.detail + (f"; Debian xdg-dbus-proxy {row.version}" if row.version else "")
+        checks.append(
+            Check(
+                "D-Bus session" if row.channel == "dbus" else "Audio relay",
+                status,
+                detail,
+                "Rebuild and recreate dev." if status is not Status.PASS else "",
+            )
+        )
     checks.append(
         Check(
-            "D-Bus session",
-            Status.PASS,
-            "desktop notifications available"
-            if dbus_available
-            else "not detected — desktop notifications off",
+            "Desktop raw sockets",
+            Status.FAIL
+            if inspection.raw_sources
+            else Status.PASS
+            if inspection.raw_verified
+            else Status.WARN,
+            "; ".join(inspection.raw_sources)
+            if inspection.raw_sources
+            else "no raw desktop sources in actual dev mounts"
+            if inspection.raw_verified
+            else "no running dev inspection; raw exposure unknown",
         )
     )
 

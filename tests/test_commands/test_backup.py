@@ -58,7 +58,7 @@ def test_declared_backup_categories(
     assert snapshot == {
         "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server", "djinn-scratch"],
         "data": ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-journal"],
-        "none": ["djinn-worker"],
+        "none": ["djinn-desktop-dbus", "djinn-desktop-audio", "djinn-worker"],
     }
     snapshot["data"].clear()
     assert original == VOLUME_CATEGORIES
@@ -98,8 +98,8 @@ def test_declared_backup_categories(
         result = runner.invoke(app, args)
     load.assert_called_once()
     if selection == "none":
-        assert result.exit_code == 1, result.output
-        assert "Unknown category: 'none'" in result.output
+        assert result.exit_code == 0, result.output
+        assert "No existing volumes" in result.output
         volumes.assert_not_called()
         sync.assert_not_called()
         assert not backups_dir.exists()
@@ -123,6 +123,9 @@ def test_declared_backup_categories(
 @pytest.mark.parametrize(
     ("case", "members", "mounts", "expected_volumes", "expected_sync", "skipped"),
     [
+        ("desktop-runtime", ["djinn-desktop-dbus.tar.gz", "djinn-desktop-audio.tar.gz",
+                              "declared-volumes/djinn-desktop-audio.tar.gz"],
+         {}, set(), set(), set()),
         ("data", ["declared-volumes/djinn-journal.tar.gz"], {}, {"djinn-journal"}, set(), set()),
         ("cache", ["declared-volumes/djinn-scratch.tar.gz"], {}, {"djinn-scratch"}, set(), set()),
         ("sync-project", ["declared-volumes/djinn-sync-project.tar.gz"],
@@ -137,7 +140,7 @@ def test_declared_backup_categories(
                              "declared-volumes/djinn-sync-claude.tar.gz"],
          {"sync-claude": "none"}, set(), {"claude"}, {"djinn-sync-claude"}),
     ],
-    ids=["data", "cache", "sync-project", "changed-category", "none", "removed",
+    ids=["desktop-runtime", "data", "cache", "sync-project", "changed-category", "none", "removed",
          "built-in", "sync-claude-pair"],
 )
 def test_declared_volume_restore_namespace(

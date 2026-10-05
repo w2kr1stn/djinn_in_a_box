@@ -24,6 +24,8 @@ def test_every_creator_public_fragment_and_lifetime(git_inputs, monkeypatch, kin
         assert config is git_inputs
         assert name == "djinn"
         lease = GitRuntime(root, "generation")
+        lease.begin_creation = lambda: None
+        lease.retain = lambda: setattr(lease, "detached", True)
         events.append("acquired")
         try:
             yield lease
@@ -44,8 +46,8 @@ def test_every_creator_public_fragment_and_lifetime(git_inputs, monkeypatch, kin
 
     for name in (
         "get_shell_mount_args",
-        "get_audio_mount_args",
-        "get_dbus_mount_args",
+
+
         "get_sops_age_key_mount_args",
     ):
         monkeypatch.setattr(docker, name, lambda *args: [])
@@ -66,8 +68,7 @@ def test_every_creator_public_fragment_and_lifetime(git_inputs, monkeypatch, kin
         with pytest.raises(KeyboardInterrupt):
             create()
     elif outcome == "timeout" and kind == "detached":
-        with pytest.raises(subprocess.TimeoutExpired):
-            create()
+        assert create().returncode == 124
     else:
         result = create()
         assert result.success == (outcome == "success")
@@ -105,8 +106,8 @@ def test_managed_delivery_and_children_cannot_be_overridden(
 ):
     for name in (
         "get_shell_mount_args",
-        "get_audio_mount_args",
-        "get_dbus_mount_args",
+
+
         "get_sops_age_key_mount_args",
     ):
         monkeypatch.setattr(docker, name, lambda *args: [])

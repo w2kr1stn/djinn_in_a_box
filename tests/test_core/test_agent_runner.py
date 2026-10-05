@@ -100,7 +100,9 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     assert compose.call_args.kwargs["env"] == {"AGENT_PROMPT": "inspect this"}
     assert compose.call_args.kwargs["interactive"] is False
     assert compose.call_args.kwargs["timeout"] == 120
-    runner_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, runner_mocks["app_config"])
+    runner_mocks["cleanup"].assert_called_once_with(
+        DockerMode.PROXY, runner_mocks["app_config"], owner=None
+    )
 
 
 def test_run_headless_agent_requires_resolved_mounts(
@@ -170,7 +172,7 @@ def test_checked_config_snapshot_is_used_without_reload(
 
     runner_mocks["load_config"].assert_not_called()
     assert runner_mocks["compose"].call_args.args[0] is checked
-    runner_mocks["cleanup"].assert_called_once_with(DockerMode.NONE, checked)
+    runner_mocks["cleanup"].assert_called_once_with(DockerMode.NONE, checked, owner=None)
 
 
 def test_run_headless_agent_rejects_unknown_agent_before_network(
@@ -225,7 +227,9 @@ def test_run_headless_agent_cleans_proxy_after_execution_error(
             resolved_mounts=(),
         )
 
-    runner_mocks["cleanup"].assert_called_once_with(DockerMode.PROXY, runner_mocks["app_config"])
+    runner_mocks["cleanup"].assert_called_once_with(
+        DockerMode.PROXY, runner_mocks["app_config"], owner=None
+    )
 
 
 def test_headless_config_carries_declarations(tmp_path, monkeypatch):
@@ -249,11 +253,11 @@ def test_headless_config_carries_declarations(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(agent_runner, "load_agents", lambda: {"codex": AgentConfig(binary="codex")})
     monkeypatch.setattr(agent_runner, "ensure_network", lambda: True)
-    monkeypatch.setattr(agent_runner, "cleanup_docker_proxy", lambda *args: None)
+    monkeypatch.setattr(agent_runner, "cleanup_docker_proxy", lambda *args, **kwargs: None)
     for name in (
         "get_shell_mount_args",
-        "get_audio_mount_args",
-        "get_dbus_mount_args",
+
+
         "get_sops_age_key_mount_args",
     ):
         monkeypatch.setattr(docker, name, lambda *args: [])

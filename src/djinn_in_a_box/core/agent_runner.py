@@ -100,8 +100,9 @@ def run_headless_agent(
         mounts=resolved_mounts,
     )
 
+    result = None
     try:
-        return compose_run(
+        result = compose_run(
             checked_config,
             options,
             command=agent_command,
@@ -109,5 +110,6 @@ def run_headless_agent(
             env={"AGENT_PROMPT": prompt},
             timeout=timeout,
         )
+        return result
     finally:
-        cleanup_docker_proxy(docker_mode, checked_config)
+        cleanup_docker_proxy(docker_mode, checked_config, owner=result.owner if result else None)

@@ -44,6 +44,7 @@ def fake_docker(git_inputs, monkeypatch):
         "    sys.exit(1)\n"
     )
     binary.chmod(0o700)
+    monkeypatch.setattr(host_runtime, "DOCKER_EXECUTABLE", str(binary))
     monkeypatch.setenv("PATH", str(binary.parent) + os.pathsep + os.environ["PATH"])
     try:
         yield state
@@ -278,7 +279,7 @@ def test_runtime_requires_owner_only_directory_and_matching_uid(git_inputs, monk
         assert "0700" in str(exc_info.value)
 
 
-def test_empty_identities_skip_git_runtime(git_inputs, monkeypatch):
+def test_empty_identities_skip_git_runtime(git_inputs, fake_docker, monkeypatch):
     config = git_inputs.model_copy(
         update={
             "git": git_inputs.git.model_copy(
@@ -296,15 +297,14 @@ def test_empty_identities_skip_git_runtime(git_inputs, monkeypatch):
     root = runtime_root()
 
     with git_runtime(config, "djinn") as runtime:
-        assert runtime.root is None
+        assert runtime.root == root
         assert runtime.agent is None
-        assert runtime.observer is None
+        assert runtime.observer is not None
         runtime.add_to_fragment(fragment)
-        runtime.retain()
-        runtime.close()
-
-    assert fragment["services"]["dev"] == {}
-    assert not root.exists()
+        assert fragment["services"]["dev"] == {"labels": {GENERATION_LABEL: runtime.generation}}
+    assert not (root / "export").exists()
+    assert not (root / "public").exists()
+    assert not (root / "state.json").exists()
 
 
 def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):
@@ -321,7 +321,7 @@ def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):
                 "container_name": "djinn",
                 "creator_pid": os.getpid(),
                 "creator_token": host_runtime.process_token(os.getpid()),
-                "keys": [],
+                "keys": [], "git_enabled": True, "resources": {}, "volumes": [],
             }
         )
     )
@@ -336,9 +336,9 @@ def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):
         def serve(self):
             self.stop.wait(3)
 
-    def inspect(name):
+    def inspect(name, *args):
         observations.append(name)
-        if len(observations) > 1:
+        if len(observations) > 2:
             raise AssertionError("observer continued after its startup deadline")
         return None
 
@@ -349,8 +349,8 @@ def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):
     monkeypatch.setattr(host_runtime, "agent_keys", lambda path: frozenset())
     monkeypatch.setattr(host_runtime, "stop_owned_process", lambda *args: stopped.append(args))
     monkeypatch.setattr(host_runtime.signal, "signal", lambda *args: None)
-    host_runtime.observe(root, lock_fd)
-    assert observations == ["djinn"]
+    host_runtime.observe(root, lock_fd, host_runtime.DOCKER_EXECUTABLE)
+    assert observations == ["djinn", "djinn"]
     assert stopped == [(123456, "fake")]
     assert not (root / "state.json").exists()
     with pytest.raises(OSError):

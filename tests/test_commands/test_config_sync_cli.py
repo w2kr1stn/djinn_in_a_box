@@ -220,7 +220,6 @@ def test_doctor_audits_once_without_sync_or_provider(
     monkeypatch.setattr(doctor_module, "get_project_root", lambda: tmp_path)
     monkeypatch.setattr(doctor_module, "_docker_installed", lambda: False)
     monkeypatch.setattr(doctor_module, "_docker_socket_ok", lambda: True)
-    monkeypatch.setattr(doctor_module, "get_dbus_mount_args", _no_mount_args)
 
     checks = doctor_module.run_checks(config)
 

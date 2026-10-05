@@ -1,0 +1,3 @@
+load-module module-native-protocol-unix socket=/out/native auth-anonymous=no auth-group-enable=no auth-cookie=/out/cookie
+load-module module-tunnel-sink-new server=unix:/upstream/pulse/native sink_name=djinn_host_sink reconnect_interval_ms=1000
+load-module module-tunnel-source-new server=unix:/upstream/pulse/native source_name=djinn_host_source reconnect_interval_ms=1000
