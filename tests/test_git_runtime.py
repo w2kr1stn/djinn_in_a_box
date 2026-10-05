@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import subprocess
 import sys
 import threading
@@ -76,6 +77,63 @@ def wait_for_absence(path):
     assert not path.exists(), f"runtime leaked: {path}"
 
 
+def test_runtime_root_ignores_environment(tmp_path, monkeypatch):
+    expected = (
+        Path(pwd.getpwuid(os.getuid()).pw_dir)
+        / ".local"
+        / "state"
+        / "djinn"
+        / "runtime"
+        / "git-agent"
+    )
+    xdg = tmp_path / "xdg-runtime"
+    xdg.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+    monkeypatch.setenv("HOME", str(tmp_path / "first-home"))
+    assert runtime_root() == expected
+
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path / "second-home"))
+    assert runtime_root() == expected
+
+
+@pytest.mark.parametrize("vector", ["caller-directory", "pythonpath"])
+def test_observer_ignores_shadow_package_in_caller_directory(
+    git_inputs, fake_docker, tmp_path, monkeypatch, vector
+):
+    caller = tmp_path / "caller"
+    shadow_package = caller / "djinn_in_a_box"
+    shadow_package.mkdir(parents=True)
+    marker = tmp_path / "shadow-imported"
+    (shadow_package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('shadowed')\n"
+    )
+    if vector == "caller-directory":
+        monkeypatch.chdir(caller)
+    else:
+        # The working directory alone is neutralised by cwd="/"; only -I ignores PYTHONPATH.
+        monkeypatch.setenv("PYTHONPATH", str(caller))
+
+    root = runtime_root()
+    observer = None
+    runtime = None
+    try:
+        with git_runtime(git_inputs, "djinn") as runtime:
+            observed_dev(fake_docker, runtime)
+            runtime.retain()
+            observer = runtime.observer
+            assert observer is not None and observer.poll() is None
+            assert (root / "attached").exists()
+            assert not marker.exists()
+    finally:
+        if observer is not None:
+            if observer.poll() is None:
+                observer.terminate()
+            observer.wait(timeout=8)
+        if runtime is not None:
+            runtime.close()
+
+
 @pytest.mark.parametrize("transition", ["stopped", "removed", "replaced"])
 def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, transition):
     root = runtime_root()
@@ -108,12 +166,18 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
 
 def test_detached_agent_survives_actual_creator_exit(git_inputs, fake_docker):
     driver = """
+from types import SimpleNamespace
 import json, os, sys, pytest
 from pathlib import Path
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import host_runtime
 config = AppConfig.model_validate(json.loads(sys.argv[1]))
 with pytest.MonkeyPatch.context() as monkeypatch:
+    monkeypatch.setattr(
+        host_runtime.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=os.environ["DJINN_TEST_PASSWD_HOME"]),
+    )
     monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
     with host_runtime.git_runtime(config, "djinn") as runtime:
         Path(sys.argv[2]).write_text(json.dumps([{
@@ -172,10 +236,16 @@ def test_pending_creator_lock_refuses_second_creator(git_inputs, fake_docker):
 
 def test_startup_orphan_cleanup_after_creator_hard_death(git_inputs, fake_docker):
     driver = """
+from types import SimpleNamespace
 import json, os, sys, pytest
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import host_runtime
 with pytest.MonkeyPatch.context() as monkeypatch:
+    monkeypatch.setattr(
+        host_runtime.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=os.environ["DJINN_TEST_PASSWD_HOME"]),
+    )
     monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
     with host_runtime.git_runtime(AppConfig.model_validate(json.loads(sys.argv[1])), "djinn"):
         os._exit(0)
@@ -195,7 +265,7 @@ with pytest.MonkeyPatch.context() as monkeypatch:
 @pytest.mark.parametrize("problem", ["permissions", "uid"])
 def test_runtime_requires_owner_only_directory_and_matching_uid(git_inputs, monkeypatch, problem):
     if problem == "permissions":
-        Path(os.environ["XDG_RUNTIME_DIR"]).chmod(0o777)
+        runtime_root(create=True).chmod(0o777)
     else:
         monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid() + 1)
     with pytest.raises(GitSSHError) as exc_info, git_runtime(git_inputs, "djinn"):

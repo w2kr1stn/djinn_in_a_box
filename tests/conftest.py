@@ -36,14 +36,25 @@ def _isolate_legacy_compose_subprocess_tests(request, monkeypatch):
 
 
 @pytest.fixture
-def git_inputs(tmp_path, monkeypatch):
+def git_inputs(tmp_path, monkeypatch, request):
     """Two disposable identities and public trust; never touches the user's keys."""
+    from types import SimpleNamespace
+
     from djinn_in_a_box.config.ssh import GitConfig, GitIdentity
+    from djinn_in_a_box.core import host_runtime
 
     home = tmp_path / "home"
     ssh = home / ".ssh"
     ssh.mkdir(parents=True, mode=0o700)
     monkeypatch.setenv("HOME", str(home))
+    passwd_home = tempfile.TemporaryDirectory(prefix="djinn-h-")
+    request.addfinalizer(passwd_home.cleanup)
+    monkeypatch.setenv("DJINN_TEST_PASSWD_HOME", passwd_home.name)
+    monkeypatch.setattr(
+        host_runtime.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=passwd_home.name),
+    )
     monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
     identities = {}
