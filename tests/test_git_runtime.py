@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from djinn_in_a_box.core import host_runtime
 from djinn_in_a_box.core.git_agent import agent_keys
 from djinn_in_a_box.core.host_runtime import (
     GENERATION_LABEL,
@@ -18,6 +19,11 @@ from djinn_in_a_box.core.host_runtime import (
     stop_owned_process,
 )
 from djinn_in_a_box.core.ssh_delivery import GitSSHError, read_public_delivery
+
+
+@pytest.fixture(autouse=True)
+def container_uid_matches_host(monkeypatch):
+    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
 
 
 @pytest.fixture
@@ -102,17 +108,19 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
 
 def test_detached_agent_survives_actual_creator_exit(git_inputs, fake_docker):
     driver = """
-import json, sys
+import json, os, sys, pytest
 from pathlib import Path
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core.host_runtime import git_runtime, GENERATION_LABEL
+from djinn_in_a_box.core import host_runtime
 config = AppConfig.model_validate(json.loads(sys.argv[1]))
-with git_runtime(config, "djinn") as runtime:
-    Path(sys.argv[2]).write_text(json.dumps([{
-        "Id": "dev-detached", "State": {"Running": True},
-        "Config": {"Labels": {GENERATION_LABEL: runtime.generation}}
-    }]))
-    runtime.retain()
+with pytest.MonkeyPatch.context() as monkeypatch:
+    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
+    with host_runtime.git_runtime(config, "djinn") as runtime:
+        Path(sys.argv[2]).write_text(json.dumps([{
+            "Id": "dev-detached", "State": {"Running": True},
+            "Config": {"Labels": {host_runtime.GENERATION_LABEL: runtime.generation}}
+        }]))
+        runtime.retain()
 """
     result = subprocess.run(
         [sys.executable, "-c", driver, git_inputs.model_dump_json(), str(fake_docker)],
@@ -164,11 +172,13 @@ def test_pending_creator_lock_refuses_second_creator(git_inputs, fake_docker):
 
 def test_startup_orphan_cleanup_after_creator_hard_death(git_inputs, fake_docker):
     driver = """
-import json, os, sys
+import json, os, sys, pytest
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core.host_runtime import git_runtime
-with git_runtime(AppConfig.model_validate(json.loads(sys.argv[1])), "djinn"):
-    os._exit(0)
+from djinn_in_a_box.core import host_runtime
+with pytest.MonkeyPatch.context() as monkeypatch:
+    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
+    with host_runtime.git_runtime(AppConfig.model_validate(json.loads(sys.argv[1])), "djinn"):
+        os._exit(0)
 """
     result = subprocess.run(
         [sys.executable, "-c", driver, git_inputs.model_dump_json()],
@@ -187,9 +197,44 @@ def test_runtime_requires_owner_only_directory_and_matching_uid(git_inputs, monk
     if problem == "permissions":
         Path(os.environ["XDG_RUNTIME_DIR"]).chmod(0o777)
     else:
-        monkeypatch.setattr("djinn_in_a_box.core.host_runtime.os.getuid", lambda: 1001)
-    with pytest.raises(GitSSHError, match="0700|UID 1000"), git_runtime(git_inputs, "djinn"):
+        monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid() + 1)
+    with pytest.raises(GitSSHError) as exc_info, git_runtime(git_inputs, "djinn"):
         pytest.fail("unsafe runtime must not prepare Git delivery")
+    if problem == "uid":
+        assert str(exc_info.value) == (
+            f"Git agent socket requires host numeric UID {os.getuid() + 1}, matching the dev image"
+        )
+    else:
+        assert "0700" in str(exc_info.value)
+
+
+def test_empty_identities_skip_git_runtime(git_inputs, monkeypatch):
+    config = git_inputs.model_copy(
+        update={
+            "git": git_inputs.git.model_copy(
+                update={"identities": {}, "signing_identity": None}
+            )
+        }
+    )
+    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid() + 1)
+    monkeypatch.setattr(
+        host_runtime,
+        "start_agent",
+        lambda *args: pytest.fail("empty Git identities must not start an agent"),
+    )
+    fragment = {"services": {"dev": {}}}
+    root = runtime_root()
+
+    with git_runtime(config, "djinn") as runtime:
+        assert runtime.root is None
+        assert runtime.agent is None
+        assert runtime.observer is None
+        runtime.add_to_fragment(fragment)
+        runtime.retain()
+        runtime.close()
+
+    assert fragment["services"]["dev"] == {}
+    assert not root.exists()
 
 
 def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):

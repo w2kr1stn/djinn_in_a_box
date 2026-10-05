@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 GENERATION_LABEL = "djinn.git-agent.generation"
 STARTUP_SECONDS = 60
+CONTAINER_USER_UID = 1000
+"""Must match the ``USER_UID`` build argument used by the dev image."""
 
 
 def private_directory(path: Path) -> Path:
@@ -112,7 +114,7 @@ def inspect_dev(name: str) -> tuple[str, bool, str] | None:
 
 @dataclass
 class GitRuntime:
-    root: Path
+    root: Path | None
     generation: str
     observer: subprocess.Popen[bytes] | None = None
     agent: subprocess.Popen[bytes] | None = None
@@ -120,6 +122,8 @@ class GitRuntime:
     owns_generation: bool = False
 
     def add_to_fragment(self, fragment: ComposeFragment) -> None:
+        if self.root is None:
+            return
         service = fragment["services"]["dev"]
         volumes = service.setdefault("volumes", [])
         for source, target in (
@@ -139,6 +143,8 @@ class GitRuntime:
         service["labels"] = {GENERATION_LABEL: self.generation}
 
     def retain(self) -> None:
+        if self.root is None:
+            return
         if self.observer is not None:
             # `up -d` completed; require the observer to have bound the actual ID.
             deadline = time.monotonic() + 10
@@ -149,6 +155,8 @@ class GitRuntime:
         self.detached = True
 
     def close(self) -> None:
+        if self.root is None:
+            return
         if self.observer is not None:
             self.observer.terminate()
             try:
@@ -186,8 +194,14 @@ class GitRuntime:
 @contextlib.contextmanager
 def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
     """Serialize preparation and hand pending creation to a detached host observer."""
-    if os.getuid() != 1000:
-        raise GitSSHError("Git agent socket requires host numeric UID 1000, matching the dev image")
+    if not config.git.identities:
+        yield GitRuntime(None, "")
+        return
+    if os.getuid() != CONTAINER_USER_UID:
+        raise GitSSHError(
+            f"Git agent socket requires host numeric UID {CONTAINER_USER_UID}, "
+            "matching the dev image"
+        )
     root = runtime_root(create=True)
     lock_fd = os.open(root / "creator.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     runtime = GitRuntime(root, uuid.uuid4().hex)

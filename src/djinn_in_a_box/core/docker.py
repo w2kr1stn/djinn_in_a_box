@@ -31,6 +31,7 @@ from djinn_in_a_box.config.declarations import (
     inspect_declarations,
 )
 from djinn_in_a_box.config.defaults import SYNC_PATHS, VOLUME_CATEGORIES, volume_categories
+from djinn_in_a_box.core import host_runtime
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.exceptions import (
     DeclarationSpecificationError,
@@ -40,18 +41,16 @@ from djinn_in_a_box.core.exceptions import (
     ZoneConfigurationError,
     ZoneRootValidationError,
 )
-from djinn_in_a_box.core.host_runtime import git_runtime
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
+
+git_runtime = host_runtime.git_runtime
 
 DJINN_NETWORK: str = "djinn-network"
 """Docker network name for Djinn containers."""
 
 BUILD_NETWORK_VAR: Final = "DJINN_BUILD_NETWORK"
 """Compose variable that sets ``build.network``; the build grants ``network.host`` from it."""
-
-_CONTAINER_USER_UID: int = 1000
-"""Must match USER_UID build ARG in Dockerfile."""
 
 _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
@@ -568,7 +567,7 @@ def get_audio_mount_args() -> list[str]:
     if not pulse_socket.exists():
         return []
 
-    container_socket = f"/run/user/{_CONTAINER_USER_UID}/pulse/native"
+    container_socket = f"/run/user/{host_runtime.CONTAINER_USER_UID}/pulse/native"
     return [
         "-v", f"{pulse_socket}:{container_socket}",
         "-e", f"PULSE_SERVER=unix:{container_socket}",
@@ -584,7 +583,7 @@ def get_dbus_mount_args() -> list[str]:
     if not host_bus.is_socket():
         return []
 
-    container_bus = f"/run/user/{_CONTAINER_USER_UID}/bus"
+    container_bus = f"/run/user/{host_runtime.CONTAINER_USER_UID}/bus"
     return [
         "-v", f"{host_bus}:{container_bus}:ro",
         "-e", f"DBUS_SESSION_BUS_ADDRESS=unix:path={container_bus}",

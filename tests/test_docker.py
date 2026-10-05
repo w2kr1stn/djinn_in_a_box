@@ -545,8 +545,8 @@ class TestMountTargetCollisions:
     @pytest.mark.parametrize(
         "target",
         [
-            "/run/user/1000/pulse/native",
-            "/var/run/user/1000/pulse/native",
+            f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native",
+            f"/var/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native",
         ],
     )
     def test_rejects_active_audio_socket_target_and_alias(
@@ -567,7 +567,10 @@ class TestMountTargetCollisions:
         try:
             with pytest.raises(
                 MountCollisionError,
-                match=r"conflict path: /run/user/1000/pulse/native",
+                match=re.escape(
+                    f"conflict path: /run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}"
+                    "/pulse/native"
+                ),
             ):
                 validate_container_mounts(
                     resolve_container_mounts((f"{tmp_path}:{target}",)),
@@ -579,7 +582,10 @@ class TestMountTargetCollisions:
 
     @pytest.mark.parametrize(
         "target",
-        ["/run/user/1000/bus", "/var/run/user/1000/bus"],
+        [
+            f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus",
+            f"/var/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus",
+        ],
     )
     def test_rejects_active_dbus_socket_target_and_alias(
         self,
@@ -596,7 +602,10 @@ class TestMountTargetCollisions:
 
         try:
             with pytest.raises(
-                MountCollisionError, match=r"conflict path: /run/user/1000/bus"
+                MountCollisionError,
+                match=re.escape(
+                    f"conflict path: /run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus"
+                ),
             ):
                 validate_container_mounts(
                     resolve_container_mounts((f"{tmp_path}:{target}",)),
@@ -1152,14 +1161,19 @@ class TestGetAudioMountArgs:
         args = get_audio_mount_args()
         v_idx = args.index("-v")
         mount_arg = args[v_idx + 1]
-        assert mount_arg.endswith("/run/user/1000/pulse/native")
+        assert mount_arg.endswith(
+            f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native"
+        )
         assert ":ro" not in mount_arg
 
     def test_pulse_server_env_points_to_container_socket(self, pulse_socket: Path) -> None:
         args = get_audio_mount_args()
         e_idx = args.index("-e")
         env_arg = args[e_idx + 1]
-        assert env_arg == "PULSE_SERVER=unix:/run/user/1000/pulse/native"
+        assert env_arg == (
+            "PULSE_SERVER=unix:/run/user/"
+            f"{docker_mod.host_runtime.CONTAINER_USER_UID}/pulse/native"
+        )
 
 
 class TestGetDbusMountArgs:
@@ -1183,8 +1197,9 @@ class TestGetDbusMountArgs:
         args = get_dbus_mount_args()
         assert "-v" in args
         assert "-e" in args
-        assert f"{dbus_socket}:/run/user/1000/bus:ro" in args
-        assert "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus" in args
+        container_bus = f"/run/user/{docker_mod.host_runtime.CONTAINER_USER_UID}/bus"
+        assert f"{dbus_socket}:{container_bus}:ro" in args
+        assert f"DBUS_SESSION_BUS_ADDRESS=unix:path={container_bus}" in args
 
     def test_returns_empty_when_no_socket(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
