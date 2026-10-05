@@ -204,6 +204,11 @@ def _overlap(a: Path, b: Path) -> bool:
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 
+def _capabilities(values: list[Any] | None) -> set[str]:
+    # Compose reports capabilities as CAP_<NAME>; the plain Docker CLI keeps the given form.
+    return {str(value).removeprefix("CAP_") for value in values or []}
+
+
 def _env(obj: Mapping[str, Any]) -> dict[str, str]:
     return dict(item.split("=", 1) for item in obj.get("Config", {}).get("Env", []) if "=" in item)
 
@@ -244,8 +249,8 @@ def helper_verification_reasons(
         or hc.get("Devices")
         or hc.get("PidMode")
         or hc.get("IpcMode") == "host"
-        or "ALL" not in hc.get("CapDrop", [])
-        or set(hc.get("CapAdd", [])) != {"CHOWN", "SETUID", "SETGID", "SETPCAP"}
+        or "ALL" not in _capabilities(hc.get("CapDrop"))
+        or _capabilities(hc.get("CapAdd")) != {"CHOWN", "SETUID", "SETGID", "SETPCAP"}
         or "no-new-privileges:true" not in hc.get("SecurityOpt", [])
     ):
         reasons.append("helper isolation is unverified")

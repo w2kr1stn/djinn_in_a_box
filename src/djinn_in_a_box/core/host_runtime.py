@@ -98,7 +98,8 @@ def inspect_object(
         cwd="/",
     )
     if result.returncode:
-        if "No such" in result.stderr:
+        # The daemon reports "No such container/image: X" but "get X: no such volume".
+        if "no such" in result.stderr.lower():
             return None
         raise GitSSHError("Docker inspection failed; runtime ownership is unknown")
     try:

@@ -54,7 +54,8 @@ def objects(e):
             "ReadonlyRootfs": True,
             "NetworkMode": "none",
             "CapDrop": ["ALL"],
-            "CapAdd": ["CHOWN", "SETUID", "SETGID", "SETPCAP"],
+            # As Compose 5 reports them; the plain Docker CLI omits the CAP_ prefix.
+            "CapAdd": ["CAP_CHOWN", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID"],
             "SecurityOpt": ["no-new-privileges:true"],
         },
         "Mounts": [
@@ -92,10 +93,14 @@ def inspect(e, dev, helper, image, evidence):
     )
 
 
-def test_verified_endpoints():
+@pytest.mark.parametrize("prefix", ["CAP_", ""])
+def test_verified_endpoints(prefix):
     for channel, expected in (("dbus", "filtered"), ("audio", "locked")):
         e = endpoint(channel)
-        result = inspect(e, *objects(e))
+        dev, helper, image, evidence = objects(e)
+        caps = helper["HostConfig"]["CapAdd"]
+        helper["HostConfig"]["CapAdd"] = [prefix + c.removeprefix("CAP_") for c in caps]
+        result = inspect(e, dev, helper, image, evidence)
         assert result.sealed_ok is True
         assert result.channels[0].state == expected
         assert result.raw_verified
@@ -119,6 +124,8 @@ FAULTS = [
     "wrong-project",
     "wrong-command",
     "writable-root",
+    "extra-cap",
+    "no-cap-drop",
     "network",
     "extra-mount",
     "rw-upstream",
@@ -179,6 +186,10 @@ def test_inspector_rejects_unverified_delivery(fault, tmp_path):
         helper["Config"]["Cmd"].remove("-I")
     elif fault == "writable-root":
         helper["HostConfig"]["ReadonlyRootfs"] = False
+    elif fault == "extra-cap":
+        helper["HostConfig"]["CapAdd"].append("CAP_SYS_ADMIN")
+    elif fault == "no-cap-drop":
+        helper["HostConfig"]["CapDrop"] = None
     elif fault == "network":
         helper["HostConfig"]["NetworkMode"] = "host"
     elif fault == "extra-mount":
@@ -509,6 +520,46 @@ def test_build_version_assertion(version, expected, tmp_path):
         env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
     )
     assert (result.returncode == 0) is expected
+
+
+def test_downstream_probe_uses_supported_compose_run_flags(tmp_path, monkeypatch):
+    # Fakes accept any flag; the real Compose CLI rejects unknown ones (e.g. run --no-build).
+    import re
+    import shutil
+    import subprocess
+
+    docker_cli = shutil.which("docker")
+    if docker_cli is None:
+        pytest.skip("Docker CLI unavailable")
+    help_text = subprocess.run(
+        [docker_cli, "compose", "run", "--help"], capture_output=True, text=True, check=False
+    )
+    if help_text.returncode:
+        pytest.skip("docker compose unavailable")
+    captured = []
+    monkeypatch.setattr(
+        host_runtime,
+        "inspect_object",
+        lambda name, path, resource="container", **kwargs: (
+            {"Id": "sha256:dev"} if resource == "image" else None
+        ),
+    )
+    monkeypatch.setattr(
+        docker,
+        "_run_compose",
+        lambda args, **kwargs: captured.append(args) or SimpleNamespace(success=True, stderr=""),
+    )
+    docker._downstream_probe(
+        AppConfig(code_dir=tmp_path),
+        docker.ContainerOptions(),
+        endpoint(),
+        SimpleNamespace(generation="generation"),
+    )
+    args = captured[0]
+    flags = [a for a in args[args.index("run") + 1 :] if a.startswith("-")]
+    assert flags
+    for flag in flags:
+        assert re.search(rf"(^|\s){re.escape(flag)}(,|\s)", help_text.stdout, re.M), flag
 
 
 def test_root_bootstrap_only_hands_over_directories():
