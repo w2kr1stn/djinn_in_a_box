@@ -511,6 +511,27 @@ def test_build_version_assertion(version, expected, tmp_path):
     assert (result.returncode == 0) is expected
 
 
+def test_root_bootstrap_only_hands_over_directories():
+    # Without CAP_FOWNER/CAP_DAC_OVERRIDE root can neither chmod nor write a directory
+    # it has chowned to UID 1000, so all preparation runs after the privilege drop.
+    import ast
+
+    tree = ast.parse((ROOT / "helpers/desktop/helper.py").read_text())
+    initialize = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "initialize"
+    )
+    calls = {
+        n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id
+        for n in ast.walk(initialize)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute | ast.Name)
+    }
+    assert calls <= {"Path", "mkdir", "chown", "update", "execvp"}
+    # Docker recreates the tmpfs root-owned on restart; it is handed over after its children.
+    loop = next(n for n in ast.walk(initialize) if isinstance(n, ast.For))
+    assert isinstance(loop.iter, ast.Tuple)
+    assert [e.value for e in loop.iter.elts if isinstance(e, ast.Constant)][-1] == "/runtime"
+
+
 @pytest.mark.parametrize("state", ["off", "filtered", "locked", "missing", "raw", "unknown"])
 def test_doctor_consumes_read_only_inspector(state, monkeypatch):
     from djinn_in_a_box.commands import doctor

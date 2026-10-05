@@ -15,12 +15,23 @@ DROP = ["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
 
 
 def initialize(channel):
-    os.umask(0o022)
-    for directory in ("/out", "/runtime/home", "/runtime/user"):
+    # Root only hands the private directories to UID 1000: without CAP_FOWNER and
+    # CAP_DAC_OVERRIDE it can no longer chmod or write them afterwards. /runtime comes
+    # last because Docker recreates the tmpfs as root-owned 0755 on restart.
+    for directory in ("/out", "/runtime/home", "/runtime/user", "/runtime"):
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         os.chown(path, 1000, 1000)
-        path.chmod(0o755 if directory == "/out" else 0o700)
+    os.environ.update(HOME="/runtime/home", XDG_RUNTIME_DIR="/runtime/user",
+                      PULSE_CLIENTCONFIG="/etc/djinn/client.conf",
+                      PULSE_CONFIG="/etc/djinn/daemon.conf")
+    os.execvp(DROP[0], [*DROP, "python3", "-I", "/etc/djinn/helper.py", channel, "daemon"])
+
+
+def prepare(channel):
+    os.umask(0o022)
+    for directory, mode in (("/out", 0o755), ("/runtime/home", 0o700), ("/runtime/user", 0o700)):
+        Path(directory).chmod(mode)
     # Restart replaces the listener, while the relay credential survives.
     Path("/out/bus" if channel == "dbus" else "/out/native").unlink(missing_ok=True)
     if channel == "audio":
@@ -30,9 +41,8 @@ def initialize(channel):
             with os.fdopen(fd, "wb") as stream:
                 stream.write(os.urandom(256))
         info = cookie.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size != 256:
+        if not stat.S_ISREG(info.st_mode) or info.st_size != 256 or info.st_uid != 1000:
             raise RuntimeError("invalid relay cookie")
-        os.chown(cookie, 1000, 1000)
         cookie.chmod(0o644)
         relay = Path("/etc/djinn/relay.template").read_text()
         if Path("/upstream-cookie").is_file():
@@ -43,10 +53,6 @@ def initialize(channel):
                 for line in relay.splitlines()
             ) + "\n"
         Path("/runtime/relay.pa").write_text(relay)
-    os.environ.update(HOME="/runtime/home", XDG_RUNTIME_DIR="/runtime/user",
-                      PULSE_CLIENTCONFIG="/etc/djinn/client.conf",
-                      PULSE_CONFIG="/etc/djinn/daemon.conf")
-    os.execvp(DROP[0], [*DROP, "python3", "-I", "/etc/djinn/helper.py", channel, "daemon"])
 
 
 def client(*args):
@@ -107,4 +113,5 @@ def launch(channel):
 if __name__ == "__main__":
     if len(sys.argv) == 2:
         initialize(sys.argv[1])
+    prepare(sys.argv[1])
     sys.exit(launch(sys.argv[1]))
