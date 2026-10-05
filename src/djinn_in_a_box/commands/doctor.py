@@ -545,6 +545,10 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
 
     if config is not None:
         checks.extend(declaration_checks(config))
+        from djinn_in_a_box.core.git_diagnostics import git_diagnostics
+
+        checks.extend(Check(row.name, Status(row.status), row.detail, row.remedy)
+                      for row in git_diagnostics(config))
 
     image = daemon and _image_built()
     checks.append(

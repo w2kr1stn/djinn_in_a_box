@@ -1,8 +1,12 @@
 """Pytest configuration and fixtures for Djinn in a Box tests."""
 
 import os
+import subprocess
+import tempfile
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +18,67 @@ os.environ.pop("FORCE_COLOR", None)
 
 from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
 from djinn_in_a_box.core.paths import get_project_root
+
+
+@pytest.fixture(autouse=True)
+def _isolate_legacy_compose_subprocess_tests(request, monkeypatch):
+    """Legacy Compose tests mock Docker. Dedicated Git tests exercise the real lifecycle."""
+    legacy = {"test_docker", "test_ws0", "test_sops_age_identity"}
+    if request.module.__name__.split(".")[-1] not in legacy:
+        return
+    from djinn_in_a_box.core import docker
+
+    @contextmanager
+    def isolated(*args):
+        yield MagicMock()
+
+    monkeypatch.setattr(docker, "git_runtime", isolated)
+
+
+@pytest.fixture
+def git_inputs(tmp_path, monkeypatch):
+    """Two disposable identities and public trust; never touches the user's keys."""
+    from djinn_in_a_box.config.ssh import GitConfig, GitIdentity
+
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    ssh.mkdir(parents=True, mode=0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    identities = {}
+    for alias, name in (("git-work", "work_git"), ("git-personal", "personal_git")):
+        key = ssh / name
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+        identities[alias] = GitIdentity(
+            hostname="git.example.com",
+            user="git",
+            key_file=key,
+            public_key_file=Path(str(key) + ".pub"),
+        )
+    public = identities["git-work"].public_key_file.read_text().split()[:2]
+    (ssh / "known_hosts").write_text(
+        "git.example.com "
+        + " ".join(public)
+        + "\n"
+        + "other.example.com "
+        + " ".join(public)
+        + "\n"
+    )
+    signers = ssh / "allowed_signers"
+    signers.write_text("signer@example.com " + " ".join(public) + "\n")
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    config = AppConfig(
+        code_dir=projects,
+        config_root=tmp_path / "config",
+        git=GitConfig(
+            identities=identities, signing_identity="git-work", allowed_signers_file=signers
+        ),
+    )
+    with tempfile.TemporaryDirectory(prefix="djinn-git-") as temporary:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", temporary)
+        yield config
 
 
 @pytest.fixture(autouse=True)

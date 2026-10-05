@@ -64,6 +64,8 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "shell.omp_theme_path",
     "config_sync.source",
     "build.network",
+    "git.signing_identity",
+    "git.allowed_signers_file",
 )
 _LOCK_PROBLEM_IDENTIFIER = "canonical-lock-failed"
 
@@ -331,6 +333,12 @@ def _build_config(
 
 
 def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
+    if key in {"git.signing_identity", "git.allowed_signers_file"}:
+        from djinn_in_a_box.config.ssh import GitConfig
+
+        selected = None if value.strip().lower() in {"", "none", "null"} else value
+        git = GitConfig.model_validate({**config.git.model_dump(), key.split(".")[1]: selected})
+        return AppConfig.model_validate({**config.model_dump(), "git": git})
     if key == "general.workspace":
         return _build_config(config, workspace=value)
     if key == "general.code_dir":
@@ -436,6 +444,10 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
 
 
 def _format_config_value(config: AppConfig, key: str) -> str:
+    if key == "git.signing_identity":
+        return config.git.signing_identity or "unset"
+    if key == "git.allowed_signers_file":
+        return str(config.git.allowed_signers_file) if config.git.allowed_signers_file else "unset"
     if key == "general.workspace":
         return config.workspace
     if key == "general.code_dir":
@@ -621,6 +633,14 @@ def config_show(
 
         _print_config_table("Build", [("network", config.build.network)])
 
+        _print_config_table("Git", [
+            ("signing_identity", config.git.signing_identity or "unset"),
+            ("allowed_signers_file", config.git.allowed_signers_file or "unset"),
+        ])
+        for alias, identity in config.git.identities.items():
+            console.print(Text(f"  {alias}: {identity.hostname} user={identity.user} "
+                               f"key_file={identity.key_file} "
+                               f"public_key_file={identity.public_key_file}"))
         rule("Mounts")
         from djinn_in_a_box.config.declarations import BindDeclaration
 

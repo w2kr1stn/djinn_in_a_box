@@ -40,7 +40,9 @@ from djinn_in_a_box.core.exceptions import (
     ZoneConfigurationError,
     ZoneRootValidationError,
 )
+from djinn_in_a_box.core.host_runtime import git_runtime
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
+from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
 
 DJINN_NETWORK: str = "djinn-network"
 """Docker network name for Djinn containers."""
@@ -85,7 +87,6 @@ _COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
     Path("/home/dev/.cache/djinn-tools"): "directory",
     Path("/home/dev/.vscode-server"): "directory",
     Path("/home/dev/workspaces"): "directory",
-    Path("/home/dev/.ssh"): "directory",
     Path("/home/dev/.gitconfig"): "file",
     Path("/home/dev/.claude_seed"): "directory",
     Path("/home/dev/.claude/skills"): "directory",
@@ -763,6 +764,7 @@ def _reserved_mount_targets(
         _, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
     targets = [
         *_COMPOSE_DEV_MOUNT_TARGETS,
+        *MANAGED_SSH_TARGETS,
         *([config.workspace_target] if config else []),
         *(zone_overlay_targets or ()),
         _MOUNT_ROOT,
@@ -834,7 +836,8 @@ def validate_container_mounts(
     for mount in normalized_mounts:
         mount_target = mount.target
         for target, description, display_target in occupied:
-            if mount_target == target or target.is_relative_to(mount_target):
+            if (mount_target == target or target.is_relative_to(mount_target)
+                    or (target in MANAGED_SSH_TARGETS and mount_target.is_relative_to(target))):
                 msg = (
                     f"Mount {mount.source} -> {mount_target} conflicts with {description} "
                     f"(conflict path: {display_target})"
@@ -902,6 +905,7 @@ class ResolvedDeclarations:
 class ComposeService(TypedDict, total=False):
     volumes: list[str | dict[str, object]]
     environment: dict[str, str]
+    labels: dict[str, str]
     working_dir: str
 
 
@@ -997,6 +1001,9 @@ def resolve_declared_entries(
     entries = declarations or inspect_declarations(
         config.mounts if config else {}, config.environment if config else {}
     )
+    for key in GIT_ENVIRONMENT:
+        if caller_env and key in caller_env:
+            raise DeclarationSpecificationError(f"caller environment.{key} is reserved by Djinn")
     errors = {d.identity: d.error for d in entries.diagnostics}
     targets: dict[str, Path] = {}
     resolved: list[ResolvedDeclaration] = []
@@ -1028,7 +1035,7 @@ def resolve_declared_entries(
     for name, target in targets.items():
         if errors.get(f"mounts.{name}"):
             continue
-        for repair in MANAGED_VOLUME_REPAIR_TARGETS:
+        for repair in (*MANAGED_VOLUME_REPAIR_TARGETS, *MANAGED_SSH_TARGETS):
             if target == repair or target.is_relative_to(repair):
                 errors[f"mounts.{name}"] = declaration_error(
                     "mounts",
@@ -1320,56 +1327,58 @@ def compose_run(
     fragment: ComposeFragment = (
         declarations.compose_fragment() if service == "dev" else {"services": {service: {}}}
     )
-    with _compose_override(fragment, prefix="djinn-run-") as override_path:
-        cmd[2 + len(compose_files):2 + len(compose_files)] = ["-f", str(override_path)]
-        try:
-            if interactive:
-                # Interactive mode: inherit stdin/stdout/stderr
+    with git_runtime(config, container_name) as git_delivery:
+        if service == "dev":
+            git_delivery.add_to_fragment(fragment)
+        with _compose_override(fragment, prefix="djinn-run-") as override_path:
+            cmd[2 + len(compose_files):2 + len(compose_files)] = ["-f", str(override_path)]
+            try:
+                if interactive:
+                    # Interactive mode: inherit stdin/stdout/stderr
+                    result = subprocess.run(
+                        cmd,
+                        cwd=project_root,
+                        env=host_env,
+                        check=False,
+                    )
+                    return RunResult(
+                        returncode=result.returncode,
+                    )
+
+                # Headless mode: capture output with optional timeout. stdin must be
+                # closed explicitly: agent CLIs such as `codex exec` block waiting for
+                # stdin when they inherit an open terminal descriptor.
                 result = subprocess.run(
                     cmd,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
                     cwd=project_root,
                     env=host_env,
+                    timeout=timeout,
                     check=False,
                 )
                 return RunResult(
                     returncode=result.returncode,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
                 )
-
-            # Headless mode: capture output with optional timeout. stdin must be
-            # closed explicitly: agent CLIs such as `codex exec` block waiting for
-            # stdin when they inherit an open terminal descriptor.
-            result = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                cwd=project_root,
-                env=host_env,
-                timeout=timeout,
-                check=False,
-            )
-            return RunResult(
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
-        except subprocess.TimeoutExpired as e:
-            assert timeout is not None  # TimeoutExpired only raised when timeout is set
-            stdout, stderr = _decode_timeout_output(e, timeout)
-            return RunResult(returncode=124, stdout=stdout, stderr=stderr)
-        except FileNotFoundError as e:
-            return RunResult(
-                returncode=127,
-                stdout="",
-                stderr=f"Docker command not found: {e}",
-            )
-        except PermissionError as e:
-            return RunResult(
-                returncode=126,
-                stdout="",
-                stderr=f"Permission denied: {e}",
-            )
-
+            except subprocess.TimeoutExpired as e:
+                assert timeout is not None  # TimeoutExpired only raised when timeout is set
+                stdout, stderr = _decode_timeout_output(e, timeout)
+                return RunResult(returncode=124, stdout=stdout, stderr=stderr)
+            except FileNotFoundError as e:
+                return RunResult(
+                    returncode=127,
+                    stdout="",
+                    stderr=f"Docker command not found: {e}",
+                )
+            except PermissionError as e:
+                return RunResult(
+                    returncode=126,
+                    stdout="",
+                    stderr=f"Permission denied: {e}",
+                )
 
 def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
     """Pull the ``src:dst[:mode]`` specs out of a ``["-v", spec, ...]`` list."""
@@ -1504,22 +1513,29 @@ def compose_up_detached(
     service_override["volumes"] = [*volume_specs, *declared_service.get("volumes", [])]
     service_override["environment"] = {**environment, **declared_service.get("environment", {})}
     fragment["services"][service] = service_override
-    with _compose_override(fragment) as override_path:
-        args = [*compose_files, "-f", str(override_path)]
-        args.extend(["up", "-d", service])
-        # ENABLE_FIREWALL rides the compose file's ${ENABLE_FIREWALL:-false}
-        # interpolation, because `up` has no per-invocation `-e` flag to carry it.
-        return _run_compose(
-            args,
-            config=config,
-            cwd=project_root,
-            extra_env={
-                "ENABLE_FIREWALL": str(options.firewall_enabled).lower(),
-                # Tells the entrypoint nobody will ever use PID 1's shell here:
-                # consumers attach with `djinn enter`, which brings its own TTY.
-                "DJINN_DETACHED": "true",
-            },
-        )
+    container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
+    with git_runtime(config, container_name) as git_delivery:
+        if service == "dev":
+            git_delivery.add_to_fragment(fragment)
+        with _compose_override(fragment) as override_path:
+            args = [*compose_files, "-f", str(override_path)]
+            args.extend(["up", "-d", service])
+            # ENABLE_FIREWALL rides the compose file's ${ENABLE_FIREWALL:-false}
+            # interpolation, because `up` has no per-invocation `-e` flag to carry it.
+            result = _run_compose(
+                args,
+                config=config,
+                cwd=project_root,
+                extra_env={
+                    "ENABLE_FIREWALL": str(options.firewall_enabled).lower(),
+                    # Tells the entrypoint nobody will ever use PID 1's shell here:
+                    # consumers attach with `djinn enter`, which brings its own TTY.
+                    "DJINN_DETACHED": "true",
+                },
+            )
+            if result.success:
+                git_delivery.retain()
+            return result
 
 
 SELF_TEARDOWN_ERROR = (
@@ -1898,7 +1914,6 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     for sub in ("sessions", "backups"):
         (djinn_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    (Path.home() / ".ssh").mkdir(parents=True, exist_ok=True, mode=0o700)
     gitconfig = Path.home() / ".gitconfig"
     if not gitconfig.exists():
         gitconfig.touch()

@@ -620,7 +620,7 @@ class TestMountTargetCollisions:
         try:
             with pytest.raises(
                 MountCollisionError,
-                match=r"conflict path: /run/user/1000/pulse/native",
+                match=r"conflict path: /run/djinn-git-agent",
             ):
                 validate_container_mounts(
                     resolve_container_mounts((f"{tmp_path}:/var/run",)),
@@ -699,7 +699,7 @@ class TestMountTargetCollisions:
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
 
-        with pytest.raises(MountCollisionError, match=r"conflict path: /run/docker\.sock"):
+        with pytest.raises(MountCollisionError, match=r"conflict path: /run/djinn-git-agent"):
             validate_container_mounts(
                 (ContainerMount(tmp_path, Path("/var")),),
                 mock_app_config,

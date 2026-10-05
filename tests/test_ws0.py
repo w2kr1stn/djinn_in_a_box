@@ -261,7 +261,7 @@ class TestEnsureHostEnv:
             assert (root / name).stat().st_mode & 0o077 == 0
         assert (mock_home / ".djinn" / "sessions").is_dir()
         assert (mock_home / ".djinn" / "backups").is_dir()
-        assert (mock_home / ".ssh").is_dir()
+        assert not (mock_home / ".ssh").exists()
         assert (mock_home / ".gitconfig").is_file()
 
         # Idempotent: a second run must not raise.

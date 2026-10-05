@@ -625,7 +625,8 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `${DJINN_CONFIG_ROOT}/age` | `/home/dev/.config/age` | age encryption identities (`keys.txt`) |
 | `${CODE_DIR}` | `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) | One configured workspace root; AIOS's `projects/` appears at `/home/dev/aios/projects` |
 | `${HOME}/.djinn/sessions` | `/home/dev/sessions` | Session workspaces |
-| `~/.ssh` | `/home/dev/.ssh:ro` | Read-only SSH access |
+| Djinn-generated public SSH directory | `/home/dev/.ssh:ro` | Declared Git aliases, public keys and host/signing trust |
+| Djinn Git agent export directory | `/run/djinn-git-agent:ro` | Filtered SSH agent socket (`auth.sock`) |
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
 | `./config/claude/AGENTS.md` | `/home/dev/.claude/AGENTS.md` | Direct Compose-Claude instruction mount |
@@ -633,6 +634,66 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
+
+### Git identities and SSH signing
+
+Declare each existing Git SSH alias and both host key paths with `djinn config edit`:
+
+```toml
+[git]
+signing_identity = "git-work"                 # optional explicit default
+allowed_signers_file = "~/.ssh/allowed_signers" # optional public signing trust
+
+[git.identities.git-work]
+hostname = "git.example.com"
+user = "git"
+key_file = "~/.ssh/work_git"
+public_key_file = "~/.ssh/work_git.pub"
+
+[git.identities.git-personal]
+hostname = "git.example.com"
+user = "git"
+key_file = "~/.ssh/personal_git"
+public_key_file = "~/.ssh/personal_git.pub"
+```
+
+Verify the real Git host's key on the host and put its trusted entry in
+`~/.ssh/known_hosts` before starting. Djinn selects entries for declared hostnames,
+including hashed entries and key markers. Missing trust or a mismatched key refuses
+startup. The host SSH config and private keys are no longer mounted. The generated
+read-only `~/.ssh` contains `config`, `known_hosts`, `tailnet_known_hosts` (empty until
+hostctl is delivered), `git.json`, the public keys under their original filenames,
+and optional `allowed_signers`. Alias URLs such as `git@git-work:group/repo.git`
+continue to select the declared account. Hardware keys and certificates are unsupported.
+
+A dedicated host agent loads only these keys; encrypted keys prompt on the host
+terminal at startup. Run Djinn from a host terminal when keys need unlocking.
+Linux host numeric UID 1000 must match the dev image. The runtime uses an owner-only
+`XDG_RUNTIME_DIR`, or `~/.local/state/djinn/runtime` when it is unset. Both `start`
+and `run` deliver `SSH_AUTH_SOCK=/run/djinn-git-agent/auth.sock`. A detached start keeps
+the agent until the actual dev container stops or is removed. Concurrent creation is
+refused; use `djinn clean` on the host before replacing a live container.
+
+For SSH signing, Djinn writes `gpg.format=ssh`, an explicitly selected public signing
+key and optional `gpg.ssh.allowedSignersFile` to `~/.gitconfig_local`. Add this manually
+to the host's read-only Git config, adjusting the workspace path for your mode:
+
+```gitconfig
+[includeIf "gitdir:/home/dev/projects/"]
+    path = /home/dev/.gitconfig_local
+```
+
+An existing `user.signingkey = ~/.ssh/work_git.pub` remains valid when that public
+file is declared. Without `git.signing_identity`, Djinn omits `user.signingkey` so
+host/repository choices remain effective. Enable `commit.gpgsign` yourself and supply
+your own public allowed-signers trust; Djinn does not infer it from email.
+
+Run `djinn doctor` to inspect declarations, agent state and global/repository key-file
+references with their origins. Manually replace private `core.sshCommand -i` selectors,
+removed `-F` configs, SSH `IdentityFile`/`Include` paths and old allowed-signers paths
+with the generated config/public selectors. Repository discovery is bounded and
+reports uninspected roots. Djinn never rewrites repositories or the host Git config.
+Git keys must not be authorized on machines whose SSH access should be gated.
 
 `--here` mounts the current directory at `/home/dev/workspace` for both `start` and
 `run`; for `run` it can be combined with any number of `--mount` values. Each
@@ -669,7 +730,9 @@ even inactive ones. Children of built-in, reserved, zone or invocation targets
 are allowed, with one exception: no declared mount may sit at or below the
 Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
 `/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
-Their existing recursive ownership repair remains in place. Declared mounts
+Their existing recursive ownership repair remains in place. Generated SSH delivery
+(`/home/dev/.ssh`), the Git socket directory (`/run/djinn-git-agent`) and
+`/home/dev/.gitconfig_local` also reserve their descendants and image aliases. Declared mounts
 support writable directory binds and named volumes only, without file binds or
 a read-only declaration option; invocation `--mount ...:ro` remains available.
 

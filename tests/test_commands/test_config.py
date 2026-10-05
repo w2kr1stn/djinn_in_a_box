@@ -70,6 +70,8 @@ def test_every_scalar_set_preserves_declarations(tmp_path, key):
         "shell.omp_theme_path": str(tmp_path / "theme"),
         "config_sync.source": "codex",
         "build.network": "host",
+        "git.signing_identity": "none",
+        "git.allowed_signers_file": str(tmp_path / "allowed_signers"),
     }
     before = AppConfig(
         code_dir=tmp_path,
