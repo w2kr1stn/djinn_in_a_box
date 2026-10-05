@@ -166,6 +166,7 @@ RUN chmod +x ~/.tools/install.sh ~/.tools/installers/*.sh 2>/dev/null || true \
 
 COPY --chown=dev:dev scripts/entrypoint.sh /home/dev/entrypoint.sh
 COPY --chown=dev:dev src/djinn_in_a_box/core/workflow_publisher.py /home/dev/workflow-publisher.py
+COPY --chown=dev:dev scripts/git-config.py /home/dev/git-config.py
 COPY --chown=dev:dev scripts/settings-copy.py /home/dev/settings-copy.py
 COPY --chown=dev:dev scripts/ownership-repair.py /home/dev/ownership-repair.py
 COPY --chown=dev:dev scripts/opencode-credentials.sh /home/dev/opencode-credentials.sh

@@ -34,7 +34,6 @@ x-common-volumes: &common-volumes
   # VS Code Workspaces (persistent .code-workspace files)
   - vscode-workspaces:/home/dev/workspaces
   # Host configs (read-only)
-  - ~/.ssh:/home/dev/.ssh:ro
   - ~/.gitconfig:/home/dev/.gitconfig:ro
   # Seed configs (rw for reverse-sync of settings.json on exit)
   - ./config/claude:/home/dev/.claude_seed

@@ -16,6 +16,7 @@ from djinn_in_a_box.config.declarations import (
     MountDeclaration,
     inspect_declarations,
 )
+from djinn_in_a_box.config.ssh import GitConfig
 
 
 def validate_memory_format(value: str) -> str:
@@ -239,6 +240,8 @@ class AppConfig(BaseModel):
 
     build: BuildConfig = Field(default_factory=BuildConfig)
     """Image-build settings."""
+
+    git: GitConfig = Field(default_factory=GitConfig)
 
     mounts: dict[str, MountDeclaration] = Field(default_factory=dict)
     environment: dict[str, str] = Field(default_factory=dict)

@@ -62,16 +62,10 @@ python3 "$OWNERSHIP_REPAIR_HELPER" --targets "${DJINN_DECLARED_VOLUME_TARGETS:-[
 # =============================================================================
 # Git Configuration (container-specific paths)
 # =============================================================================
-# Generate ~/.gitconfig_local with container paths for includeIf directives
-SIGNING_KEY=$(ls ~/.ssh/*_github.pub 2>/dev/null | head -1 || true)
-# Validate path contains only safe characters before interpolating into gitconfig
-if [[ -n "$SIGNING_KEY" ]] && [[ "$SIGNING_KEY" =~ ^[/a-zA-Z0-9_.-]+$ ]]; then
-    printf '[user]\n    signingkey = %s\n' "$SIGNING_KEY" > ~/.gitconfig_local
-    # Add excludesfile if it exists
-    if [[ -f ~/.gitignore_global ]]; then
-        echo "[core]" >> ~/.gitconfig_local
-        echo "    excludesfile = $HOME/.gitignore_global" >> ~/.gitconfig_local
-    fi
+# Generate public signing/trust paths; no implicit first-key selection.
+GIT_CONFIG_HELPER="${GIT_CONFIG_HELPER:-/home/dev/git-config.py}"
+if [[ -n "${DJINN_GIT_MANIFEST:-}" ]]; then
+    python3 "$GIT_CONFIG_HELPER"
 fi
 
 # =============================================================================
