@@ -1504,12 +1504,18 @@ def _prepare_companions(
             fragment["services"].pop(endpoint.service, None)
 
 
-def inspect_running_desktop() -> desktop.DesktopInspection:
+def inspect_running_desktop(
+    dev_id: str = "djinn", *, dev_inspect: dict[str, Any] | None = None
+) -> desktop.DesktopInspection:
     endpoints = desktop.discover_desktop_endpoints()
     helpers: dict[str, dict[str, Any] | None] = {}
     versions: dict[str, dict[str, Any]] = {}
     try:
-        dev = host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE)
+        dev = (
+            dev_inspect
+            if dev_inspect is not None
+            else host_runtime.inspect_object(dev_id, DOCKER_EXECUTABLE)
+        )
         image = host_runtime.inspect_object(desktop.HELPER_IMAGE, DOCKER_EXECUTABLE, "image")
         for endpoint in endpoints:
             actual = _service_inspect(endpoint.service)
@@ -1652,6 +1658,9 @@ def compose_run(
             git_delivery.begin_creation()
         with _compose_override(fragment, prefix="djinn-run-") as override_path:
             cmd[2 + len(compose_files) : 2 + len(compose_files)] = ["-f", str(override_path)]
+            if git_delivery is not None:
+                _guard_dev_creation(config, compose_files, override_path, git_delivery,
+                                    _volume_specs_from_mount_args(cmd), env_vars)
             try:
                 if interactive:
                     # Interactive mode: inherit stdin/stdout/stderr
@@ -1843,6 +1852,8 @@ def compose_up_detached(
             _prepare_companions(config, options, fragment, git_delivery)
             git_delivery.begin_creation()
         with _compose_override(fragment) as override_path:
+            if git_delivery is not None:
+                _guard_dev_creation(config, compose_files, override_path, git_delivery)
             args = [*compose_files, "-f", str(override_path)]
             args.extend(["up", "-d", service])
             # ENABLE_FIREWALL rides the compose file's ${ENABLE_FIREWALL:-false}
@@ -1874,6 +1885,90 @@ SELF_TEARDOWN_ERROR = (
     "Run teardown from the host instead:\n"
     "  djinn clean\n"
 )
+
+
+def _guard_dev_creation(
+    config: AppConfig,
+    compose_files: list[str],
+    override: Path,
+    owner: host_runtime.GitRuntime,
+    extra_volumes: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> None:
+    from djinn_in_a_box.core import hostctl
+
+    with hostctl.control_guard():
+        helper = hostctl.inspect_helper()
+        if helper is None or not helper["State"]["Running"]:
+            return
+    planned: dict[str, Any] = {"Id": "planned"}
+    try:
+        result = _run_compose(
+            [*compose_files, "-f", str(override), "config", "--format", "json"],
+            config=config,
+            cwd=get_project_root(),
+            timeout=10,
+        )
+        if not result.success:
+            raise RuntimeError("resolved Compose delivery unavailable")
+        delivery = json.loads(result.stdout)
+        service = delivery["services"]["dev"]
+        mounts: list[dict[str, Any]] = []
+        for row in service.get("volumes", []):
+            source = row.get("source", "")
+            mount = {
+                "Type": row["type"],
+                "Source": source,
+                "Destination": row["target"],
+                "RW": not row.get("read_only", False),
+            }
+            if row["type"] == "volume":
+                name = delivery["volumes"][source]["name"]
+                actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, "volume")
+                definition = delivery["volumes"][source]
+                mount.update(
+                    Name=name,
+                    Source=actual["Mountpoint"] if actual else "",
+                    PlannedVolume=actual
+                    if actual
+                    else {
+                        "Driver": definition.get("driver", "local"),
+                        "Options": definition.get("driver_opts") or {},
+                    },
+                )
+            mounts.append(mount)
+        for spec in extra_volumes or []:
+            parts = spec.split(":")
+            mounts = [m for m in mounts if m["Destination"] != parts[1]]
+            mounts.append(
+                {
+                    "Type": "bind",
+                    "Source": parts[0],
+                    "Destination": parts[1],
+                    "RW": len(parts) < 3 or parts[2] != "ro",
+                }
+            )
+        environment = {**service.get("environment", {}), **(extra_env or {})}
+        planned = {
+            "Id": "planned",
+            "State": {"Running": True},
+            "Mounts": mounts,
+            "Config": {
+                "Env": [f"{k}={v}" for k, v in environment.items() if v is not None],
+                "Labels": service.get("labels", {}),
+                "Image": service["image"],
+            },
+            "HostConfig": {"NetworkMode": service.get("network_mode", "bridge")},
+            "NetworkSettings": {
+                "Networks": {
+                    delivery["networks"][name]["name"]: {} for name in service.get("networks", {})
+                }
+            },
+        }
+    except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError):
+        # Incomplete delivery is an uncertain assessment; close before proceeding.
+        pass
+    hostctl.guard_dev_start(planned, owner.generation)
 
 
 def is_own_container(name: str) -> bool:

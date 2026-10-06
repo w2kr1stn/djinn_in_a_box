@@ -227,7 +227,7 @@ def test_open_state_requires_helper_admission(monkeypatch):
     assert hostctl.snapshot()["state"] == "open"
 
 
-def test_doctor_trust_relay_and_unchecked(monkeypatch):
+def test_doctor_trust_relay_and_unknown(monkeypatch):
     # Mutation: claim trust PASS for a different generation.
     value = {
         "state": "open",
@@ -240,7 +240,7 @@ def test_doctor_trust_relay_and_unchecked(monkeypatch):
     rows = {row.name: row for row in hostctl_checks(None, daemon=True)}
     assert rows["Hostctl peer trust"].status is Status.WARN
     assert rows["Hostctl relay"].status is Status.PASS
-    assert "unchecked" in rows["Hostctl helper"].detail
+    assert "unknown" in rows["Hostctl sealing"].detail
     value["trust"]["generation"] = "generation-a"
     rows = {row.name: row for row in hostctl_checks(None, daemon=True)}
     assert rows["Hostctl peer trust"].status is Status.PASS
@@ -333,7 +333,7 @@ def test_observer_freezes_trust_and_rechecks_generation(tmp_path, monkeypatch, c
         return trust
 
     monkeypatch.setattr(hostctl, "prepare_trust", snapshot)
-    monkeypatch.setattr(hostctl, "admit_locked", lambda *a: captures.append("admit"))
+    monkeypatch.setattr(hostctl, "admit_locked", lambda *a, **kw: captures.append("admit"))
 
     def advance(_):
         nonlocal iterations

@@ -814,10 +814,21 @@ Off and expiry end every relay stream, including SSH multiplexed connections.
 Generated SSH delivery requires host numeric UID 1000, matching the dev image,
 so the dev user can read the owner-only public files.
 
-Sealing, direct-bypass assessment and the dev-start guard are pending B3.
-`--allow-unsealed` is accepted and recorded; `status` and `doctor` explicitly
-report sealing unchecked. The existing `--firewall` private-network rules allow
-the helper bridge IP; custom networks outside RFC1918 refuse relay readiness.
+`on` assesses the running container's actual delivery and names every sealing
+cause. `--allow-unsealed` records those causes and the lost host boundary: the
+window becomes an operating aid when dev has host authority. It overrides only
+sealing; deadline, trust, logging and direct-route failures still refuse admission.
+No restart or creation security flag is needed to change the running assessment.
+An unsealed dev start closes and verifies the helper before launching, including
+headless and detached starts. A sealed start pauses admission until actual
+delivery and the direct TCP22 probe pass. Removal or replacement closes the window.
+Doctor reports sealing causes and reached/blocked/unknown results for every
+declared tailnet address, using current or cached authenticated peer data. With
+no dev or peer snapshot, the probe is deferred. The host must prevent forwarding
+from the Docker network into the tailnet; Djinn changes no firewall. The trusted
+probe detects misconfiguration, and NET_ADMIN can hide routes from it.
+The existing `--firewall` private-network rules allow the helper bridge IP;
+custom networks outside RFC1918 refuse relay readiness.
 
 The helper alone mounts `djinn-hostctl-state`. Normal/category/name cleanup
 retains this identity; explicit name deletion refuses. Only `clean all` deletes

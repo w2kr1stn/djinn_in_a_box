@@ -33,6 +33,7 @@ type window struct {
 	Closed       bool      `json:"closed"`
 	Reason       string    `json:"reason,omitempty"`
 	Admission    bool      `json:"admission"`
+	Paused       bool      `json:"paused"`
 }
 
 type request struct {
@@ -149,6 +150,16 @@ func (c *controller) update(r request) response {
 			return response{Error: err.Error()}
 		}
 		c.routes = r.Routes
+		c.w = candidate
+	} else if r.Operation == "pause" || r.Operation == "resume" {
+		if !c.diskMatches() {
+			return response{Error: "window state is unavailable or changed"}
+		}
+		candidate := c.w
+		candidate.Paused = r.Operation == "pause"
+		if err := persist(c.path, candidate); err != nil {
+			return response{Error: err.Error()}
+		}
 		c.w = candidate
 	} else if r.Operation != "status" {
 		return response{Error: "unknown operation"}

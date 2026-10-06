@@ -38,9 +38,12 @@ def on(
         "Window opening. Login time counts; use djinn hostctl status for login/readiness."
     )
     console.print(
-        "Sealing unchecked (B3 pending); relay waits for enrollment, "
-        "peer trust and journal readiness."
+        "Relay waits for enrollment, peer trust, sealing, direct-route probe and journal readiness."
     )
+    if allow_unsealed:
+        console.print(
+            "Sealing override recorded; dev host authority makes the window an operating aid only."
+        )
 
 
 @app.command("off")
@@ -89,3 +92,5 @@ def status() -> None:
     elif observation.get("error"):
         console.print(Text(f"Observation gap: {observation['error']}"))
     console.print(Text(f"Sealing: {value['sealing']}; relay: {value['relay']}"))
+    for cause in (*value.get("sealing_causes", ()), *value.get("sealing_errors", ())):
+        console.print(Text(cause))

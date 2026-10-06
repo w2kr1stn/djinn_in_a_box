@@ -964,8 +964,25 @@ SOCKS5 without a direct connection fallback. Each relay stream has structured
 start/end records in the rotated Docker log. Graceful off/expiry closes all
 streams before exiting; forced death can leave unmatched starts.
 
-Sealing, direct-bypass assessment and dev-creator admission guards belong to B3;
-status, doctor and the journal retain sealing unchecked in B2.
+One host-side assessment reads actual ID, mounts, environment and network peers,
+canonicalizes host sources and aliases, and consumes the desktop provenance
+inspector. It checks Docker authority, home/root and helper backing storage,
+private controller/agent/journal paths and writable host execution inputs at
+check time. Uncertain inspection refuses; an explicit sealing override journals
+the causes and lost host boundary.
+
+The direct probe runs trusted raw-socket Python in a digest-pinned throwaway
+container sharing only the assessed dev network namespace. It validates results
+for every authenticated peer IPv4/IPv6 address and verifies removal after success,
+timeout and cancellation. Reached or unknown results refuse admission. Doctor
+uses the same probe with current/cached peers without starting a helper.
+
+Both creators inspect resolved Compose delivery before launch. Unsealed delivery
+closes and verifies the helper; sealed delivery pauses admission via private IPC.
+The existing asynchronous observer inspects the actual created dev and probes
+outside the control lock, then verifies generation/ID under the lock before
+admitting/resuming. Pause preserves immutable routes and helper-owned deadlines;
+creator starts never inherit an override. External replacement/removal closes.
 
 ## Image Build
 

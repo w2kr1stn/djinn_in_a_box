@@ -274,3 +274,57 @@ func TestDamagedAdmittedState(t *testing.T) {
 		t.Fatal("damaged grant restored by limit")
 	}
 }
+
+func TestAdmissionPauseResume(t *testing.T) {
+	t.Run("pause", func(t *testing.T) {
+		c, _, _ := relayFixture(t, true)
+		before := c.w
+		reply := c.update(request{Operation: "pause", Generation: c.w.Generation})
+		if reply.Error != "" || !c.w.Paused || !c.w.Admission || c.admissionValid() {
+			t.Fatal("pause did not close admission while retaining frozen trust", reply)
+		}
+		if c.w.Deadline != before.Deadline || c.w.BootDeadline != before.BootDeadline {
+			t.Fatal("pause changed the deadline")
+		}
+		if r := c.update(request{Operation: "admit", Generation: c.w.Generation,
+			Routes: map[string]string{"replacement": "100.64.0.2"}}); r.Error == "" {
+			t.Fatal("pause allowed replacement trust")
+		}
+	})
+	t.Run("resume", func(t *testing.T) {
+		c, _, _ := relayFixture(t, true)
+		before := c.w
+		if r := c.update(request{Operation: "pause", Generation: c.w.Generation}); r.Error != "" {
+			t.Fatal(r.Error)
+		}
+		reply := c.update(request{Operation: "resume", Generation: c.w.Generation})
+		if reply.Error != "" || c.w.Paused || !c.admissionValid() || c.w != before {
+			t.Fatal("resume did not restore the same grant", reply)
+		}
+		if c.routes["host-a.example.ts.net"] != "100.64.0.1" {
+			t.Fatal("resume changed frozen destinations")
+		}
+	})
+	t.Run("pending", func(t *testing.T) {
+		c, _, _ := relayFixture(t, false)
+		if r := c.update(request{Operation: "pause", Generation: c.w.Generation}); r.Error != "" {
+			t.Fatal(r.Error)
+		}
+		if r := c.update(request{Operation: "resume", Generation: c.w.Generation}); r.Error != "" {
+			t.Fatal(r.Error)
+		}
+		if c.w.Admission || c.admissionValid() {
+			t.Fatal("resume admitted before enrollment/trust")
+		}
+	})
+	t.Run("cancelled", func(t *testing.T) {
+		c, _, _ := relayFixture(t, true)
+		if r := c.update(request{Operation: "resume", Generation: "old"}); r.Error == "" {
+			t.Fatal("old generation resumed admission")
+		}
+		c.now = func() time.Time { return c.w.Deadline.Add(time.Second) }
+		if r := c.update(request{Operation: "resume", Generation: c.w.Generation}); r.Error == "" {
+			t.Fatal("expired window resumed admission")
+		}
+	})
+}

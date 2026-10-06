@@ -354,7 +354,118 @@ def prepare_trust(gen: str, node: dict[str, Any]) -> dict[str, Any]:
     return peer_snapshot(HostctlConfig.model_validate(opening["config"]), node, gen)
 
 
-def admit_locked(helper: dict[str, Any], trust: dict[str, Any]) -> None:
+def verify_dev(dev_id: str | None) -> None:
+    from djinn_in_a_box.core.host_runtime import inspect_dev
+
+    actual = inspect_dev("djinn", DOCKER_EXECUTABLE)
+    current = actual[0] if actual and actual[1] else None
+    if current != dev_id:
+        raise HostctlError("dev was removed or replaced during assessment")
+
+
+def admission_assessment(trust: dict[str, Any]) -> dict[str, Any] | None:
+    """Slow checks outside the control lock; commit verifies ID and transition."""
+    from djinn_in_a_box.core.host_sealing import inspect_assessment, require_blocked, run_probe
+
+    opening = json.loads((state_root() / "opening.json").read_text())
+    if opening["generation"] != trust["generation"]:
+        raise HostctlError("opening generation changed")
+    assessment = inspect_assessment()
+    creator = opening.get("creator")
+    if creator:
+        actual = host_runtime_dev()
+        if actual is None or not actual[1]:
+            return None
+        if actual[2] != creator:
+            raise HostctlError("external dev replaced pending creation")
+    elif opening.get("dev_id") != assessment.dev_id:
+        raise HostctlError("dev was removed or replaced during window opening")
+    assessment.require(allow_unsealed=bool(opening.get("allow_unsealed")) and not creator)
+    rows = run_probe(assessment.dev_id, trust) if assessment.dev_id else []
+    require_blocked(rows)
+    return {
+        "generation": trust["generation"],
+        "dev_id": assessment.dev_id,
+        "creator": creator,
+        "sealing": assessment.state,
+        "causes": assessment.causes,
+        "probe": rows,
+    }
+
+
+def host_runtime_dev() -> tuple[str, bool, str] | None:
+    from djinn_in_a_box.core.host_runtime import inspect_dev
+
+    return inspect_dev("djinn", DOCKER_EXECUTABLE)
+
+
+def guard_dev_start(planned: dict[str, Any], creator: str) -> None:
+    """Close before unsealed creation; sealed creation stays paused until delivery checks."""
+    from djinn_in_a_box.core.console import warning
+    from djinn_in_a_box.core.host_sealing import assess
+
+    checked = assess(planned)
+    with control_guard():
+        helper = inspect_helper()
+        if helper is None or not helper["State"]["Running"]:
+            return
+        if checked.causes or checked.errors:
+            reason = "; ".join((*checked.causes, *checked.errors))
+            control_journal("dev-start-unsealed", generation=generation(helper), reason=reason)
+            stop_helper_locked()
+            journal("dev-start-closed", generation=generation(helper), reason=reason)
+            warning(f"Hostctl window closed before unsealed dev start: {reason}")
+            return
+        opening = json.loads((state_root() / "opening.json").read_text())
+        if opening["generation"] != generation(helper):
+            raise HostctlError("dev start window generation changed")
+        reply = json.loads(
+            command("exec", str(helper["Id"]), SUPERVISOR, "pause", generation(helper))
+        )
+        if (
+            reply.get("generation") != generation(helper)
+            or reply.get("paused") is not True
+            or reply.get("closed")
+        ):
+            stop_helper_locked()
+            raise HostctlError("helper did not acknowledge admission pause")
+        opening.update(creator=creator, allow_unsealed=False)
+        save_private("opening.json", opening)
+        journal("dev-start-paused", generation=generation(helper), creator=creator)
+
+
+def resume_locked(helper: dict[str, Any]) -> None:
+    journal("dev-start-ready", generation=generation(helper))
+    reply = json.loads(command("exec", str(helper["Id"]), SUPERVISOR, "resume", generation(helper)))
+    if (
+        reply.get("generation") != generation(helper)
+        or reply.get("paused") is not False
+        or reply.get("closed")
+    ):
+        raise HostctlError("helper did not acknowledge admission resume")
+
+
+def commit_assessment(checked: dict[str, Any]) -> None:
+    verify_dev(checked["dev_id"])
+    opening = json.loads((state_root() / "opening.json").read_text())
+    if (
+        opening["generation"] != checked["generation"]
+        or opening.get("creator") != checked["creator"]
+    ):
+        raise HostctlError("dev transition changed during assessment")
+    if checked["creator"]:
+        actual = host_runtime_dev()
+        if actual is None or actual[2] != checked["creator"]:
+            raise HostctlError("creator dev ID changed during assessment")
+    opening["dev_id"] = checked["dev_id"]
+    opening.pop("creator", None)
+    save_private("opening.json", opening)
+    save_private("assessment.json", checked)
+
+
+def admit_locked(
+    helper: dict[str, Any], trust: dict[str, Any], *, sealing: str = "deferred"
+) -> None:
     """Commit once, after enrollment, trust and journal readiness; caller holds the lock."""
     from djinn_in_a_box.core import host_runtime
     from djinn_in_a_box.core.ssh_delivery import tailnet_files, write_public_files
@@ -381,9 +492,7 @@ def admit_locked(helper: dict[str, Any], trust: dict[str, Any]) -> None:
         config = HostctlConfig.model_validate({"hosts": runtime["hostctl_hosts"]})
         write_public_files(root / "public", tailnet_files(config, trust))
     save_private("trust.json", trust)
-    journal(
-        "relay-ready", generation=gen, peers=len(trust["peers"]), sealing="unchecked (B3 pending)"
-    )
+    journal("relay-ready", generation=gen, peers=len(trust["peers"]), sealing=sealing)
     output = command(
         "exec", str(helper["Id"]), SUPERVISOR, "admit", gen, json.dumps(trust["routes"])
     )
@@ -396,10 +505,17 @@ def open_window(
     config: AppConfig, duration: str | None = None, *, allow_unsealed: bool = False
 ) -> str:
     from djinn_in_a_box.core import docker, host_runtime
+    from djinn_in_a_box.core.host_sealing import inspect_assessment
 
     minutes = duration_minutes(config.hostctl.default_duration if duration is None else duration)
     if not config.hostctl.hosts:
         raise HostctlError("Declare at least one [hostctl.hosts.<name>] with address and user")
+    assessment = inspect_assessment()
+    try:
+        assessment.require(allow_unsealed=allow_unsealed)
+    except HostctlError:
+        control_journal("on-refused", causes=assessment.causes, errors=assessment.errors)
+        raise
     binary = supervisor_path()
     deadline = datetime.now(UTC) + timedelta(minutes=minutes)
     boot_deadline = time.clock_gettime_ns(time.CLOCK_BOOTTIME) + minutes * 60 * 10**9
@@ -409,6 +525,13 @@ def open_window(
             control_journal("on-refused", generation=generation(helper), reason="already open")
             raise HostctlError("Window is already open; use djinn hostctl limit <minutes>")
         control_journal("on-attempt", allow_unsealed=allow_unsealed)
+        verify_dev(assessment.dev_id)
+        if allow_unsealed and assessment.causes:
+            journal(
+                "unsealed-override",
+                causes=assessment.causes,
+                boundary="dev has host authority; window is an operating aid only",
+            )
         if helper is not None:
             reconcile(helper)
             command("rm", str(helper["Id"]))
@@ -419,7 +542,15 @@ def open_window(
             journal("on-refused", reason="network verification failed")
             raise HostctlError("Helper network could not be verified")
         gen = uuid.uuid4().hex
-        save_private("opening.json", {"generation": gen, "config": config.hostctl.model_dump()})
+        save_private(
+            "opening.json",
+            {
+                "generation": gen,
+                "config": config.hostctl.model_dump(),
+                "allow_unsealed": allow_unsealed,
+                "dev_id": assessment.dev_id,
+            },
+        )
         argv = run_argv(binary, gen, deadline, boot_deadline)
         command(*argv[1:], timeout=15)
         helper = inspect_helper()
@@ -431,7 +562,8 @@ def open_window(
                 generation=gen,
                 deadline=deadline.isoformat(),
                 allow_unsealed=allow_unsealed,
-                sealing="unchecked (B3 pending)",
+                sealing=assessment.state,
+                causes=assessment.causes,
                 relay="closed pending enrollment, trust and journal readiness",
             )
             host_runtime.start_hostctl_observer(str(helper["Id"]), gen, DOCKER_EXECUTABLE)
@@ -522,15 +654,22 @@ def node_status(helper: dict[str, Any]) -> dict[str, Any]:
 
 
 def snapshot() -> dict[str, Any]:
+    from djinn_in_a_box.core.host_sealing import inspect_assessment
+
+    assessment = inspect_assessment()
     result: dict[str, Any] = {
         "state": "closed",
-        "sealing": "unchecked (B3 pending)",
+        "sealing": assessment.state,
+        "sealing_causes": assessment.causes,
+        "sealing_errors": assessment.errors,
+        "dev_id": assessment.dev_id,
         "relay": "closed",
     }
     helper = inspect_helper()
     if helper is None:
         result["helper"] = "absent"
         result["node"] = "unknown (helper is off)"
+        result["trust"] = cached_trust()
         return result
     result["helper"] = str(helper["Id"])
     result["generation"] = generation(helper)
@@ -555,7 +694,7 @@ def snapshot() -> dict[str, Any]:
             ):
                 raise HostctlError("helper admission response is malformed")
             result["relay"] = "closed pending readiness"
-            if live["admission"] and not live.get("closed"):
+            if live["admission"] and not live.get("paused") and not live.get("closed"):
                 result["state"] = "open"
                 result["relay"] = "open (:1080; declared peers, TCP 22 only)"
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
