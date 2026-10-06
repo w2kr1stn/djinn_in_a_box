@@ -49,7 +49,7 @@ _CLAUDE_HOOK_REWRITES: dict[tuple[str, ...], tuple[bytes, bytes]] = {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "uv run python3 ~/.claude_seed/security_reminder_hook.py",
+                            "command": "python3 ~/.claude_seed/security_reminder_hook.py",
                         }
                     ],
                 }
@@ -62,7 +62,7 @@ _CLAUDE_HOOK_REWRITES: dict[tuple[str, ...], tuple[bytes, bytes]] = {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "uv run python3 ~/.claude/security_reminder_hook.py",
+                            "command": "python3 ~/.claude/security_reminder_hook.py",
                         }
                     ],
                 }
@@ -77,7 +77,7 @@ _CLAUDE_HOOK_REWRITES: dict[tuple[str, ...], tuple[bytes, bytes]] = {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "uv run python3 ~/.claude_seed/ready_notify_hook.py",
+                            "command": "python3 ~/.claude_seed/ready_notify_hook.py",
                         }
                     ],
                 }
@@ -90,7 +90,7 @@ _CLAUDE_HOOK_REWRITES: dict[tuple[str, ...], tuple[bytes, bytes]] = {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "uv run python3 ~/.claude/ready_notify_hook.py",
+                            "command": "python3 ~/.claude/ready_notify_hook.py",
                         }
                     ],
                 }
