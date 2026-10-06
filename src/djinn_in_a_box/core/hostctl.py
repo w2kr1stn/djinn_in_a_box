@@ -18,12 +18,15 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.ssh import HostctlConfig, duration_minutes
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+
+if TYPE_CHECKING:
+    from djinn_in_a_box.core.docker import RunResult
 
 HELPER_NAME = "djinn-hostctl"
 HELPER_NETWORK = "djinn-network"
@@ -33,6 +36,7 @@ HELPER_IMAGE = (
 )
 GENERATION_LABEL = "djinn.hostctl.generation"
 SUPERVISOR = "/djinn-hostctl-supervisor"
+SUPERVISOR_IMAGE = "djinn-hostctl-supervisor:1"
 TAILSCALE_SOCKET = "/run/djinn-hostctl/tailscaled.sock"
 WINDOW_PATH = "/var/lib/tailscale/djinn-hostctl/window.json"
 STOP_SECONDS = 3
@@ -196,9 +200,7 @@ def supervisor_path() -> Path:
     try:
         info = path.lstat()
     except FileNotFoundError as exc:
-        raise HostctlError(
-            "Build and install Dockerfile.hostctl-helper first; see CONTRIBUTING.md"
-        ) from exc
+        raise HostctlError("hostctl supervisor is not installed; run djinn build") from exc
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise HostctlError("supervisor must be an owner-only regular file in protected storage")
     if not info.st_mode & stat.S_IXUSR:
@@ -209,7 +211,26 @@ def supervisor_path() -> Path:
     return path
 
 
-def install_supervisor(image: str = "djinn-hostctl-supervisor:1") -> Path:
+def build_supervisor(*, no_cache: bool = False) -> RunResult:
+    """Build the static supervisor for the host architecture, streaming the log.
+
+    It is no Compose service, so bake does not see it. BuildKit derives TARGETARCH
+    and TARGETVARIANT from the build platform.
+    """
+    from djinn_in_a_box.core.docker import (
+        _build_progress,  # pyright: ignore[reportPrivateUsage]
+        _run_streamed,  # pyright: ignore[reportPrivateUsage]
+    )
+    from djinn_in_a_box.core.paths import get_project_root
+
+    cmd = [DOCKER_EXECUTABLE, "buildx", "build", "--progress", _build_progress(), "--load"]
+    if no_cache:
+        cmd.append("--no-cache")
+    cmd.extend(["-f", "Dockerfile.hostctl-helper", "-t", SUPERVISOR_IMAGE, "."])
+    return _run_streamed(cmd, cwd=get_project_root())
+
+
+def install_supervisor(image: str = SUPERVISOR_IMAGE) -> Path:
     """Extract a built static executable; runtime always uses the official image."""
     from djinn_in_a_box.core.host_runtime import private_directory
 

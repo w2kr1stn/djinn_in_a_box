@@ -559,3 +559,39 @@ def test_shared_host_runtime_captured_calls_close_stdin(monkeypatch, operation):
         host_runtime._command("/usr/bin/docker", "stop", "disposable")
     else:
         host_runtime.remove_runtime_volume("disposable", "/usr/bin/docker")
+
+
+@pytest.mark.parametrize("no_cache", [False, True])
+def test_supervisor_build_uses_supported_buildx_flags(no_cache, monkeypatch):
+    # Fakes accept any flag; the installed buildx rejects unknown ones.
+    import re
+    import shutil
+    import subprocess
+
+    from djinn_in_a_box.core import docker
+
+    captured = {}
+
+    def streamed(cmd, *, cwd=None, env=None):
+        captured.update(cmd=cmd, cwd=cwd)
+        return docker.RunResult(returncode=0)
+
+    monkeypatch.setattr(docker, "_run_streamed", streamed)
+    assert hostctl.build_supervisor(no_cache=no_cache).success
+    cmd = captured["cmd"]
+    assert cmd[1:3] == ["buildx", "build"] and cmd[-1] == "."
+    assert cmd[cmd.index("-f") + 1] == "Dockerfile.hostctl-helper"
+    assert cmd[cmd.index("-t") + 1] == hostctl.SUPERVISOR_IMAGE
+    assert "--load" in cmd and ("--no-cache" in cmd) is no_cache
+    assert (captured["cwd"] / "Dockerfile.hostctl-helper").is_file()
+    docker_cli = shutil.which("docker")
+    if docker_cli is None:
+        pytest.skip("Docker CLI unavailable")
+    help_text = subprocess.run(
+        [docker_cli, "buildx", "build", "--help"], capture_output=True, text=True, check=False
+    )
+    # Without the plugin the CLI prints its generic help and still exits 0.
+    if help_text.returncode or "docker buildx build" not in help_text.stdout:
+        pytest.skip("docker buildx unavailable")
+    for flag in [a for a in cmd[3:] if a.startswith("-")]:
+        assert re.search(rf"(^|\s){re.escape(flag)}(,|\s|=)", help_text.stdout, re.M), flag
