@@ -291,9 +291,18 @@ def test_connector_fragmented_handshake_and_refusal(monkeypatch):
 
 def test_connector_packaged_and_firewall_keeps_private_rules():
     # Mutation: drop connector COPY or its executable permission.
+    import re
+
     dockerfile = (ROOT / "Dockerfile").read_text()
-    assert "COPY scripts/hostctl-connect.py /usr/local/bin/djinn-hostctl-connect" in dockerfile
-    assert "chmod 755 /usr/local/bin/djinn-hostctl-connect" in dockerfile
+    assert (
+        "COPY --chmod=755 scripts/hostctl-connect.py /usr/local/bin/djinn-hostctl-connect"
+        in dockerfile
+    )
+    # The build runs as dev after USER; a RUN there cannot change root-owned system paths.
+    after_user = dockerfile.split("\nUSER $USERNAME\n", 1)[1]
+    runs = re.findall(r"^RUN (.+(?:\\\n.+)*)", after_user, re.M)
+    assert runs
+    assert not [r for r in runs if re.search(r"(?<![~\w.])/(usr|etc|opt|bin|sbin|lib)/", r)]
     firewall = (ROOT / "scripts/init-firewall.sh").read_text()
     assert '"172.16.0.0/12"' in firewall and '"192.168.0.0/16"' in firewall
     assert '"10.0.0.0/8"' in firewall and '"100.64.0.0/10"' not in firewall
