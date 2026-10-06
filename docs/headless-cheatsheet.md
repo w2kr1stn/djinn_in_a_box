@@ -5,13 +5,11 @@ the session-oriented `djinn session --prompt` path.
 
 Host control runs on the host: `djinn hostctl on --for 10m`, `status`,
 `limit 5` and `off`. Enrollment is asynchronous and login time counts against
-the window. Once enrollment, peer trust, sealing, direct-route and journal checks succeed,
-headless agents use generated `ssh host-a` aliases through the gated relay.
-Off/expiry cuts all relay streams. Unsealed headless or detached starts close
-the helper before launching; sealed starts pause admission until actual delivery
-and the direct TCP22 probe pass. `--allow-unsealed` belongs to an explicit host
-opening and never carries over to a dev start. Doctor reports each sealing cause
-and address result; a missing dev or authenticated peer snapshot defers the probe.
+the window. Once `status` reports open, headless agents use `ssh host-a`.
+Doctor reports sealing causes and address results. See
+[host control usage](../README.md#host-control-windows) and the
+[security model](../SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
+for creator close/pause behavior, `--allow-unsealed` and deployment requirements.
 
 ---
 
@@ -214,4 +212,9 @@ must start with a letter or number.
 | File edits in the current project | `djinn run ... --write` | Enables the agent's write mode for the mounted workspace. |
 | Long-running project context | `djinn session --project <name>` | Reuses a stable workspace under `~/.djinn/sessions/`. |
 | Container build or test tasks | `djinn run ... --docker` | Uses the Docker proxy instead of direct socket access. |
-| Dockerfile or daemon debugging | `djinn run ... --docker-direct` | Uses unfiltered Docker access; treat as host-level authority. |
+| Dockerfile or daemon debugging | `djinn run ... --docker-direct` | Uses unfiltered Docker access. |
+
+Docker authority and write-mode implications are documented in the
+[security model](../SECURITY-MODEL.md#host-authority-and-docker-access).
+Session host fallback has a separate
+[open workflow path](../SECURITY-MODEL.md#direct-routes-and-target-authority).

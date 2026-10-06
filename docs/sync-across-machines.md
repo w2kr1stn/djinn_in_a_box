@@ -3,6 +3,8 @@
 Djinn can be used on more than one machine, but it does not prescribe a sync
 service. Use Git for this repository, and use any bidirectional file
 synchronizer for local config files you choose to share.
+See the [security model](../SECURITY-MODEL.md#credentials-backups-and-outbound-traffic)
+for credential, transcript and backup implications.
 
 ## What To Sync
 
@@ -97,11 +99,8 @@ included by default because they are rebuildable.
 
 Backups are age-encrypted with a passphrase by default and use the filename
 `djinn-backup-YYYY-MM-DD.tar.gz.age`. `age` asks for that passphrase directly at
-the terminal during backup and restore; Djinn does not store it. Move the
-archive by your chosen secure transport and retain the passphrase separately: a
-forgotten passphrase cannot be recovered. Existing cleartext `.tar.gz` backups
-remain restorable. `djinn backup --no-encrypt` is an explicit cleartext opt-out
-for controlled use only.
+the terminal during backup and restore. Existing cleartext `.tar.gz` backups
+remain restorable; `djinn backup --no-encrypt` creates that format.
 
 Stop Djinn containers before backup or restore; the command enforces this.
 
@@ -114,6 +113,8 @@ against Docker's internal storage. Use `djinn clean`, `djinn backup`, and
 
 ## Hostctl node identity
 
-Never sync or back up `djinn-hostctl-state`. Each Docker host enrolls its own
-node; ordinary cleanup retains it and `clean all` requires fresh enrollment.
-The hostctl journal and supervisor storage are host-local as well.
+Exclude `djinn-hostctl-state` and the hostctl journal/supervisor directories
+from synchronization. Build and enroll separately on each Docker host using
+[host control setup](../README.md#host-control-windows). Identity persistence,
+cleanup and the prohibition on node-state copies/backups are defined in
+[enrollment and tailnet policy](../SECURITY-MODEL.md#enrollment-and-tailnet-policy).
