@@ -18,6 +18,7 @@ from rich.text import Text
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import (
     AppConfig,
+    AssistantConfig,
     BuildConfig,
     ConfigSyncConfig,
     ResourceLimits,
@@ -64,6 +65,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "shell.omp_theme_path",
     "config_sync.source",
     "build.network",
+    "assistant.agent",
     "git.signing_identity",
     "git.allowed_signers_file",
     "hostctl.default_duration",
@@ -334,6 +336,9 @@ def _build_config(
 
 
 def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
+    if key == "assistant.agent":
+        assistant = AssistantConfig.model_validate({"agent": value})
+        return AppConfig.model_validate({**config.model_dump(), "assistant": assistant})
     if key == "hostctl.default_duration":
         from djinn_in_a_box.config.ssh import HostctlConfig
 
@@ -452,6 +457,8 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
 
 
 def _format_config_value(config: AppConfig, key: str) -> str:
+    if key == "assistant.agent":
+        return config.assistant.agent
     if key == "git.signing_identity":
         return config.git.signing_identity or "unset"
     if key == "git.allowed_signers_file":
@@ -640,6 +647,7 @@ def config_show(
         console.print()
 
         _print_config_table("Build", [("network", config.build.network)])
+        _print_config_table("Assistant", [("agent", config.assistant.agent)])
 
         _print_config_table("Git", [
             ("signing_identity", config.git.signing_identity or "unset"),

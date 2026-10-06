@@ -70,6 +70,7 @@ def test_every_scalar_set_preserves_declarations(tmp_path, key):
         "shell.omp_theme_path": str(tmp_path / "theme"),
         "config_sync.source": "codex",
         "build.network": "host",
+        "assistant.agent": "codex",
         "git.signing_identity": "none",
         "git.allowed_signers_file": str(tmp_path / "allowed_signers"),
         "hostctl.default_duration": "20m",

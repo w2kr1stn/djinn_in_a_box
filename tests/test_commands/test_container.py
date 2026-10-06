@@ -1279,62 +1279,6 @@ class TestCleanAllCommand:
         mock_clear.assert_not_called()
 
 
-class TestAuditCommand:
-    """Tests for the audit command."""
-
-    def test_audit_requires_proxy_running(self) -> None:
-        """Test audit requires docker proxy to be running."""
-        with patch("djinn_in_a_box.commands.container.is_container_running", return_value=False):
-            with pytest.raises(typer.Exit) as exc_info:
-                container.audit()
-
-            assert exc_info.value.exit_code == 1
-
-    def test_audit_shows_logs(self) -> None:
-        """Test audit shows proxy logs."""
-        with (
-            patch("djinn_in_a_box.commands.container.is_container_running", return_value=True),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
-
-            # Successful audit returns normally (no exit)
-            container.audit()
-
-            # Should have called docker logs
-            call_args = mock_run.call_args[0][0]
-            assert container.DOCKER_EXECUTABLE in call_args
-            assert "logs" in call_args
-
-    def test_audit_with_tail_option(self) -> None:
-        """Test audit -n option sets tail count."""
-        with (
-            patch("djinn_in_a_box.commands.container.is_container_running", return_value=True),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
-
-            # Successful audit returns normally (no exit)
-            container.audit(tail=100)
-
-            call_args = mock_run.call_args[0][0]
-            assert "--tail" in call_args
-            assert "100" in call_args
-
-    def test_audit_propagates_error_exit_code(self) -> None:
-        """Test audit propagates error exit code from docker logs."""
-        with (
-            patch("djinn_in_a_box.commands.container.is_container_running", return_value=True),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=1)
-
-            with pytest.raises(typer.Exit) as exc_info:
-                container.audit()
-
-            assert exc_info.value.exit_code == 1
-
-
 class TestUpdateCommand:
     """Tests for the update command."""
 

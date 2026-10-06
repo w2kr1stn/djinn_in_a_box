@@ -271,6 +271,7 @@ Supported `djinn config set` keys are:
 | `shell.omp_theme_path` | Optional Oh My Posh theme file mounted read-only | unset |
 | `config_sync.source` | Native global workflow source: `claude`, `codex`, or `opencode` | `claude` |
 | `build.network` | Network for image-build steps: `default` or `host` | `default` |
+| `assistant.agent` | Interactive audit agent: `claude`, `codex`, or `opencode` | `claude` |
 
 `djinn init` asks for the mode first, then the corresponding host directory.
 Set the mode and host root explicitly; mode values must be lowercase:
@@ -427,8 +428,8 @@ The five states are:
 There is no semantic-provider fallback: workflow sync never invokes a provider.
 Normal `start`, `run`, and `session` preparation repairs only deterministic
 `source-changed` projection drift; all other states stop the command before an
-agent starts. Preflight, status, audit, and sync never seed or repair source
-roots. Only `djinn init` and `djinn doctor --fix` perform source seeding.
+agent starts. Preflight, status, config-workflow audits, and sync never seed or
+repair source roots. Only `djinn init` and `djinn doctor --fix` perform source seeding.
 
 Host fallback for Claude, Codex, or OpenCode receives the selected canonical
 view through the shared publisher. The container OpenCode runtime is refreshed
@@ -1010,11 +1011,40 @@ status:
 djinn status
 ```
 
-When the Docker proxy is running, show its recent logs:
+Open an interactive installation check or investigate a symptom:
 
 ```sh
 djinn audit
-djinn audit --tail 200
+djinn audit "Container fails to start" --agent opencode
+djinn config set assistant.agent opencode
+```
+
+Audit uses its own slim assistant image, built on first use and when its agent,
+Dockerfile or pinned version changes. It works without the dev image/container
+and with broken configuration; loader errors are included in the first input.
+The [audit guide](assistant/audit-briefing.md) points into the installation docs.
+Run it as your regular user in a foreground terminal on Linux with a local Unix
+Docker socket. Remote Docker contexts are unsupported.
+
+The installed repository, Djinn config directory, `~/.djinn` and Docker socket
+are mounted read-write, together with existing selected credential files.
+Custom config roots outside `~/.djinn` supply only these credential files;
+workspace trees and custom zone roots are not mounted. Harness settings, hooks,
+plugins and history are fresh in the temporary container. Claude uses normal
+manual approvals; Codex runs without its sandbox (`danger-full-access`, which needs
+user namespaces the container does not grant) and asks when the model requests approval
+(`on-request`); OpenCode asks for edits and shell commands. No approval bypass is used.
+Credential refreshes persist at ordinary/signal exit; abrupt SIGKILL cannot
+flush them. Missing credentials require signing in through the normal agent
+setup first. The agent hands host-only build/sync/recreation commands back to you.
+`--rm` removes the assistant session container; approved file edits and Docker
+objects created during repairs persist.
+
+When the Docker proxy is running, show its recent logs:
+
+```sh
+djinn logs proxy
+djinn logs proxy --tail 200
 ```
 
 Update the pinned agent versions in the Dockerfile through the project script:
