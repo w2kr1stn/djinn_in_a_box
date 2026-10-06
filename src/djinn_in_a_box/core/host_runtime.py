@@ -509,7 +509,16 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
         # Inspect before any stale resource mutation, including without Git identities.
         actual = inspect_dev(container_name, runtime.docker_path)
         previous = read_state(root)
-        if actual is not None:
+        # A host or Docker restart leaves the recorded dev stopped and its observer gone;
+        # reclaim exactly that generation like `djinn clean` would. A running or foreign dev
+        # keeps the refusal, and a surviving observer refuses below.
+        stale_dev = (
+            actual is not None
+            and not actual[1]
+            and previous is not None
+            and actual[2] == previous["generation"]
+        )
+        if actual is not None and not stale_dev:
             raise GitSSHError(
                 "a dev container already owns the runtime; clean it from the host first"
             )
@@ -518,7 +527,9 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                 raise GitSSHError(
                     "a dev container already owns the runtime; clean it from the host first"
                 )
-            if not cleanup_owned(root, previous["generation"], runtime.docker_path):
+            if not cleanup_owned(
+                root, previous["generation"], runtime.docker_path, terminate_dev=stale_dev
+            ):
                 raise GitSSHError("previous runtime ownership is unknown")
             if previous.get("agent_pid", -1) > 0:
                 stop_owned_process(previous["agent_pid"], previous["agent_token"])
