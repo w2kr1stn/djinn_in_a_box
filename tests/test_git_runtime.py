@@ -402,3 +402,20 @@ def test_doctor_reports_actual_live_agent_and_changed_declarations(git_inputs, f
         )
         rows = git_diagnostics(changed)
         assert any(row.name == "Git agent" and row.status == "warn" for row in rows)
+
+
+def test_shared_state_parent_stays_private_under_a_permissive_umask(git_inputs, monkeypatch):
+    # An implicit mkdir parent takes the umask's mode; hostctl refuses a group-writable one.
+    import stat
+
+    from djinn_in_a_box.core import hostctl
+
+    previous = os.umask(0o002)
+    try:
+        parent = runtime_root(create=True).parent.parent
+    finally:
+        os.umask(previous)
+    assert parent.name == "djinn"
+    assert stat.S_IMODE(parent.stat().st_mode) & 0o022 == 0
+    monkeypatch.setenv("XDG_STATE_HOME", str(parent.parent))
+    assert hostctl.state_root().parent == parent
