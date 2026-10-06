@@ -42,16 +42,10 @@ The hostctl supervisor uses Go 1.27.1, matching Dockerfile.hostctl-helper.
 Without local Go, run its gates in `golang:1.27.1-alpine` with the source mounted
 at `/src` and working directory `/src`. Bind sources must be paths on the Docker host.
 
-Build and install on the Linux host (outside writable dev mounts):
-
-```sh
-docker build -f Dockerfile.hostctl-helper --build-arg TARGETARCH=amd64 -t djinn-hostctl-supervisor:1 .
-uv run python -c 'from djinn_in_a_box.core.hostctl import install_supervisor; install_supervisor()'
-```
-
-Use the Docker host architecture (`amd64`, `arm64`, `386`, or `arm` with
-`--build-arg TARGETVARIANT=v7`). The static binary is extracted to owner-only
-host state storage and bound read-only into the pinned official Tailscale image.
+`djinn build` builds the supervisor for the Docker host's platform (BuildKit sets
+`TARGETARCH`/`TARGETVARIANT`) and extracts the static binary to owner-only host
+state storage, from where it is bound read-only into the pinned official
+Tailscale image. Run it on the host, outside writable dev mounts.
 
 ## Commit Style
 

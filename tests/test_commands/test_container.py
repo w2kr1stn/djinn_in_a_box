@@ -259,6 +259,49 @@ class TestBuildCommand:
         assert "exit code 1" in captured
         assert "above" in captured
 
+    @pytest.mark.parametrize("failing", ["none", "compose", "supervisor", "install"])
+    @pytest.mark.parametrize("no_cache", [False, True])
+    def test_build_also_builds_and_installs_the_hostctl_supervisor(
+        self, failing: str, no_cache: bool
+    ) -> None:
+        """The supervisor is no Compose service; build adds it and installs it after bake."""
+        steps: list[str] = []
+
+        def compose(config: object, *, no_cache: bool) -> RunResult:
+            steps.append(f"compose:{no_cache}")
+            return RunResult(returncode=2 if failing == "compose" else 0)
+
+        def supervisor(*, no_cache: bool) -> RunResult:
+            steps.append(f"supervisor:{no_cache}")
+            return RunResult(returncode=3 if failing == "supervisor" else 0)
+
+        def install() -> Path:
+            steps.append("install")
+            if failing == "install":
+                raise container.hostctl.HostctlError("Docker cp failed (exit 1)")
+            return Path("/state/bin/supervisor")
+
+        with (
+            patch("djinn_in_a_box.commands.container.load_config"),
+            patch("djinn_in_a_box.commands.container.preflight"),
+            patch("djinn_in_a_box.commands.container._sync_build_files"),
+            patch("djinn_in_a_box.commands.container.compose_build", side_effect=compose),
+            patch.object(container.hostctl, "build_supervisor", side_effect=supervisor),
+            patch.object(container.hostctl, "install_supervisor", side_effect=install),
+        ):
+            if failing == "none":
+                container.build(no_cache=no_cache)
+            else:
+                with pytest.raises(typer.Exit) as exc_info:
+                    container.build(no_cache=no_cache)
+                assert exc_info.value.exit_code == {"compose": 2, "supervisor": 3, "install": 1}[
+                    failing
+                ]
+
+        expected = [f"compose:{no_cache}", f"supervisor:{no_cache}", "install"]
+        stop = {"compose": 1, "supervisor": 2, "install": 3, "none": 3}[failing]
+        assert steps == expected[:stop]
+
     def test_sync_build_files_uses_config_root_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

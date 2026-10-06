@@ -114,6 +114,16 @@ def build(
     info("Building djinn-in-a-box image...")
 
     result = compose_build(config, no_cache=no_cache)
+    if result.success:
+        info("Building hostctl supervisor...")
+        result = hostctl.build_supervisor(no_cache=no_cache)
+    if result.success:
+        try:
+            hostctl.install_supervisor()
+        except (hostctl.HostctlError, OSError) as exc:
+            blank()
+            error(f"Installing the hostctl supervisor failed: {exc}")
+            raise typer.Exit(1) from None
 
     if result.success:
         blank()

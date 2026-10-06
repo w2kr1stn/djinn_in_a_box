@@ -932,7 +932,9 @@ the same diagnostics; it never repairs declared sources, markers or volumes.
 The hostctl helper runs separately from Compose on the shared Djinn network.
 `core/hostctl.py` creates the pinned official Tailscale image with an extracted
 static supervisor bound read-only as PID 1. `Dockerfile.hostctl-helper` builds
-that executable with Go 1.27.1. No Tailscale daemon or Go SDK is added to dev.
+that executable with Go 1.27.1; `djinn build` builds it for the host platform after
+the Compose images and installs it into owner-only host state storage. No
+Tailscale daemon or Go SDK is added to dev.
 
 The host control flock covers on/off/limit, short dev generation transitions,
 normal cleanup and the full all-clean interval. It is distinct from the existing

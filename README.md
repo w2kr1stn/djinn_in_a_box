@@ -778,8 +778,8 @@ when a declared volume has the same name in the separate namespace.
 
 ## Host control windows
 
-On a Linux Docker host, build and install the static supervisor as described in
-[CONTRIBUTING.md](CONTRIBUTING.md), then declare hosts in `config.toml`:
+On a Linux Docker host, `djinn build` builds and installs the static supervisor.
+Then declare hosts in `config.toml`:
 
 ```toml
 [hostctl]
