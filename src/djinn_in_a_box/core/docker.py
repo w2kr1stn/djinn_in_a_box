@@ -37,6 +37,7 @@ from djinn_in_a_box.config.defaults import (
     VOLUME_CATEGORIES,
     volume_categories,
 )
+from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
 from djinn_in_a_box.core import desktop, host_runtime
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
@@ -338,8 +339,10 @@ def _docker_inspect(resource: str, name: str) -> bool:
             capture_output=True,
             text=True,
             check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
         )
-    except FileNotFoundError:
+    except (OSError, subprocess.SubprocessError):
         warning("Docker is not installed")
         return False
     return result.returncode == 0
@@ -454,7 +457,7 @@ def delete_network(name: str) -> bool:
 def ensure_network(name: str = DJINN_NETWORK) -> bool:
     if _docker_inspect("network", name):
         return True
-    result = _run_captured([DOCKER_EXECUTABLE, "network", "create", name])
+    result = _run_captured([DOCKER_EXECUTABLE, "network", "create", name], timeout=5)
     if not result.success:
         detail = result.stderr.strip() or f"exit code {result.returncode}"
         warning(f"Failed to create Docker network '{name}': {detail}")
@@ -1003,7 +1006,8 @@ def resolve_declared_entries(
             targets[name] = target
             if isinstance(mount, VolumeDeclaration):
                 source = f"djinn-{name}"
-                if source in {v for values in VOLUME_CATEGORIES.values() for v in values}:
+                if source in ({v for values in VOLUME_CATEGORIES.values() for v in values}
+                              | PROTECTED_INTERNAL_VOLUMES):
                     raise ValueError(f"volume '{source}' conflicts with built-in volume '{source}'")
                 kind = "volume"
             else:
@@ -1893,9 +1897,12 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
     """Config-independent teardown under the same guard, dev before helpers."""
     if is_own_container("djinn"):
         return RunResult(returncode=1, stderr=SELF_TEARDOWN_ERROR)
+    from djinn_in_a_box.core import hostctl
+
     observer_identity = None
     try:
-        with host_runtime.creation_guard() as root:
+        with hostctl.control_guard(), host_runtime.creation_guard() as root:
+            hostctl.stop_helper_locked(remove=True)
             state = host_runtime.read_state(root)
             actual = host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE)
             if actual is not None:
@@ -1968,6 +1975,9 @@ def volume_exists(name: str) -> bool:
 
 
 def delete_volume(name: str) -> bool:
+    if name in PROTECTED_INTERNAL_VOLUMES:
+        warning("Hostctl identity is protected; only djinn clean all deletes it")
+        return False
     if name in DESKTOP_RUNTIME_VOLUMES:
         try:
             with host_runtime.creation_guard():
@@ -1997,6 +2007,8 @@ def get_existing_volumes_by_category(
 
 
 def backup_volume(name: str, dest_dir: Path) -> RunResult:
+    if name in PROTECTED_INTERNAL_VOLUMES:
+        return RunResult(1, stderr="Hostctl identity must never be backed up")
     return _run_captured(
         [
             DOCKER_EXECUTABLE,
@@ -2018,6 +2030,8 @@ def backup_volume(name: str, dest_dir: Path) -> RunResult:
 
 
 def restore_volume(name: str, source_dir: Path) -> RunResult:
+    if name in PROTECTED_INTERNAL_VOLUMES:
+        return RunResult(1, stderr="Hostctl identity must never be restored")
     archive_path = source_dir / f"{name}.tar.gz"
     if not archive_path.exists():
         return RunResult(returncode=1, stdout="", stderr=f"Archive not found: {archive_path}")

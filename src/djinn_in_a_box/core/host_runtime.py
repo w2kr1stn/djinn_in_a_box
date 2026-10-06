@@ -96,6 +96,7 @@ def inspect_object(
         timeout=timeout,
         check=False,
         cwd="/",
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode:
         # The daemon reports "No such container/image: X" but "get X: no such volume".
@@ -141,12 +142,15 @@ def acquire_creation_lock(root: Path) -> int:
 @contextlib.contextmanager
 def creation_guard(root: Path | None = None) -> Iterator[Path]:
     """One nonblocking guard for creators, observers and config-independent clean."""
-    root = root or runtime_root(create=True)
-    fd = acquire_creation_lock(root)
-    try:
-        yield root
-    finally:
-        os.close(fd)
+    from djinn_in_a_box.core.hostctl import control_guard
+
+    with control_guard():
+        root = root or runtime_root(create=True)
+        fd = acquire_creation_lock(root)
+        try:
+            yield root
+        finally:
+            os.close(fd)
 
 
 def read_state(root: Path) -> dict[str, Any] | None:
@@ -158,9 +162,12 @@ def read_state(root: Path) -> dict[str, Any] | None:
 
 def _save(root: Path, state: dict[str, Any]) -> None:
     temporary = root / "state.tmp"
-    temporary.write_text(json.dumps(state))
-    temporary.chmod(0o600)
-    temporary.replace(root / "state.json")
+    from djinn_in_a_box.core.hostctl import control_guard
+
+    with control_guard():
+        temporary.write_text(json.dumps(state))
+        temporary.chmod(0o600)
+        temporary.replace(root / "state.json")
 
 
 def inspect_owned_resource(
@@ -182,7 +189,13 @@ def inspect_owned_resource(
 
 def _command(docker_path: str, *args: str) -> None:
     result = subprocess.run(
-        [docker_path, *args], capture_output=True, text=True, timeout=5, cwd="/", check=False
+        [docker_path, *args],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        cwd="/",
+        check=False,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode:
         raise GitSSHError(result.stderr.strip() or "Docker runtime operation failed")
@@ -218,6 +231,7 @@ def cleanup_owned(
         users = subprocess.run(
             [docker_path, "ps", "-aq", "--filter", f"volume={name}"],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=5,
             cwd="/",
@@ -242,6 +256,7 @@ def remove_runtime_volume(name: str, docker_path: str) -> None:
     result = subprocess.run(
         [docker_path, "ps", "-aq", "--filter", f"volume={name}"],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=5,
         cwd="/",
@@ -407,6 +422,7 @@ class GitRuntime:
             result = subprocess.run(
                 [self.docker_path, "ps", "-aq", "--filter", f"volume={name}"],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
                 cwd="/",
@@ -704,5 +720,133 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
             warning(f"Observer cleanup preserved resources: {exc}")
 
 
+def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) -> None:
+    """The same detached observer entry point also serves standalone windows."""
+    from djinn_in_a_box.core.hostctl import state_root
+
+    with (state_root() / "observer.log").open("ab") as log:
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "djinn_in_a_box.core.host_runtime",
+                "--hostctl",
+                helper_id,
+                generation,
+                docker_path,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            start_new_session=True,
+            cwd="/",
+        )
+
+
+def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
+    """Enroll and report; helper PID 1 remains the only expiry timer."""
+    from djinn_in_a_box.core import hostctl
+
+    if not Path(docker_path).is_absolute():
+        raise GitSSHError("observer requires a pinned absolute Docker executable")
+    hostctl.DOCKER_EXECUTABLE = docker_path
+    hostctl.HELPER_NAME = helper_id
+    root = hostctl.state_root()
+    enrollment = None
+    dev_id = None
+    try:
+        while True:
+            helper = hostctl.inspect_helper()
+            if (
+                helper is None
+                or helper["Id"] != helper_id
+                or hostctl.generation(helper) != generation
+            ):
+                return
+            if not helper["State"]["Running"]:
+                with hostctl.control_guard():
+                    fresh = hostctl.inspect_helper()
+                    if fresh and fresh["Id"] == helper_id:
+                        hostctl.reconcile(fresh)
+                return
+            observation = {
+                "generation": generation,
+                "observer_pid": os.getpid(),
+                "observer_token": process_token(os.getpid()),
+                "time": time.time(),
+            }
+            try:
+                node = hostctl.node_status(helper)
+                observation["node_state"] = node["BackendState"]
+                if enrollment is None:
+                    enrollment = subprocess.Popen(
+                        [
+                            docker_path,
+                            "exec",
+                            helper_id,
+                            "/usr/local/bin/tailscale",
+                            "--socket=" + hostctl.TAILSCALE_SOCKET,
+                            "up",
+                            "--reset",
+                            "--hostname=" + hostctl.machine_name(),
+                            "--accept-dns=false",
+                            "--accept-routes=false",
+                            "--ssh=false",
+                            "--timeout=30s",
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        cwd="/",
+                    )
+                if enrollment.poll() is not None:
+                    observation["enrollment_exit"] = enrollment.returncode
+            except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                observation["error"] = str(exc)
+            actual = inspect_dev("djinn", docker_path)
+            if actual and actual[1] and dev_id is None:
+                dev_id = actual[0]
+            if dev_id is not None and (actual is None or not actual[1] or actual[0] != dev_id):
+                with hostctl.control_guard():
+                    fresh = hostctl.inspect_helper()
+                    if fresh and fresh["Id"] == helper_id:
+                        hostctl.stop_helper_locked()
+                        hostctl.journal("external-dev-teardown", generation=generation)
+                return
+            temporary = root / f"observation-{generation}.tmp"
+            temporary.write_text(json.dumps(observation))
+            temporary.chmod(0o600)
+            with hostctl.control_guard():
+                fresh = hostctl.inspect_helper()
+                if (
+                    fresh is None
+                    or fresh["Id"] != helper_id
+                    or hostctl.generation(fresh) != generation
+                    or not fresh["State"]["Running"]
+                ):
+                    temporary.unlink(missing_ok=True)
+                    return
+                temporary.replace(root / "observation.json")
+            time.sleep(0.5)
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        warning(f"Hostctl observation gap: {exc}")
+        with hostctl.control_guard():
+            fresh = hostctl.inspect_helper()
+            if fresh and fresh["Id"] == helper_id:
+                hostctl.stop_helper_locked()
+    finally:
+        if enrollment is not None and enrollment.poll() is None:
+            enrollment.terminate()
+            try:
+                enrollment.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                enrollment.kill()
+                enrollment.wait(timeout=3)
+
+
 if __name__ == "__main__":
-    observe(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3])
+    if sys.argv[1] == "--hostctl":
+        observe_hostctl(sys.argv[2], sys.argv[3], sys.argv[4])
+    else:
+        observe(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3])

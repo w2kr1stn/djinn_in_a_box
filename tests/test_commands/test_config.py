@@ -72,6 +72,7 @@ def test_every_scalar_set_preserves_declarations(tmp_path, key):
         "build.network": "host",
         "git.signing_identity": "none",
         "git.allowed_signers_file": str(tmp_path / "allowed_signers"),
+        "hostctl.default_duration": "20m",
     }
     before = AppConfig(
         code_dir=tmp_path,

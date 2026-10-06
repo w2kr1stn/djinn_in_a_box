@@ -66,6 +66,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "build.network",
     "git.signing_identity",
     "git.allowed_signers_file",
+    "hostctl.default_duration",
 )
 _LOCK_PROBLEM_IDENTIFIER = "canonical-lock-failed"
 
@@ -333,6 +334,13 @@ def _build_config(
 
 
 def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
+    if key == "hostctl.default_duration":
+        from djinn_in_a_box.config.ssh import HostctlConfig
+
+        hostctl = HostctlConfig.model_validate(
+            {**config.hostctl.model_dump(), "default_duration": value}
+        )
+        return AppConfig.model_validate({**config.model_dump(), "hostctl": hostctl})
     if key in {"git.signing_identity", "git.allowed_signers_file"}:
         from djinn_in_a_box.config.ssh import GitConfig
 
@@ -641,6 +649,9 @@ def config_show(
             console.print(Text(f"  {alias}: {identity.hostname} user={identity.user} "
                                f"key_file={identity.key_file} "
                                f"public_key_file={identity.public_key_file}"))
+        _print_config_table("Hostctl", [("default_duration", config.hostctl.default_duration)])
+        for alias, host in config.hostctl.hosts.items():
+            console.print(Text(f"  {alias}: {host.address} user={host.user}"))
         rule("Mounts")
         from djinn_in_a_box.config.declarations import BindDeclaration
 

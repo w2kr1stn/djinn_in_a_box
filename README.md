@@ -679,7 +679,7 @@ Verify the real Git host's key on the host and put its trusted entry in
 including hashed entries and key markers. Missing trust or a mismatched key refuses
 startup. The host SSH config and private keys are no longer mounted. The generated
 read-only `~/.ssh` contains `config`, `known_hosts`, `tailnet_known_hosts` (empty until
-hostctl is delivered), `git.json`, the public keys under their original filenames,
+tailnet trust is delivered), `git.json`, the public keys under their original filenames,
 and optional `allowed_signers`. Alias URLs such as `git@git-work:group/repo.git`
 continue to select the declared account. Hardware keys and certificates are unsupported.
 
@@ -775,6 +775,47 @@ unchanged. Restore uses the archive contents, skips removed or currently `none`
 declarations with a warning, and accepts a change between `data` and `cache`.
 Root `djinn-sync-*` archives still restore credentials/config-root paths, even
 when a declared volume has the same name in the separate namespace.
+
+## Host control windows
+
+On a Linux Docker host, build and install the static supervisor as described in
+[CONTRIBUTING.md](CONTRIBUTING.md), then declare hosts in `config.toml`:
+
+```toml
+[hostctl]
+default_duration = "2h"
+
+[hostctl.hosts.host-a]
+address = "host-a.example.ts.net"
+user = "operator"
+```
+
+```sh
+djinn hostctl on --for 10m
+djinn hostctl status
+djinn hostctl limit 5
+djinn hostctl off
+```
+
+Durations are positive integer minutes (`10m`) or hours (`2h`), at most 24h.
+`limit` resets the remaining minutes (1–1440). Repeated `on` refuses and points
+to `limit`; `off` is idempotent and works without configuration. The deadline
+starts at `on`, including login time. Enrollment is asynchronous: obtain the
+login link with `status` on the host terminal, enroll the untagged machine-local
+`djinn-<machine>` node, then disable its node-key expiry in Tailscale's admin
+console. No auth key is stored. Window expiry is independent of node-key expiry.
+
+This first hostctl package has no relay and performs no sealing assessment.
+Agents have no route through this helper to its tailnet. `--allow-unsealed` is
+accepted and recorded; sealing checks arrive in a subsequent package. `status`
+and `doctor` report this explicitly. Tailnet SSH delivery is still pending.
+
+The helper alone mounts `djinn-hostctl-state`. Normal/category/name cleanup
+retains this identity; explicit name deletion refuses. Only `clean all` deletes
+it, requiring enrollment again. It is excluded from backup and restore. The host
+journal lives under `${XDG_STATE_HOME:-~/.local/state}/djinn/hostctl`, outside
+public SSH delivery; Docker logs retain helper expiry events. Forced kills and
+observer outages can leave observation gaps, which diagnostics report.
 
 ## Credential Security
 

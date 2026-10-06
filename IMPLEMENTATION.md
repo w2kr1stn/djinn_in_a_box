@@ -927,6 +927,29 @@ Dockerfile delivery of this helper requires an image rebuild (`djinn build`).
 Doctor reports exactly one PASS/FAIL per declared mount/environment key using
 the same diagnostics; it never repairs declared sources, markers or volumes.
 
+## Hostctl helper
+
+The hostctl helper runs separately from Compose on the shared Djinn network.
+`core/hostctl.py` creates the pinned official Tailscale image with an extracted
+static supervisor bound read-only as PID 1. `Dockerfile.hostctl-helper` builds
+that executable with Go 1.27.1. No Tailscale daemon or Go SDK is added to dev.
+
+The host control flock covers on/off/limit, short dev generation transitions,
+normal cleanup and the full all-clean interval. It is distinct from the existing
+creator flock, which protects lengthy preparation. Enrollment runs in the
+host_runtime detached observer, outside the control lock; each publication
+rechecks helper identity and window generation. The observer has no expiry timer.
+
+PID 1 persists generation, boot ID, UTC deadline and CLOCK_BOOTTIME deadline in
+the protected state volume, polls within 250 ms and bounds tailscaled shutdown.
+The exec updater communicates over a helper-private Unix socket, atomically
+persists a reset deadline, and acknowledges the effective window. Expired,
+closed and replaced generations cannot be updated or restarted. Host metadata
+contains observation only; no host deadline mirror authorizes the window.
+
+B1 exposes no relay, tailnet trust, SSH connector or sealing/probe assessment.
+Host status and doctor say so. Later packages supply those capabilities.
+
 ## Image Build
 
 The Dockerfile refuses a build network it cannot resolve names on:

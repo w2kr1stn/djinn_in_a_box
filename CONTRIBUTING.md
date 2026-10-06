@@ -33,9 +33,25 @@ uv run ruff check src/ tests/
 uv run pyright src/
 uv run pytest -q
 uvx bandit -r src/ --severity-level medium --confidence-level medium
+(cd helper/hostctl && go test ./... && CGO_ENABLED=0 go build ./...)
 ```
 
-The CI workflow runs the same gates on pull requests and pushes to `master`.
+CI runs these gates on pull requests and pushes to `master`.
+
+The hostctl supervisor uses Go 1.27.1, matching Dockerfile.hostctl-helper.
+Without local Go, run its gates in `golang:1.27.1-alpine` with the source mounted
+at `/src` and working directory `/src`. Bind sources must be paths on the Docker host.
+
+Build and install on the Linux host (outside writable dev mounts):
+
+```sh
+docker build -f Dockerfile.hostctl-helper --build-arg TARGETARCH=amd64 -t djinn-hostctl-supervisor:1 .
+uv run python -c 'from djinn_in_a_box.core.hostctl import install_supervisor; install_supervisor()'
+```
+
+Use the Docker host architecture (`amd64`, `arm64`, `386`, or `arm` with
+`--build-arg TARGETVARIANT=v7`). The static binary is extracted to owner-only
+host state storage and bound read-only into the pinned official Tailscale image.
 
 ## Commit Style
 
