@@ -55,6 +55,9 @@ def runtime_root(*, create: bool = False) -> Path:
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     root = home / ".local" / "state" / "djinn" / "runtime" / "git-agent"
     if create:
+        # Create the shared Djinn state directory itself as 0700: as an implicit parent
+        # it would get the umask's mode, and hostctl refuses a group-writable parent.
+        root.parent.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         private_directory(root.parent)
         private_directory(root)
     return root
