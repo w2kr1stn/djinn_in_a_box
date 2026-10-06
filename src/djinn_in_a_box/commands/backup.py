@@ -25,6 +25,7 @@ from djinn_in_a_box.config.defaults import (
 )
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
 from djinn_in_a_box.core.console import blank, error, info, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
@@ -93,7 +94,7 @@ def _collect_items(
         if cat == "none":
             continue
         volumes.extend(v for v in get_existing_volumes_by_category(cat, config)
-                       if v not in DESKTOP_RUNTIME_VOLUMES)
+                       if v not in DESKTOP_RUNTIME_VOLUMES and v not in PROTECTED_INTERNAL_VOLUMES)
         sync_paths.extend(get_existing_sync_paths_by_category(cat, config))
     return volumes, sync_paths
 
@@ -398,6 +399,10 @@ def restore() -> None:
 
         failed = False
         for archive in inner_archives:
+            if archive.name.removesuffix(".tar.gz") in PROTECTED_INTERNAL_VOLUMES:
+                error("Refusing to restore protected hostctl identity")
+                failed = True
+                continue
             if archive.name.removesuffix(".tar.gz") in DESKTOP_RUNTIME_VOLUMES:
                 warning(f"Skipping desktop runtime archive: {archive.name}")
                 continue

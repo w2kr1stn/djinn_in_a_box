@@ -3,6 +3,11 @@
 Quick reference for running CLI agents in headless mode with `djinn run`, plus
 the session-oriented `djinn session --prompt` path.
 
+Host control runs on the host: `djinn hostctl on --for 10m`, `status`,
+`limit 5` and `off`. Enrollment is asynchronous and login time counts against
+the window. The first hostctl package exposes no relay, so it does not yet
+provide tailnet SSH to headless agents; sealing assessment is pending too.
+
 ---
 
 ## Model Handling

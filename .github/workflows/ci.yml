@@ -44,3 +44,26 @@ jobs:
 
       - name: Run Bandit
         run: uvx bandit -r src/ --severity-level medium --confidence-level medium
+
+  hostctl:
+    name: Hostctl supervisor
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: helper/hostctl
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: helper/hostctl/go.mod
+          cache: false
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build static supervisor
+        run: CGO_ENABLED=0 go build ./...

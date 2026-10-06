@@ -6,6 +6,7 @@ from typing import Final
 
 from djinn_in_a_box.config.declarations import VolumeDeclaration, declaration_error
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
+from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
 from djinn_in_a_box.core.exceptions import ConfigValidationError
 
 DESKTOP_RUNTIME_VOLUMES: Final = ("djinn-desktop-dbus", "djinn-desktop-audio")
@@ -29,6 +30,7 @@ def volume_categories(config: AppConfig | None = None) -> dict[str, list[str]]:
     """Copy the built-ins and add declared volumes without inspecting bind sources."""
     categories = {category: list(names) for category, names in VOLUME_CATEGORIES.items()}
     builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}
+    builtins |= PROTECTED_INTERNAL_VOLUMES
     if config is not None:
         for name, declaration in config.mounts.items():
             if isinstance(declaration, VolumeDeclaration):

@@ -51,6 +51,7 @@ def test_status_declared_volume_categories(
         "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"],
         "data": ["djinn-opencode-data", "djinn-vscode-workspaces"],
         "none": ["djinn-desktop-dbus", "djinn-desktop-audio"],
+        "protected (only clean all)": ["djinn-hostctl-state"],
     }
     if configured:
         expected["data"].append("djinn-journal")

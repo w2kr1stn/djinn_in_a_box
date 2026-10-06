@@ -16,7 +16,7 @@ from djinn_in_a_box.config.declarations import (
     MountDeclaration,
     inspect_declarations,
 )
-from djinn_in_a_box.config.ssh import GitConfig
+from djinn_in_a_box.config.ssh import GitConfig, HostctlConfig
 
 
 def validate_memory_format(value: str) -> str:
@@ -242,6 +242,13 @@ class AppConfig(BaseModel):
     """Image-build settings."""
 
     git: GitConfig = Field(default_factory=GitConfig)
+    hostctl: HostctlConfig = Field(default_factory=HostctlConfig)
+
+    @model_validator(mode="after")
+    def ssh_aliases(self) -> AppConfig:
+        if self.git.identities.keys() & self.hostctl.hosts.keys():
+            raise ValueError("Git and hostctl aliases must be distinct")
+        return self
 
     mounts: dict[str, MountDeclaration] = Field(default_factory=dict)
     environment: dict[str, str] = Field(default_factory=dict)

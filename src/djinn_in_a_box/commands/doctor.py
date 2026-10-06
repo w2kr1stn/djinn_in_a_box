@@ -14,10 +14,11 @@ import fnmatch
 import os
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
 import typer
 from rich.table import Table
@@ -388,6 +389,92 @@ def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> 
 
 # -----------------------------------------------------------------------------
 # Check assembly
+def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
+    from djinn_in_a_box.core import hostctl
+
+    checks = [
+        Check(
+            "Hostctl configuration",
+            Status.WARN if config is None or not config.hostctl.hosts else Status.PASS,
+            "unknown/missing configuration"
+            if config is None
+            else f"{len(config.hostctl.hosts)} hosts; default {config.hostctl.default_duration}",
+        )
+    ]
+    if not daemon:
+        return checks + [
+            Check(f"Hostctl {name}", Status.WARN, "unknown: Docker unavailable")
+            for name in ("window", "helper", "node", "journal")
+        ]
+    try:
+        value = hostctl.snapshot()
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return checks + [
+            Check(f"Hostctl {name}", Status.WARN, f"unknown: {exc}")
+            for name in ("window", "helper", "node", "journal")
+        ]
+    window = value.get("window")
+    checks.append(
+        Check(
+            "Hostctl window",
+            Status.PASS if window else Status.WARN,
+            f"{value['state']}; helper-owned deadline {window['deadline']}"
+            if window
+            else f"{value['state']}; deadline unknown",
+        )
+    )
+    checks.append(
+        Check(
+            "Hostctl helper",
+            Status.PASS if value.get("running") else Status.WARN,
+            f"{value['helper']}; sealing unchecked (B1); relay absent (B1)",
+        )
+    )
+    node = value.get("node")
+    if isinstance(node, dict):
+        from typing import cast
+
+        node = cast(dict[str, Any], node)
+        self_node: dict[str, Any] = node.get("Self") or {}
+        users: dict[str, Any] = node.get("User") or {}
+        account: dict[str, Any] = users.get(str(self_node.get("UserID")), {})
+        tags = self_node.get("Tags")
+        detail = (
+            f"{node['BackendState']}; name={self_node.get('HostName', 'unknown')}; "
+            f"account={account.get('LoginName', 'unknown')}; "
+            f"tags={tags if tags is not None else 'unknown'}; "
+            f"key expiry={self_node.get('KeyExpiry', 'unknown')}"
+        )
+        checks.append(
+            Check(
+                "Hostctl node",
+                Status.WARN,
+                detail,
+                "Enroll on the host and disable node-key expiry in the admin console.",
+            )
+        )
+    else:
+        checks.append(Check("Hostctl node", Status.WARN, str(node or "unknown")))
+    root = hostctl.state_root(create=False)
+    observation: dict[str, Any] = value.get("observation") or {}
+    from djinn_in_a_box.core.host_runtime import process_token
+
+    observer_live = (bool(observation) and time.time() - observation.get("time", 0) < 10
+                     and process_token(observation.get("observer_pid", -1))
+                     == observation.get("observer_token"))
+    checks.append(
+        Check(
+            "Hostctl journal",
+            Status.PASS if (root / "journal.jsonl").exists() and observer_live else Status.WARN,
+            "present; observer current"
+            if observer_live
+            else "observation/log gaps unknown; forced kills cannot record exact expiry",
+        )
+    )
+    return checks
+
+
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 def declaration_checks(
     config: AppConfig | None, declarations: DeclarationSet | None = None,
@@ -550,6 +637,8 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             Check(row.name, Status(row.status), row.detail, row.remedy)
             for row in git_diagnostics(config)
         )
+
+    checks.extend(hostctl_checks(config, daemon=daemon))
 
     image = daemon and _image_built()
     checks.append(

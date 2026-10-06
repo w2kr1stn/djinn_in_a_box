@@ -51,6 +51,7 @@ def test_top_level_commands_are_exact() -> None:
         "run",
         "agents",
         "session",
+        "hostctl",
     }
 
 

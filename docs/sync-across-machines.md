@@ -111,3 +111,9 @@ Do not sync live containers, Docker volume directories, Unix sockets, PID files,
 or the local zone's runtime cache directories. Do not run a file synchronizer
 against Docker's internal storage. Use `djinn clean`, `djinn backup`, and
 `djinn restore` for Djinn-managed runtime state.
+
+## Hostctl node identity
+
+Never sync or back up `djinn-hostctl-state`. Each Docker host enrolls its own
+node; ordinary cleanup retains it and `clean all` requires fresh enrollment.
+The hostctl journal and supervisor storage are host-local as well.

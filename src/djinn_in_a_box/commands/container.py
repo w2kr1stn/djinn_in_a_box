@@ -19,7 +19,8 @@ from djinn_in_a_box.config.defaults import (
 )
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core import host_runtime
+from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
+from djinn_in_a_box.core import host_runtime, hostctl
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
@@ -394,6 +395,9 @@ def _list_existing_volumes(config: AppConfig | None = None) -> dict[str, list[st
         ]
         if existing or missing:
             entries[category] = existing + missing
+    protected = [name for name in sorted(PROTECTED_INTERNAL_VOLUMES) if volume_exists(name)]
+    if protected:
+        entries["protected (only clean all)"] = protected
     return entries
 
 
@@ -601,6 +605,9 @@ def clean_volumes(
         djinn clean volumes djinn-uv-cache     # Delete specific volume
     """
     if name:
+        if name in PROTECTED_INTERNAL_VOLUMES:
+            error("Hostctl identity is protected; only djinn clean all deletes it")
+            raise typer.Exit(1)
         if not name.startswith("djinn-"):
             error(f"Refusing to delete volume '{name}': only djinn-* volumes are managed")
             raise typer.Exit(1)
@@ -717,52 +724,57 @@ def clean_all(
             info("Aborted.")
             raise typer.Exit(0)
 
-    config = _load_optional_config()
-    categories = volume_categories(config)
+    with hostctl.control_guard():
+        config = _load_optional_config()
+        categories = volume_categories(config)
 
-    info("Stopping and removing containers...")
-    down_result = compose_down()
-    if not down_result.success:
-        warning(f"Failed to stop containers: {down_result.stderr.strip() or 'unknown error'}")
-        raise typer.Exit(down_result.returncode)
+        info("Stopping and removing containers...")
+        down_result = compose_down()
+        if not down_result.success:
+            warning(f"Failed to stop containers: {down_result.stderr.strip() or 'unknown error'}")
+            raise typer.Exit(down_result.returncode)
 
-    try:
-        with host_runtime.creation_guard():
-            if host_runtime.inspect_dev("djinn", host_runtime.DOCKER_EXECUTABLE) is not None:
-                raise RuntimeMountSpecificationError(
-                    "A replacement dev owns the runtime; retry clean"
-                )
-            info("Deleting all volumes...")
-            all_volumes = [v for vols in categories.values() for v in vols
-                           if v not in DESKTOP_RUNTIME_VOLUMES]
-            results = delete_volumes(all_volumes)
-            for vol, deleted in results.items():
-                if deleted:
-                    success(f"  Deleted: {vol}")
-                else:
-                    warning(f"  Failed: {vol}")
-
-            info("Clearing all sync paths...")
-            for category in SYNC_PATHS:
-                for path in get_existing_sync_paths_by_category(category, config):
-                    if clear_sync_path(path):
-                        success(f"  Cleared: {path}")
+        try:
+            with host_runtime.creation_guard():
+                if host_runtime.inspect_dev("djinn", host_runtime.DOCKER_EXECUTABLE) is not None:
+                    raise RuntimeMountSpecificationError(
+                        "A replacement dev owns the runtime; retry clean"
+                    )
+                hostctl.delete_state_locked()
+                info("Deleting all volumes...")
+                all_volumes = [v for vols in categories.values() for v in vols
+                               if v not in DESKTOP_RUNTIME_VOLUMES]
+                results = delete_volumes(all_volumes)
+                for vol, deleted in results.items():
+                    if deleted:
+                        success(f"  Deleted: {vol}")
                     else:
-                        warning(f"  Failed: {path}")
+                        error(f"  Failed: {vol}")
+                        raise typer.Exit(1)
 
-            info("Removing network...")
-            if network_exists(DJINN_NETWORK):
-                if delete_network(DJINN_NETWORK):
-                    success(f"  Deleted: {DJINN_NETWORK}")
-            else:
-                err_console.print(f"  {DJINN_NETWORK} does not exist")
+                info("Clearing all sync paths...")
+                for category in SYNC_PATHS:
+                    for path in get_existing_sync_paths_by_category(category, config):
+                        if clear_sync_path(path):
+                            success(f"  Cleared: {path}")
+                        else:
+                            warning(f"  Failed: {path}")
 
-    except (RuntimeMountSpecificationError, OSError, subprocess.SubprocessError) as exc:
-        error(f"Cleanup preserved resources: {exc}")
-        raise typer.Exit(1) from None
+                info("Removing network...")
+                if network_exists(DJINN_NETWORK):
+                    if delete_network(DJINN_NETWORK):
+                        success(f"  Deleted: {DJINN_NETWORK}")
+                    else:
+                        raise typer.Exit(1)
+                else:
+                    err_console.print(f"  {DJINN_NETWORK} does not exist")
 
-    blank()
-    success("Cleanup complete.")
+        except (RuntimeMountSpecificationError, OSError, subprocess.SubprocessError) as exc:
+            error(f"Cleanup preserved resources: {exc}")
+            raise typer.Exit(1) from None
+
+        blank()
+        success("Cleanup complete.")
 
 
 def audit(

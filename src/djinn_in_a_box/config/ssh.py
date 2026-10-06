@@ -19,6 +19,48 @@ def ssh_token(value: str) -> str:
     return value
 
 
+def duration_minutes(value: str) -> int:
+    """The public duration grammar is shared by configuration and hostctl on."""
+    if not re.fullmatch(r"[1-9][0-9]*[mh]", value):
+        raise ValueError("duration must be a positive integer followed by m or h")
+    # Bound the input before int conversion as well as the resulting duration.
+    if len(value) > 5:
+        raise ValueError("duration must not exceed 24h (1440m)")
+    minutes = int(value[:-1]) * (60 if value[-1] == "h" else 1)
+    if minutes > 1440:
+        raise ValueError("duration must not exceed 24h (1440m)")
+    return minutes
+
+
+class HostctlHost(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    address: str
+    user: str
+
+    _tokens = field_validator("address", "user")(ssh_token)
+
+
+class HostctlConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    default_duration: str = "2h"
+    hosts: dict[str, HostctlHost] = {}
+
+    @field_validator("default_duration")
+    @classmethod
+    def duration(cls, value: str) -> str:
+        duration_minutes(value)
+        return value
+
+    @field_validator("hosts")
+    @classmethod
+    def aliases(cls, value: dict[str, HostctlHost]) -> dict[str, HostctlHost]:
+        for alias in value:
+            ssh_token(alias)
+        return value
+
+
 class GitIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
