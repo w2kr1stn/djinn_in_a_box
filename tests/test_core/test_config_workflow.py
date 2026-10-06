@@ -778,7 +778,7 @@ def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) ->
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "uv run python3 ~/.claude_seed/ready_notify_hook.py",
+                        "command": "python3 ~/.claude_seed/ready_notify_hook.py",
                     }
                 ],
             }
@@ -856,3 +856,16 @@ def test_runtime_state_does_not_block_repeated_workflow_preparation(tmp_path: Pa
     # Nothing of the tool's own data was removed to get there.
     assert (source_root / "skills" / "synced" / _BUCKET).is_dir()
     assert list((source_root / "scripts" / "__pycache__").iterdir())
+
+
+def test_managed_hook_commands_never_sync_the_working_directory_project() -> None:
+    # `uv run` would create a venv and build any Python project in the agent's cwd.
+    from djinn_in_a_box.core import config_workflow
+
+    rewrites = config_workflow._CLAUDE_HOOK_REWRITES  # pyright: ignore[reportPrivateUsage]
+    assert rewrites
+    for container_form, host_form in rewrites.values():
+        for raw in (container_form, host_form):
+            for entry in json.loads(raw):
+                for hook in entry["hooks"]:
+                    assert hook["command"].startswith("python3 "), hook["command"]

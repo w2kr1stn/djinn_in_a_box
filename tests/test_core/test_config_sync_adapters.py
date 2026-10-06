@@ -73,9 +73,9 @@ def _hook_content(name: str) -> bytes:
 def _hook_registrations(tool: ConfigSyncSource) -> dict[str, object]:
     if tool == "claude":
         commands = {
-            "startup": "uv run python3 ~/.claude/scripts/session-start-status.py",
-            "security": "uv run python3 ~/.claude_seed/security_reminder_hook.py",
-            "ready": "uv run python3 ~/.claude_seed/ready_notify_hook.py",
+            "startup": "python3 ~/.claude/scripts/session-start-status.py",
+            "security": "python3 ~/.claude_seed/security_reminder_hook.py",
+            "ready": "python3 ~/.claude_seed/ready_notify_hook.py",
         }
         return {
             "hooks": {
@@ -100,7 +100,7 @@ def _hook_registrations(tool: ConfigSyncSource) -> dict[str, object]:
     }
 
     def command(name: str) -> str:
-        return f"bash -lc 'uv run python \"${{CODEX_HOME:-$HOME/.codex}}/{commands[name]}\"'"
+        return f"bash -lc 'python3 \"${{CODEX_HOME:-$HOME/.codex}}/{commands[name]}\"'"
 
     return {
         "hooks": {

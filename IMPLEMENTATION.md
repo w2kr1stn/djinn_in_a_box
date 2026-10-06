@@ -415,14 +415,16 @@ carrier or event for that artifact.
 | ready | hook | `plugins/ready-notify.js` | — | — |
 
 In the container, Claude registers startup with
-`uv run python3 ~/.claude/scripts/session-start-status.py` and root-level hook
-scripts with `uv run python3 ~/.claude_seed/<script>`. The `scripts/` subtree
+`python3 ~/.claude/scripts/session-start-status.py` and root-level hook
+scripts with `python3 ~/.claude_seed/<script>`. The `scripts/` subtree
 is directly mounted at `~/.claude/scripts/`. The host fallback rewrites
-Claude's root-level seed commands to `uv run python3 ~/.claude/<script>`.
+Claude's root-level seed commands to `python3 ~/.claude/<script>`.
 Codex hook commands use
-`bash -lc 'uv run python "${CODEX_HOME:-$HOME/.codex}/<script>"'`; the
+`bash -lc 'python3 "${CODEX_HOME:-$HOME/.codex}/<script>"'`; the
 container mounts its Codex runtime root at `~/.codex`, which is the default
-when `CODEX_HOME` is unset. OpenCode has no hook command carrier: its plugin
+when `CODEX_HOME` is unset. Hook scripts use only the standard library and run
+with plain `python3`: `uv run` would sync and build any Python project found in
+the agent's working directory. OpenCode has no hook command carrier: its plugin
 files are read from the mounted `~/.opencode/seed/<script>` workflow and
 published to `~/.config/opencode/<script>` for runtime use.
 
