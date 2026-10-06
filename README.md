@@ -5,7 +5,7 @@
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](pyproject.toml)
 
 Djinn in a Box is a Docker-based development environment for running CLI coding
-agents with isolated credentials and a managed container lifecycle.
+agents with persistent per-tool credentials and a managed container lifecycle.
 
 It ships the mechanism:
 
@@ -160,6 +160,8 @@ this once per tool:
 
 `djinn backup` includes credentials by default. When selecting categories,
 include credentials.
+See [credential security](SECURITY-MODEL.md#credentials-backups-and-outbound-traffic)
+for host storage, agent access, encryption and retention limits.
 
 ## Configuration
 
@@ -293,12 +295,9 @@ builds run on another and resolve nothing there. The build then resolves through
 the resolver the host itself uses, which keeps DNS on its intended path instead of
 bypassing it.
 
-**Understand the trade-off before setting it.** `host` removes the build's network
-isolation: every `RUN` step in the Dockerfile shares the host's network namespace
-and can reach host-local services, including anything bound to loopback. It
-applies to the whole build, not one step, so enable it only for a Dockerfile you
-trust. It changes nothing about the resulting image or about how containers run
-afterwards — only how build steps reach the network.
+The setting affects build steps, not container runtime networking. See the
+[host build-network implications](SECURITY-MODEL.md#host-authority-and-docker-access)
+before selecting `host`.
 
 Buildx asks for explicit consent to that: since buildx 0.37.2, a build that
 requests the host network fails unless the `network.host` entitlement is granted.
@@ -478,7 +477,7 @@ backup and restore exclude them.
 After rebuilding, recreate dev through the normal start/run path. Recreate after
 a host desktop session or audio server restart too; plain container restart keeps
 the existing mounts and cannot restore an endpoint omitted during creation.
-See [desktop access and trusted host inputs](DOCKER-SOCKET-SECURITY.md#desktop-access-and-trusted-host-inputs)
+See [desktop boundaries](SECURITY-MODEL.md#desktop-boundaries)
 for the policy and its limits.
 
 ## The Blank-Space and Seed Model
@@ -602,24 +601,22 @@ disabled.
 
 Third-party model providers you configure yourself (OpenRouter, x.ai, and the
 like) are deliberately absent; add the ones you actually use.
+See [outbound traffic limits](SECURITY-MODEL.md#credentials-backups-and-outbound-traffic)
+before using the firewall with sensitive data.
 
 ## Docker Access Modes
 
-The base mode gives the container no Docker socket access. This is the safest
-default and is enough for ordinary editing, tests, and agent conversations that
-do not need to create containers.
+The base mode delivers no Docker socket or Docker endpoint.
 
 `djinn start --docker` enables Docker access through a Docker socket proxy. The
 dev container talks to `docker-proxy` over the internal Docker network, and the
-proxy bind-mounts the host socket read-only. The proxy permits a limited API
-surface and blocks several high-risk Docker API areas.
+proxy bind-mounts the host socket read-only.
 
 `djinn start --docker-direct` mounts `/var/run/docker.sock` directly into the
-container. This gives the container broad control over the host Docker daemon.
-Use it only when the proxied mode is insufficient.
+container. Both Docker flags also work with `djinn run`.
 
-Read [DOCKER-SOCKET-SECURITY.md](DOCKER-SOCKET-SECURITY.md) before enabling
-Docker socket access, especially direct access.
+Read [host authority and Docker access](SECURITY-MODEL.md#host-authority-and-docker-access)
+for the implications of either mode.
 
 ## Storage and Mounts
 
@@ -677,10 +674,11 @@ public_key_file = "~/.ssh/personal_git.pub"
 Verify the real Git host's key on the host and put its trusted entry in
 `~/.ssh/known_hosts` before starting. Djinn selects entries for declared hostnames,
 including hashed entries and key markers. Missing trust or a mismatched key refuses
-startup. The host SSH config and private keys are no longer mounted. The generated
+startup. Built-in delivery excludes the host SSH config and private keys. The generated
 read-only `~/.ssh` contains `config`, `known_hosts`, `tailnet_known_hosts` (empty until
 tailnet trust is delivered), `git.json`, the public keys under their original filenames,
-and optional `allowed_signers`. Alias URLs such as `git@git-work:group/repo.git`
+optional `allowed_signers`, and `tailnet_config` when hostctl hosts are declared.
+Alias URLs such as `git@git-work:group/repo.git`
 continue to select the declared account. Hardware keys and certificates are unsupported.
 
 A dedicated host agent loads only these keys; encrypted keys prompt on the host
@@ -711,7 +709,8 @@ references with their origins. Manually replace private `core.sshCommand -i` sel
 removed `-F` configs, SSH `IdentityFile`/`Include` paths and old allowed-signers paths
 with the generated config/public selectors. Repository discovery is bounded and
 reports uninspected roots. Djinn never rewrites repositories or the host Git config.
-Git keys must not be authorized on machines whose SSH access should be gated.
+See [Git keys and browser identity](SECURITY-MODEL.md#git-keys-and-browser-identity)
+for the signing capability and target-key restrictions.
 
 `--here` mounts the current directory at `/home/dev/workspace` for both `start` and
 `run`; for `run` it can be combined with any number of `--mount` values. Each
@@ -800,79 +799,28 @@ djinn hostctl off
 Durations are positive integer minutes (`10m`) or hours (`2h`), at most 24h.
 `limit` resets the remaining minutes (1–1440). Repeated `on` refuses and points
 to `limit`; `off` is idempotent and works without configuration. The deadline
-starts at `on`, including login time. Enrollment is asynchronous: obtain the
-login link with `status` on the host terminal, enroll the untagged machine-local
-`djinn-<machine>` node, then disable its node-key expiry in Tailscale's admin
-console. No auth key is stored. Window expiry is independent of node-key expiry.
+starts at `on`, including login time. Enrollment is asynchronous; obtain its
+login link with `status` on the host terminal. Before the first opening, follow
+[enrollment and tailnet policy](SECURITY-MODEL.md#enrollment-and-tailnet-policy)
+for node setup, target configuration and the policy example.
 
-Agents use `ssh host-a` through the helper's admission-controlled relay on
-port 1080. Only declared peers on TCP 22 are allowed. Each opening snapshots
-their authenticated Tailscale SSH host keys; missing or ambiguous peers refuse
-admission. Changed keys fail strict checking until the next opening. Generated
-aliases exist while closed and keep Git's agent and trust independent.
-Off and expiry end every relay stream, including SSH multiplexed connections.
+Once `status` reports open, agents use `ssh host-a`. Generated aliases remain
+present while the window is closed. Git and signing work independently.
 Generated SSH delivery requires host numeric UID 1000, matching the dev image,
 so the dev user can read the owner-only public files.
 
-`on` assesses the running container's actual delivery and names every sealing
-cause. `--allow-unsealed` records those causes and the lost host boundary: the
-window becomes an operating aid when dev has host authority. It overrides only
-sealing; deadline, trust, logging and direct-route failures still refuse admission.
-No restart or creation security flag is needed to change the running assessment.
-An unsealed dev start closes and verifies the helper before launching, including
-headless and detached starts. A sealed start pauses admission until actual
-delivery and the direct TCP22 probe pass. Removal or replacement closes the window.
-Doctor reports sealing causes and reached/blocked/unknown results for every
-declared tailnet address, using current or cached authenticated peer data. With
-no dev or peer snapshot, the probe is deferred. The host must prevent forwarding
-from the Docker network into the tailnet; Djinn changes no firewall. The trusted
-probe detects misconfiguration, and NET_ADMIN can hide routes from it.
-The existing `--firewall` private-network rules allow the helper bridge IP;
-custom networks outside RFC1918 refuse relay readiness.
+`on` names causes when the running dev is unsealed. The explicit
+`--allow-unsealed` option and creator close/pause behavior are defined in
+[sealed deployments](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller).
+Run `djinn doctor` for sealing causes and per-address reached/blocked/unknown
+probe results; no dev or authenticated peer snapshot means deferred.
+Configure the [host networking prerequisite](SECURITY-MODEL.md#direct-routes-and-target-authority)
+before relying on these checks.
 
-The helper alone mounts `djinn-hostctl-state`. Normal/category/name cleanup
-retains this identity; explicit name deletion refuses. Only `clean all` deletes
-it, requiring enrollment again. It is excluded from backup and restore. The host
-journal lives under `${XDG_STATE_HOME:-~/.local/state}/djinn/hostctl`, outside
-public SSH delivery; Docker logs retain helper expiry events and connection IDs,
-destinations, UTC starts/ends and end reasons, without payload. Forced kills and
-observer outages can leave observation gaps, which diagnostics report.
-
-## Credential Security
-
-Djinn isolates credentials per CLI. It does not encrypt them. Understand the
-model before you store a high-value key such as an `age` identity.
-
-- **Cleartext on the host.** Credential directories under the config root are
-  ordinary files guarded by filesystem permissions. Host provisioning secures
-  config and credential roots with mode `0700`. `djinn doctor` reports permission
-  drift, and `djinn doctor --fix` repairs it.
-- **Readable by every agent in the container.** Each credential is mounted where
-  its tool expects it, so the `dev` user — and therefore every coding agent you
-  run — can read all of them. An `age` identity is a master decryption key. An
-  agent running in write mode (`--dangerously-skip-permissions`, `--full-auto`)
-  acts without approval, so a prompt injection reaching that agent can read the
-  key. Run `djinn start --firewall` when an agent processes untrusted content, so
-  a leaked secret cannot be sent outbound.
-- **Backups are encrypted by default.** `djinn backup` writes an age-encrypted
-  `tar.gz.age` archive under `~/.djinn/backups/`. `age` prompts for the
-  passphrase directly at your terminal; Djinn never receives or stores it.
-  A forgotten passphrase makes that archive unrecoverable. Use `--no-encrypt`
-  only when you explicitly need a cleartext archive, and protect it as
-  carefully as the credentials themselves.
-- **Zones separate credentials from agent data.** The config root is the
-  credential/config zone: Djinn backs it up and you may mirror it. Its sibling
-  `<config-root>.shared` holds transcript directories and needs your own backup
-  and, when desired, cross-machine mirror. `<config-root>.local` holds caches
-  and scratch; exclude it from mirroring. `djinn init` provisions every assigned
-  overlay directory, and startup ensures it exists before mounting.
-- **Transcript retention belongs to the agent.** Djinn never deletes
-  agent-owned transcript data. For Claude Code, configure its native
-  `cleanupPeriodDays` setting or use `claude project purge`; use the equivalent
-  native setting or command for other agents.
-
-Read [DOCKER-SOCKET-SECURITY.md](DOCKER-SOCKET-SECURITY.md) before enabling
-Docker socket access, which widens this surface further.
+For journal/connection-log locations, cutoffs and observation limits, see
+[window state, expiry and logs](SECURITY-MODEL.md#window-state-expiry-and-logs).
+For host-local identity storage and cleanup, see
+[sync guidance](docs/sync-across-machines.md#hostctl-node-identity).
 
 ## Resources
 
@@ -932,8 +880,7 @@ The archive is written to:
 ~/.djinn/backups/djinn-backup-YYYY-MM-DD.tar.gz.age
 ```
 
-`age` prompts twice for a passphrase at your terminal. Keep it safe: Djinn
-cannot recover a forgotten passphrase. Only the newest
+`age` prompts twice for a passphrase at your terminal. Only the newest
 `djinn-backup-*.tar.gz` or `djinn-backup-*.tar.gz.age` archive is kept in that
 directory. Existing cleartext archives remain restorable and are removed after
 a successful new backup.
@@ -962,6 +909,8 @@ djinn backup --no-encrypt
 
 For cross-machine usage, see
 [docs/sync-across-machines.md](docs/sync-across-machines.md).
+For encryption and credential implications, see the
+[security model](SECURITY-MODEL.md#credentials-backups-and-outbound-traffic).
 
 ## Cleanup and Uninstall
 

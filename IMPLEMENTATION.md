@@ -212,8 +212,8 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 - `environment: dict[str, str]`: empty by default, literal dev-container values
 - `build: BuildConfig`: `network: BuildNetwork` (`default` | `host`, default
   `default`) — reaches compose as `DJINN_BUILD_NETWORK`, which
-  `docker-compose.yml` interpolates into `build.network`. `host` trades the
-  build's network isolation for the host's resolver path. Buildkit's third mode,
+  `docker-compose.yml` interpolates into `build.network`. `host` uses the
+  host's resolver path. Buildkit's third mode,
   `none`, is not offered: no layer of this image builds without a network. A named
   network buildkit rejects itself.
 
@@ -767,11 +767,12 @@ variables rendered by `build_compose_env()`.
 
 `docker-compose.docker.yml` adds a Docker socket proxy service and sets
 `DOCKER_HOST=tcp://docker-proxy:2375` for the dev container. The proxy allows
-selected read and lifecycle operations and blocks higher-risk Docker APIs.
+selected read and lifecycle operations.
 
 `docker-compose.docker-direct.yml` mounts `/var/run/docker.sock` directly and
-sets `DOCKER_DIRECT=true`. The CLI warns that this gives the container full
-Docker control.
+sets `DOCKER_DIRECT=true`; the entrypoint adjusts socket permissions.
+See [host authority and Docker access](SECURITY-MODEL.md#host-authority-and-docker-access)
+for the analysis of these delivery paths.
 
 Git delivery is owned by `config/ssh.py`, `core/ssh_delivery.py`,
 `core/git_agent.py` and `core/host_runtime.py`. The frozen Git declarations specify
@@ -791,9 +792,9 @@ variables are reserved against caller/declaration overrides.
 The host starts an empty `ssh-agent -D`, loads explicit keys with `ssh-add` on the
 host terminal, deduplicates shared key paths and verifies the complete public blob
 set. The exported protocol filter permits list/sign only for that set; it rejects
-add/remove, lock, provider and extension requests. It is a signing capability,
-without destination restrictions. Host UID 1000 matches the image; runtime roots
-are owner-only (0700), sockets 0600. There is no ambient-agent import or init service.
+add/remove, lock, provider and extension requests. Host UID 1000 matches the image;
+runtime roots are owner-only (0700), sockets 0600. There is no ambient-agent import
+or init service.
 
 A detached observer starts before loading, detects creator death during startup,
 then observes Docker's actual dev ID with a per-creation label. An inherited flock
@@ -813,13 +814,16 @@ See [Git identities and SSH signing](README.md#git-identities-and-ssh-signing) f
 manual declarations, `includeIf` wiring and repository changes. Doctor inspects
 configuration with origins and bounded repository discovery, and parses SSH
 Includes without executing `Match exec`; it never loads keys or repairs Git/SSH config.
+See [Git keys and browser identity](SECURITY-MODEL.md#git-keys-and-browser-identity)
+for the implications of signing access.
 
 `core/desktop.py` discovers only standard runtime Unix sockets, renders helper
-delivery, and exposes `inspect_desktop_endpoints()` for doctor and the future
-#76 sealed check. `core/docker.py` executes bounded helper preparation and a
+delivery, and exposes `inspect_desktop_endpoints()` for doctor and the shared
+sealing assessment. `core/docker.py` executes bounded helper preparation and a
 downstream probe from the dev image. Only healthy, authenticated endpoints receive
 read-only volume mounts at `/run/djinn/dbus` or `/run/djinn/audio` and their paired
 environment. Failed channels warn and remain absent, with no raw fallback.
+See [desktop boundaries](SECURITY-MODEL.md#desktop-boundaries) for policy and limits.
 
 `core/host_runtime.py` always takes the canonical creation guard, including without
 Git identities. Generation labels, actual container IDs and persisted ownership
@@ -934,20 +938,21 @@ The hostctl helper runs separately from Compose on the shared Djinn network.
 static supervisor bound read-only as PID 1. `Dockerfile.hostctl-helper` builds
 that executable with Go 1.27.1; `djinn build` builds it for the host platform after
 the Compose images and installs it into owner-only host state storage. No
-Tailscale daemon or Go SDK is added to dev.
+Tailscale daemon or Go SDK is added to dev. The
+[security model](SECURITY-MODEL.md#window-state-expiry-and-logs) owns the
+deployment conditions, guarantees and residual paths.
 
 The host control flock covers on/off/limit, short dev generation transitions,
 normal cleanup and the full all-clean interval. It is distinct from the existing
 creator flock, which protects lengthy preparation. Enrollment runs in the
 host_runtime detached observer, outside the control lock; each publication
-rechecks helper identity and window generation. The observer has no expiry timer.
+rechecks helper identity and window generation.
 
 PID 1 persists generation, boot ID, UTC deadline and CLOCK_BOOTTIME deadline in
-the protected state volume, polls within 250 ms and bounds tailscaled shutdown.
+the state volume and polls every 250 ms.
 The exec updater communicates over a helper-private Unix socket, atomically
-persists a reset deadline, and acknowledges the effective window. Expired,
-closed and replaced generations cannot be updated or restarted. Host metadata
-contains observation only; no host deadline mirror authorizes the window.
+persists a reset deadline, and acknowledges the effective window. Host metadata
+contains observations; the observer has no deadline timer.
 
 PID 1 exposes only the gated TCP relay at :1080 to dev. Its raw SOCKS5 listener
 is loopback-only at 127.0.0.1:1055; LocalAPI and control use private Unix sockets.
@@ -961,21 +966,21 @@ The public SSH renderer composes a tailnet Include before Git aliases, including
 when no Git identities exist. Opening atomically refreshes only the tailnet
 files in the mounted directory. The dev image's `djinn-hostctl-connect` uses
 SOCKS5 without a direct connection fallback. Each relay stream has structured
-start/end records in the rotated Docker log. Graceful off/expiry closes all
-streams before exiting; forced death can leave unmatched starts.
+start/end records in the rotated Docker log.
 
-One host-side assessment reads actual ID, mounts, environment and network peers,
-canonicalizes host sources and aliases, and consumes the desktop provenance
-inspector. It checks Docker authority, home/root and helper backing storage,
-private controller/agent/journal paths and writable host execution inputs at
-check time. Uncertain inspection refuses; an explicit sealing override journals
-the causes and lost host boundary.
+`core/host_sealing.py` supplies the shared assessment for on, doctor and both
+creators. It reads actual ID, mounts, environment and network peers,
+canonicalizes host sources/aliases, and consumes the desktop provenance
+inspector. The [sealed definition and override](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
+are documented in the model.
 
 The direct probe runs trusted raw-socket Python in a digest-pinned throwaway
 container sharing only the assessed dev network namespace. It validates results
 for every authenticated peer IPv4/IPv6 address and verifies removal after success,
 timeout and cancellation. Reached or unknown results refuse admission. Doctor
 uses the same probe with current/cached peers without starting a helper.
+See [direct routes and target authority](SECURITY-MODEL.md#direct-routes-and-target-authority)
+for the host prerequisite and diagnostic limits.
 
 Both creators inspect resolved Compose delivery before launch. Unsealed delivery
 closes and verifies the helper; sealed delivery pauses admission via private IPC.

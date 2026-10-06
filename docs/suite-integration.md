@@ -82,6 +82,11 @@ djinn session --project <project> --create   # create the workspace if missing
 
 Without `--create`, the workspace directory must exist before the command runs.
 
+Without a running container, session preflight checks the selected agent on host
+`PATH`; the CLI prepares its native host workflow before invocation. See the
+[security model](../SECURITY-MODEL.md#direct-routes-and-target-authority) for the
+open host-fallback workflow path and target authority limits.
+
 ## Suite mode (optional)
 
 Suite mode is additive. Djinn does not require any peer application, and the
@@ -103,6 +108,8 @@ Use generic names and replace the port before use:
 `docker-compose.yml` maps `host.docker.internal` to the host gateway for the
 main `djinn` container, so services listening on the host can be reached from
 inside the container through that hostname.
+Review the [host-network and credential implications](../SECURITY-MODEL.md)
+before exposing local services to agents.
 
 At startup, `scripts/mcp-register.sh` reads the registry from
 `${MCP_SERVERS_CONFIG:-$HOME/.config/mcp-servers.json}`. The compose file mounts

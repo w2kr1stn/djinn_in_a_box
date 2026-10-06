@@ -45,7 +45,9 @@ at `/src` and working directory `/src`. Bind sources must be paths on the Docker
 `djinn build` builds the supervisor for the Docker host's platform (BuildKit sets
 `TARGETARCH`/`TARGETVARIANT`) and extracts the static binary to owner-only host
 state storage, from where it is bound read-only into the pinned official
-Tailscale image. Run it on the host, outside writable dev mounts.
+Tailscale image. Run it on the host. Deployment placement and security changes
+must follow the [security model](SECURITY-MODEL.md), including its
+[trusted controller requirements](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller).
 
 ## Commit Style
 
@@ -70,5 +72,4 @@ Before opening a pull request:
 - Keep unrelated cleanup out of the pull request.
 
 For general project questions, open a GitHub issue. For security reports, use
-the private reporting process described in `SECURITY.md`; the fallback contact
-there is maintained by w2kr1stn.
+the private reporting process described in [SECURITY.md](SECURITY.md).
