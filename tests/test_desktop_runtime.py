@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -416,3 +417,59 @@ def test_degraded_detached_retain_never_rewrites_released_ownership(fake_owner, 
     owner.retain()
     assert owner.detached
     assert host_runtime.read_state(root) == state
+
+
+@pytest.mark.parametrize("condition", ["stale", "running", "foreign", "observed"])
+def test_creator_reclaims_only_a_stopped_recorded_dev(fake_owner, condition):
+    # A host reboot leaves the recorded dev stopped, its observer gone and helpers restarted.
+    config, _, objects, log = fake_owner
+    config = config.model_copy(update={"git": GitConfig()})
+    root = host_runtime.runtime_root(create=True)
+    # A disposable live process stands in for a surviving observer.
+    observer = subprocess.Popen(["sleep", "30"]) if condition == "observed" else None
+    state = {
+        "generation": "old",
+        "container_name": "djinn",
+        "dev_id": "dev-id",
+        "observer_pid": observer.pid if observer else -1,
+        "observer_token": host_runtime.process_token(observer.pid) if observer else "",
+        "agent_pid": -1,
+        "agent_token": "",
+        "resources": {"dbus-helper": {"id": "helper-id", "service": "dbus-helper"}},
+        "volumes": [],
+    }
+    (root / "state.json").write_text(json.dumps(state))
+    label = host_runtime.GENERATION_LABEL
+    dev = {
+        "Id": "dev-id",
+        "State": {"Running": condition == "running"},
+        "Config": {"Labels": {label: "other" if condition == "foreign" else "old"}},
+    }
+    helper = {
+        "Id": "helper-id",
+        "Config": {
+            "Labels": {
+                label: "old",
+                "com.docker.compose.project": "djinn-in-a-box",
+                "com.docker.compose.service": "dbus-helper",
+            }
+        },
+    }
+    objects.write_text(json.dumps({"djinn": dev, "helper-id": helper}))
+    if condition == "stale":
+        with host_runtime.git_runtime(config, "djinn") as owner:
+            assert owner.generation != "old"
+        assert ["rm", "-f", "dev-id"] in calls(log)
+        assert ["rm", "-f", "helper-id"] in calls(log)
+        assert json.loads(objects.read_text()) == {}
+    else:
+        with (
+            pytest.raises(GitSSHError, match="already owns the runtime"),
+            host_runtime.git_runtime(config, "djinn"),
+        ):
+            pass
+        assert not [c for c in calls(log) if c[0] == "rm"]
+        assert set(json.loads(objects.read_text())) == {"djinn", "helper-id"}
+    if observer:
+        observer.terminate()
+        observer.wait(timeout=5)

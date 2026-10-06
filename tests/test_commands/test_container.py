@@ -1374,7 +1374,7 @@ class TestEnterCommand:
             patch("subprocess.run") as mock_run,
         ):
             mock_sys.stdin.isatty.return_value = True
-            mock_get.return_value = ["djinn-12345"]
+            mock_get.return_value = ["djinn"]
             mock_run.return_value = MagicMock(returncode=0)
 
             with pytest.raises(typer.Exit) as exc_info:
@@ -1386,7 +1386,38 @@ class TestEnterCommand:
             assert "exec" in call_args
             assert "-it" in call_args
             assert "zsh" in call_args
-            assert "djinn-12345" in call_args
+            assert "djinn" in call_args
+
+    @pytest.mark.parametrize("dev_running", [True, False])
+    def test_enter_targets_dev_not_helpers(self, dev_running: bool) -> None:
+        """Desktop and hostctl helpers share the name prefix; only dev has a shell."""
+        names = ["djinn-in-a-box-audio-helper-1", "djinn-in-a-box-dbus-helper-1", "djinn-hostctl"]
+        if dev_running:
+            names.append("djinn")
+
+        def docker_ps(cmd: list[str]) -> list[str]:
+            # Docker's name filter is an unanchored regular-expression search.
+            pattern = cmd[cmd.index("--filter") + 1].removeprefix("name=")
+            return [name for name in names if re.search(pattern, name)]
+
+        with (
+            patch("djinn_in_a_box.commands.container.sys") as mock_sys,
+            patch("djinn_in_a_box.core.docker._docker_list", side_effect=docker_ps),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_sys.stdin.isatty.return_value = True
+            mock_run.return_value = MagicMock(returncode=0)
+
+            with pytest.raises(typer.Exit) as exc_info:
+                container.enter()
+
+            if dev_running:
+                assert exc_info.value.exit_code == 0
+                call_args = mock_run.call_args[0][0]
+                assert call_args[call_args.index("-it") + 1] == "djinn"
+            else:
+                assert exc_info.value.exit_code == 1
+                mock_run.assert_not_called()
 
 
 class TestResourceTable:
