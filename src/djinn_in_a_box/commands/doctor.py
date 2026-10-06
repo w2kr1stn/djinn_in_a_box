@@ -404,14 +404,14 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
     if not daemon:
         return checks + [
             Check(f"Hostctl {name}", Status.WARN, "unknown: Docker unavailable")
-            for name in ("window", "helper", "node", "journal")
+            for name in ("window", "helper", "node", "journal", "peer trust", "relay")
         ]
     try:
         value = hostctl.snapshot()
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
         return checks + [
             Check(f"Hostctl {name}", Status.WARN, f"unknown: {exc}")
-            for name in ("window", "helper", "node", "journal")
+            for name in ("window", "helper", "node", "journal", "peer trust", "relay")
         ]
     window = value.get("window")
     checks.append(
@@ -427,7 +427,7 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
         Check(
             "Hostctl helper",
             Status.PASS if value.get("running") else Status.WARN,
-            f"{value['helper']}; sealing unchecked (B1); relay absent (B1)",
+            f"{value['helper']}; sealing unchecked (B3 pending)",
         )
     )
     node = value.get("node")
@@ -459,9 +459,11 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
     observation: dict[str, Any] = value.get("observation") or {}
     from djinn_in_a_box.core.host_runtime import process_token
 
-    observer_live = (bool(observation) and time.time() - observation.get("time", 0) < 10
-                     and process_token(observation.get("observer_pid", -1))
-                     == observation.get("observer_token"))
+    observer_live = (
+        bool(observation)
+        and time.time() - observation.get("time", 0) < 10
+        and process_token(observation.get("observer_pid", -1)) == observation.get("observer_token")
+    )
     checks.append(
         Check(
             "Hostctl journal",
@@ -470,6 +472,29 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
             if observer_live
             else "observation/log gaps unknown; forced kills cannot record exact expiry",
         )
+    )
+    trust: dict[str, Any] = value.get("trust") or {}
+    current_trust = bool(
+        trust
+        and trust.get("generation") == value.get("generation")
+        and value.get("state") == "open"
+    )
+    checks.extend(
+        [
+            Check(
+                "Hostctl peer trust",
+                Status.PASS if current_trust else Status.WARN,
+                f"{len(trust['peers'])} peers; frozen at opening"
+                if current_trust
+                else "unknown or cached from a closed window",
+            ),
+            Check(
+                "Hostctl relay",
+                Status.PASS if value.get("state") == "open" else Status.WARN,
+                value.get("relay", "unknown")
+                + (f"; {value['relay_error']}" if value.get("relay_error") else ""),
+            ),
+        ]
     )
     return checks
 

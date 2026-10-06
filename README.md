@@ -805,16 +805,26 @@ login link with `status` on the host terminal, enroll the untagged machine-local
 `djinn-<machine>` node, then disable its node-key expiry in Tailscale's admin
 console. No auth key is stored. Window expiry is independent of node-key expiry.
 
-This first hostctl package has no relay and performs no sealing assessment.
-Agents have no route through this helper to its tailnet. `--allow-unsealed` is
-accepted and recorded; sealing checks arrive in a subsequent package. `status`
-and `doctor` report this explicitly. Tailnet SSH delivery is still pending.
+Agents use `ssh host-a` through the helper's admission-controlled relay on
+port 1080. Only declared peers on TCP 22 are allowed. Each opening snapshots
+their authenticated Tailscale SSH host keys; missing or ambiguous peers refuse
+admission. Changed keys fail strict checking until the next opening. Generated
+aliases exist while closed and keep Git's agent and trust independent.
+Off and expiry end every relay stream, including SSH multiplexed connections.
+Generated SSH delivery requires host numeric UID 1000, matching the dev image,
+so the dev user can read the owner-only public files.
+
+Sealing, direct-bypass assessment and the dev-start guard are pending B3.
+`--allow-unsealed` is accepted and recorded; `status` and `doctor` explicitly
+report sealing unchecked. The existing `--firewall` private-network rules allow
+the helper bridge IP; custom networks outside RFC1918 refuse relay readiness.
 
 The helper alone mounts `djinn-hostctl-state`. Normal/category/name cleanup
 retains this identity; explicit name deletion refuses. Only `clean all` deletes
 it, requiring enrollment again. It is excluded from backup and restore. The host
 journal lives under `${XDG_STATE_HOME:-~/.local/state}/djinn/hostctl`, outside
-public SSH delivery; Docker logs retain helper expiry events. Forced kills and
+public SSH delivery; Docker logs retain helper expiry events and connection IDs,
+destinations, UTC starts/ends and end reasons, without payload. Forced kills and
 observer outages can leave observation gaps, which diagnostics report.
 
 ## Credential Security

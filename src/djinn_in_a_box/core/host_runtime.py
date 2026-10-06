@@ -29,6 +29,7 @@ from djinn_in_a_box.core.ssh_delivery import (
     SSH_TARGET,
     GitSSHError,
     read_public_delivery,
+    with_tailnet,
     write_public_delivery,
 )
 
@@ -291,6 +292,7 @@ class GitRuntime:
     detached: bool = False
     owns_generation: bool = False
     git_enabled: bool = True
+    ssh_enabled: bool = True
     docker_path: str = DOCKER_EXECUTABLE
     resources: dict[str, dict[str, str]] = field(
         default_factory=lambda: dict[str, dict[str, str]]()
@@ -357,13 +359,13 @@ class GitRuntime:
             return
         service = fragment["services"]["dev"]
         service.setdefault("labels", {})[GENERATION_LABEL] = self.generation
-        if not self.git_enabled:
+        if not self.ssh_enabled:
             return
         volumes = service.setdefault("volumes", [])
-        for source, target in (
-            (self.root / "public", SSH_TARGET),
-            (self.root / "export", AGENT_TARGET),
-        ):
+        mounts = [(self.root / "public", SSH_TARGET)]
+        if self.git_enabled:
+            mounts.append((self.root / "export", AGENT_TARGET))
+        for source, target in mounts:
             volumes.append(
                 {
                     "type": "bind",
@@ -373,7 +375,8 @@ class GitRuntime:
                     "bind": {"create_host_path": False},
                 }
             )
-        service.setdefault("environment", {}).update(GIT_ENVIRONMENT)
+        if self.git_enabled:
+            service.setdefault("environment", {}).update(GIT_ENVIRONMENT)
 
     def register(self, service: str, actual: dict[str, Any], volume: str | None = None) -> None:
         assert self.root is not None
@@ -495,15 +498,21 @@ class GitRuntime:
 def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
     """Always serialize dev creation; Git delivery is optional within that owner."""
     git_enabled = bool(config.git.identities)
-    if git_enabled and os.getuid() != CONTAINER_USER_UID:
+    ssh_enabled = git_enabled or bool(config.hostctl.hosts)
+    if ssh_enabled and os.getuid() != CONTAINER_USER_UID:
         raise GitSSHError(
-            f"Git agent socket requires host numeric UID {CONTAINER_USER_UID}, "
+            f"Generated SSH delivery requires host numeric UID {CONTAINER_USER_UID}, "
             "matching the dev image"
         )
     root = runtime_root(create=True)
     fd = acquire_creation_lock(root)
     runtime = GitRuntime(
-        root, uuid.uuid4().hex, git_enabled=git_enabled, docker_path=DOCKER_EXECUTABLE, lock_fd=fd
+        root,
+        uuid.uuid4().hex,
+        git_enabled=git_enabled,
+        ssh_enabled=ssh_enabled,
+        docker_path=DOCKER_EXECUTABLE,
+        lock_fd=fd,
     )
     try:
         # Inspect before any stale resource mutation, including without Git identities.
@@ -542,9 +551,15 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
             private_directory(root / "private")
             private_directory(root / "export")
             (root / "export/auth.sock").unlink(missing_ok=True)
+        if ssh_enabled:
+            from djinn_in_a_box.core.hostctl import cached_trust, control_guard
+
             delivery = read_public_delivery(config.git)
             blobs = delivery.blobs
-            write_public_delivery(root / "public", delivery)
+            with control_guard():
+                write_public_delivery(
+                    root / "public", with_tailnet(delivery, config.hostctl, cached_trust())
+                )
         state: dict[str, Any] = {
             "generation": runtime.generation,
             "container_name": container_name,
@@ -556,6 +571,9 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
             "agent_token": "",
             "keys": [blob.hex() for blob in sorted(blobs)],
             "git_enabled": git_enabled,
+            "hostctl_hosts": {
+                name: host.model_dump() for name, host in config.hostctl.hosts.items()
+            },
             "docker_path": runtime.docker_path,
             "resources": {},
             "volumes": [],
@@ -766,6 +784,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
     root = hostctl.state_root()
     enrollment = None
     dev_id = None
+    admitted = False
     try:
         while True:
             helper = hostctl.inspect_helper()
@@ -787,6 +806,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                 "observer_token": process_token(os.getpid()),
                 "time": time.time(),
             }
+            node: dict[str, Any] = {}
             try:
                 node = hostctl.node_status(helper)
                 observation["node_state"] = node["BackendState"]
@@ -813,8 +833,39 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                     )
                 if enrollment.poll() is not None:
                     observation["enrollment_exit"] = enrollment.returncode
+                if not admitted and enrollment.poll() == 0 and node["BackendState"] == "Running":
+                    trust = hostctl.prepare_trust(generation, node)
+                    with hostctl.control_guard():
+                        fresh = hostctl.inspect_helper()
+                        if (
+                            fresh is None
+                            or fresh["Id"] != helper_id
+                            or hostctl.generation(fresh) != generation
+                            or not fresh["State"]["Running"]
+                        ):
+                            return
+                        hostctl.admit_locked(fresh, trust)
+                        admitted = True
+                    observation["relay"] = "open"
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 observation["error"] = str(exc)
+                if (
+                    enrollment is not None
+                    and enrollment.poll() == 0
+                    and node.get("BackendState") == "Running"
+                ):
+                    with hostctl.control_guard():
+                        fresh = hostctl.inspect_helper()
+                        if (
+                            fresh
+                            and fresh["Id"] == helper_id
+                            and hostctl.generation(fresh) == generation
+                        ):
+                            hostctl.control_journal(
+                                "relay-refused", generation=generation, reason=str(exc)
+                            )
+                            hostctl.stop_helper_locked()
+                    return
             actual = inspect_dev("djinn", docker_path)
             if actual and actual[1] and dev_id is None:
                 dev_id = actual[0]

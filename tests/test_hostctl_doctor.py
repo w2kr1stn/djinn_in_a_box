@@ -27,6 +27,8 @@ def test_doctor_missing_data_is_unknown_and_never_starts(tmp_path, monkeypatch, 
         "Hostctl helper",
         "Hostctl node",
         "Hostctl journal",
+        "Hostctl peer trust",
+        "Hostctl relay",
     }
     assert all(r.status is Status.WARN for r in rows[1:])
 
@@ -47,7 +49,8 @@ def test_doctor_reports_needs_login_without_auth_url_or_sealing_claim(tmp_path, 
     rows = hostctl_checks(config, daemon=True)
     details = " ".join(row.detail for row in rows)
     assert "NeedsLogin" in details and "helper-owned deadline" in details
-    assert "sealing unchecked (B1)" in details and "relay absent (B1)" in details
+    assert "sealing unchecked (B3 pending)" in details
+    assert next(r for r in rows if r.name == "Hostctl relay").status is Status.WARN
     assert "example.invalid" not in details
     assert next(r for r in rows if r.name == "Hostctl node").status is Status.WARN
 

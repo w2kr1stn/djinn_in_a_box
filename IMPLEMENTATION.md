@@ -947,8 +947,23 @@ persists a reset deadline, and acknowledges the effective window. Expired,
 closed and replaced generations cannot be updated or restarted. Host metadata
 contains observation only; no host deadline mirror authorizes the window.
 
-B1 exposes no relay, tailnet trust, SSH connector or sealing/probe assessment.
-Host status and doctor say so. Later packages supply those capabilities.
+PID 1 exposes only the gated TCP relay at :1080 to dev. Its raw SOCKS5 listener
+is loopback-only at 127.0.0.1:1055; LocalAPI and control use private Unix sockets.
+The observer snapshots declared peers from authenticated `Peer[*].sshHostKeys`
+once after enrollment, publishes public trust, durably journals readiness and
+commits admission over private IPC. PID 1 refuses replacement routes within
+that generation and checks both persisted state and deadline on admission.
+Status reports open only after PID 1 acknowledges admission.
+
+The public SSH renderer composes a tailnet Include before Git aliases, including
+when no Git identities exist. Opening atomically refreshes only the tailnet
+files in the mounted directory. The dev image's `djinn-hostctl-connect` uses
+SOCKS5 without a direct connection fallback. Each relay stream has structured
+start/end records in the rotated Docker log. Graceful off/expiry closes all
+streams before exiting; forced death can leave unmatched starts.
+
+Sealing, direct-bypass assessment and dev-creator admission guards belong to B3;
+status, doctor and the journal retain sealing unchecked in B2.
 
 ## Image Build
 

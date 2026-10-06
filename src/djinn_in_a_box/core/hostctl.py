@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.config.ssh import duration_minutes
+from djinn_in_a_box.config.ssh import HostctlConfig, duration_minutes
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 
@@ -303,6 +303,74 @@ def read_window(helper: dict[str, Any]) -> dict[str, Any]:
         raise HostctlError("helper window state is malformed") from exc
 
 
+def save_private(name: str, value: dict[str, Any]) -> None:
+    root = state_root()
+    temporary = root / (name + ".tmp")
+    temporary.write_text(json.dumps(value))
+    temporary.chmod(0o600)
+    temporary.replace(root / name)
+
+
+def cached_trust() -> dict[str, Any] | None:
+    path = state_root(create=False) / "trust.json"
+    if not path.exists():
+        return None
+    raw: Any = json.loads(path.read_text())
+    if not isinstance(raw, dict):
+        raise HostctlError("cached peer trust is malformed")
+    value = cast(dict[str, Any], raw)
+    if not value.get("peers") or not value.get("generation"):
+        raise HostctlError("cached peer trust is malformed")
+    return value
+
+
+def prepare_trust(gen: str, node: dict[str, Any]) -> dict[str, Any]:
+    from djinn_in_a_box.core.ssh_delivery import peer_snapshot
+
+    opening = json.loads((state_root() / "opening.json").read_text())
+    if opening.get("generation") != gen:
+        raise HostctlError("opening generation changed")
+    return peer_snapshot(HostctlConfig.model_validate(opening["config"]), node, gen)
+
+
+def admit_locked(helper: dict[str, Any], trust: dict[str, Any]) -> None:
+    """Commit once, after enrollment, trust and journal readiness; caller holds the lock."""
+    from djinn_in_a_box.core import host_runtime
+    from djinn_in_a_box.core.ssh_delivery import tailnet_files, write_public_files
+
+    gen = generation(helper)
+    if trust.get("generation") != gen:
+        raise HostctlError("trust generation changed")
+    # B2 keeps the existing private-network firewall rules; no allowlist expansion.
+    import ipaddress
+
+    networks = helper.get("NetworkSettings", {}).get("Networks", {})
+    bridge = next((row.get("IPAddress") for row in networks.values() if row.get("IPAddress")), None)
+    if bridge is None or not any(
+        ipaddress.ip_address(bridge) in ipaddress.ip_network(cidr)
+        for cidr in ("172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8")
+    ):
+        raise HostctlError(
+            "helper bridge IP is outside the firewall's private-network rules; "
+            "use an RFC1918 Docker subnet"
+        )
+    root = host_runtime.runtime_root()
+    runtime = host_runtime.read_state(root)
+    if runtime is not None and runtime.get("hostctl_hosts"):
+        config = HostctlConfig.model_validate({"hosts": runtime["hostctl_hosts"]})
+        write_public_files(root / "public", tailnet_files(config, trust))
+    save_private("trust.json", trust)
+    journal(
+        "relay-ready", generation=gen, peers=len(trust["peers"]), sealing="unchecked (B3 pending)"
+    )
+    output = command(
+        "exec", str(helper["Id"]), SUPERVISOR, "admit", gen, json.dumps(trust["routes"])
+    )
+    value = json.loads(output)
+    if value.get("generation") != gen or value.get("admission") is not True or value.get("closed"):
+        raise HostctlError("helper did not acknowledge relay admission")
+
+
 def open_window(
     config: AppConfig, duration: str | None = None, *, allow_unsealed: bool = False
 ) -> str:
@@ -330,6 +398,7 @@ def open_window(
             journal("on-refused", reason="network verification failed")
             raise HostctlError("Helper network could not be verified")
         gen = uuid.uuid4().hex
+        save_private("opening.json", {"generation": gen, "config": config.hostctl.model_dump()})
         argv = run_argv(binary, gen, deadline, boot_deadline)
         command(*argv[1:], timeout=15)
         helper = inspect_helper()
@@ -341,8 +410,8 @@ def open_window(
                 generation=gen,
                 deadline=deadline.isoformat(),
                 allow_unsealed=allow_unsealed,
-                sealing="unchecked (B1)",
-                relay="absent (B1)",
+                sealing="unchecked (B3 pending)",
+                relay="closed pending enrollment, trust and journal readiness",
             )
             host_runtime.start_hostctl_observer(str(helper["Id"]), gen, DOCKER_EXECUTABLE)
         except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -358,7 +427,7 @@ def stop_helper_locked(*, remove: bool = False) -> None:
     identity = str(helper["Id"])
     gen = generation(helper)
     if helper["State"]["Running"]:
-        command("stop", "--time", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+        command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
     current = inspect_helper()
     if current is None or current["Id"] != identity or generation(current) != gen:
         raise HostctlError("Helper changed during teardown; preserving resources")
@@ -434,8 +503,8 @@ def node_status(helper: dict[str, Any]) -> dict[str, Any]:
 def snapshot() -> dict[str, Any]:
     result: dict[str, Any] = {
         "state": "closed",
-        "sealing": "unchecked (B1)",
-        "relay": "absent (B1); dev has no helper tailnet route",
+        "sealing": "unchecked (B3 pending)",
+        "relay": "closed",
     }
     helper = inspect_helper()
     if helper is None:
@@ -451,14 +520,29 @@ def snapshot() -> dict[str, Any]:
         result["window_error"] = str(exc)
     if helper["State"]["Running"]:
         result["state"] = "opening"
+        result["relay"] = "unknown (helper admission unavailable)"
         try:
             result["node"] = node_status(helper)
-            if result["node"]["BackendState"] == "Running":
-                result["state"] = "open"
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
             result["node_error"] = str(exc)
+        try:
+            live = json.loads(
+                command("exec", str(helper["Id"]), SUPERVISOR, "status", generation(helper))
+            )
+            if live.get("generation") != generation(helper) or not isinstance(
+                live.get("admission"), bool
+            ):
+                raise HostctlError("helper admission response is malformed")
+            result["relay"] = "closed pending readiness"
+            if live["admission"] and not live.get("closed"):
+                result["state"] = "open"
+                result["relay"] = "open (:1080; declared peers, TCP 22 only)"
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            result["relay_error"] = str(exc)
     else:
         result["node"] = "unknown (helper is off)"
+    trust = cached_trust()
+    result["trust"] = trust
     observation = state_root(create=False) / "observation.json"
     if observation.exists():
         value = json.loads(observation.read_text())

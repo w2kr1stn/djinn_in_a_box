@@ -9,7 +9,14 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 PUBLIC_FILENAMES = frozenset(
-    {"config", "known_hosts", "tailnet_known_hosts", "allowed_signers", "git.json"}
+    {
+        "config",
+        "known_hosts",
+        "tailnet_known_hosts",
+        "tailnet_config",
+        "allowed_signers",
+        "git.json",
+    }
 )
 
 

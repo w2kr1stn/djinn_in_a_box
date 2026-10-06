@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import json
 import os
 import shlex
@@ -12,8 +13,9 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
-from djinn_in_a_box.config.ssh import GitConfig
+from djinn_in_a_box.config.ssh import GitConfig, HostctlConfig, ssh_token
 from djinn_in_a_box.core.exceptions import RuntimeMountSpecificationError
 
 SSH_TARGET = Path("/home/dev/.ssh")
@@ -200,7 +202,15 @@ def write_public_delivery(directory: Path, delivery: PublicDelivery) -> None:
     if directory.is_symlink() or directory.stat().st_uid != os.getuid():
         raise GitSSHError("public SSH delivery directory must be owned by the host user")
     directory.chmod(0o700)
-    for name, contents in delivery.files.items():
+    write_public_files(directory, delivery.files)
+    for path in directory.iterdir():
+        if path.name not in delivery.files:
+            path.unlink()
+
+
+def write_public_files(directory: Path, files: dict[str, str]) -> None:
+    """Replace a subset without disturbing Git selectors or the mounted directory."""
+    for name, contents in files.items():
         fd, temporary = tempfile.mkstemp(dir=directory)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -210,6 +220,103 @@ def write_public_delivery(directory: Path, delivery: PublicDelivery) -> None:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    for path in directory.iterdir():
-        if path.name not in delivery.files:
-            path.unlink()
+
+
+def tailnet_ip(value: str) -> str:
+    address = ipaddress.ip_address(value)
+    networks = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+    if not any(address in network for network in networks):
+        raise GitSSHError("peer has a non-tailnet address")
+    return str(address)
+
+
+def peer_snapshot(config: HostctlConfig, status: dict[str, Any], generation: str) -> dict[str, Any]:
+    """Resolve declarations solely against the authenticated status wire format."""
+    peers = status.get("Peer")
+    if status.get("BackendState") != "Running" or not isinstance(peers, dict):
+        raise GitSSHError("authenticated peer status is unavailable")
+    peers = cast(dict[str, Any], peers)
+    resolved: dict[str, Any] = {}
+    routes: dict[str, str] = {}
+    for alias, host in config.hosts.items():
+        matches: list[dict[str, Any]] = []
+        for raw_peer in peers.values():
+            if not isinstance(raw_peer, dict):
+                raise GitSSHError("malformed peer status")
+            peer = cast(dict[str, Any], raw_peer)
+            dns = str(peer.get("DNSName") or "").lower().rstrip(".")
+            raw_ips: Any = peer.get("TailscaleIPs") or []
+            if not isinstance(raw_ips, list) or any(
+                not isinstance(ip, str) for ip in cast(list[Any], raw_ips)
+            ):
+                raise GitSSHError("malformed peer addresses")
+            ips = cast(list[str], raw_ips)
+            names = {dns, dns.split(".")[0], str(peer.get("HostName") or "").lower(), *ips}
+            if host.address.lower().rstrip(".") in names:
+                matches.append(peer)
+        if len(matches) != 1:
+            raise GitSSHError(f"{alias}: declared address must resolve to exactly one peer")
+        peer = matches[0]
+        ips = [tailnet_ip(ip) for ip in peer.get("TailscaleIPs", [])]
+        keys = peer.get("sshHostKeys")
+        if not ips or not isinstance(keys, list) or not keys:
+            raise GitSSHError(f"{alias}: missing tailnet addresses or sshHostKeys")
+        for key in cast(list[Any], keys):
+            if not isinstance(key, str):
+                raise GitSSHError(f"{alias}: malformed sshHostKeys")
+            public_blob(key)
+        keys = cast(list[str], keys)
+        canonical = str(peer.get("DNSName") or ips[0]).lower().rstrip(".")
+        ssh_token(canonical)
+        primary = next((ip for ip in ips if ":" not in ip), ips[0])
+        resolved[alias] = {
+            "address": host.address,
+            "ip": primary,
+            "ips": ips,
+            "host_key_alias": canonical,
+            "keys": [" ".join(key.split()[:2]) for key in keys],
+        }
+        for selector in {host.address.lower().rstrip("."), canonical, *ips}:
+            if selector in routes and routes[selector] != primary:
+                raise GitSSHError("ambiguous relay destination")
+            routes[selector] = primary
+    if not resolved:
+        raise GitSSHError("no declared peers")
+    return {"generation": generation, "peers": resolved, "routes": routes}
+
+
+def tailnet_files(config: HostctlConfig, snapshot: dict[str, Any] | None) -> dict[str, str]:
+    blocks: list[str] = []
+    known: list[str] = []
+    peers: dict[str, Any] = snapshot.get("peers", {}) if snapshot else {}
+    for alias, host in config.hosts.items():
+        peer: dict[str, Any] = peers.get(alias) or {}
+        if peer.get("address") != host.address:
+            peer = {}
+        hostname = peer.get("ip", host.address)
+        canonical = peer.get("host_key_alias", host.address.lower().rstrip("."))
+        blocks.append(
+            f"Host {alias}\n    HostName {hostname}\n    HostKeyAlias {canonical}\n"
+            f"    User {host.user}\n    ProxyCommand /usr/local/bin/djinn-hostctl-connect %h %p\n"
+            "    StrictHostKeyChecking yes\n    UpdateHostKeys no\n"
+            "    UserKnownHostsFile /home/dev/.ssh/tailnet_known_hosts\n"
+            "    GlobalKnownHostsFile /dev/null\n    IdentityAgent none\n"
+            "    IdentityFile none\n    PubkeyAuthentication no\n    ForwardAgent no\n"
+            "    ForwardX11 no\n    ForwardX11Trusted no\n    ClearAllForwardings yes\n"
+            "    PermitLocalCommand no\n    ControlMaster no\n    ControlPersist no\n"
+        )
+        known.extend(f"{canonical} {key}\n" for key in peer.get("keys", []))
+    return {
+        "tailnet_config": "\n".join(blocks),
+        "tailnet_known_hosts": "".join(dict.fromkeys(known)),
+    }
+
+
+def with_tailnet(
+    delivery: PublicDelivery, config: HostctlConfig, snapshot: dict[str, Any] | None
+) -> PublicDelivery:
+    if not config.hosts:
+        return delivery
+    files = {**delivery.files, **tailnet_files(config, snapshot)}
+    files["config"] = "Include /home/dev/.ssh/tailnet_config\n" + files["config"]
+    return PublicDelivery(files, delivery.blobs)
