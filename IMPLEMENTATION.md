@@ -112,7 +112,9 @@ user
 djinn CLI (Typer)
   |
   +-- commands/config.py     init, config show/path/set/edit/status/sync
-  +-- commands/container.py  build, start, status, clean, audit, update, enter
+  +-- commands/container.py  build, start, status, clean, update, enter
+  +-- commands/assistant.py  interactive installation audit
+  +-- commands/logs.py       logs proxy
   +-- commands/doctor.py     doctor, doctor --fix, preflight
   +-- commands/agent.py      djinn run, djinn agents
   +-- commands/session.py    djinn session
@@ -129,6 +131,7 @@ core + config
   +-- core/config_workflow.py  shared preflight and runtime publication
   +-- core/config_lock.py    config-setting directory lock
   +-- core/docker.py         Compose env bridge, Docker operations, backup helpers
+  +-- core/assistant.py      standalone assistant image and temporary session
   +-- core/seeding.py        host-side first-run seed repair/copy
   +-- core/session.py        docker exec and host-mode session runner
   |
@@ -553,8 +556,8 @@ workflow roots. The source-aware `seed_config(..., source=...)` entry point only
 installs the Claude baseline when Claude is selected and that root is
 uninitialized.
 `seed_config()` is called only by `djinn init` and `djinn doctor --fix`, before
-`ensure_host_env()`. Status, audit, sync, and workflow preflight never seed or
-repair a source root.
+`ensure_host_env()`. Status, config-workflow audits, sync, and workflow preflight
+never seed or repair a source root.
 
 `SEED_MANIFEST` defines every seed source, target, and kind:
 
@@ -1141,7 +1144,7 @@ backed by named volumes.
   local zone data.
   It attempts deletion of every built-in and declared volume, including absent
   ones and `none`. Default `clean` keeps all volumes and declared binds.
-- `audit()`: prints Docker proxy logs.
+- `logs proxy`: prints Docker proxy logs with the default tail of 50.
 - `update()`: runs `scripts/update-agents.sh`.
 - `enter()`: opens a zsh shell in the first running Djinn container.
 
@@ -1159,6 +1162,38 @@ files exist. This is a build-context refresh helper, not a Compose bind-mount.
 During `djinn build`, the loaded `AppConfig` is threaded through, so
 `general.config_root` from `config.toml` is honored unless `DJINN_CONFIG_ROOT`
 is exported in the host environment, which still takes precedence.
+
+## Assistant Audit
+
+`commands/assistant.py` runs `core/assistant.py` independently of the dev image,
+Compose lifecycle and workspace delivery. `assistant.agent` selects Claude,
+Codex or OpenCode; `--agent` overrides it without saving configuration. Invalid
+TOML, zones and missing workspace paths fall back to derivable default mounts
+and Claude (unless overridden), with the loader error in the initial message.
+
+`assistant/Dockerfile` installs the selected native CLI and basic diagnostic
+tools. Agent and Docker versions come from the dev Dockerfile ARG pins. One
+content label covers the selected pin, agent, Dockerfile/runtime bytes, host
+platform/UID/GID and build network. First use or a changed label rebuilds via
+buildx; a failed build aborts. Launch uses the inspected immutable image ID.
+
+The foreground `docker run --rm -it` joins `djinn-network` as the host UID/GID
+with the socket's numeric group. The project, config directory, ~/.djinn and
+socket are rw binds; existing selected credential files are rw aliases under
+`/run/djinn-credentials`. No workspace/declaration/extra zone roots are delivered.
+The entrypoint copies credential files into fresh native homes and writes only
+refreshes back at exit, accommodating CLIs that atomically replace auth files.
+Claude imports only account metadata from its mixed `claude.json` carrier;
+settings and session history remain ephemeral. Claude safe mode suppresses
+customizations; OpenCode uses pure mode and asks for edits/bash; Codex keeps
+`--sandbox danger-full-access --ask-for-approval on-request`: its sandbox needs user
+namespaces the container does not grant, and 0.160 offers only `on-request`/`never`.
+After interruption or client failure, cleanup verifies the unique session label
+and removes only that container's inspected ID. Cleanup errors are reported.
+
+The [compact audit guide](assistant/audit-briefing.md), live mount map and
+occasion are one initial user message. Host-only operations are returned as
+commands for the host terminal. Container removal does not roll back repairs.
 
 ## Doctor and Preflight
 

@@ -190,6 +190,14 @@ class BuildConfig(BaseModel):
 
 
 WorkspaceMode = Literal["aios", "projects"]
+AssistantAgent = Literal["claude", "codex", "opencode"]
+
+
+class AssistantConfig(BaseModel):
+    """Agent selection shared by assistant sessions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    agent: AssistantAgent = "claude"
 
 
 class AppConfig(BaseModel):
@@ -240,6 +248,8 @@ class AppConfig(BaseModel):
 
     build: BuildConfig = Field(default_factory=BuildConfig)
     """Image-build settings."""
+
+    assistant: AssistantConfig = Field(default_factory=AssistantConfig)
 
     git: GitConfig = Field(default_factory=GitConfig)
     hostctl: HostctlConfig = Field(default_factory=HostctlConfig)

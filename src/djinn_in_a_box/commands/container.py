@@ -787,29 +787,6 @@ def clean_all(
         success("Cleanup complete.")
 
 
-def audit(
-    tail: Annotated[
-        int,
-        typer.Option("--tail", "-n", help="Number of log lines to show"),
-    ] = 50,
-) -> None:
-    """Show Docker proxy audit log."""
-    if not is_container_running("djinn-docker-proxy"):
-        error("Docker Proxy is not running.")
-        err_console.print("Start with: djinn start --docker")
-        raise typer.Exit(1)
-
-    rule(f"Docker Proxy Audit Log (last {tail} lines):")
-    blank()
-
-    result = subprocess.run(
-        [DOCKER_EXECUTABLE, "logs", "--tail", str(tail), "djinn-docker-proxy"],
-        check=False,
-    )
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
-
-
 def update() -> None:
     """Update CLI agent versions in Dockerfile."""
     info("Updating CLI agent versions...")

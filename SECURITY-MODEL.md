@@ -50,7 +50,9 @@ Docker access combines workspace modification with daemon control. Dev's default
 agent creates through that daemon. Those containers can exhaust host resources
 or reach other services and networks independently of dev's firewall. Prefer no
 Docker access when unnecessary, review created resources, and use
-[status/audit commands](README.md#status-and-audit-commands) to inspect proxy logs.
+[djinn logs proxy](README.md#status-and-audit-commands) to inspect proxy logs.
+
+The temporary audit assistant holds host Docker authority and shares `djinn-network`.
 
 `build.network = "host"` shares the host network namespace for image `RUN`
 steps, including access to loopback-only host services. It applies to the whole
