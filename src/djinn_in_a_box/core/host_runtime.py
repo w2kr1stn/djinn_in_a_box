@@ -785,6 +785,15 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
     enrollment = None
     dev_id = None
     admitted = False
+    trust = None
+    opening = json.loads((root / "opening.json").read_text())
+    dev_id = opening.get("dev_id")
+
+    def cancelled(_signum: int, _frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, cancelled)
+    signal.signal(signal.SIGINT, cancelled)
     try:
         while True:
             helper = hostctl.inspect_helper()
@@ -833,8 +842,19 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                     )
                 if enrollment.poll() is not None:
                     observation["enrollment_exit"] = enrollment.returncode
-                if not admitted and enrollment.poll() == 0 and node["BackendState"] == "Running":
-                    trust = hostctl.prepare_trust(generation, node)
+                opening = json.loads((root / "opening.json").read_text())
+                pending_creator = opening.get("creator")
+                if (
+                    (not admitted or pending_creator)
+                    and enrollment.poll() == 0
+                    and node["BackendState"] == "Running"
+                ):
+                    if trust is None:
+                        trust = hostctl.prepare_trust(generation, node)
+                    checked = hostctl.admission_assessment(trust)
+                    if checked is None:
+                        time.sleep(0.1)
+                        continue
                     with hostctl.control_guard():
                         fresh = hostctl.inspect_helper()
                         if (
@@ -844,7 +864,12 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                             or not fresh["State"]["Running"]
                         ):
                             return
-                        hostctl.admit_locked(fresh, trust)
+                        hostctl.commit_assessment(checked)
+                        if not admitted:
+                            hostctl.admit_locked(fresh, trust, sealing=checked["sealing"])
+                        if checked["creator"]:
+                            hostctl.resume_locked(fresh)
+                        dev_id = checked["dev_id"]
                         admitted = True
                     observation["relay"] = "open"
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -867,8 +892,9 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                             hostctl.stop_helper_locked()
                     return
             actual = inspect_dev("djinn", docker_path)
+            # A no-dev window admits a new dev only through the guarded creator.
             if actual and actual[1] and dev_id is None:
-                dev_id = actual[0]
+                raise GitSSHError("unassessed dev appeared during open window")
             if dev_id is not None and (actual is None or not actual[1] or actual[0] != dev_id):
                 with hostctl.control_guard():
                     fresh = hostctl.inspect_helper()

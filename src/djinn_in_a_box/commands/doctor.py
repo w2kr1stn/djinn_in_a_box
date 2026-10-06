@@ -404,14 +404,32 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
     if not daemon:
         return checks + [
             Check(f"Hostctl {name}", Status.WARN, "unknown: Docker unavailable")
-            for name in ("window", "helper", "node", "journal", "peer trust", "relay")
+            for name in (
+                "window",
+                "helper",
+                "node",
+                "journal",
+                "peer trust",
+                "relay",
+                "sealing",
+                "direct probe",
+            )
         ]
     try:
         value = hostctl.snapshot()
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
         return checks + [
             Check(f"Hostctl {name}", Status.WARN, f"unknown: {exc}")
-            for name in ("window", "helper", "node", "journal", "peer trust", "relay")
+            for name in (
+                "window",
+                "helper",
+                "node",
+                "journal",
+                "peer trust",
+                "relay",
+                "sealing",
+                "direct probe",
+            )
         ]
     window = value.get("window")
     checks.append(
@@ -427,7 +445,7 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
         Check(
             "Hostctl helper",
             Status.PASS if value.get("running") else Status.WARN,
-            f"{value['helper']}; sealing unchecked (B3 pending)",
+            str(value["helper"]),
         )
     )
     node = value.get("node")
@@ -496,6 +514,77 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
             ),
         ]
     )
+    checks.extend(hostctl_boundary_checks(value, config))
+    return checks
+
+
+def hostctl_boundary_checks(value: dict[str, Any], config: AppConfig | None) -> list[Check]:
+    from djinn_in_a_box.core import host_sealing, hostctl
+
+    causes = value.get("sealing_causes", ())
+    errors = value.get("sealing_errors", ())
+    checks = [
+        Check(f"Hostctl sealing cause {i}", Status.FAIL, cause) for i, cause in enumerate(causes, 1)
+    ]
+    checks.extend(
+        Check(f"Hostctl sealing unknown {i}", Status.WARN, error)
+        for i, error in enumerate(errors, 1)
+    )
+    if not causes and not errors:
+        state = value.get("sealing", "unknown: assessment unavailable")
+        checks.append(
+            Check("Hostctl sealing", Status.PASS if state == "sealed" else Status.WARN, state)
+        )
+    dev_id = value.get("dev_id")
+    trust = value.get("trust")
+    if not dev_id or not trust or config is None or not config.hostctl.hosts:
+        checks.append(
+            Check(
+                "Hostctl direct probe",
+                Status.WARN,
+                "deferred: running dev and authenticated declared-peer snapshot required",
+            )
+        )
+        return checks
+    addresses: list[list[str]] = []
+    try:
+        for alias, host in config.hostctl.hosts.items():
+            if trust["peers"][alias]["address"] != host.address:
+                raise ValueError("cached peer declaration differs; open a new window")
+        selected = {
+            **trust,
+            "peers": {alias: trust["peers"][alias] for alias in config.hostctl.hosts},
+        }
+        addresses = host_sealing.probe_addresses(selected)
+        rows = host_sealing.run_probe(dev_id, selected)
+        hostctl.verify_dev(dev_id)
+        for row in rows:
+            state = row["state"]
+            checks.append(
+                Check(
+                    f"Hostctl direct probe {row['host']} {row['address']}",
+                    Status.FAIL
+                    if state == "reached"
+                    else (Status.PASS if state == "blocked" else Status.WARN),
+                    state + ("; " + host_sealing.PREREQUISITE if state == "reached" else ""),
+                )
+            )
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        for alias, address in addresses or [["", ""]]:
+            checks.append(
+                Check(
+                    f"Hostctl direct probe {alias} {address}".rstrip(),
+                    Status.WARN,
+                    f"unknown: {exc}",
+                )
+            )
     return checks
 
 

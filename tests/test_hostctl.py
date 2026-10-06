@@ -22,6 +22,11 @@ from djinn_in_a_box.core import docker, host_runtime, hostctl
 
 @pytest.fixture
 def inputs(tmp_path, monkeypatch):
+    from djinn_in_a_box.core import host_sealing
+
+    # B1 transition fixtures describe a window with no dev; B3 tests inspect delivery.
+    monkeypatch.setattr(host_sealing, "inspect_assessment", lambda: host_sealing.Assessment(None))
+    monkeypatch.setattr(hostctl, "verify_dev", lambda dev_id: None)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     root = hostctl.state_root()
     (root / "bin").mkdir(mode=0o700)

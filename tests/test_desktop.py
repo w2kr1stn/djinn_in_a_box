@@ -364,6 +364,8 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         helper["State"]["Health"]["Status"] = "unhealthy"
 
     def actual(name, path, resource="container", **kwargs):
+        if name == "djinn-hostctl" and resource == "container":
+            return None
         if resource == "volume":
             return None
         if resource == "image":

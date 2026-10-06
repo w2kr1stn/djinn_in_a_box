@@ -35,7 +35,7 @@ func validateRoutes(routes map[string]string) error {
 }
 
 func (c *controller) admissionValid() bool {
-	if !c.w.Admission || !c.w.valid(c.now(), c.boot(), c.bootID) {
+	if !c.w.Admission || c.w.Paused || !c.w.valid(c.now(), c.boot(), c.bootID) {
 		return false
 	}
 	return c.diskMatches()

@@ -5,10 +5,13 @@ the session-oriented `djinn session --prompt` path.
 
 Host control runs on the host: `djinn hostctl on --for 10m`, `status`,
 `limit 5` and `off`. Enrollment is asynchronous and login time counts against
-the window. Once enrollment, peer trust and journal readiness succeed,
+the window. Once enrollment, peer trust, sealing, direct-route and journal checks succeed,
 headless agents use generated `ssh host-a` aliases through the gated relay.
-Off/expiry cuts all relay streams. Sealing and direct-bypass assessment remain
-unchecked until B3; status and doctor report that explicitly.
+Off/expiry cuts all relay streams. Unsealed headless or detached starts close
+the helper before launching; sealed starts pause admission until actual delivery
+and the direct TCP22 probe pass. `--allow-unsealed` belongs to an explicit host
+opening and never carries over to a dev start. Doctor reports each sealing cause
+and address result; a missing dev or authenticated peer snapshot defers the probe.
 
 ---
 
