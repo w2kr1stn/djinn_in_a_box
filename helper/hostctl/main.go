@@ -32,12 +32,14 @@ type window struct {
 	BootDeadline int64     `json:"boottime_deadline_ns"`
 	Closed       bool      `json:"closed"`
 	Reason       string    `json:"reason,omitempty"`
+	Admission    bool      `json:"admission"`
 }
 
 type request struct {
-	Operation  string `json:"operation"`
-	Generation string `json:"generation"`
-	Minutes    int    `json:"minutes"`
+	Operation  string            `json:"operation"`
+	Generation string            `json:"generation"`
+	Minutes    int               `json:"minutes"`
+	Routes     map[string]string `json:"routes,omitempty"`
 }
 
 type response struct {
@@ -98,19 +100,23 @@ func persist(path string, w window) error {
 }
 
 type controller struct {
-	mu     sync.Mutex
-	w      window
-	path   string
-	now    func() time.Time
-	boot   func() int64
-	bootID string
+	mu          sync.Mutex
+	w           window
+	path        string
+	now         func() time.Time
+	boot        func() int64
+	bootID      string
+	routes      map[string]string
+	streams     map[*stream]bool
+	connections sync.WaitGroup
+	sequence    uint64
 }
 
 func (c *controller) update(r request) response {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.w.valid(c.now(), c.boot(), c.bootID) {
-		return response{Error: "window is closed or expired"}
+	if !c.w.valid(c.now(), c.boot(), c.bootID) || (c.w.Admission && !c.diskMatches()) {
+		return response{Error: "window is closed, expired or its state is unavailable"}
 	}
 	if r.Generation != c.w.Generation {
 		return response{Error: "generation changed"}
@@ -127,6 +133,23 @@ func (c *controller) update(r request) response {
 			return response{Error: err.Error()}
 		}
 		c.w = candidate
+	} else if r.Operation == "admit" {
+		if !c.diskMatches() {
+			return response{Error: "window state is unavailable or changed"}
+		}
+		if c.w.Admission {
+			return response{Error: "trust is frozen for this generation"}
+		}
+		if err := validateRoutes(r.Routes); err != nil {
+			return response{Error: err.Error()}
+		}
+		candidate := c.w
+		candidate.Admission = true
+		if err := persist(c.path, candidate); err != nil {
+			return response{Error: err.Error()}
+		}
+		c.routes = r.Routes
+		c.w = candidate
 	} else if r.Operation != "status" {
 		return response{Error: "unknown operation"}
 	}
@@ -136,10 +159,19 @@ func (c *controller) update(r request) response {
 
 func (c *controller) close(reason string) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.w.Closed = true
+	c.w.Admission = false
 	c.w.Reason = reason
+	for stream := range c.streams {
+		stream.reason = reason
+		_ = stream.client.Close()
+		if stream.upstream != nil {
+			_ = stream.upstream.Close()
+		}
+	}
 	err := persist(c.path, c.w)
+	c.mu.Unlock()
+	c.connections.Wait()
 	// No login URL, key, payload or account credential is included in events.
 	returnErr := json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"event": reason, "generation": c.w.Generation, "deadline": c.w.Deadline,
@@ -170,7 +202,7 @@ func serve(listener net.Listener, c *controller) {
 			defer conn.Close()
 			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 			var r request
-			if err := json.NewDecoder(io.LimitReader(conn, 4096)).Decode(&r); err != nil {
+			if err := json.NewDecoder(io.LimitReader(conn, 1024*1024)).Decode(&r); err != nil {
 				_ = json.NewEncoder(conn).Encode(response{Error: "invalid request"})
 				return
 			}
@@ -239,6 +271,12 @@ func run(args []string) error {
 		return err
 	}
 	go serve(listener, c)
+	relay, err := net.Listen("tcp", ":1080")
+	if err != nil {
+		return err
+	}
+	defer relay.Close()
+	go serveRelay(relay, c, "127.0.0.1:1055", os.Stdout)
 	child := exec.Command("/usr/local/bin/tailscaled", "--tun=userspace-networking",
 		"--statedir=/var/lib/tailscale", "--socket="+tailscaleSocket,
 		"--socks5-server=127.0.0.1:1055")
@@ -262,6 +300,7 @@ func run(args []string) error {
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
 	reason := monitor(c, done, signals)
+	_ = relay.Close()
 	if reason == "failure" {
 		_ = c.close(reason)
 		return errors.New("tailscaled exited")
@@ -307,6 +346,14 @@ func client(args []string) error {
 		return errors.New("expected operation generation [minutes]")
 	}
 	r := request{Operation: args[0], Generation: args[1]}
+	if r.Operation == "admit" {
+		if len(args) != 3 {
+			return errors.New("expected frozen routes")
+		}
+		if err := json.Unmarshal([]byte(args[2]), &r.Routes); err != nil {
+			return err
+		}
+	}
 	if r.Operation == "set-deadline" {
 		if len(args) != 3 {
 			return errors.New("expected minutes")

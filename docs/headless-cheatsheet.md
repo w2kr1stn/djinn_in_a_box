@@ -5,8 +5,10 @@ the session-oriented `djinn session --prompt` path.
 
 Host control runs on the host: `djinn hostctl on --for 10m`, `status`,
 `limit 5` and `off`. Enrollment is asynchronous and login time counts against
-the window. The first hostctl package exposes no relay, so it does not yet
-provide tailnet SSH to headless agents; sealing assessment is pending too.
+the window. Once enrollment, peer trust and journal readiness succeed,
+headless agents use generated `ssh host-a` aliases through the gated relay.
+Off/expiry cuts all relay streams. Sealing and direct-bypass assessment remain
+unchecked until B3; status and doctor report that explicitly.
 
 ---
 

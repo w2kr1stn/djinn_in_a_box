@@ -80,13 +80,13 @@ func TestUpdaterRefusals(t *testing.T) {
 		change  func(*controller)
 		request request
 	}{
-		{"old-generation", func(c *controller) {}, request{"set-deadline", "old", 1}},
-		{"over-max", func(c *controller) {}, request{"set-deadline", "generation-a", 1441}},
-		{"zero", func(c *controller) {}, request{"set-deadline", "generation-a", 0}},
-		{"closed", func(c *controller) { c.w.Closed = true }, request{"set-deadline", "generation-a", 1}},
-		{"expired", func(c *controller) { c.boot = func() int64 { return c.w.BootDeadline } }, request{"set-deadline", "generation-a", 1}},
-		{"operation", func(c *controller) {}, request{"open", "generation-a", 1}},
-		{"write-failure", func(c *controller) { c.path = filepath.Join(t.TempDir(), "missing/window.json") }, request{"set-deadline", "generation-a", 1}},
+		{"old-generation", func(c *controller) {}, request{Operation: "set-deadline", Generation: "old", Minutes: 1}},
+		{"over-max", func(c *controller) {}, request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1441}},
+		{"zero", func(c *controller) {}, request{Operation: "set-deadline", Generation: "generation-a", Minutes: 0}},
+		{"closed", func(c *controller) { c.w.Closed = true }, request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1}},
+		{"expired", func(c *controller) { c.boot = func() int64 { return c.w.BootDeadline } }, request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1}},
+		{"operation", func(c *controller) {}, request{Operation: "open", Generation: "generation-a", Minutes: 1}},
+		{"write-failure", func(c *controller) { c.path = filepath.Join(t.TempDir(), "missing/window.json") }, request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fixture(t)
@@ -107,12 +107,15 @@ func TestCloseUpdateRaceNeverResurrects(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); _ = c.close("expiry") }()
-	go func() { defer wg.Done(); c.update(request{"set-deadline", "generation-a", 1}) }()
+	go func() {
+		defer wg.Done()
+		c.update(request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1})
+	}()
 	wg.Wait()
 	if !c.w.Closed {
 		t.Fatal("racing update reopened window")
 	}
-	if r := c.update(request{"set-deadline", "generation-a", 1}); r.Error == "" {
+	if r := c.update(request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1}); r.Error == "" {
 		t.Fatal("closed generation acknowledged")
 	}
 }
@@ -132,7 +135,7 @@ func TestIPCGenerationAndAcknowledgement(t *testing.T) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(time.Second))
-	if err = json.NewEncoder(conn).Encode(request{"set-deadline", "generation-a", 1}); err != nil {
+	if err = json.NewEncoder(conn).Encode(request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1}); err != nil {
 		t.Fatal(err)
 	}
 	var reply response
@@ -161,7 +164,7 @@ func TestMonitorProcess(t *testing.T) {
 		if reason := monitor(c, make(chan error), make(chan os.Signal)); reason != "expiry" || !c.w.Closed {
 			os.Exit(2)
 		}
-		if r := c.update(request{"set-deadline", "generation-a", 1}); r.Error == "" {
+		if r := c.update(request{Operation: "set-deadline", Generation: "generation-a", Minutes: 1}); r.Error == "" {
 			os.Exit(3)
 		}
 		os.Exit(0)

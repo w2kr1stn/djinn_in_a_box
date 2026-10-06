@@ -1,4 +1,4 @@
-"""Host terminal controls; B1 exposes no relay or sealing assessment."""
+"""Host terminal controls for the bounded helper relay."""
 
 from __future__ import annotations
 
@@ -37,7 +37,10 @@ def on(
     console.print(
         "Window opening. Login time counts; use djinn hostctl status for login/readiness."
     )
-    console.print("B1: sealing unchecked; relay absent, so dev has no helper tailnet route.")
+    console.print(
+        "Sealing unchecked (B3 pending); relay waits for enrollment, "
+        "peer trust and journal readiness."
+    )
 
 
 @app.command("off")
@@ -77,7 +80,7 @@ def status() -> None:
             console.print(Text(f"Login on the host: {url}"))
     else:
         console.print(Text(f"Node: {node or 'unknown'}"))
-    for key in ("window_error", "node_error"):
+    for key in ("window_error", "node_error", "relay_error"):
         if key in value:
             console.print(Text(f"Unknown: {value[key]}"))
     observation = value.get("observation")

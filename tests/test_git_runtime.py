@@ -273,7 +273,8 @@ def test_runtime_requires_owner_only_directory_and_matching_uid(git_inputs, monk
         pytest.fail("unsafe runtime must not prepare Git delivery")
     if problem == "uid":
         assert str(exc_info.value) == (
-            f"Git agent socket requires host numeric UID {os.getuid() + 1}, matching the dev image"
+            f"Generated SSH delivery requires host numeric UID {os.getuid() + 1}, "
+            "matching the dev image"
         )
     else:
         assert "0700" in str(exc_info.value)

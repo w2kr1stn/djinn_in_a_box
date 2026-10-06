@@ -210,7 +210,7 @@ def test_emitted_flags_exist_in_installed_docker_help(inputs):
     argv = hostctl.run_argv(hostctl.supervisor_path(), "gen", datetime.now(UTC), 1)
     image_index = argv.index(hostctl.HELPER_IMAGE)
     flags = {arg for arg in argv[2:image_index] if arg.startswith("--")}
-    for subcommand, emitted in [("run", flags), ("exec", set()), ("stop", {"--time"})]:
+    for subcommand, emitted in [("run", flags), ("exec", set()), ("stop", {"-t"})]:
         output = subprocess.run(
             [executable, subcommand, "--help"],
             capture_output=True,
@@ -367,7 +367,7 @@ def test_cleanup_checks_identity_and_retains_state(inputs, fake_transitions, mon
     with hostctl.control_guard():
         hostctl.stop_helper_locked(remove=True)
     calls = fake_transitions["calls"]
-    assert calls[0] == ("stop", "--time", "3", "helper-a")
+    assert calls[0] == ("stop", "-t", "3", "helper-a")
     assert ("rm", "helper-a") in calls
     assert not any(call[:2] == ("volume", "rm") for call in calls)
     values = iter([helper(), helper(running=False, identity="replacement")])
