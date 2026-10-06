@@ -832,17 +832,18 @@ def enter() -> None:
         error("Cannot enter container: no TTY available (stdin is not a terminal)")
         raise typer.Exit(1)
 
+    # Desktop and hostctl helpers share the name prefix; only the dev container has a shell.
     containers = get_running_containers("djinn")
     if containers is None:
         error("Could not determine whether a Djinn container is running.")
         err_console.print("Restore Docker access, then retry.")
         raise typer.Exit(1)
-    if not containers:
+    if "djinn" not in containers:
         error("No running Djinn container found.")
         err_console.print("Start one with: djinn start")
         raise typer.Exit(1)
 
-    container = containers[0]
+    container = "djinn"
     info(f"Opening new Zsh session in: {container}")
     blank()
 
