@@ -10,8 +10,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_FILE="${TOOLS_FILE:-$SCRIPT_DIR/tools.txt}"
+[[ "$TOOLS_FILE" == /* ]] || TOOLS_FILE="$PWD/$TOOLS_FILE"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/djinn-tools}"
+[[ "$CACHE_DIR" == /* ]] || CACHE_DIR="$PWD/$CACHE_DIR"
 INSTALLERS_DIR="${INSTALLERS_DIR:-$SCRIPT_DIR/installers}"
+[[ "$INSTALLERS_DIR" == /* ]] || INSTALLERS_DIR="$PWD/$INSTALLERS_DIR"
 OUTPUT_LIB="${OUTPUT_LIB:-/home/dev/output-lib.sh}"
 
 define_plain_ui_fallbacks() {
@@ -61,6 +64,10 @@ ui_info "[tools] Checking optional tools..."
 
 installed=0
 skipped=0
+
+# Verify and install outside the container's starting directory so project files
+# (packageManager pins, rust-toolchain.toml, uv configuration) cannot steer them.
+cd /
 
 for tool in $tools; do
     installer="$INSTALLERS_DIR/${tool}.sh"

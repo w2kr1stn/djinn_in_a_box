@@ -40,6 +40,7 @@ def run_install(
     cache_dir: Path,
     installers_dir: Path,
     tools_file: Path,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
@@ -56,7 +57,9 @@ def run_install(
         ["bash", str(SCRIPT)],
         check=False,
         capture_output=True,
+        cwd=cwd,
         env=env,
+        stdin=subprocess.DEVNULL,
         text=True,
     )
 
@@ -161,3 +164,77 @@ def test_failed_verify_reinstalls_and_warns(tmp_path: Path) -> None:
     assert "[info] [tools] Installing broken-tool" in result.stderr
     assert "[ok] [tools] broken-tool installed (broken-tool 1.0)" in result.stderr
     assert (cache_dir / "broken-tool-reinstalled").exists()
+
+
+def test_relative_cache_dir_skips_cached_tool(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["probe"])
+    (cache_dir / "probe.installed").write_text("cached\n", encoding="utf-8")
+    write_executable(cache_dir / "bin" / "probe", "#!/bin/sh\necho probe-version\n")
+    write_executable(
+        installers_dir / "probe.sh",
+        '#!/bin/sh\ntouch "$TOOLS_DIR/reinstalled"\necho probe-version\n',
+    )
+
+    result = run_install(home, Path("cache"), installers_dir, tmp_path / "tools.txt", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "1 tool(s) already installed (cached)" in result.stderr
+    assert "Installing" not in result.stderr
+    assert not (cache_dir / "reinstalled").exists()
+
+
+def test_relative_installers_dir_installs_tool(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["probe"])
+    write_executable(installers_dir / "probe.sh", "#!/bin/sh\necho probe-version\n")
+
+    result = run_install(home, cache_dir, Path("installers"), tmp_path / "tools.txt", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "probe installed (probe-version)" in result.stderr
+    assert (cache_dir / "probe.installed").read_text(encoding="utf-8") == "probe-version\n"
+
+
+def test_relative_tools_file_is_absolute_for_installer(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["probe"])
+    write_executable(installers_dir / "probe.sh", '#!/bin/sh\ncat "$TOOLS_FILE"\n')
+
+    result = run_install(home, cache_dir, installers_dir, Path("tools.txt"), tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "probe installed (probe)" in result.stderr
+    assert (cache_dir / "probe.installed").read_text(encoding="utf-8") == "probe\n"
+
+
+def test_cached_verify_runs_from_root(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["probe"])
+    project = tmp_path / "project"
+    project.mkdir()
+    (cache_dir / "probe.installed").write_text("cached\n", encoding="utf-8")
+    write_executable(cache_dir / "bin" / "probe", '#!/bin/sh\n[ "$PWD" = / ]\n')
+    write_executable(
+        installers_dir / "probe.sh",
+        '#!/bin/sh\ntouch "$TOOLS_DIR/reinstalled"\necho probe-version\n',
+    )
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt", project)
+
+    assert result.returncode == 0, result.stderr
+    assert "1 tool(s) already installed (cached)" in result.stderr
+    assert "Installing" not in result.stderr
+    assert not (cache_dir / "reinstalled").exists()
+
+
+def test_installer_runs_from_root(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["probe"])
+    project = tmp_path / "project"
+    project.mkdir()
+    write_executable(
+        installers_dir / "probe.sh",
+        '#!/bin/sh\nprintf "%s\\n" "$PWD" > "$TOOLS_DIR/installer-cwd"\necho probe-version\n',
+    )
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt", project)
+
+    assert result.returncode == 0, result.stderr
+    assert (cache_dir / "probe.installed").read_text(encoding="utf-8") == "probe-version\n"
+    assert (cache_dir / "installer-cwd").read_text(encoding="utf-8") == "/\n"
