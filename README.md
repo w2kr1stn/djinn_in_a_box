@@ -703,7 +703,10 @@ Alias URLs such as `git@git-work:group/repo.git`
 continue to select the declared account. Hardware keys and certificates are unsupported.
 
 A dedicated host agent loads only these keys; encrypted keys prompt on the host
-terminal at startup. Run Djinn from a host terminal when keys need unlocking.
+terminal at startup. Djinn loads them with one `ssh-add` call, which tries the last
+entered passphrase on each following key. Keys that share a passphrase ask for it
+once when declared next to each other. Run Djinn from a host terminal when keys
+need unlocking.
 Linux host numeric UID 1000 must match the dev image. Host runtime state lives in the
 owner-only `.local/state/djinn/runtime/git-agent` directory under the home recorded for
 the host UID; `HOME` and `XDG_RUNTIME_DIR` do not affect its location. Both `start` and

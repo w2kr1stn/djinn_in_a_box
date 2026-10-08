@@ -813,8 +813,8 @@ inode stays stable; files are replaced atomically. Generated targets and childre
 including `/var/run` aliases, and the emitted `SSH_AUTH_SOCK`/`DJINN_GIT_MANIFEST`
 variables are reserved against caller/declaration overrides.
 
-The host starts an empty `ssh-agent -D`, loads explicit keys with `ssh-add` on the
-host terminal, deduplicates shared key paths and verifies the complete public blob
+The host starts an empty `ssh-agent -D`, loads deduplicated explicit key paths with
+one `ssh-add` call on the host terminal and verifies the complete public blob
 set. The exported protocol filter permits list/sign only for that set; it rejects
 add/remove, lock, provider and extension requests. Host UID 1000 matches the image;
 runtime roots are owner-only (0700), sockets 0600. There is no ambient-agent import
@@ -822,10 +822,11 @@ or init service.
 
 A detached observer starts before loading, detects creator death during startup,
 then observes Docker's actual dev ID with a per-creation label. An inherited flock
-serializes pending creators and is released after ID handoff. Key loading is bounded
-at 120 seconds; container discovery at 60 seconds. CLI exit after detached handoff
-keeps the agent; foreground completion, timeout, interruption, failure, external
-stop/removal/replacement or inspection failure releases it. Observation failures
+serializes pending creators and is released after ID handoff. The single key-loading
+call is bounded at 120 seconds (10 seconds without a terminal); container discovery
+at 60 seconds. CLI exit after detached handoff keeps the agent; foreground
+completion, timeout, interruption, failure, external stop/removal/replacement or
+inspection failure releases it. Observation failures
 are recorded in the host-only `observer.log`; `doctor` reports unavailable state.
 
 The image packages `scripts/git-config.py`; the entrypoint reads the public-only
