@@ -892,13 +892,22 @@ The same module owns the repeatable user-mount contract:
   `dev` invocation, including Compose, image-alias, runtime, Direct-socket,
   zone-overlay, and user mounts. Equal targets and user targets that are
   ancestors of an occupied target raise `MountCollisionError`; child targets
-  remain valid except that assigned zone targets and managed SSH/desktop directories
-  (including descendants and `/var/run` aliases) are reserved too.
+  remain valid except at or below the shared `MANAGED_TARGET_ROOTS`. Assigned
+  zone targets are reserved like other occupied targets. The managed-root set
+  includes the five recursively repaired roots, managed SSH targets, desktop
+  directories and the agent-Docker endpoint.
+  Equality and descendants (including `/var/run` aliases) are refused for both
+  read-only and read-write mounts before occupied-target checks, with the
+  `conflicts with Djinn-managed path <root> (conflict path: <root>)` message.
+  Targets are compared after lexical normalization and the fixed image aliases;
+  symlinks inside mounted content, such as a workspace link into a managed root,
+  are not resolved.
   The typed static Compose target table excludes the workspace root;
   `_reserved_mount_targets()` adds only the active `config.workspace_target`.
   The unused workspace root remains available for explicit user mounts.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
-  `MountCollisionError` reports the two involved mounts and the conflict path.
+  `MountCollisionError` reports the two involved mounts and the conflict path;
+  managed-root conflicts identify the Djinn-managed root.
 
 When a mount exists, `compose_run()` uses the first mount target as
 `--workdir`. With no mount it omits `--workdir`, so the Compose service's
@@ -934,11 +943,12 @@ Targets use the existing canonicalizer and `_reserved_mount_targets`, with the
 union of all Docker modes for declarations in start/run/doctor. Equality and
 declared ancestors of built-in/reserved/zone/active-workspace/invocation targets
 are refused; declared pairs cannot nest. Children otherwise remain allowed,
-except at or below the five recursively repaired Djinn-managed roots:
-`/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`, `/home/dev/.local/share/fnm`,
-`/home/dev/.vscode-server`, `/home/dev/workspaces`. The Python constant is checked
-against the unchanged entrypoint repair list. Actual volume names are
-`djinn-<name>` and cannot collide with the built-in volume registry.
+except at or below `MANAGED_TARGET_ROOTS`, the same set used by invocation mounts.
+Its five recursively repaired roots come from `MANAGED_VOLUME_REPAIR_TARGETS`,
+checked against the unchanged entrypoint repair list; the remaining roots are
+managed SSH targets, desktop directories and the agent-Docker endpoint. The
+declared diagnostic retains its `Djinn-managed volume root` wording. Actual volume
+names are `djinn-<name>` and cannot collide with the built-in volume registry.
 
 The single reserved-environment registry covers all Compose service modes and
 everything the repository ships into the image or runs at startup: Python,

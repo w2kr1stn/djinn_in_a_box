@@ -85,6 +85,13 @@ MANAGED_VOLUME_REPAIR_TARGETS = (
     Path("/home/dev/.vscode-server"),
     Path("/home/dev/workspaces"),
 )
+MANAGED_TARGET_ROOTS = (
+    *MANAGED_VOLUME_REPAIR_TARGETS,
+    *MANAGED_SSH_TARGETS,
+    *desktop.MANAGED_TARGETS,
+    Path(agent_docker.DEV_ENDPOINT),
+)
+"""Targets at or below are refused for declared and per-invocation mounts."""
 _COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
     Path("/home/dev/.claude"): "directory",
     Path("/home/dev/.codex"): "directory",
@@ -207,7 +214,7 @@ class ContainerMount:
 
 
 class MountCollisionError(ValueError):
-    """Raised when a user mount would hide another container mount."""
+    """Raised when a user mount hides another mount or enters a Djinn-managed root."""
 
 
 def parse_mount_spec(specification: str) -> tuple[str, Path | None, bool]:
@@ -801,7 +808,7 @@ def validate_container_mounts(
     sops_args: list[str] | None = None,
     zone_overlay_targets: tuple[Path, ...] | None = None,
 ) -> None:
-    """Reject user targets that equal or are ancestors of an occupied target."""
+    """Reject user targets that hide occupied targets or enter Djinn-managed roots."""
     normalized_mounts = tuple(
         ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
         for mount in mounts
@@ -823,15 +830,15 @@ def validate_container_mounts(
 
     for mount in normalized_mounts:
         mount_target = mount.target
-        for target, description, display_target in occupied:
-            if (
-                mount_target == target
-                or target.is_relative_to(mount_target)
-                or (
-                    target in (*MANAGED_SSH_TARGETS, *desktop.MANAGED_TARGETS)
-                    and mount_target.is_relative_to(target)
+        for root in MANAGED_TARGET_ROOTS:
+            if mount_target == root or mount_target.is_relative_to(root):
+                msg = (
+                    f"Mount {mount.source} -> {mount_target} conflicts with Djinn-managed path "
+                    f"{root} (conflict path: {root})"
                 )
-            ):
+                raise MountCollisionError(msg)
+        for target, description, display_target in occupied:
+            if mount_target == target or target.is_relative_to(mount_target):
                 msg = (
                     f"Mount {mount.source} -> {mount_target} conflicts with {description} "
                     f"(conflict path: {display_target})"
@@ -1042,12 +1049,7 @@ def resolve_declared_entries(
     for name, target in targets.items():
         if errors.get(f"mounts.{name}"):
             continue
-        for repair in (
-            *MANAGED_VOLUME_REPAIR_TARGETS,
-            *MANAGED_SSH_TARGETS,
-            *desktop.MANAGED_TARGETS,
-            Path(agent_docker.DEV_ENDPOINT),
-        ):
+        for repair in MANAGED_TARGET_ROOTS:
             if target == repair or target.is_relative_to(repair):
                 errors[f"mounts.{name}"] = declaration_error(
                     "mounts",

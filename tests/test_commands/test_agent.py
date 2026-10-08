@@ -10,11 +10,12 @@ from unittest.mock import patch
 
 import pytest
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands.agent import build_agent_command
-from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.agent_runner import UnknownAgentError
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
@@ -448,6 +449,50 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
         error.assert_called_once_with("mount collision detail")
+
+    def test_run_cli_refuses_managed_mount_before_creation(
+        self, mock_app_config: AppConfig, claude_config: AgentConfig, tmp_path: Path
+    ) -> None:
+        root = "/home/dev/workspaces"
+        target = f"{root}/x"
+        with (
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=mock_app_config),
+            patch(
+                "djinn_in_a_box.commands.agent.prepare_config_workflow",
+                return_value=WorkflowPreparationResult(True),
+            ),
+            patch(
+                "djinn_in_a_box.commands.agent.workflow_image_compatible",
+                return_value=WorkflowImageCompatibility.COMPATIBLE,
+            ),
+            patch("djinn_in_a_box.core.agent_runner.ensure_network", return_value=True),
+            patch(
+                "djinn_in_a_box.core.agent_runner.load_agents",
+                return_value={"claude": claude_config},
+            ),
+            patch("djinn_in_a_box.core.docker.get_shell_mount_args", return_value=[]),
+            patch("djinn_in_a_box.core.docker.get_sops_age_key_mount_args", return_value=[]),
+            patch(
+                "djinn_in_a_box.core.docker._zone_overlay_mount_args_and_targets",
+                return_value=([], ()),
+            ),
+            patch("djinn_in_a_box.core.docker.subprocess.run") as docker_run,
+            patch("djinn_in_a_box.core.docker.subprocess.Popen") as docker_popen,
+            patch("djinn_in_a_box.core.docker.tempfile.mkstemp") as override,
+            patch("djinn_in_a_box.core.console.err_console", Console(width=1000, no_color=True)),
+        ):
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test prompt", "--mount", f"{tmp_path}:{target}"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert (
+            f"Mount {tmp_path} -> {target} conflicts with Djinn-managed path {root} "
+            f"(conflict path: {root})"
+        ) in result.output
+        docker_run.assert_not_called()
+        docker_popen.assert_not_called()
+        override.assert_not_called()
 
     def test_run_reports_a_mount_specification_error(
         self, run_mocks: dict[str, Any]

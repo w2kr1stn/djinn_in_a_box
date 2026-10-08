@@ -169,6 +169,52 @@ def test_declared_target_matrix(tmp_path, target, reserved, fails):
         result.require_valid()
 
 
+@pytest.mark.parametrize("root", docker.MANAGED_TARGET_ROOTS, ids=str)
+def test_managed_root_rule_matches_invocation(tmp_path, root):
+    target = root / "child"
+    result = resolve(
+        tmp_path,
+        {"worker": {"volume": True, "target": str(target), "backup": "none"}},
+    )
+
+    error = result.diagnostics[0].error
+    assert error is not None
+    assert (
+        f"target '{target}' conflicts with built-in mount '{root}' "
+        "(Djinn-managed volume root)"
+    ) in error
+    mounts = docker.resolve_container_mounts((f"{tmp_path}:{target}",))
+    with pytest.raises(docker.MountCollisionError) as exc_info:
+        docker.validate_container_mounts(
+            mounts, AppConfig(code_dir=tmp_path), docker.DockerMode.NONE,
+            shell_args=[], sops_args=[], zone_overlay_targets=(),
+        )
+    assert str(exc_info.value) == (
+        f"Mount {tmp_path} -> {target} conflicts with Djinn-managed path {root} "
+        f"(conflict path: {root})"
+    )
+
+
+@pytest.mark.parametrize(
+    "root",
+    [*docker.MANAGED_TARGET_ROOTS, None],
+    ids=lambda root: str(root) if root is not None else "existing-cache-other",
+)
+def test_declared_managed_root_sibling_is_allowed(tmp_path, root):
+    target = (
+        root.with_name(root.name + "2")
+        if root is not None
+        else Path("/home/dev/.cache/other")
+    )
+    result = resolve(
+        tmp_path,
+        {"worker": {"volume": True, "target": str(target), "backup": "none"}},
+    )
+
+    result.require_valid()
+    assert result.diagnostics[0].error is None
+
+
 @pytest.mark.parametrize("order", ["forward", "reverse"])
 @pytest.mark.parametrize(
     "case",

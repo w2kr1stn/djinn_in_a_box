@@ -763,7 +763,8 @@ directory is `/home/dev/workspace` with `--here`, otherwise the first mount targ
 in projects mode or `/home/dev/aios` in aios mode.
 User mounts cannot equal or contain the active workspace target; children remain
 valid. The unused root is available for explicit user mounts. Djinn creates only
-the selected workspace bind.
+the selected workspace bind. Targets at or below a Djinn-managed root are refused
+for both `:rw` and `:ro`, following the shared rule for declared mounts below.
 `djinn run` without `--mount` and without `--here` keeps its implicit `--here`
 behavior.
 
@@ -785,13 +786,15 @@ Declared targets must be absolute. They cannot equal or contain a built-in,
 reserved, assigned zone, active workspace or `--mount`/`--here` target; nested
 declared targets are refused too. Target reservations cover all Docker modes,
 even inactive ones. Children of built-in, reserved, zone or invocation targets
-are allowed, with one exception: no declared mount may sit at or below the
-Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
+are allowed, with one exception shared with invocation `--mount`: neither may sit
+at or below the Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
 `/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
 Their existing recursive ownership repair remains in place. Generated SSH delivery
 (`/home/dev/.ssh`), the Git socket directory (`/run/djinn-git-agent`) and
-`/home/dev/.gitconfig_local` also reserve their descendants and image aliases. Declared mounts
-support directory binds and named volumes only. Binds default to read-write;
+`/home/dev/.gitconfig_local`, desktop directories (`/run/djinn/dbus`, `/run/djinn/audio`)
+and the agent-Docker endpoint (`/run/djinn/agent-docker`) follow the same managed-root
+rule, including image aliases. Declared mounts support directory binds and named
+volumes only. Binds default to read-write;
 `read_only = true` delivers them read-only to dev and the agent daemon.
 File binds remain unsupported; invocation `--mount ...:ro` remains available.
 
