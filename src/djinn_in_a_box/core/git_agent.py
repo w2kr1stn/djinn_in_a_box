@@ -158,10 +158,12 @@ def start_agent(
         }
         for key in ("SSH_AGENT_PID", "SSH_ASKPASS", "DISPLAY"):
             environment.pop(key, None)
-        for key_file in dict.fromkeys(i.key_file for i in config.identities.values()):
-            # ssh-add reads encrypted-key passphrases from the host controlling terminal.
+        key_files = list(dict.fromkeys(i.key_file for i in config.identities.values()))
+        if key_files:
+            # ssh-add reads passphrases from the host controlling terminal and tries the
+            # last entered passphrase on following files; shared passphrases prompt once.
             result = subprocess.run(
-                ["ssh-add", str(key_file)],
+                ["ssh-add", *map(str, key_files)],
                 env=environment,
                 check=False,
                 stdout=subprocess.DEVNULL,

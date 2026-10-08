@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import pty
+import re
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -13,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from djinn_in_a_box.config.ssh import GitConfig
+from djinn_in_a_box.config.ssh import GitConfig, GitIdentity
 from djinn_in_a_box.core.git_agent import (
     AgentFilter,
     agent_keys,
@@ -26,22 +28,113 @@ from djinn_in_a_box.core.git_agent import (
 from djinn_in_a_box.core.ssh_delivery import GitSSHError, public_blob, read_public_delivery
 
 
+def encrypt(key_file, passphrase):
+    subprocess.run(
+        ["ssh-keygen", "-q", "-p", "-P", "", "-N", passphrase, "-f", str(key_file)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=True,
+    )
+
+
+def run_on_terminal(config, answers):
+    driver = """
+import fcntl, json, os, sys, termios
+from pathlib import Path
+from djinn_in_a_box.config.ssh import GitConfig
+from djinn_in_a_box.core.git_agent import start_agent, stop_agent, agent_keys
+from djinn_in_a_box.core.ssh_delivery import GitSSHError, read_public_delivery
+os.setsid()
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+config = GitConfig.model_validate(json.loads(sys.argv[1]))
+expected = read_public_delivery(config).blobs
+path = Path(os.environ["XDG_RUNTIME_DIR"]) / "terminal.sock"
+agents = []
+try:
+    try:
+        start_agent(config, path, expected, on_start=agents.append)
+    except GitSSHError as error:
+        print(str(error), flush=True)
+        try:
+            agent_keys(path)
+        except OSError:
+            print("AGENT_STOPPED", flush=True)
+        else:
+            raise AssertionError("private agent is still usable")
+        sys.exit(1)
+    assert agent_keys(path) == expected
+    print("HOST_PROMPT_OK", flush=True)
+finally:
+    for agent in agents:
+        stop_agent(agent)
+"""
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [sys.executable, "-c", driver, config.model_dump_json()],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+    )
+    os.close(slave)
+    output = b""
+    answered = 0
+    deadline = time.monotonic() + 12
+    try:
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+                prompts = re.findall(
+                    rb"(?:Enter passphrase for |Bad passphrase, try again for )[^\r\n]+: ",
+                    output,
+                )
+                while answered < len(prompts):
+                    answer = answers[answered] if answered < len(answers) else ""
+                    os.write(master, (answer + "\n").encode())
+                    answered += 1
+            elif process.poll() is not None:
+                break
+        try:
+            returncode = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"driver did not finish before deadline: {output!r}")
+        return returncode, output, answered
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        os.close(master)
+
+
 @contextmanager
 def filtered_agent(config):
     root = Path(os.environ["XDG_RUNTIME_DIR"])
     private = root / "private.sock"
     exported = root / "auth.sock"
     expected = read_public_delivery(config).blobs
-    agent = start_agent(config, private, expected)
-    server = AgentFilter(exported, private, expected)
-    thread = threading.Thread(target=server.serve)
-    thread.start()
+    agents = []
     try:
-        yield private, exported, expected
+        start_agent(config, private, expected, on_start=agents.append)
+        server = AgentFilter(exported, private, expected)
+        thread = threading.Thread(target=server.serve)
+        thread.start()
+        try:
+            yield private, exported, expected
+        finally:
+            server.stop.set()
+            thread.join(timeout=2)
     finally:
-        server.stop.set()
-        thread.join(timeout=2)
-        stop_agent(agent)
+        for agent in agents:
+            stop_agent(agent)
 
 
 def test_declared_only_with_ambient_and_default_keys(git_inputs, monkeypatch):
@@ -49,8 +142,9 @@ def test_declared_only_with_ambient_and_default_keys(git_inputs, monkeypatch):
     ambient_config = GitConfig(identities={"ambient": identities["git-personal"]})
     ambient = Path(os.environ["XDG_RUNTIME_DIR"]) / "ambient.sock"
     ambient_keys = frozenset({public_blob(identities["git-personal"].public_key_file.read_text())})
-    agent = start_agent(ambient_config, ambient, ambient_keys)
+    agents = []
     try:
+        start_agent(ambient_config, ambient, ambient_keys, on_start=agents.append)
         monkeypatch.setenv("SSH_AUTH_SOCK", str(ambient))
         # A real default-key filename is present but is never imported.
         (Path.home() / ".ssh" / "id_ed25519").write_bytes(
@@ -63,7 +157,8 @@ def test_declared_only_with_ambient_and_default_keys(git_inputs, monkeypatch):
             assert expected.isdisjoint(ambient_keys)
         assert agent_keys(ambient) == ambient_keys
     finally:
-        stop_agent(agent)
+        for agent in agents:
+            stop_agent(agent)
 
 
 @pytest.mark.parametrize("message_type", [17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 255])
@@ -164,119 +259,209 @@ def test_mismatched_private_public_key_stops_agent(git_inputs):
     personal = git_inputs.git.identities["git-personal"]
     config = GitConfig(identities={"work": work.model_copy(update={"key_file": personal.key_file})})
     socket = Path(os.environ["XDG_RUNTIME_DIR"]) / "mismatch.sock"
-    with pytest.raises(GitSSHError, match="do not match"):
-        start_agent(config, socket, read_public_delivery(config).blobs)
-    with pytest.raises(OSError):
-        agent_keys(socket)
+    agents = []
+    try:
+        with pytest.raises(GitSSHError, match="do not match"):
+            start_agent(config, socket, read_public_delivery(config).blobs, on_start=agents.append)
+        with pytest.raises(OSError):
+            agent_keys(socket)
+    finally:
+        for agent in agents:
+            stop_agent(agent)
 
 
 def test_encrypted_key_no_terminal_refuses_with_remedy(git_inputs, monkeypatch):
     work = git_inputs.git.identities["git-work"]
-    subprocess.run(
-        [
-            "ssh-keygen",
-            "-q",
-            "-p",
-            "-P",
-            "",
-            "-N",
-            "throwaway-passphrase",
-            "-f",
-            str(work.key_file),
-        ],
-        capture_output=True,
-        check=True,
-    )
+    encrypt(work.key_file, "throwaway-passphrase")
     config = GitConfig(identities={"work": work})
     socket = Path(os.environ["XDG_RUNTIME_DIR"]) / "encrypted.sock"
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    with pytest.raises(GitSSHError, match="host terminal"):
-        start_agent(config, socket, read_public_delivery(config).blobs)
-    with pytest.raises(OSError):
-        agent_keys(socket)
+    agents = []
+    try:
+        with pytest.raises(GitSSHError, match="host terminal"):
+            start_agent(config, socket, read_public_delivery(config).blobs, on_start=agents.append)
+        with pytest.raises(OSError):
+            agent_keys(socket)
+    finally:
+        for agent in agents:
+            stop_agent(agent)
 
 
-def test_shared_private_keys_loaded_once(git_inputs, monkeypatch):
+def test_declared_keys_loaded_in_one_call_in_order(git_inputs, monkeypatch):
     from djinn_in_a_box.core import git_agent
 
     work = git_inputs.git.identities["git-work"]
-    config = GitConfig(identities={"work": work, "same": work})
+    personal = git_inputs.git.identities["git-personal"]
+    config = GitConfig(identities={"work": work, "same": work, "personal": personal})
     original = subprocess.run
     loads = []
 
     def capture(command, **kwargs):
         if command[0] == "ssh-add":
             loads.append(command)
-        return original(command, **kwargs)
+        return original(command, stdin=subprocess.DEVNULL, **kwargs)
 
     monkeypatch.setattr(git_agent.subprocess, "run", capture)
     with filtered_agent(config):
+        assert loads == [["ssh-add", str(work.key_file), str(personal.key_file)]]
+
+
+@pytest.mark.parametrize(("isatty", "timeout"), [(False, 10), (True, 120)])
+def test_combined_key_loading_process_options(git_inputs, monkeypatch, isatty, timeout):
+    from djinn_in_a_box.core import git_agent
+
+    original = subprocess.run
+    loads = []
+
+    def capture(command, **kwargs):
+        if command[0] == "ssh-add":
+            loads.append(kwargs)
+        return original(command, stdin=subprocess.DEVNULL, **kwargs)
+
+    monkeypatch.setenv("SSH_AGENT_PID", "stale-agent-pid")
+    monkeypatch.setenv("SSH_ASKPASS", "/unused/askpass")
+    monkeypatch.setenv("DISPLAY", ":999")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/unused/ambient.sock")
+    monkeypatch.setenv("SSH_ASKPASS_REQUIRE", "prefer")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: isatty)
+    monkeypatch.setattr(git_agent.subprocess, "run", capture)
+    with filtered_agent(git_inputs.git) as (private, _, _):
         assert len(loads) == 1
+        kwargs = loads[0]
+        assert kwargs["timeout"] == timeout
+        assert kwargs["env"]["SSH_AUTH_SOCK"] == str(private)
+        assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "never"
+        for key in ("SSH_AGENT_PID", "SSH_ASKPASS", "DISPLAY"):
+            assert key not in kwargs["env"]
+        assert kwargs["stdout"] is subprocess.DEVNULL
+        assert kwargs["stderr"] is (None if isatty else subprocess.DEVNULL)
+        assert kwargs["start_new_session"] is (not isatty)
+        assert "stdin" not in kwargs
+
+
+@pytest.mark.parametrize(
+    "error",
+    [subprocess.TimeoutExpired(["ssh-add"], 10), KeyboardInterrupt()],
+    ids=["timeout", "interrupt"],
+)
+def test_key_loading_exception_stops_agent(git_inputs, monkeypatch, error):
+    from djinn_in_a_box.core import git_agent
+
+    original = subprocess.run
+    agents = []
+    socket = Path(os.environ["XDG_RUNTIME_DIR"]) / "loading-exception.sock"
+
+    def fail_loading(command, **kwargs):
+        if command[0] == "ssh-add":
+            raise error
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(git_agent.subprocess, "run", fail_loading)
+    try:
+        with pytest.raises(type(error)) as caught:
+            start_agent(
+                git_inputs.git,
+                socket,
+                read_public_delivery(git_inputs.git).blobs,
+                on_start=agents.append,
+            )
+        assert caught.value is error
+        assert len(agents) == 1
+        assert agents[0].poll() is not None
+        with pytest.raises(OSError):
+            agent_keys(socket)
+    finally:
+        for agent in agents:
+            if agent.poll() is None:
+                stop_agent(agent)
+
+
+def test_empty_identities_never_invoke_ssh_add(git_inputs, monkeypatch):
+    from djinn_in_a_box.core import git_agent
+
+    loads = []
+
+    def capture(command, **kwargs):
+        loads.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(git_agent.subprocess, "run", capture)
+    with filtered_agent(GitConfig(identities={})) as (private, _, expected):
+        assert expected == frozenset()
+        assert agent_keys(private) == frozenset()
+        assert loads == []
 
 
 def test_encrypted_key_prompts_on_host_terminal(git_inputs):
     work = git_inputs.git.identities["git-work"]
+    encrypt(work.key_file, "throwaway-passphrase")
+    config = GitConfig(identities={"work": work})
+    returncode, output, prompts = run_on_terminal(config, ["throwaway-passphrase"])
+    assert prompts == 1, output
+    assert returncode == 0, output
+    assert b"HOST_PROMPT_OK" in output, output
+
+
+def test_encrypted_keys_with_shared_passphrase_prompt_once(git_inputs):
+    for identity in git_inputs.git.identities.values():
+        encrypt(identity.key_file, "throwaway-passphrase")
+    returncode, output, prompts = run_on_terminal(git_inputs.git, ["throwaway-passphrase"])
+    assert prompts == 1, output
+    assert returncode == 0, output
+    assert b"HOST_PROMPT_OK" in output, output
+    for key in {identity.key_file for identity in git_inputs.git.identities.values()}:
+        assert output.count(f"Identity added: {key} ".encode()) == 1, output
+
+
+def test_encrypted_keys_with_different_passphrases_prompt_again(git_inputs):
+    encrypt(git_inputs.git.identities["git-work"].key_file, "throwaway-work")
+    encrypt(git_inputs.git.identities["git-personal"].key_file, "throwaway-personal")
+    returncode, output, prompts = run_on_terminal(
+        git_inputs.git, ["throwaway-work", "throwaway-personal"]
+    )
+    assert prompts == 2, output
+    assert returncode == 0, output
+    assert b"HOST_PROMPT_OK" in output, output
+    for key in {identity.key_file for identity in git_inputs.git.identities.values()}:
+        assert output.count(f"Identity added: {key} ".encode()) == 1, output
+
+
+def test_three_encrypted_keys_with_interleaved_passphrases_prompt_three_times(git_inputs):
+    work = git_inputs.git.identities["git-work"]
+    personal = git_inputs.git.identities["git-personal"]
+    key_file = work.key_file.parent / "third_git"
     subprocess.run(
-        [
-            "ssh-keygen",
-            "-q",
-            "-p",
-            "-P",
-            "",
-            "-N",
-            "throwaway-passphrase",
-            "-f",
-            str(work.key_file),
-        ],
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_file)],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=True,
     )
-    driver = """
-import fcntl, json, os, sys, termios
-from pathlib import Path
-from djinn_in_a_box.config.ssh import GitConfig
-from djinn_in_a_box.core.git_agent import start_agent, stop_agent, agent_keys
-from djinn_in_a_box.core.ssh_delivery import read_public_delivery
-os.setsid()
-fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-config = GitConfig.model_validate(json.loads(sys.argv[1]))
-expected = read_public_delivery(config).blobs
-path = Path(os.environ["XDG_RUNTIME_DIR"]) / "terminal.sock"
-agent = start_agent(config, path, expected)
-try:
-    assert agent_keys(path) == expected
-    print("HOST_PROMPT_OK", flush=True)
-finally:
-    stop_agent(agent)
-"""
-    master, slave = pty.openpty()
-    config = GitConfig(identities={"work": work})
-    process = subprocess.Popen(
-        [sys.executable, "-c", driver, config.model_dump_json()],
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
+    third = GitIdentity(
+        hostname="git.example.com",
+        user="git",
+        key_file=key_file,
+        public_key_file=Path(str(key_file) + ".pub"),
     )
-    os.close(slave)
-    output = b""
-    sent = False
-    deadline = time.monotonic() + 12
-    try:
-        while time.monotonic() < deadline:
-            if select.select([master], [], [], 0.1)[0]:
-                try:
-                    output += os.read(master, 4096)
-                except OSError:
-                    break
-                if b"Enter passphrase" in output and not sent:
-                    os.write(master, b"throwaway-passphrase\n")
-                    sent = True
-            if process.poll() is not None:
-                break
-        assert process.wait(timeout=2) == 0, output
-        assert sent and b"HOST_PROMPT_OK" in output, output
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=3)
-        os.close(master)
+    encrypt(work.key_file, "throwaway-work")
+    encrypt(personal.key_file, "throwaway-personal")
+    encrypt(third.key_file, "throwaway-work")
+    config = GitConfig(identities={"work": work, "personal": personal, "third": third})
+    returncode, output, prompts = run_on_terminal(
+        config, ["throwaway-work", "throwaway-personal", "throwaway-work"]
+    )
+    assert prompts == 3, output
+    assert returncode == 0, output
+    assert b"HOST_PROMPT_OK" in output, output
+
+
+def test_encrypted_key_refusal_reports_complete_remedy_and_stops_agent(git_inputs):
+    encrypt(git_inputs.git.identities["git-work"].key_file, "throwaway-work")
+    encrypt(git_inputs.git.identities["git-personal"].key_file, "throwaway-personal")
+    returncode, output, prompts = run_on_terminal(git_inputs.git, ["throwaway-work", ""])
+    assert prompts == 2, output
+    assert returncode != 0, output
+    assert (
+        b"Could not load a declared Git key. Start Djinn on a host terminal to unlock "
+        b"encrypted keys; check the key path and its permissions."
+    ) in output, output
+    assert b"AGENT_STOPPED" in output, output

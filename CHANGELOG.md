@@ -161,6 +161,10 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Git keys that share a passphrase now ask for it once at `djinn start` and
+  `djinn run`, instead of once per key. One `ssh-add` call loads all declared
+  keys; a different passphrase prompts again, so declare keys that share one
+  next to each other.
 - Host provisioning creates every nested bind-mount target inside the config
   root, so Docker no longer creates root-owned directories or files there.
 - Claude Code loads the global `AGENTS.md` again: Djinn provides
