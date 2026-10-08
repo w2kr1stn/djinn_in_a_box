@@ -6,6 +6,8 @@ import re
 import socket
 import subprocess
 import tarfile
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -2440,14 +2442,16 @@ class TestComposeUpDetached:
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
+        generated_overrides: Callable[..., list[Path]],
+        djinn_named_project_root: Path,
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
-        mock_root.return_value = Path("/project")
+        mock_root.return_value = djinn_named_project_root
         payload: dict[str, object] = {}
         seen_paths: list[Path] = []
 
         def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
-            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            (override,) = generated_overrides(cmd, "djinn-detach-")
             seen_paths.append(override)
             payload.update(json.loads(override.read_text()))
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -2473,15 +2477,17 @@ class TestComposeUpDetached:
         mock_root: MagicMock,
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
+        generated_overrides: Callable[..., list[Path]],
+        djinn_named_project_root: Path,
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
-        mock_root.return_value = Path("/project")
+        mock_root.return_value = djinn_named_project_root
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         compose_up_detached(mock_app_config, ContainerOptions())
 
         cmd = mock_run.call_args.args[0]
-        override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+        (override,) = generated_overrides(cmd, "djinn-detach-")
         assert not override.exists()
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
@@ -2517,12 +2523,14 @@ class TestComposeUpDetached:
         mock_root: MagicMock,
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
+        generated_overrides: Callable[..., list[Path]],
+        djinn_named_project_root: Path,
     ) -> None:
         """Detached startup mounts assigned overlays just like foreground startup."""
         self._without_runtime_mounts(monkeypatch)
         zones_file = mock_app_config.config_root.parent / "zones.toml"
         monkeypatch.setattr(zones_mod, "ZONES_FILE", zones_file)
-        mock_root.return_value = Path("/project")
+        mock_root.return_value = djinn_named_project_root
         shared_source = Path(f"{mock_app_config.config_root}.shared") / "claude" / "projects"
         shared_source.mkdir(parents=True)
         local_source = Path(f"{mock_app_config.config_root}.local") / "claude" / "jobs"
@@ -2530,7 +2538,7 @@ class TestComposeUpDetached:
         payload: dict[str, object] = {}
 
         def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
-            override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+            (override,) = generated_overrides(cmd, "djinn-detach-")
             payload.update(json.loads(override.read_text()))
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2621,10 +2629,11 @@ class TestRunningContainerProbeFailure:
 
 
 @pytest.fixture
-def declared_creator(tmp_path, monkeypatch):
+def declared_creator(tmp_path, monkeypatch, djinn_named_project_root):
     from djinn_in_a_box.config.models import AppConfig
     from djinn_in_a_box.core import docker
 
+    monkeypatch.setattr(docker, "get_project_root", lambda: djinn_named_project_root)
     source = tmp_path / "archive$disk"
     source.mkdir()
     (source / ".ready").touch()
@@ -2659,15 +2668,18 @@ def _call_declared_creator(kind, config, options=None, **kwargs):
 
 
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
-def test_declared_entries_on_every_creator(tmp_path, monkeypatch, declared_creator, kind):
+def test_declared_entries_on_every_creator(
+    tmp_path, monkeypatch, declared_creator, generated_overrides, kind
+):
     from djinn_in_a_box.core import docker
 
     payloads, commands = [], []
 
     def capture(cmd, **kwargs):
-        overrides = [Path(cmd[i + 1]) for i, arg in enumerate(cmd) if arg == "-f"]
-        assert overrides[-1].name.startswith("djinn-")
-        payloads.append(json.loads(overrides[-1].read_text()))
+        (override,) = generated_overrides(cmd)
+        last_compose_file = max(i for i, arg in enumerate(cmd[:-1]) if arg == "-f")
+        assert cmd[last_compose_file + 1] == str(override)
+        payloads.append(json.loads(override.read_text()))
         commands.append((cmd, kwargs))
         return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2712,11 +2724,10 @@ def test_declared_entries_on_every_creator(tmp_path, monkeypatch, declared_creat
         assert "AGENT_PROMPT=prompt" in cmd
         assert not any(arg.startswith("CDP_HOST=") for arg in cmd)
         assert cmd.index("run") > max(i for i, arg in enumerate(cmd) if arg == "-f")
-    assert all(
-        not Path(cmd[i + 1]).exists()
-        for i, arg in enumerate(cmd)
-        if arg == "-f" and "djinn-" in cmd[i + 1]
-    )
+    for cmd, _ in commands:
+        overrides = generated_overrides(cmd)
+        assert overrides
+        assert all(not override.exists() for override in overrides)
 
 
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
@@ -2776,15 +2787,15 @@ def test_declaration_refusal_precedes_creation(
 
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
 @pytest.mark.parametrize("outcome", ["success", "exception", "timeout"])
-def test_declaration_override_cleanup(monkeypatch, declared_creator, kind, outcome):
+def test_declaration_override_cleanup(
+    monkeypatch, declared_creator, generated_overrides, kind, outcome
+):
     from djinn_in_a_box.core import docker
 
     paths = []
 
     def run(cmd, **kwargs):
-        paths.extend(
-            Path(cmd[i + 1]) for i, arg in enumerate(cmd) if arg == "-f" and "djinn-" in cmd[i + 1]
-        )
+        paths.extend(generated_overrides(cmd))
         assert paths and paths[-1].exists()
         if outcome == "exception":
             raise RuntimeError("Docker failed")
@@ -2803,6 +2814,49 @@ def test_declaration_override_cleanup(monkeypatch, declared_creator, kind, outco
             kind, declared_creator, **({"timeout": 1} if kind != "detached" else {})
         )
     assert paths and all(not path.exists() for path in paths)
+
+
+def test_generated_overrides_ignore_other_djinn_paths(tmp_path, generated_overrides):
+    temp = Path(tempfile.gettempdir())
+    cmd = [
+        "-p",
+        "djinn-in-a-box",
+        "-f",
+        str(tmp_path / "djinn-detach-export" / "docker-compose.yml"),
+        "-f",
+        str(tmp_path / "djinn-run-stray.yml"),
+        "-f",
+        str(temp / "compose-extra.yml"),
+        "-f",
+        str(temp / "djinn-run-generated.txt"),
+        "--env-file",
+        str(temp / "djinn-run-flagged.yml"),
+        "-f",
+        str(temp / "djinn-run-generated.yml"),
+        "-f",
+        str(temp / "djinn-detach-generated.yml"),
+        "run",
+    ]
+
+    assert generated_overrides(cmd) == [
+        temp / "djinn-run-generated.yml",
+        temp / "djinn-detach-generated.yml",
+    ]
+    assert generated_overrides(cmd, "djinn-detach-") == [temp / "djinn-detach-generated.yml"]
+
+
+@pytest.mark.parametrize("prefix", ["djinn-detach-", "djinn-run-", "djinn-probe-"])
+def test_generated_overrides_match_real_creation(
+    tmp_path, monkeypatch, generated_overrides, prefix
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "temp").mkdir()
+    # mkstemp normalizes its relative cached temp directory to an absolute parent.
+    monkeypatch.setattr(tempfile, "tempdir", "temp")
+
+    with docker_mod._compose_override({}, prefix=prefix) as path:
+        assert generated_overrides(["-f", str(path)]) == [path]
+        assert generated_overrides(["-f", str(path)], prefix) == [path]
 
 
 def test_compose_reservations_match(tmp_path, monkeypatch):

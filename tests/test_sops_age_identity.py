@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -207,15 +208,21 @@ class TestComposeRun:
         mock_run.assert_not_called()
 
 
-@patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
+@patch("djinn_in_a_box.core.docker.get_project_root")
 @patch("djinn_in_a_box.core.docker.subprocess.run")
 def test_detached_start_carries_mount_and_env_in_the_override(
-    mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig, key_file: Path
+    mock_run: MagicMock,
+    mock_root: MagicMock,
+    mock_app_config: AppConfig,
+    key_file: Path,
+    generated_overrides: Callable[..., list[Path]],
+    djinn_named_project_root: Path,
 ) -> None:
+    mock_root.return_value = djinn_named_project_root
     payload: dict[str, object] = {}
 
     def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
-        override = Path(next(arg for arg in cmd if "djinn-detach-" in arg))
+        (override,) = generated_overrides(cmd, "djinn-detach-")
         payload.update(json.loads(override.read_text()))
         return MagicMock(returncode=0, stdout="", stderr="")
 

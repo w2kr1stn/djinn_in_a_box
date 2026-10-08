@@ -1,9 +1,10 @@
 """Pytest configuration and fixtures for Djinn in a Box tests."""
 
 import os
+import shutil
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -200,3 +201,39 @@ def declared_app_config(mock_app_config: AppConfig, tmp_path: Path) -> AppConfig
             },
         },
     })
+
+
+@pytest.fixture
+def generated_overrides() -> Callable[..., list[Path]]:
+    """Select generated overrides; project files may live under paths with Djinn prefixes.
+
+    ``_compose_override`` creates ``<prefix>*.yml`` directly in the temp dir.
+    """
+
+    def select(cmd: Sequence[str], prefix: str = "djinn-") -> list[Path]:
+        temp_dir = Path(os.path.abspath(tempfile.gettempdir()))
+        overrides = []
+        for index, arg in enumerate(cmd[:-1]):
+            if arg != "-f":
+                continue
+            path = Path(cmd[index + 1])
+            if (
+                path.parent == temp_dir
+                and path.name.startswith(prefix)
+                and path.suffix == ".yml"
+            ):
+                overrides.append(path)
+        return overrides
+
+    return select
+
+
+@pytest.fixture
+def djinn_named_project_root(tmp_path: Path) -> Path:
+    """Create a decoy root so loose path predicates also match project compose files."""
+    project_root = tmp_path / "djinn-detach-export"
+    project_root.mkdir()
+    repository_root = Path(__file__).resolve().parents[1]
+    for compose_file in repository_root.glob("docker-compose*.yml"):
+        shutil.copy(compose_file, project_root / compose_file.name)
+    return project_root
