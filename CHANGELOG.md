@@ -18,6 +18,10 @@ Versioning before and after the first stable release.
 - Rootless agent Docker runtime for `--docker`, with generation-owned Unix endpoint,
   matching workspace mounts, persistent cache, resource limits and firewall gating.
 - Checksum-verified Buildx 0.37.2 in the dev image.
+- Optional tool `herdr` (`tools/installers/herdr.sh`), a terminal workspace manager
+  for AI coding agents. Installs the latest stable GitHub release into the tools
+  cache volume after checking its published SHA-256 and version; image rebuilds
+  reuse an installed binary whose version still matches.
 - Optional tool `pnpm` (`tools/installers/pnpm.sh`) via Corepack, respecting a
   project's `packageManager` pin. Corepack is installed from npm into the tools
   cache volume because Node >= 25 no longer bundles it; `COREPACK_HOME` also
