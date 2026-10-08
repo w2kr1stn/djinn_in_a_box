@@ -179,6 +179,28 @@ def pure(m, **kwargs):
     )
 
 
+def readonly_workspace(m):
+    observed = next(mount for mount in m.dev["Mounts"] if mount["Type"] == "bind")
+    config = AppConfig(code_dir=m.ground.paths["bus"], mounts={
+        "ro": {
+            "source": observed["Source"], "target": observed["Destination"], "read_only": True,
+        },
+    })
+    declarations = docker.resolve_declared_entries(
+        config, docker.ContainerOptions(), runtime_targets=[], caller_env=None,
+    )
+    declarations.require_valid()
+    row = declarations.compose_fragment()["services"]["dev"]["volumes"][0]
+    assert row["read_only"] is True
+    companion = next(
+        mount for mount in m.companion["Mounts"] if mount["Destination"] == row["target"]
+    )
+    expected = next(mount for mount in m.manifest["mounts"] if mount[2] == row["target"])
+    observed["RW"] = companion["RW"] = expected[3] = not row["read_only"]
+    host_runtime.save_state(m.ground.paths["runtime"], m.state)
+    return observed, companion
+
+
 def test_verified_agent_removes_only_its_docker_causes(managed, monkeypatch):
     m = managed
     assert pure(m).kind == "agent"
@@ -238,6 +260,9 @@ def test_exact_host_profile(managed, key):
         "endpoint-driver",
         "endpoint-options",
         "cache-options",
+        "workspace-readonly",
+        "workspace-readonly-dev-flip",
+        "workspace-readonly-companion-flip",
         "workspace-extra",
         "workspace-dev-lacks",
         "workspace-volume-subpath",
@@ -259,7 +284,23 @@ def test_exact_host_profile(managed, key):
 )
 def test_agent_evidence_never_fails_open(managed, monkeypatch, case):
     m = managed
-    if case.startswith("env-"):
+    if case.startswith("workspace-readonly"):
+        observed, companion = readonly_workspace(m)
+        assert observed["RW"] is False and companion["RW"] is False
+        assert pure(m).kind == "agent"
+        docker.require_agent_profile(m.companion, m.manifest)
+        if case == "workspace-readonly":
+            assert host_sealing.assess(m.dev).state == "sealed"
+            assert all(row.status is Status.PASS for row in agent_docker_checks(daemon=True))
+            return
+        if case.endswith("dev-flip"):
+            observed["RW"] = True
+        else:
+            companion["RW"] = True
+            with pytest.raises(RuntimeError, match="profile differs"):
+                docker.require_agent_profile(m.companion, m.manifest)
+        assert pure(m).kind == "unknown"
+    elif case.startswith("env-"):
         env = m.companion["Config"]["Env"]
         if case == "env-extra":
             env.append("DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--net=host")
@@ -441,6 +482,7 @@ def test_planned_assessment_carries_prepared_companion(managed, monkeypatch):
 
 def test_planned_delivery_keeps_workspace_backing(managed):
     m = managed
+    observed, _ = readonly_workspace(m)
     m.objects[m.network["Name"]] = m.network
     delivery = {
         "services": {
@@ -468,6 +510,9 @@ def test_planned_delivery_keeps_workspace_backing(managed):
         },
     }
     planned = docker.planned_dev_inspection(delivery)
+    assert next(
+        mount for mount in planned["Mounts"] if mount["Destination"] == observed["Destination"]
+    )["RW"] is False
     checked = host_sealing.assess(planned, planned_generation=m.state["generation"])
     assert checked.state == "sealed" and checked.agent, checked
     assert checked.agent == host_sealing.assess(m.dev).agent

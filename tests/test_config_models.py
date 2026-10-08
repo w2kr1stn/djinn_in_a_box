@@ -180,6 +180,20 @@ class TestBuildNetwork:
     [
         ("archive", {"source": "/unplugged", "target": "/archive"}, None),
         ("archive.disk", {"volume": True, "target": "/data", "backup": "none"}, None),
+        *[
+            ("archive", {"source": "/unplugged", "target": "/archive", "read_only": mode}, None)
+            for mode in (True, False)
+        ],
+        *[
+            ("archive", {"source": "/src", "target": "/dst", "read_only": mode},
+             "invalid read_only: value must be a boolean")
+            for mode in ("true", 1)
+        ],
+        *[
+            ("archive", {"volume": True, "target": "/dst", "backup": "none", "read_only": mode},
+             "invalid read_only: field is not supported for this mount kind")
+            for mode in (True, False)
+        ],
         ("bad name", {"source": "/src", "target": "/dst"}, "name"),
         ("x", {"target": "/dst"}, "source"),
         ("x", {"source": "/src"}, "target"),
@@ -209,6 +223,12 @@ class TestBuildNetwork:
     ids=[
         "offline-bind",
         "volume",
+        "bind-readonly",
+        "bind-readwrite",
+        "read-only-string",
+        "read-only-integer",
+        "volume-readonly",
+        "volume-readwrite",
         "name",
         "source-required",
         "target-required",
@@ -241,12 +261,18 @@ def test_declaration_schema(tmp_path, name, entry, cause):
 
     if cause is None:
         config = AppConfig(code_dir=tmp_path, mounts={name: entry})
+        from djinn_in_a_box.config.declarations import BindDeclaration
+
         assert config.mounts[name].target == entry["target"]
+        if isinstance(config.mounts[name], BindDeclaration):
+            assert config.mounts[name].read_only is entry.get("read_only", False)
         assert not (tmp_path / "unplugged").exists()
     else:
         # Values and identities must be useful without relying on Pydantic punctuation.
         with pytest.raises(ValidationError) as exc:
             AppConfig(code_dir=tmp_path, mounts={name: entry})
+        if cause.startswith("invalid read_only:"):
+            assert f"Declared mount '{name}': {cause}." in str(exc.value)
         text = str(exc.value).lower()
         assert name in text
         assert ("contain" if cause == "colon" else cause.lower()) in text

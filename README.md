@@ -195,6 +195,11 @@ source = "/mnt/archive"
 target = "/home/dev/archive"
 marker = ".drive-ready"
 
+[mounts.tools]
+source = "/opt/tools"
+target = "/home/dev/tools"
+read_only = true
+
 [mounts.journal]
 volume = true
 target = "/home/dev/journal"
@@ -221,7 +226,8 @@ remove them. Names must match `[a-z0-9][a-z0-9_.-]*` and are unique across both
 mount kinds. A dotted name needs quotes, for example `[mounts."archive.disk"]`.
 Volumes are created by Compose as `djinn-<name>`; names colliding with built-in
 volumes are refused. `volume = true`, `target` and `backup` are required for a
-volume; `source` and `target` are required for a bind, with optional `marker`.
+volume; `source` and `target` are required for a bind, with optional `marker`
+and `read_only` (a strict boolean, default `false`). Volumes refuse `read_only`.
 Other fields and mixed shapes are refused.
 
 A bind source must be an existing absolute host directory without `:`; source
@@ -229,6 +235,7 @@ symlinks are resolved. The optional marker is a single filename directly inside
 that directory and must be a regular file, never a symlink. A missing drive,
 missing marker or wrong marker type refuses creation and names the declaration;
 `djinn doctor` reports one PASS/FAIL row per declared mount or environment key.
+Valid read-only binds report `valid declaration (read-only)`.
 Djinn never provisions a source or marker because it is declared, checks no marker
 contents or identity, and never backs up, restores or cleans declared bind data.
 Use your host backup for it. Existing built-in provisioning still runs before
@@ -245,8 +252,10 @@ shell startup files or third-party tools outside the repository are outside this
 reservation boundary. Declared environment affects dev only. Declared mounts are also delivered to
 the agent daemon as workspace mounts; neither affects image builds or host execution. No declared string may contain NUL.
 
-`djinn config show` (text or JSON) includes declarations. `djinn config set`
-preserves their values but rewrites the file and loses TOML comments.
+`djinn config show` includes declarations, with `read_only=true` on read-only
+binds in text and an explicit boolean on every bind in JSON. `djinn config set`
+preserves effective modes, omits false `read_only`, rewrites the file and loses
+TOML comments.
 `djinn init` asks no declaration questions; `djinn init --force` replaces the whole
 file, including declarations. Changes take effect at the next container creation
 through `start` (foreground or detached) or `run`; `session` and `enter` inherit
@@ -782,8 +791,9 @@ Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
 Their existing recursive ownership repair remains in place. Generated SSH delivery
 (`/home/dev/.ssh`), the Git socket directory (`/run/djinn-git-agent`) and
 `/home/dev/.gitconfig_local` also reserve their descendants and image aliases. Declared mounts
-support writable directory binds and named volumes only, without file binds or
-a read-only declaration option; invocation `--mount ...:ro` remains available.
+support directory binds and named volumes only. Binds default to read-write;
+`read_only = true` delivers them read-only to dev and the agent daemon.
+File binds remain unsupported; invocation `--mount ...:ro` remains available.
 
 At startup an empty declared-volume root that the dev user cannot write receives
 one ownership repair of the root itself. Existing contents are never changed;

@@ -2668,14 +2668,24 @@ def _call_declared_creator(kind, config, options=None, **kwargs):
 
 
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("mode", [DockerMode.NONE, DockerMode.DIRECT])
+@pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])
 def test_declared_entries_on_every_creator(
-    tmp_path, monkeypatch, declared_creator, generated_overrides, kind
+    tmp_path, monkeypatch, declared_creator, generated_overrides, kind, mode, read_only,
 ):
     from djinn_in_a_box.core import docker
 
+    if read_only is not None:
+        mounts = declared_creator.model_dump()["mounts"]
+        mounts["archive.disk"]["read_only"] = read_only
+        declared_creator = AppConfig.model_validate({
+            **declared_creator.model_dump(), "mounts": mounts,
+        })
     payloads, commands = [], []
 
     def capture(cmd, **kwargs):
+        if kwargs.get("capture_output"):
+            assert kwargs["stdin"] is subprocess.DEVNULL
         (override,) = generated_overrides(cmd)
         last_compose_file = max(i for i, arg in enumerate(cmd[:-1]) if arg == "-f")
         assert cmd[last_compose_file + 1] == str(override)
@@ -2688,7 +2698,7 @@ def test_declared_entries_on_every_creator(
     _call_declared_creator(
         kind,
         declared_creator,
-        ContainerOptions(mounts=(invocation,)),
+        ContainerOptions(docker_mode=mode, mounts=(invocation,)),
         env={"AGENT_PROMPT": "prompt"},
     )
     fragment = payloads[0]
@@ -2701,6 +2711,7 @@ def test_declared_entries_on_every_creator(
             "source": str(tmp_path / "archive$$disk"),
             "target": "/archive$$disk",
             "bind": {"create_host_path": False},
+            **({"read_only": True} if read_only is True else {}),
         }
     ]
     assert volumes == [
@@ -2732,7 +2743,10 @@ def test_declared_entries_on_every_creator(
 
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
 @pytest.mark.parametrize(
-    "cause", ["missing", "marker", "target", "volume", "environment", "schema", "caller", "socket"]
+    "cause", [
+        "missing", "marker", "target", "volume", "environment", "schema", "caller", "socket",
+        "mode-string", "mode-integer", "volume-ro", "volume-rw",
+    ]
 )
 def test_declaration_refusal_precedes_creation(
     tmp_path, monkeypatch, declared_creator, kind, cause
@@ -2748,6 +2762,13 @@ def test_declaration_refusal_precedes_creation(
         entry["marker"] = ".missing"
     elif cause in ("target", "socket"):
         entry["target"] = "/home/dev/.codex" if cause == "target" else "/var/run/docker.sock"
+    elif cause in ("mode-string", "mode-integer"):
+        entry["read_only"] = "true" if cause == "mode-string" else 1
+    elif cause in ("volume-ro", "volume-rw"):
+        entry = {
+            "volume": True, "target": "/extra", "backup": "none",
+            "read_only": cause == "volume-ro",
+        }
     elif cause == "schema":
         entry["backup"] = "data"
     elif cause == "volume":
@@ -2777,6 +2798,10 @@ def test_declaration_refusal_precedes_creation(
         "volume": "built-in volume",
         "environment": "reserved",
         "schema": "backup",
+        "mode-string": "invalid read_only: value must be a boolean",
+        "mode-integer": "invalid read_only: value must be a boolean",
+        "volume-ro": "invalid read_only: field is not supported for this mount kind",
+        "volume-rw": "invalid read_only: field is not supported for this mount kind",
         "caller": "caller",
     }[cause] in text
     assert "do not echo" not in text

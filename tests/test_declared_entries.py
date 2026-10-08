@@ -27,10 +27,16 @@ def resolve(tmp_path, mounts=None, environment=None, targets=None, invocation=()
     )
 
 
+@pytest.mark.parametrize("kind", ["bind", "volume"])
+def test_resolved_declaration_defaults(kind):
+    assert docker.ResolvedDeclaration("entry", kind, "source", Path("/target")).read_only is False
+
+
 @pytest.mark.parametrize(
     "case", ["missing", "file", "relative", "colon", "symlink", "resolved-colon", "loop", "denied"]
 )
-def test_bind_source_checks(tmp_path, monkeypatch, case):
+@pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])
+def test_bind_source_checks(tmp_path, monkeypatch, case, read_only):
     source = tmp_path / "source"
     cause = None
     if case == "missing":
@@ -62,7 +68,10 @@ def test_bind_source_checks(tmp_path, monkeypatch, case):
             raise PermissionError("denied")
 
         monkeypatch.setattr(docker, "resolve_mount_path", denied)
-    result = resolve(tmp_path, {"archive": {"source": str(source), "target": "/archive"}})
+    entry = {"source": str(source), "target": "/archive"}
+    if read_only is not None:
+        entry["read_only"] = read_only
+    result = resolve(tmp_path, {"archive": entry})
     if cause:
         with pytest.raises(DeclarationSpecificationError) as exc:
             result.require_valid()
@@ -70,6 +79,14 @@ def test_bind_source_checks(tmp_path, monkeypatch, case):
     else:
         result.require_valid()
         assert result.mounts[0].source == str(real)
+        assert result.mounts[0].read_only is (read_only is True)
+        fragment = result.compose_fragment()["services"]["dev"]
+        assert fragment["volumes"] == [{
+            "type": "bind", "source": str(real), "target": "/archive",
+            "bind": {"create_host_path": False},
+            **({"read_only": True} if read_only is True else {}),
+        }]
+        assert fragment["environment"]["DJINN_DECLARED_VOLUME_TARGETS"] == "[]"
     if case == "missing":
         assert not source.exists()
     if case == "file":

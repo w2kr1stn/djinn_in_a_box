@@ -260,6 +260,7 @@ never nested under `[general]`. For example:
 source = "/mnt/archive"
 target = "/home/dev/archive"
 marker = ".drive-ready"
+read_only = true
 
 [mounts.journal]
 volume = true
@@ -275,13 +276,15 @@ EXAMPLE_LITERAL = "${HOST_VALUE}"
 `config/declarations.py` owns frozen, strict, extra-forbid declaration models.
 Only literal `volume = true` selects `VolumeDeclaration`, with required absolute
 `target` and `backup = "data" | "cache" | "none"`; binds require absolute
-`source`/`target` and optionally a marker filename. Mixed shapes, unsupported
+`source`/`target` and optionally a marker filename and strict boolean `read_only`
+(default `false`). A non-boolean yields `invalid read_only: value must be a boolean`;
+volumes refuse the field. Mixed shapes, unsupported
 fields, NUL in any declared string, invalid names/keys and non-string environment
 values fail model validation. Names match `[a-z0-9][a-z0-9_.-]*` and keys match
 `[A-Za-z_][A-Za-z0-9_]*`. Quoted dotted table components serialize as one name;
 duplicate TOML tables/keys are parse errors. Model loading performs no bind host
-inspection. Directory binds are writable; file binds and read-only declared
-binds are outside this format.
+inspection. Directory binds default to writable and support `read_only = true`;
+file binds are outside this format.
 
 `load_config()` flattens
 `[general]` into the `AppConfig` constructor and raises:
@@ -292,7 +295,8 @@ binds are outside this format.
 `save_config()` serializes back to nested TOML and writes atomically with
 `tempfile.mkstemp()` plus `os.replace()`.
 The `workspace` key is saved under `[general]` beside `code_dir`.
-Saving preserves declaration values, omits an absent marker and discards TOML
+Saving preserves effective declaration values, omits an absent marker and false
+`read_only` from bind tables only, and discards TOML
 comments. Parseable schema failures attach per-entry diagnostics to
 `ConfigValidationError` for doctor; no partially valid `AppConfig` is returned.
 
@@ -940,13 +944,16 @@ interpolation. Literal endpoints, including a CDP gateway, need manual edits
 when the host gateway changes.
 
 Both creators serialize the same temporary Compose fragment: long-form binds
-with `bind.create_host_path: false`, volumes with actual sources and top-level
+with `bind.create_host_path: false` and `read_only: true` only for read-only binds,
+volumes with actual sources and top-level
 `volumes: {djinn-<name>: {name: djinn-<name>}}`, and a dev environment mapping.
 Each `$` is escaped as `$$` in Compose-bound strings without mutating config.
 The override is removed in `finally` on success, failure and timeout. Existing
 invocation flags and working-directory selection remain independent of declarations.
 Declared environment applies only to dev creation; workspace declarations also feed
 the companion. Neither applies to builds or raw archive helpers.
+`_prepare_workspace` forwards the resolved access mode into `WorkspaceMount` for
+identical dev and companion delivery.
 `session` and `enter` inherit the running container; edits affect the next
 creation, with no running-mount comparison or attach-time update.
 
@@ -961,7 +968,9 @@ A populated, unwritable root warns with a manual ownership remedy. Malformed
 transport or a failing privileged call stops startup; warnings do not.
 Dockerfile delivery of this helper requires an image rebuild (`djinn build`).
 Doctor reports exactly one PASS/FAIL per declared mount/environment key using
-the same diagnostics; it never repairs declared sources, markers or volumes.
+the same diagnostics; valid read-only binds say `valid declaration (read-only)`,
+including retained valid binds next to invalid declarations. It never repairs
+declared sources, markers or volumes.
 
 ## Hostctl helper
 

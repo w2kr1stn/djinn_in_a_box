@@ -207,24 +207,45 @@ class TestSaveConfig:
 def test_declarations_round_trip(tmp_path, kind):
     import tomllib
 
+    import tomli_w
+
     from djinn_in_a_box.core.exceptions import ConfigValidationError
 
     path = tmp_path / "config.toml"
     mounts = (
         {
-            "archive.disk": {"source": "/offline", "target": "/archive", "marker": ".ready"},
+            "archive.disk": {
+                "source": "/offline", "target": "/archive", "marker": ".ready", "read_only": True,
+            },
             "plain": {"source": "/offline2", "target": "/plain"},
+            "explicit-rw": {"source": "/offline3", "target": "/rw", "read_only": False},
             "worker": {"volume": True, "target": "/worker", "backup": "none"},
         }
         if kind != "empty"
         else {}
     )
     environment = {"CDP_HOST": "$HOST\n[value]", "EMPTY": ""} if kind != "empty" else {}
-    config = AppConfig(code_dir=tmp_path, mounts=mounts, environment=environment)
+    path.write_text(tomli_w.dumps({
+        "general": {"code_dir": str(tmp_path)}, "mounts": mounts, "environment": environment,
+    }))
+    config = load_config(path)
     save_config(config, path)
     assert load_config(path) == config
     raw = tomllib.loads(path.read_text())
-    assert raw["mounts"] == config.model_dump(exclude_none=True)["mounts"]
+    assert raw["mounts"] == ({
+        "archive.disk": {
+            "source": "/offline", "target": "/archive", "marker": ".ready", "read_only": True,
+        },
+        "plain": {"source": "/offline2", "target": "/plain"},
+        "explicit-rw": {"source": "/offline3", "target": "/rw"},
+        "worker": {"volume": True, "target": "/worker", "backup": "none"},
+    } if kind != "empty" else {})
+    assert "read_only = false" not in path.read_text()
+    if kind != "empty":
+        reloaded = load_config(path)
+        assert reloaded.mounts["archive.disk"].read_only is True
+        assert reloaded.mounts["plain"].read_only is False
+        assert reloaded.mounts["explicit-rw"].read_only is False
     assert raw["environment"] == environment
     assert "mounts" not in raw["general"] and "environment" not in raw["general"]
     if kind == "populated":

@@ -166,10 +166,32 @@ def test_each_sealing_cause(ground, kind):
     result.require(allow_unsealed=True)
 
 
-def test_clean_and_readonly_execution_binds_pass(ground):
+@pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])
+def test_clean_and_readonly_execution_binds_pass(ground, read_only):
     result = sealing.assess(dev([bind(ground.paths["install"])]))
     assert result.state == "sealed" and not result.causes and not result.errors
     assert sealing.assess(None).state == "deferred"
+    config = AppConfig(code_dir=ground.paths["bus"], mounts={
+        "execution": {
+            "source": str(ground.paths["install"]), "target": "/execution",
+            **({"read_only": read_only} if read_only is not None else {}),
+        },
+    })
+    declarations = docker.resolve_declared_entries(
+        config, docker.ContainerOptions(), runtime_targets=[], caller_env=None,
+    )
+    declarations.require_valid()
+    delivery = declarations.compose_fragment()
+    delivery["services"]["dev"]["image"] = "dev:1"
+    planned = docker.planned_dev_inspection(delivery)
+    assert planned["Mounts"][0]["RW"] is (read_only is not True)
+    result = sealing.assess(planned)
+    writable = [cause for cause in result.causes if "writable" in cause]
+    if read_only is True:
+        assert result.state == "sealed" and not writable and not result.errors
+    else:
+        assert result.state == "unsealed" and writable
+        assert any("Djinn installation/build context" in cause for cause in writable)
 
 
 def test_alias_and_relocated_socket(ground, monkeypatch):
@@ -498,7 +520,10 @@ def test_resolved_creator_delivery_includes_all_producers(tmp_path, monkeypatch)
             "dev": {
                 "image": "dev:1",
                 "volumes": [
-                    {"type": "bind", "source": "/declared", "target": "/declared"},
+                    {
+                        "type": "bind", "source": "/declared", "target": "/declared",
+                        "read_only": True,
+                    },
                     {"type": "volume", "source": "output", "target": "/output", "read_only": True},
                 ],
                 "environment": {"DOCKER_HOST": "tcp://proxy:2375"},
@@ -533,6 +558,7 @@ def test_resolved_creator_delivery_includes_all_producers(tmp_path, monkeypatch)
         "/invocation",
     }
     assert {row["Destination"]: row["RW"] for row in planned["Mounts"]}["/workspace"] is False
+    assert {row["Destination"]: row["RW"] for row in planned["Mounts"]}["/declared"] is False
     assert planned["NetworkSettings"]["Networks"] == {"djinn-network": {"NetworkID": "network-id"}}
     assert "CALLER=value" in planned["Config"]["Env"] and creator == "creator"
 

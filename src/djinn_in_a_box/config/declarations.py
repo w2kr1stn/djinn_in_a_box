@@ -171,6 +171,7 @@ class BindDeclaration(BaseModel):
     source: StrictStr
     target: StrictStr
     marker: StrictStr | None = None
+    read_only: bool = False
 
     @field_validator("source", "target")
     @classmethod
@@ -258,6 +259,7 @@ def validate_mount(name: str, value: object) -> MountDeclaration:
             "missing": "required field is missing",
             "extra_forbidden": "field is not supported for this mount kind",
             "string_type": "value must be a string",
+            "bool_type": "value must be a boolean",
         }.get(error["type"], error["msg"].removeprefix("Value error, "))
         raise ValueError(f"invalid {error['loc'][0]}: {reason}") from exc
 
