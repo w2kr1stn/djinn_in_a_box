@@ -160,16 +160,19 @@ def start_agent(
             environment.pop(key, None)
         key_files = list(dict.fromkeys(i.key_file for i in config.identities.values()))
         if key_files:
-            # ssh-add reads passphrases from the host controlling terminal and tries the
-            # last entered passphrase on following files; shared passphrases prompt once.
+            # Passphrases come only from the host terminal, where ssh-add tries the last one
+            # entered on following files. Off a terminal it gets no controlling terminal and
+            # stdin from /dev/null, so encrypted keys refuse at once.
+            interactive = sys.stdin.isatty()
             result = subprocess.run(
                 ["ssh-add", *map(str, key_files)],
                 env=environment,
                 check=False,
                 stdout=subprocess.DEVNULL,
-                stderr=None if sys.stdin.isatty() else subprocess.DEVNULL,
-                start_new_session=not sys.stdin.isatty(),
-                timeout=120 if sys.stdin.isatty() else 10,
+                stdin=None if interactive else subprocess.DEVNULL,
+                stderr=None if interactive else subprocess.DEVNULL,
+                start_new_session=not interactive,
+                timeout=120 if interactive else 10,
             )
             if result.returncode:
                 raise GitSSHError(

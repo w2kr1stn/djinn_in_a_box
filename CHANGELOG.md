@@ -259,6 +259,9 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- A passphrase piped to `djinn start` or `djinn run` no longer unlocks encrypted
+  Git keys; without a terminal on stdin, encrypted keys refuse startup. Unlock
+  them at a host terminal.
 - Host provisioning secures config and credential roots with mode `0700` and
   creates every assigned zone overlay directory before Compose starts.
 - Documented credential storage and access: credentials remain unencrypted at

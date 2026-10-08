@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import pytest
@@ -37,82 +37,131 @@ def encrypt(key_file, passphrase):
     )
 
 
-def run_on_terminal(config, answers):
+def run_driver(config, answers=(), *, stdin_data=None, terminal=True):
     driver = """
-import fcntl, json, os, sys, termios
+import fcntl, json, os, sys, termios, time
 from pathlib import Path
 from djinn_in_a_box.config.ssh import GitConfig
 from djinn_in_a_box.core.git_agent import start_agent, stop_agent, agent_keys
 from djinn_in_a_box.core.ssh_delivery import GitSSHError, read_public_delivery
-os.setsid()
-fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+ctty_fd = int(sys.argv[2])
+if ctty_fd >= 0:
+    fcntl.ioctl(ctty_fd, termios.TIOCSCTTY, 0)
+    tty_fd = os.open("/dev/tty", os.O_RDONLY)
+    os.close(tty_fd)
 config = GitConfig.model_validate(json.loads(sys.argv[1]))
 expected = read_public_delivery(config).blobs
 path = Path(os.environ["XDG_RUNTIME_DIR"]) / "terminal.sock"
 agents = []
 try:
+    load_started = time.monotonic()
     try:
         start_agent(config, path, expected, on_start=agents.append)
-    except GitSSHError as error:
-        print(str(error), flush=True)
-        try:
-            agent_keys(path)
-        except OSError:
-            print("AGENT_STOPPED", flush=True)
-        else:
-            raise AssertionError("private agent is still usable")
-        sys.exit(1)
+    finally:
+        print(f"LOAD_SECONDS={time.monotonic() - load_started}", flush=True)
     assert agent_keys(path) == expected
     print("HOST_PROMPT_OK", flush=True)
+except GitSSHError as error:
+    print(str(error), flush=True)
+    try:
+        agent_keys(path)
+    except OSError:
+        print("AGENT_STOPPED", flush=True)
+    else:
+        raise AssertionError("private agent is still usable")
+    sys.exit(1)
 finally:
     for agent in agents:
         stop_agent(agent)
 """
-    master, slave = pty.openpty()
-    process = subprocess.Popen(
-        [sys.executable, "-c", driver, config.model_dump_json()],
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-    )
-    os.close(slave)
-    output = b""
+    if not terminal and stdin_data is None:
+        raise ValueError("a driver without a terminal requires piped stdin")
+    master = slave = stdin_read = stdin_write = None
+    if terminal:
+        master, slave = pty.openpty()
+    if stdin_data is not None:
+        stdin_read, stdin_write = os.pipe()
+    ctty_fd = 0 if stdin_data is None else (1 if terminal else -1)
+    input_fd = slave if stdin_data is None else stdin_read
+    stdout = slave if terminal else subprocess.PIPE
+    stderr = slave if terminal else subprocess.PIPE
+    process = None
+    output = bytearray()
     answered = 0
-    deadline = time.monotonic() + 12
+    started = time.monotonic()
+    deadline = started + 25
     try:
-        while time.monotonic() < deadline:
-            if select.select([master], [], [], 0.1)[0]:
+        if stdin_write is not None:
+            os.write(stdin_write, stdin_data.encode())
+        process = subprocess.Popen(
+            [sys.executable, "-c", driver, config.model_dump_json(), str(ctty_fd)],
+            stdin=input_fd,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        if stdin_read is not None:
+            os.close(stdin_read)
+            stdin_read = None
+        if slave is not None:
+            os.close(slave)
+            slave = None
+        read_fds = {master} if terminal else {process.stdout.fileno(), process.stderr.fileno()}
+        while read_fds:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                pytest.fail(f"driver did not finish before deadline: {bytes(output)!r}")
+            ready = select.select(list(read_fds), [], [], min(0.1, remaining))[0]
+            for fd in ready:
                 try:
-                    chunk = os.read(master, 4096)
+                    chunk = os.read(fd, 4096)
                 except OSError:
-                    break
+                    chunk = b""
                 if not chunk:
-                    break
-                output += chunk
+                    read_fds.remove(fd)
+                    continue
+                output.extend(chunk)
                 prompts = re.findall(
                     rb"(?:Enter passphrase for |Bad passphrase, try again for )[^\r\n]+: ",
                     output,
                 )
-                while answered < len(prompts):
-                    answer = answers[answered] if answered < len(answers) else ""
+                while master is not None and answered < len(prompts):
+                    answer = (
+                        ""
+                        if stdin_data is not None
+                        else (answers[answered] if answered < len(answers) else "")
+                    )
                     os.write(master, (answer + "\n").encode())
                     answered += 1
-            elif process.poll() is not None:
-                break
-        try:
-            returncode = process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pytest.fail(f"driver did not finish before deadline: {output!r}")
-        return returncode, output, answered
+        returncode = process.wait(timeout=2)
+        load_match = re.search(rb"LOAD_SECONDS=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)", output)
+        load_seconds = float(load_match.group(1)) if load_match else None
+        return returncode, bytes(output), answered, load_seconds
     finally:
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
-        os.close(master)
+        primary_exception = sys.exception()
+        try:
+            if process is not None and process.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGINT)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    with suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=3)
+        except BaseException:
+            if primary_exception is None:
+                raise
+        finally:
+            for fd in (stdin_read, stdin_write, slave, master):
+                if fd is not None:
+                    with suppress(OSError):
+                        os.close(fd)
+            if process is not None:
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        with suppress(OSError):
+                            stream.close()
 
 
 @contextmanager
@@ -270,23 +319,6 @@ def test_mismatched_private_public_key_stops_agent(git_inputs):
             stop_agent(agent)
 
 
-def test_encrypted_key_no_terminal_refuses_with_remedy(git_inputs, monkeypatch):
-    work = git_inputs.git.identities["git-work"]
-    encrypt(work.key_file, "throwaway-passphrase")
-    config = GitConfig(identities={"work": work})
-    socket = Path(os.environ["XDG_RUNTIME_DIR"]) / "encrypted.sock"
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    agents = []
-    try:
-        with pytest.raises(GitSSHError, match="host terminal"):
-            start_agent(config, socket, read_public_delivery(config).blobs, on_start=agents.append)
-        with pytest.raises(OSError):
-            agent_keys(socket)
-    finally:
-        for agent in agents:
-            stop_agent(agent)
-
-
 def test_declared_keys_loaded_in_one_call_in_order(git_inputs, monkeypatch):
     from djinn_in_a_box.core import git_agent
 
@@ -299,7 +331,7 @@ def test_declared_keys_loaded_in_one_call_in_order(git_inputs, monkeypatch):
     def capture(command, **kwargs):
         if command[0] == "ssh-add":
             loads.append(command)
-        return original(command, stdin=subprocess.DEVNULL, **kwargs)
+        return original(command, **{"stdin": subprocess.DEVNULL, **kwargs})
 
     monkeypatch.setattr(git_agent.subprocess, "run", capture)
     with filtered_agent(config):
@@ -316,7 +348,7 @@ def test_combined_key_loading_process_options(git_inputs, monkeypatch, isatty, t
     def capture(command, **kwargs):
         if command[0] == "ssh-add":
             loads.append(kwargs)
-        return original(command, stdin=subprocess.DEVNULL, **kwargs)
+        return original(command, **{"stdin": subprocess.DEVNULL, **kwargs})
 
     monkeypatch.setenv("SSH_AGENT_PID", "stale-agent-pid")
     monkeypatch.setenv("SSH_ASKPASS", "/unused/askpass")
@@ -334,9 +366,48 @@ def test_combined_key_loading_process_options(git_inputs, monkeypatch, isatty, t
         for key in ("SSH_AGENT_PID", "SSH_ASKPASS", "DISPLAY"):
             assert key not in kwargs["env"]
         assert kwargs["stdout"] is subprocess.DEVNULL
+        assert kwargs["stdin"] is (None if isatty else subprocess.DEVNULL)
         assert kwargs["stderr"] is (None if isatty else subprocess.DEVNULL)
         assert kwargs["start_new_session"] is (not isatty)
-        assert "stdin" not in kwargs
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [False, True],
+    ids=["no-terminal", "stdout-terminal"],
+)
+def test_encrypted_key_piped_stdin_refuses_without_prompt(git_inputs, terminal):
+    work = git_inputs.git.identities["git-work"]
+    encrypt(work.key_file, "throwaway-passphrase")
+    config = GitConfig(identities={"work": work})
+    returncode, output, prompts, load_seconds = run_driver(
+        config,
+        stdin_data="throwaway-passphrase\n",
+        terminal=terminal,
+    )
+    assert returncode != 0, output
+    assert (
+        b"Could not load a declared Git key. Start Djinn on a host terminal to unlock "
+        b"encrypted keys; check the key path and its permissions."
+    ) in output, output
+    assert b"AGENT_STOPPED" in output, output
+    assert prompts == 0, output
+    assert b"passphrase for" not in output, output
+    assert b"Identity added" not in output, output
+    assert load_seconds is not None, output
+    assert load_seconds < 5, load_seconds
+
+
+def test_unencrypted_keys_load_with_piped_stdin(git_inputs):
+    returncode, output, prompts, _ = run_driver(
+        git_inputs.git,
+        stdin_data="junk\n",
+        terminal=False,
+    )
+    assert returncode == 0, output
+    assert b"HOST_PROMPT_OK" in output, output
+    assert prompts == 0, output
+    assert b"passphrase for" not in output, output
 
 
 @pytest.mark.parametrize(
@@ -396,7 +467,7 @@ def test_encrypted_key_prompts_on_host_terminal(git_inputs):
     work = git_inputs.git.identities["git-work"]
     encrypt(work.key_file, "throwaway-passphrase")
     config = GitConfig(identities={"work": work})
-    returncode, output, prompts = run_on_terminal(config, ["throwaway-passphrase"])
+    returncode, output, prompts, _ = run_driver(config, ["throwaway-passphrase"])
     assert prompts == 1, output
     assert returncode == 0, output
     assert b"HOST_PROMPT_OK" in output, output
@@ -405,7 +476,7 @@ def test_encrypted_key_prompts_on_host_terminal(git_inputs):
 def test_encrypted_keys_with_shared_passphrase_prompt_once(git_inputs):
     for identity in git_inputs.git.identities.values():
         encrypt(identity.key_file, "throwaway-passphrase")
-    returncode, output, prompts = run_on_terminal(git_inputs.git, ["throwaway-passphrase"])
+    returncode, output, prompts, _ = run_driver(git_inputs.git, ["throwaway-passphrase"])
     assert prompts == 1, output
     assert returncode == 0, output
     assert b"HOST_PROMPT_OK" in output, output
@@ -416,7 +487,7 @@ def test_encrypted_keys_with_shared_passphrase_prompt_once(git_inputs):
 def test_encrypted_keys_with_different_passphrases_prompt_again(git_inputs):
     encrypt(git_inputs.git.identities["git-work"].key_file, "throwaway-work")
     encrypt(git_inputs.git.identities["git-personal"].key_file, "throwaway-personal")
-    returncode, output, prompts = run_on_terminal(
+    returncode, output, prompts, _ = run_driver(
         git_inputs.git, ["throwaway-work", "throwaway-personal"]
     )
     assert prompts == 2, output
@@ -446,7 +517,7 @@ def test_three_encrypted_keys_with_interleaved_passphrases_prompt_three_times(gi
     encrypt(personal.key_file, "throwaway-personal")
     encrypt(third.key_file, "throwaway-work")
     config = GitConfig(identities={"work": work, "personal": personal, "third": third})
-    returncode, output, prompts = run_on_terminal(
+    returncode, output, prompts, _ = run_driver(
         config, ["throwaway-work", "throwaway-personal", "throwaway-work"]
     )
     assert prompts == 3, output
@@ -457,7 +528,7 @@ def test_three_encrypted_keys_with_interleaved_passphrases_prompt_three_times(gi
 def test_encrypted_key_refusal_reports_complete_remedy_and_stops_agent(git_inputs):
     encrypt(git_inputs.git.identities["git-work"].key_file, "throwaway-work")
     encrypt(git_inputs.git.identities["git-personal"].key_file, "throwaway-personal")
-    returncode, output, prompts = run_on_terminal(git_inputs.git, ["throwaway-work", ""])
+    returncode, output, prompts, _ = run_driver(git_inputs.git, ["throwaway-work", ""])
     assert prompts == 2, output
     assert returncode != 0, output
     assert (
