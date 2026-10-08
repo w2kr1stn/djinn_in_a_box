@@ -308,30 +308,52 @@ def test_connector_packaged_and_firewall_keeps_private_rules():
     assert '"10.0.0.0/8"' in firewall and '"100.64.0.0/10"' not in firewall
 
 
+@pytest.fixture
+def observer_setup(tmp_path, monkeypatch):
+    def setup(*, verify_stdin=False, **opening):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        value = helper()
+        stopped = []
+        hostctl.save_private(
+            "opening.json",
+            {"generation": "generation-a", "config": config().model_dump(), **opening},
+        )
+        monkeypatch.setattr(hostctl, "HELPER_NAME", "helper-a")
+        monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", "/bin/docker")
+        monkeypatch.setattr(hostctl, "inspect_helper", lambda: value)
+        monkeypatch.setattr(hostctl, "node_status", lambda helper: status())
+        monkeypatch.setattr(host_runtime, "inspect_dev", lambda *args: None)
+
+        class Enrollment:
+            returncode = 0
+
+            def poll(self) -> int:
+                return 0
+
+        def enroll(*args, **kwargs):
+            if verify_stdin:
+                assert kwargs["stdin"] == subprocess.DEVNULL
+            return Enrollment()
+
+        def stop() -> None:
+            stopped.append("stop")
+            value["State"]["Running"] = False
+
+        monkeypatch.setattr(host_runtime.subprocess, "Popen", enroll)
+        monkeypatch.setattr(hostctl, "stop_helper_locked", stop)
+        return value, stopped
+
+    return setup
+
+
 @pytest.mark.parametrize("cancel", [False, True])
-def test_observer_freezes_trust_and_rechecks_generation(tmp_path, monkeypatch, cancel):
+def test_observer_freezes_trust_and_rechecks_generation(observer_setup, monkeypatch, cancel):
     # Mutations: drop once-per-opening guard; drop generation recheck before admission.
-    value = helper()
+    value, _ = observer_setup()
     iterations = 0
     captures = []
     root = hostctl.state_root()
-    hostctl.save_private(
-        "opening.json", {"generation": "generation-a", "config": config().model_dump()}
-    )
-    monkeypatch.setattr(hostctl, "HELPER_NAME", "helper-a")
-    monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", "/bin/docker")
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda: value)
     monkeypatch.setattr(hostctl, "reconcile", lambda helper: None)
-    monkeypatch.setattr(host_runtime, "inspect_dev", lambda *a: None)
-    monkeypatch.setattr(hostctl, "node_status", lambda helper: status())
-
-    class Enrollment:
-        returncode = 0
-
-        def poll(self):
-            return 0
-
-    monkeypatch.setattr(host_runtime.subprocess, "Popen", lambda *a, **k: Enrollment())
     prepare = hostctl.prepare_trust
 
     def snapshot(gen, node):
@@ -381,3 +403,144 @@ def test_host_only_delivery_requires_readable_image_uid(tmp_path, monkeypatch):
         host_runtime.git_runtime(value, "disposable-dev"),
     ):
         pytest.fail("created unreadable host-only SSH delivery")
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_observer_refusal_reason_is_grouped(observer_setup, monkeypatch, unknown):
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    value, stopped = observer_setup(dev_id="dev-a")
+    pair = ("/workspace", "/delivery")
+    assessment = sealing.Assessment(
+        "dev-a",
+        (
+            sealing.Finding("first detail", pair, "cause", "one"),
+            sealing.Finding("second detail", pair, "cause", "two"),
+        ),
+        ((sealing.Finding("unknown detail", pair, "unknown", "item"),) if unknown else ()),
+    )
+    monkeypatch.setattr(sealing, "inspect_assessment", lambda: assessment)
+    monkeypatch.setattr(
+        hostctl,
+        "command",
+        lambda *args, **kwargs: pytest.fail("unexpected Docker command"),
+    )
+    host_runtime.observe_hostctl("helper-a", "generation-a", "/bin/docker")
+    rows = [
+        json.loads(line)
+        for line in (hostctl.state_root() / "journal.jsonl").read_text().splitlines()
+    ]
+    refusal = next(row for row in rows if row["event"] == "relay-refused")
+    assert refusal["reason"] == "Sealing refused: " + "; ".join(
+        (*assessment.causes, *assessment.errors)
+    )
+    assert stopped == ["stop"] and value["State"]["Running"] is False
+    assert not (hostctl.state_root() / "observation.json").exists()
+    assert not (hostctl.state_root() / "assessment.json").exists()
+
+
+@pytest.mark.parametrize("destination", [[], {}], ids=["list", "dict"])
+@pytest.mark.parametrize("allow_unsealed", [False, True], ids=["strict", "override"])
+@pytest.mark.parametrize(
+    "rw, desktop_failure, expected_state",
+    [(False, False, "sealed"), (True, False, "unsealed"), (True, True, "unknown")],
+    ids=["readonly", "root", "fallback"],
+)
+def test_observer_malformed_bind_destination_keeps_base_decision(
+    observer_setup,
+    tmp_path,
+    monkeypatch,
+    destination,
+    allow_unsealed,
+    rw,
+    desktop_failure,
+    expected_state,
+):
+    from djinn_in_a_box.core import desktop, docker
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    value, stopped = observer_setup(
+        verify_stdin=True, dev_id="dev-a", allow_unsealed=allow_unsealed
+    )
+    source = Path("/") if rw else tmp_path / "workspace"
+    if not rw:
+        source.mkdir()
+    actual = {
+        "Id": "dev-a",
+        "State": {"Running": True},
+        "Mounts": [{"Type": "bind", "Source": str(source), "Destination": destination, "RW": rw}],
+        "Config": {"Env": [], "Labels": {}, "Image": "dev:1"},
+        "HostConfig": {"NetworkMode": "bridge"},
+        "NetworkSettings": {"Networks": {"djinn-network": {}}},
+    }
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kwargs: tmp_path / "runtime")
+    monkeypatch.setattr(sealing, "execution_paths", lambda: {})
+    monkeypatch.setattr(sealing, "docker_sockets", lambda: ())
+    monkeypatch.setattr(desktop, "discover_desktop_endpoints", lambda: ())
+
+    def inspect(name, *args, **kwargs):
+        if name == desktop.HELPER_IMAGE and desktop_failure:
+            raise RuntimeError(
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+                "Is the docker daemon running?"
+            )
+        if name == hostctl.HOSTCTL_STATE_VOLUME:
+            return {"Mountpoint": str(tmp_path / "data")}
+        assert name == docker.service_container_name("dev")
+        return actual
+
+    def command(*args, **kwargs):
+        if args[0] == "info":
+            return json.dumps({"DockerRootDir": str(tmp_path / "data")})
+        assert args == ("ps", "-q")
+        return ""
+
+    monkeypatch.setattr(host_runtime, "inspect_object", inspect)
+    monkeypatch.setattr(hostctl, "command", command)
+    if not desktop_failure:
+        monkeypatch.setattr(
+            sealing,
+            "_desktop",
+            lambda actual: desktop.DesktopInspection(
+                channels=(), raw_sources=(), raw_verified=True
+            ),
+        )
+
+    assessment = sealing.inspect_assessment()
+    assert assessment.state == expected_state
+    refused = desktop_failure or (rw and not allow_unsealed)
+    admitted = []
+    if not refused:
+        assessment.require(allow_unsealed=allow_unsealed)
+        monkeypatch.setattr(hostctl, "reconcile", lambda helper: None)
+        monkeypatch.setattr(sealing, "run_probe", lambda *args: [{"state": "blocked"}])
+        monkeypatch.setattr(
+            hostctl, "admit_locked", lambda *args, **kwargs: admitted.append("admit")
+        )
+        monkeypatch.setattr(host_runtime, "inspect_dev", lambda *args: ("dev-a", True, ""))
+        monkeypatch.setattr(
+            host_runtime.time, "sleep", lambda _: value["State"].update(Running=False)
+        )
+    else:
+        with pytest.raises(hostctl.HostctlError, match="Sealing refused"):
+            assessment.require(allow_unsealed=allow_unsealed)
+    host_runtime.observe_hostctl("helper-a", "generation-a", "/bin/docker")
+    journal = hostctl.state_root() / "journal.jsonl"
+    rows = [
+        json.loads(line) for line in (journal.read_text().splitlines() if journal.exists() else ())
+    ]
+    refusals = [row for row in rows if row["event"] == "relay-refused"]
+    if refused:
+        assert len(refusals) == 1
+        assert refusals[0]["reason"] == "Sealing refused: " + "; ".join(
+            (*assessment.causes, *assessment.errors)
+        )
+        if desktop_failure:
+            assert "raw desktop endpoint inspection unknown" in refusals[0]["reason"]
+        assert stopped == ["stop"] and value["State"]["Running"] is False
+        assert not (hostctl.state_root() / "observation.json").exists()
+        assert not (hostctl.state_root() / "assessment.json").exists()
+    else:
+        assert not refusals and not stopped and admitted == ["admit"]
+        assert (hostctl.state_root() / "observation.json").exists()
+        assert (hostctl.state_root() / "assessment.json").exists()

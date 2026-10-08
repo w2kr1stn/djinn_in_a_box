@@ -851,13 +851,17 @@ present while the window is closed. Git and signing work independently.
 Generated SSH delivery requires host numeric UID 1000, matching the dev image,
 so the dev user can read the owner-only public files.
 
-`on` names causes when the running dev is unsealed. The explicit
+`status` and the refusal of `on` group sealing causes and unknowns by bind,
+naming up to three items per class and counting larger classes; standalone
+findings keep their own lines. Status prints `djinn doctor lists each item.`
+whenever a finding is grouped under a bind. The explicit
 `--allow-unsealed` option and creator close/pause behavior are defined in
 [sealed deployments](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller).
-Run `djinn doctor` for sealing causes and per-address reached/blocked/unknown
-probe results for both dev and its verified companion; every address must be
-blocked in both namespaces. Companion replacement or profile drift closes an open
-window. No dev or authenticated peer snapshot means deferred.
+Run `djinn doctor` for every individual sealing cause and unknown, plus
+per-address reached/blocked/unknown probe results for both dev and its verified
+companion; every address must be blocked in both namespaces. Companion
+replacement or profile drift closes an open window. No dev or authenticated
+peer snapshot means deferred.
 Configure the [host networking prerequisite](SECURITY-MODEL.md#direct-routes-and-target-authority)
 before relying on these checks.
 

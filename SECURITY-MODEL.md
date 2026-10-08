@@ -141,7 +141,8 @@ image ID cannot establish trust in writable inputs. Host support is Linux with
 Docker; no init service is required.
 
 `djinn hostctl on --allow-unsealed` acknowledges known causes and journals the
-lost boundary. With host authority, the window is only an operating aid.
+lost boundary. The journal groups bind-related causes; `djinn doctor` lists the
+individual findings. With host authority, the window is only an operating aid.
 The flag cannot override uncertain inspection, direct-route results, deadline,
 trust or journal failures. It applies to that opening only. Before any new
 interactive, headless or detached dev starts, unsealed/unknown planned delivery
@@ -181,7 +182,9 @@ The owner-only host journal is
 `${XDG_STATE_HOME:-~/.local/state}/djinn/hostctl/journal.jsonl`, outside public
 SSH delivery. It records on/off/limit attempts and outcomes, overrides, readiness
 and observed helper expiry, with rotation. Admission requires successful journal
-writes; a later host journal failure requests closure. Helper Docker logs
+writes; a later host journal failure requests closure. New journal entries group
+bind-related causes and unknowns, including reasons built from them; standalone
+findings and existing entries are unchanged. Helper Docker logs
 (`docker logs djinn-hostctl`, rotated at 10 MB with three files) record connection
 IDs, destinations, UTC start/end and end reason, plus helper events. These are
 metadata logs, not payload or session recordings; login URLs and private keys

@@ -600,3 +600,200 @@ def test_supervisor_build_uses_supported_buildx_flags(no_cache, monkeypatch):
         pytest.skip("docker buildx unavailable")
     for flag in [a for a in cmd[3:] if a.startswith("-")]:
         assert re.search(rf"(^|\s){re.escape(flag)}(,|\s|=)", help_text.stdout, re.M), flag
+
+
+def grouped_assessment(*, unknown=False):
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    findings = (
+        sealing.Finding(
+            "writable Python module one: /workspace -> /delivery",
+            ("/workspace", "/delivery"),
+            "writable Python environment",
+            "one",
+        ),
+        sealing.Finding(
+            "writable Python module two: /workspace -> /delivery",
+            ("/workspace", "/delivery"),
+            "writable Python environment",
+            "two",
+        ),
+    )
+    errors = (
+        (
+            sealing.Finding(
+                "hard-link provenance unknown: /workspace/a: /workspace -> /delivery",
+                ("/workspace", "/delivery"),
+                "hard-link provenance unknown",
+                "/workspace/a",
+            ),
+            sealing.Finding(
+                "hard-link provenance unknown: /workspace/b: /workspace -> /delivery",
+                ("/workspace", "/delivery"),
+                "hard-link provenance unknown",
+                "/workspace/b",
+            ),
+        )
+        if unknown
+        else ()
+    )
+    return sealing.Assessment("dev-a", findings, errors)
+
+
+def test_snapshot_keeps_grouped_and_detail_fields(inputs, monkeypatch):
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    assessment = grouped_assessment(unknown=True)
+    monkeypatch.setattr(sealing, "inspect_assessment", lambda: assessment)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda: None)
+    monkeypatch.setattr(hostctl, "cached_trust", lambda: None)
+    snapshot = hostctl.snapshot()
+    assert snapshot["sealing_causes"] == (
+        "/workspace -> /delivery: writable Python environment one, two",
+    )
+    assert snapshot["sealing_errors"] == (
+        "/workspace -> /delivery: hard-link provenance unknown /workspace/a, /workspace/b",
+    )
+    assert snapshot["sealing_cause_details"] == assessment.cause_details
+    assert snapshot["sealing_error_details"] == assessment.error_details
+    assert snapshot["helper"] == "absent" and snapshot["sealing"] == "unknown"
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_sealing_journal_lines_are_grouped(inputs, fake_transitions, monkeypatch, unknown):
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    assessment = grouped_assessment(unknown=unknown)
+    monkeypatch.setattr(sealing, "inspect_assessment", lambda: assessment)
+    with pytest.raises(hostctl.HostctlError) as exc:
+        hostctl.open_window(inputs)
+    reason = "Sealing refused: " + "; ".join((*assessment.causes, *assessment.errors))
+    assert str(exc.value) == reason
+    if unknown:
+        with pytest.raises(hostctl.HostctlError) as overridden:
+            hostctl.open_window(inputs, allow_unsealed=True)
+        assert str(overridden.value) == reason
+        assert not fake_transitions["calls"]
+    else:
+        hostctl.open_window(inputs, allow_unsealed=True)
+    rows = [
+        json.loads(line)
+        for line in (hostctl.state_root() / "journal.jsonl").read_text().splitlines()
+    ]
+    refused = [row for row in rows if row["event"] == "on-refused"]
+    assert len(refused) == (2 if unknown else 1)
+    for row in refused:
+        assert row["causes"] == list(assessment.causes)
+        assert row["errors"] == list(assessment.errors)
+        assert "reason" not in row
+    if not unknown:
+        for event in ("unsealed-override", "on"):
+            row = next(row for row in rows if row["event"] == event)
+            assert row["causes"] == list(assessment.causes)
+        assert (
+            "host authority"
+            in next(row for row in rows if row["event"] == "unsealed-override")["boundary"]
+        )
+
+
+def test_admission_persists_grouped_causes(inputs, monkeypatch):
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    assessment = grouped_assessment()
+    monkeypatch.setattr(sealing, "inspect_assessment", lambda: assessment)
+    monkeypatch.setattr(hostctl, "verify_agent", lambda *args: None)
+    rows = [
+        {
+            "host": "host-a",
+            "address": "100.64.0.1",
+            "state": "blocked",
+            "namespace": "dev-a",
+        }
+    ]
+    monkeypatch.setattr(sealing, "run_probe", lambda dev_id, trust: rows)
+    hostctl.save_private(
+        "opening.json",
+        {"generation": "generation-a", "dev_id": "dev-a", "allow_unsealed": True},
+    )
+    checked = hostctl.admission_assessment({"generation": "generation-a"})
+    assert checked is not None
+    assert checked == {
+        "generation": "generation-a",
+        "dev_id": "dev-a",
+        "creator": None,
+        "sealing": "unsealed",
+        "causes": assessment.causes,
+        "probe": rows,
+        "agent": None,
+    }
+    hostctl.commit_assessment(checked)
+    saved = json.loads((hostctl.state_root() / "assessment.json").read_text())
+    assert set(saved) == {
+        "generation",
+        "dev_id",
+        "creator",
+        "sealing",
+        "causes",
+        "probe",
+        "agent",
+    }
+    assert saved["causes"] == list(assessment.causes) and saved["probe"] == rows
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["empty", "standalone", "single", "merged", "unknown", "mixed", "absent"],
+)
+def test_status_doctor_hint_when_grouped_view_differs(inputs, monkeypatch, case):
+    from djinn_in_a_box.core import host_sealing as sealing
+
+    findings = {
+        "empty": (),
+        "absent": (),
+        "standalone": (sealing.Finding("standalone cause"),),
+        "single": (
+            sealing.Finding("per-item cause", ("/workspace", "/delivery"), "class", "item"),
+        ),
+        "merged": (
+            sealing.Finding("first detail", ("/workspace", "/delivery"), "class", "one"),
+            sealing.Finding("second detail", ("/workspace", "/delivery"), "class", "two"),
+        ),
+        "unknown": (),
+        "mixed": (sealing.Finding("standalone cause"),),
+    }[case]
+    errors = (
+        (sealing.Finding("per-item unknown", ("/workspace", "/delivery"), "unknown", "item"),)
+        if case in {"unknown", "mixed"}
+        else ()
+    )
+    assessment = sealing.Assessment("dev-a", findings, errors)
+    value = {
+        "state": "closed",
+        "helper": "absent",
+        "sealing": assessment.state,
+        "relay": "closed",
+        "sealing_causes": assessment.causes,
+        "sealing_errors": assessment.errors,
+        "sealing_cause_details": assessment.cause_details,
+        "sealing_error_details": assessment.error_details,
+    }
+    if case == "absent":
+        for key in (
+            "sealing_causes",
+            "sealing_errors",
+            "sealing_cause_details",
+            "sealing_error_details",
+        ):
+            value.pop(key)
+    monkeypatch.setattr(hostctl, "snapshot", lambda: value)
+    result = CliRunner().invoke(app, ["hostctl", "status"])
+    assert result.exit_code == 0, result.output
+    assert f"Sealing: {assessment.state}; relay: closed" in result.output
+    assert result.output.count("djinn doctor lists each item.") == (
+        0 if case in {"empty", "standalone", "absent"} else 1
+    )
+    for line in (*assessment.causes, *assessment.errors):
+        assert line in result.output
+    for detail in (*assessment.cause_details, *assessment.error_details):
+        if detail not in (*assessment.causes, *assessment.errors):
+            assert detail not in result.output
