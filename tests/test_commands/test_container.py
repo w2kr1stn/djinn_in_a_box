@@ -1387,7 +1387,7 @@ class UpdateProcess:
     def __init__(self, result, waiting_error=None):
         self.result = result
         self.returncode = result.returncode
-        self.pid = 999999
+        self.pid = 4194305  # above pid_max: no real process can match
         self.waiting_error = waiting_error
         self.waits = []
 
@@ -1691,8 +1691,12 @@ class TestUpdateCommand:
                 pytest.fail("npm grandchild remains running after timeout")
             assert record.read_bytes() == old
         finally:
+            # Only the session update() created for this test's own script: each
+            # recorded Popen leads its group. Nothing else is ever signalled here.
             for proc in processes:
                 with contextlib.suppress(ProcessLookupError):
+                    if proc.poll() is None and os.getpgid(proc.pid) != proc.pid:
+                        continue
                     os.killpg(proc.pid, signal.SIGKILL)
             thread.join(timeout=3)
             assert not thread.is_alive(), "cleanup failed to release captured pipes"

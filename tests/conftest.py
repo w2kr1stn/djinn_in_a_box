@@ -1,5 +1,6 @@
 """Pytest configuration and fixtures for Djinn in a Box tests."""
 
+import errno
 import os
 import shutil
 import subprocess
@@ -47,6 +48,95 @@ def _forbid_real_docker(request, monkeypatch):
         original(self, args, *rest, **kwargs)
 
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded)
+
+
+def _proc_stat(pid: int) -> list[str] | None:
+    """Fields after the command name in /proc/<pid>/stat: state, ppid, pgrp, ..."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+
+
+def _descends_from_test(pid: int) -> bool:
+    me = os.getpid()
+    for _ in range(4096):
+        fields = _proc_stat(pid)
+        if fields is None:
+            return False
+        pid = int(fields[1])
+        if pid == me:
+            return True
+        if pid <= 1:
+            return False
+    return False
+
+
+def _group_exists(pgid: int) -> bool:
+    for entry in Path("/proc").iterdir():
+        fields = _proc_stat(int(entry.name)) if entry.name.isdigit() else None
+        if fields is not None and int(fields[2]) == pgid:
+            return True
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _forbid_foreign_signals(request, monkeypatch):
+    """Unit tests signal only processes they started; opt-in live modules are exempt.
+
+    The dev container's PID 1 runs as the same user as the suite, so a stray
+    ``kill``/``killpg`` (a fake PID that happens to exist, group 0/1, -1) can end
+    another session or the whole container. A target must descend from the test
+    process; a group whose leader is gone must have been spawned by this test.
+    A target that does not exist gets ``ProcessLookupError`` and no signal at all.
+    """
+    if request.module.__name__.endswith("_live_docker"):
+        return
+    spawned: set[int] = set()
+    original_init = subprocess.Popen.__init__
+
+    def recording(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        spawned.add(self.pid)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", recording)
+    real_kill, real_killpg = os.kill, os.killpg
+
+    def refuse(call: str):
+        raise AssertionError(f"unit test would signal a foreign process: {call}")
+
+    def missing():
+        raise ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH))
+
+    def check_group(pgid: int, call: str) -> None:
+        if pgid <= 1 or pgid == os.getpgrp():
+            refuse(call)
+        if _proc_stat(pgid) is not None:
+            if not _descends_from_test(pgid):
+                refuse(call)
+        elif pgid not in spawned:
+            if _group_exists(pgid):
+                refuse(call)
+            missing()
+
+    def guarded_killpg(pgid, sig):
+        check_group(pgid, f"killpg({pgid}, {sig})")
+        real_killpg(pgid, sig)
+
+    def guarded_kill(pid, sig):
+        call = f"kill({pid}, {sig})"
+        if pid < -1:
+            check_group(-pid, call)
+        elif pid in (-1, 0, 1) or pid == os.getpid():
+            refuse(call)
+        elif _proc_stat(pid) is None:
+            missing()
+        elif not _descends_from_test(pid):
+            refuse(call)
+        real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", guarded_kill)
+    monkeypatch.setattr(os, "killpg", guarded_killpg)
 
 
 @pytest.fixture(autouse=True)
