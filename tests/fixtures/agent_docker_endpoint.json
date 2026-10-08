@@ -1,0 +1,18 @@
+[
+    {
+        "CreatedAt": "2026-10-06T21:45:57+02:00",
+        "Driver": "local",
+        "Labels": {
+            "com.docker.compose.project": "djinn-test",
+            "djinn.git-agent.generation": "9acaf0657b764b17822c7f29b7c283a3"
+        },
+        "Mountpoint": "/var/lib/docker/volumes/djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3/_data",
+        "Name": "djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+        "Options": {
+            "device": "tmpfs",
+            "o": "uid=1000,gid=1000,mode=0700,size=1m",
+            "type": "tmpfs"
+        },
+        "Scope": "local"
+    }
+]

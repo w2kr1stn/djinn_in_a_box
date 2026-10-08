@@ -30,7 +30,7 @@ stores, and local command choices remain outside the published source.
 ├── pyproject.toml
 ├── Dockerfile
 ├── docker-compose.yml
-├── docker-compose.docker.yml
+├── docker-compose.agent-docker.yml
 ├── docker-compose.docker-direct.yml
 ├── docs/
 │   ├── design/
@@ -114,7 +114,6 @@ djinn CLI (Typer)
   +-- commands/config.py     init, config show/path/set/edit/status/sync
   +-- commands/container.py  build, start, status, clean, update, enter
   +-- commands/assistant.py  interactive installation audit
-  +-- commands/logs.py       logs proxy
   +-- commands/doctor.py     doctor, doctor --fix, preflight
   +-- commands/agent.py      djinn run, djinn agents
   +-- commands/session.py    djinn session
@@ -529,7 +528,7 @@ workspace bind target and default cwd. Rendered `CODE_DIR` and workspace target
 override stale inherited values. With `config=None`, teardown/parser calls use
 the home-directory source placeholder and `/home/dev/projects` target default.
 
-Captured Compose calls such as `compose_down()` and Docker proxy cleanup route
+Captured Compose calls such as `compose_down()` and companion preparation route
 through `_run_compose()`. `compose_build()` is no compose call — it runs
 `docker buildx bake` on the compose file — but takes its env from the same
 `_compose_host_env(config)`.
@@ -770,9 +769,29 @@ The base Compose environment sets `TZ`, `NO_COLOR`, `DJINN_TERM_WIDTH`,
 width decisions into the container shell UI. Resource limits use the Compose
 variables rendered by `build_compose_env()`.
 
-`docker-compose.docker.yml` adds a Docker socket proxy service and sets
-`DOCKER_HOST=tcp://docker-proxy:2375` for the dev container. The proxy allows
-selected read and lifecycle operations.
+`docker-compose.agent-docker.yml` defines the pinned UID-1000 rootless companion
+profile and healthcheck (rootless, overlay2, expected data root). `core/agent_docker.py`
+contains only profile constants and pure workspace delivery data. The shared dev
+creators build that delivery once from host-resolved code, CLI, declaration and session
+mounts; only those mounts go to the companion. Preparation creates a generation-owned
+local tmpfs endpoint volume (UID/GID 1000, mode 0700) and a persistent cache volume,
+resolves Compose, inspects the exact image/profile/limits/mounts and waits for health.
+Dev gets the endpoint read-only and managed Unix `DOCKER_HOST`; selector overrides
+are rejected. Buildx in the dev image is checksum-verified at build time.
+
+With the firewall enabled, the fixed launcher waits for a marker written by an
+exact-ID-owned, short-lived initializer from the inspected dev image. The initializer
+joins the companion's outer network namespace with user 0 and `NET_ADMIN`, mounting
+only the endpoint. It runs the existing firewall script; the launcher unlinks the
+marker before the official entrypoint executes explicit Unix-only dockerd arguments.
+No firewall means no marker gate or initializer.
+
+The existing host observer owns the daemon even without Git identities. It stops
+the companion when dev stops, revalidates and restores firewall rules on same-generation
+resume, and fails closed if resume cannot qualify. Reclaim/clean uses generation labels
+and exact IDs, preserves unknown resources, removes the endpoint after its consumers,
+and keeps the cache. Docker's inner restart policies apply on the next daemon start.
+Published inner ports use the companion's `agent-docker` network alias.
 
 `docker-compose.docker-direct.yml` mounts `/var/run/docker.sock` directly and
 sets `DOCKER_DIRECT=true`; the entrypoint adjusts socket permissions.
@@ -919,7 +938,8 @@ with `bind.create_host_path: false`, volumes with actual sources and top-level
 Each `$` is escaped as `$$` in Compose-bound strings without mutating config.
 The override is removed in `finally` on success, failure and timeout. Existing
 invocation flags and working-directory selection remain independent of declarations.
-Declarations apply only to dev creation, not builds, proxy or raw archive helpers.
+Declared environment applies only to dev creation; workspace declarations also feed
+the companion. Neither applies to builds or raw archive helpers.
 `session` and `enter` inherit the running container; edits affect the next
 creation, with no running-mount comparison or attach-time update.
 
@@ -1069,7 +1089,7 @@ so non-interactive processes resolve Codex and OpenCode without sourcing shell
 initialization.
 
 The image locale is `C.UTF-8`. Runtime Docker access is disabled unless the user
-starts with proxy or direct Docker options.
+starts with agent or direct Docker options.
 
 Optional runtime tool installers are copied from `tools/`, with cache locations
 backed by named volumes.
@@ -1088,8 +1108,7 @@ backed by named volumes.
   fallbacks. The command rejects source errors and mount collisions before
   calling `compose_run()`, then prints one source-to-target mode line per mount
   in the `Environment`/`Container` output. With `--detach` it calls
-  `compose_up_detached()` instead, skips `cleanup_docker_proxy()` (the container
-  outlives the process, so its proxy has to stay up), and refuses up front when a
+  `compose_up_detached()` instead and retains the generation observer. It refuses when a
   Djinn container is already running, because `up` collides with the fixed
   `container_name`.
 - Background-start guard: `compose_run()` refuses an interactive start from a
@@ -1122,7 +1141,7 @@ backed by named volumes.
   entrypoint keeps the container up rather than exiting. `--detach` remains the
   supported way to background a session.
 - `status()`: reports config, containers, known volumes, config-root paths,
-  networks, and Docker proxy status.
+  networks, and agent Docker status.
 - `clean_default()`: `djinn clean` stops and removes containers with
   `compose_down(config=None)`, using best-effort placeholders. `compose_down()`
   refuses outright when the container it would reap is the one the process runs
@@ -1130,9 +1149,9 @@ backed by named volumes.
   `container_name`). Compose selects by the pinned project name, so a teardown
   from any copy of the repo — a test sandbox, an agent's scratch checkout — would
   otherwise destroy the live session, and the socket is mounted so anything in the
-  container can trigger it. Teardown from the host is unaffected. `compose_down`
-  passes `--remove-orphans`, without which Compose skips the one-off containers
-  that `start` and `run` create and also leaves a proxy from `--docker` behind.
+  container can trigger it. Teardown from the host is unaffected. Agent generations are removed by exact owned IDs after ownership checks; their
+  clean path preserves foreign resources. Other modes retain Compose teardown for
+  the base services, with explicit removal of the one-off dev container.
 - `clean_volumes()`: lists or deletes named volume categories and clears
   config-root sync paths by category. Its cache/data flags include existing
   declared volumes of the category; credentials/repo-dotfiles keep their paths.
@@ -1144,7 +1163,6 @@ backed by named volumes.
   local zone data.
   It attempts deletion of every built-in and declared volume, including absent
   ones and `none`. Default `clean` keeps all volumes and declared binds.
-- `logs proxy`: prints Docker proxy logs with the default tail of 50.
 - `update()`: runs `scripts/update-agents.sh`.
 - `enter()`: opens a zsh shell in the first running Djinn container.
 

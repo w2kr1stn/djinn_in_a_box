@@ -20,37 +20,42 @@ and [implementation](IMPLEMENTATION.md#hostctl-helper).
 | --- | --- |
 | Host home or `/`, even read-only | Exposes host credentials, runtime sockets and control state. Writable delivery also lets agents alter host files. Masking a key directory does not remove these other paths. |
 | Host Docker socket | Host-root-equivalent daemon control: create privileged containers, mount `/`, enter other containers, build and commit images. A read-only socket bind still allows API requests. |
-| Docker socket proxy | Fewer API paths, but container creation still gives host authority through unchecked bind mounts, privilege and networking options. |
+| Agent Docker endpoint | Full control of the rootless inner daemon. Bind sources resolve inside the companion; delivered workspace files remain exposed according to their modes. |
 | Helper identity volume, its backing directory or Docker data root | Exposes the reusable tailnet identity and helper state; writable access also defeats state integrity. Ancestor and descendant binds matter too. |
 | Raw host D-Bus | Access to host session services, potentially including desktop-shell execution and secret services. |
 | Raw host audio socket | Playback/capture and an upstream module-loading interface where the host server permits it. |
 
-Docker access is off by default. [Docker modes](README.md#docker-access-modes)
-opt into proxy or direct delivery. The proxy in
-[docker-compose.docker.yml](docker-compose.docker.yml) is Tecnativa's
-[Docker Socket Proxy](https://github.com/Tecnativa/docker-socket-proxy), configured as follows:
+Docker access is off by default. [Agent mode](README.md#docker-access-modes)
+uses the official pinned `docker:29-dind-rootless` image as UID/GID 1000, with
+`seccomp=unconfined`, `systempaths=unconfined` and `/dev/net/tun`. It adds no
+capabilities, privileged mode, host namespaces, host Docker socket or other devices.
+Those measured relaxations enable rootless overlay2; a shared kernel and disabled
+seccomp/system-path protection are limits, not a hardened isolation boundary.
 
-| Settings | Configured API surface |
-| --- | --- |
-| `CONTAINERS`, `IMAGES`, `NETWORKS`, `VOLUMES`, `INFO`, `VERSION` = `1` | Read/list/inspect APIs. |
-| `POST`, `ALLOW_START`, `ALLOW_STOP`, `ALLOW_RESTARTS` = `1` | Container creation/lifecycle and image pulls. |
-| `BUILD`, `COMMIT`, `EXEC`, `SWARM`, `SECRETS`, `CONFIGS`, `PLUGINS`, `SERVICES`, `TASKS`, `NODES`, `AUTH` = `0` | Those API families are denied. |
+Dev has full inner-daemon API access through a read-only Unix socket mount. Read-only
+prevents unlinking/replacing the endpoint through that mount; it permits API writes.
+The daemon has no TCP API listener or host port publication. Network peers can reach
+published workload ports at `agent-docker:<port>` but receive no endpoint volume.
+ An agent can deliberately relay its inner API through a published workload port;
+that exposes the inner daemon and its delivered workspace, with no host-daemon authority.
 
-Dev receives `DOCKER_HOST=tcp://docker-proxy:2375`; only the proxy mounts the
-socket, read-only. Port 2375 is exposed on `djinn-network`, without a host port
-publication. Filtering API paths does not validate container-create payloads.
-Blocking exec/build/commit/auth and Swarm operations reduces available tools,
-but does not prevent a new container from mounting the host. Both Docker modes
-are unsealed; adding `--firewall` does not change that.
 
-Direct delivery is read-write. The entrypoint adjusts socket group access for
-`dev`; its non-root UID does not limit Docker authority. Agent write mode plus
-Docker access combines workspace modification with daemon control. Dev's default
-4-CPU/8G limits and the proxy's 0.5-CPU/128M limits do not constrain containers an
-agent creates through that daemon. Those containers can exhaust host resources
-or reach other services and networks independently of dev's firewall. Prefer no
-Docker access when unnecessary, review created resources, and use
-[djinn logs proxy](README.md#status-and-audit-commands) to inspect proxy logs.
+Only the workspace delivery is shared with the companion, including sessions.
+Choosing host `/` or a home directory exposes whatever it contains, even read-only.
+Inner bind mounts resolve against the companion filesystem and its delivered binds;
+its persistent rootless data lives in the cache volume `djinn-agent-docker`.
+The companion follows dev's resource configuration. With `--firewall`, a temporary
+root initializer from the inspected dev image applies the unchanged firewall rules
+in its outer network namespace before the daemon starts. It adds `NET_ADMIN` and
+mounts only the temporary endpoint. The daemon consumes the readiness marker;
+a manual restart waits for fresh rules and fails health until Djinn initializes it.
+The policy keeps its existing private-network/DNS allowances and fixed allowlist.
+
+`--docker-direct` delivers the host socket read-write. The entrypoint adjusts socket
+group access for dev; a non-root client still has host-root-equivalent authority.
+Host workloads are independent of dev's firewall and resource limits. Both Docker
+modes remain unsealed in this package; the verified companion sealing exception is
+separate work. Prefer no Docker access when unnecessary.
 
 The temporary audit assistant holds host Docker authority and shares `djinn-network`.
 

@@ -1,0 +1,60 @@
+# Rootless agent daemon. Trusted generation preparation supplies workspace and endpoint mounts.
+services:
+  agent-docker:
+    image: docker:29-dind-rootless@sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0
+    container_name: djinn-agent-docker
+    user: "1000:1000"
+    privileged: false
+    security_opt: [seccomp=unconfined, systempaths=unconfined]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+      DJINN_FIREWALL_GATE: "false"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ "$${DJINN_FIREWALL_GATE}" = true ]; then
+          while [ ! -f /home/rootless/.djinn-docker/firewall-ready ]; do sleep 0.1; done
+          rm /home/rootless/.djinn-docker/firewall-ready
+        fi
+        mkdir -p /home/rootless/.djinn-docker/socket
+        exec /usr/local/bin/dockerd-entrypoint.sh "$$@"
+      - djinn-agent-docker
+    command: [dockerd, "--host=unix:///home/rootless/.djinn-docker/socket/docker.sock", "--config-file=/dev/null", "--data-root=/home/rootless/.local/share/docker", "--storage-driver=overlay2", "--tls=false"]
+    tmpfs: ["/var/lib/docker"]
+    restart: "no"
+    stop_grace_period: 20s
+    networks:
+      djinn-network:
+        aliases: [agent-docker]
+    deploy:
+      resources:
+        limits:
+          cpus: '${CPU_LIMIT:-4}'
+          memory: ${MEMORY_LIMIT:-8G}
+        reservations:
+          cpus: '${CPU_RESERVATION:-1}'
+          memory: ${MEMORY_RESERVATION:-2G}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          info=$$(docker --host unix:///home/rootless/.djinn-docker/socket/docker.sock info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}') &&
+          case "$$info" in 'overlay2 /home/rootless/.local/share/docker '*\"name=rootless\"*) exit 0;; *) exit 1;; esac
+      interval: 2s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  dev:
+    environment:
+      DOCKER_ENABLED: "true"
+      DOCKER_HOST: unix:///run/djinn/agent-docker/socket/docker.sock
+      DOCKER_CONTEXT: null
+      DOCKER_TLS_VERIFY: null
+      DOCKER_CERT_PATH: null
+
+volumes:
+  agent-docker-data:
+    name: djinn-agent-docker

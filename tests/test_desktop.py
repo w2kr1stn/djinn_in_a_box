@@ -312,11 +312,11 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
             "Labels": {
                 host_runtime.GENERATION_LABEL: "generation",
                 "com.docker.compose.project": "djinn-in-a-box",
-                "com.docker.compose.service": "docker-proxy",
+                "com.docker.compose.service": "agent-docker",
             }
         },
     }
-    services = {"dbus-helper": helper, "audio-helper": audio_objects[1], "docker-proxy": proxy}
+    services = {"dbus-helper": helper, "audio-helper": audio_objects[1], "agent-docker": proxy}
     events, fragments = [], []
     owner = SimpleNamespace(
         root=tmp_path,
@@ -342,6 +342,7 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         yield owner
         events.append("retain" if owner.detached else "close")
 
+    monkeypatch.setattr(docker, "_prepare_agent_docker", lambda *args: None)
     monkeypatch.setattr(docker, "git_runtime", lease)
     monkeypatch.setattr(docker, "get_shell_mount_args", lambda *args: [])
     monkeypatch.setattr(docker, "get_sops_age_key_mount_args", lambda *args: [])

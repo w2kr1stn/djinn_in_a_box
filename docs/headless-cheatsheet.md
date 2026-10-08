@@ -107,7 +107,7 @@ djinn run claude "Analyze this project" --model sonnet \
 # Mount the current working directory implicitly
 djinn run claude "Summarize this repository"
 
-# Enable Docker through the filtered proxy
+# Enable the rootless agent Docker daemon
 djinn run claude "Build and test the project" --docker
 
 # Enable direct Docker socket access only when the task requires it
@@ -137,8 +137,8 @@ with the agent's return code.
 | `--json`, `-j` | Request JSON output from the agent. |
 | `--here` | Mount the current directory at `/home/dev/workspace`; repeatable with `--mount`. |
 | `--mount SRC[:DST[:ro\|rw]]` | Repeatable host-directory mount. Without `DST`, Djinn derives `/home/dev/mount/<basename>`; append `:ro` for read-only. |
-| `--docker`, `-d` | Enable Docker socket access through the proxy. |
-| `--docker-direct` | Enable direct Docker socket access without the proxy. |
+| `--docker`, `-d` | Enable the rootless companion daemon. |
+| `--docker-direct` | Enable direct host Docker socket access. |
 | `--firewall`, `-f` | Enable the outbound firewall inside the container. |
 | `--timeout <sec>`, `-t <sec>` | Timeout for the headless container run. |
 
@@ -211,7 +211,7 @@ must start with a letter or number.
 | Scripted batch work | `djinn run ... --json` | Keeps stdout suitable for pipelines. |
 | File edits in the current project | `djinn run ... --write` | Enables the agent's write mode for the mounted workspace. |
 | Long-running project context | `djinn session --project <name>` | Reuses a stable workspace under `~/.djinn/sessions/`. |
-| Container build or test tasks | `djinn run ... --docker` | Uses the Docker proxy instead of direct socket access. |
+| Container build or test tasks | `djinn run ... --docker` | Uses the rootless agent daemon; published ports use `agent-docker:<port>`. |
 | Dockerfile or daemon debugging | `djinn run ... --docker-direct` | Uses unfiltered Docker access. |
 
 Docker authority and write-mode implications are documented in the

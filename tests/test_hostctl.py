@@ -561,7 +561,7 @@ def test_shared_host_runtime_captured_calls_close_stdin(monkeypatch, operation):
         },
     )
     if operation == "control":
-        host_runtime._command("/usr/bin/docker", "stop", "disposable")
+        host_runtime.run_runtime_command("/usr/bin/docker", "stop", "disposable")
     else:
         host_runtime.remove_runtime_volume("disposable", "/usr/bin/docker")
 

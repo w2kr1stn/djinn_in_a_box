@@ -57,14 +57,17 @@ def _isolate_hostctl_state(monkeypatch, tmp_path):
 def _isolate_legacy_compose_subprocess_tests(request, monkeypatch, tmp_path):
     """Legacy Compose tests mock Docker. Dedicated Git tests exercise the real lifecycle."""
     dedicated = {"test_git_runtime", "test_desktop", "test_desktop_runtime", "test_desktop_live",
-                 "test_hostctl", "test_hostctl_observer", "test_hostctl_doctor"}
+                 "test_hostctl", "test_hostctl_observer", "test_hostctl_doctor",
+                 "test_agent_docker"}
     if request.module.__name__.split(".")[-1] in dedicated:
         return
     from djinn_in_a_box.core import docker
 
     @contextmanager
     def isolated(*args):
-        yield MagicMock()
+        owner = MagicMock()
+        owner.observer.poll.return_value = None
+        yield owner
 
     monkeypatch.setattr(docker, "git_runtime", isolated)
     monkeypatch.setattr(docker, "_prepare_companions", lambda *args: None)

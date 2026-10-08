@@ -14,6 +14,7 @@ DESKTOP_RUNTIME_VOLUMES: Final = ("djinn-desktop-dbus", "djinn-desktop-audio")
 VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     "none": list(DESKTOP_RUNTIME_VOLUMES),
     "cache": [
+        "djinn-agent-docker",
         "djinn-uv-cache",
         "djinn-tools-cache",
         "djinn-vscode-server",

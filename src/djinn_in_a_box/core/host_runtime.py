@@ -164,7 +164,7 @@ def read_state(root: Path) -> dict[str, Any] | None:
         return None
 
 
-def _save(root: Path, state: dict[str, Any]) -> None:
+def save_state(root: Path, state: dict[str, Any]) -> None:
     temporary = root / "state.tmp"
     from djinn_in_a_box.core.hostctl import control_guard
 
@@ -175,23 +175,23 @@ def _save(root: Path, state: dict[str, Any]) -> None:
 
 
 def inspect_owned_resource(
-    record: dict[str, Any], generation: str, docker_path: str
+    record: dict[str, Any], generation: str, docker_path: str, *, timeout: float = 5
 ) -> dict[str, Any] | None:
-    actual = inspect_object(record["id"], docker_path)
+    actual = inspect_object(record["id"], docker_path, timeout=timeout)
     if actual is None:
         return None
     labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
     if (
         actual.get("Id") != record["id"]
         or labels.get(GENERATION_LABEL) != generation
-        or labels.get("com.docker.compose.project") != "djinn-in-a-box"
+        or labels.get("com.docker.compose.project") != record.get("project", "djinn-in-a-box")
         or labels.get("com.docker.compose.service") != record["service"]
     ):
         raise GitSSHError("resource ownership changed; preserving it")
     return actual
 
 
-def _command(docker_path: str, *args: str) -> None:
+def run_runtime_command(docker_path: str, *args: str) -> None:
     result = subprocess.run(
         [docker_path, *args],
         capture_output=True,
@@ -212,6 +212,13 @@ def cleanup_owned(
     state = read_state(root)
     if state is None or state["generation"] != generation:
         return False
+    for record in state.get("resources", {}).values():
+        inspect_owned_resource(record, generation, docker_path)
+    for name in state.get("volumes", []):
+        volume = inspect_object(name, docker_path, "volume")
+        labels: dict[str, Any] = (volume.get("Labels") or {}) if volume else {}
+        if volume and labels.get(GENERATION_LABEL) != generation:
+            raise GitSSHError(f"runtime volume ownership changed: {name}")
     actual = inspect_dev(state["container_name"], docker_path)
     if actual is not None:
         if actual[2] != generation or state.get("dev_id", actual[0]) != actual[0]:
@@ -219,12 +226,14 @@ def cleanup_owned(
         if actual[1] and not terminate_dev:
             return False
         if terminate_dev:
-            _command(docker_path, "rm", "-f", actual[0])
+            run_runtime_command(docker_path, "rm", "-f", actual[0])
             if inspect_dev(state["container_name"], docker_path) is not None:
                 return False
     for record in state.get("resources", {}).values():
         if inspect_owned_resource(record, generation, docker_path) is not None:
-            _command(docker_path, "rm", "-f", record["id"])
+            if record["service"] == "agent-docker":
+                run_runtime_command(docker_path, "stop", "-t", "3", record["id"])
+            run_runtime_command(docker_path, "rm", "-f", record["id"])
     for name in state.get("volumes", []):
         volume = inspect_object(name, docker_path, "volume")
         if volume is None:
@@ -243,7 +252,7 @@ def cleanup_owned(
         )
         if users.returncode or users.stdout.strip():
             raise GitSSHError(f"runtime volume still consumed or inspection failed: {name}")
-        _command(docker_path, "volume", "rm", name)
+        run_runtime_command(docker_path, "volume", "rm", name)
     return True
 
 
@@ -268,7 +277,7 @@ def remove_runtime_volume(name: str, docker_path: str) -> None:
     )
     if result.returncode or result.stdout.strip():
         raise GitSSHError(f"runtime volume consumed or inspection unavailable: {name}")
-    _command(docker_path, "volume", "rm", name)
+    run_runtime_command(docker_path, "volume", "rm", name)
 
 
 def clear_state(root: Path, generation: str) -> None:
@@ -297,6 +306,7 @@ class GitRuntime:
     git_enabled: bool = True
     ssh_enabled: bool = True
     docker_path: str = DOCKER_EXECUTABLE
+    project: str = "djinn-in-a-box"
     resources: dict[str, dict[str, str]] = field(
         default_factory=lambda: dict[str, dict[str, str]]()
     )
@@ -339,7 +349,7 @@ class GitRuntime:
                             actual = inspect_dev(state["container_name"], self.docker_path)
                             if actual and actual[1] and actual[2] == self.generation:
                                 state["dev_id"] = actual[0]
-                                _save(root, state)
+                                save_state(root, state)
                                 self.release_creator_lock()
                                 return
                     except (GitSSHError, OSError, subprocess.SubprocessError):
@@ -386,11 +396,11 @@ class GitRuntime:
         state = read_state(self.root)
         if state is None or state["generation"] != self.generation:
             raise GitSSHError("runtime generation changed during preparation")
-        record = {"id": actual["Id"], "service": service}
+        record = {"id": actual["Id"], "service": service, "project": self.project}
         labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
         if (
             labels.get(GENERATION_LABEL) != self.generation
-            or labels.get("com.docker.compose.project") != "djinn-in-a-box"
+            or labels.get("com.docker.compose.project") != self.project
             or labels.get("com.docker.compose.service") != service
         ):
             raise GitSSHError("new resource ownership is unverified")
@@ -398,7 +408,7 @@ class GitRuntime:
         state["resources"] = self.resources
         if volume is not None and volume not in state["volumes"]:
             state["volumes"].append(volume)
-        _save(self.root, state)
+        save_state(self.root, state)
 
     def register_volume(self, name: str, *, timeout: float = 5) -> None:
         assert self.root is not None
@@ -413,7 +423,7 @@ class GitRuntime:
             raise GitSSHError("runtime volume ownership is unknown")
         if name not in state["volumes"]:
             state["volumes"].append(name)
-            _save(self.root, state)
+            save_state(self.root, state)
 
     def discard_volume(self, name: str) -> None:
         assert self.root is not None
@@ -436,9 +446,9 @@ class GitRuntime:
             )
             if result.returncode or result.stdout.strip():
                 raise GitSSHError("runtime volume consumed or inspection unavailable")
-            _command(self.docker_path, "volume", "rm", name)
+            run_runtime_command(self.docker_path, "volume", "rm", name)
         state["volumes"].remove(name)
-        _save(self.root, state)
+        save_state(self.root, state)
 
     def forget(self, service: str) -> None:
         assert self.root is not None
@@ -446,7 +456,7 @@ class GitRuntime:
         if state and state["generation"] == self.generation:
             self.resources.pop(service, None)
             state["resources"] = self.resources
-            _save(self.root, state)
+            save_state(self.root, state)
 
     def retain(self) -> None:
         if self.root is None:
@@ -456,7 +466,10 @@ class GitRuntime:
             if self.git_enabled:
                 raise GitSSHError("dev observer is unavailable")
             with self.fd_guard:
-                actual = inspect_dev("djinn", self.docker_path)
+                state = read_state(self.root)
+                if state is None:
+                    raise GitSSHError("runtime generation changed")
+                actual = inspect_dev(state["container_name"], self.docker_path)
                 if actual is None or actual[2] != self.generation:
                     raise GitSSHError("dev creation ownership is unverified")
                 state = read_state(self.root)
@@ -464,7 +477,7 @@ class GitRuntime:
                     raise GitSSHError("runtime generation changed")
                 if self.lock_fd != -1:
                     state["dev_id"] = actual[0]
-                    _save(self.root, state)
+                    save_state(self.root, state)
                 elif state.get("dev_id") != actual[0]:
                     raise GitSSHError("dev creation ownership is unverified")
                 self.release_creator_lock()
@@ -500,6 +513,8 @@ class GitRuntime:
 @contextlib.contextmanager
 def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
     """Always serialize dev creation; Git delivery is optional within that owner."""
+    from djinn_in_a_box.core.docker import COMPOSE_PROJECT
+
     git_enabled = bool(config.git.identities)
     ssh_enabled = git_enabled or bool(config.hostctl.hosts)
     if ssh_enabled and os.getuid() != CONTAINER_USER_UID:
@@ -515,6 +530,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
         git_enabled=git_enabled,
         ssh_enabled=ssh_enabled,
         docker_path=DOCKER_EXECUTABLE,
+        project=COMPOSE_PROJECT,
         lock_fd=fd,
     )
     try:
@@ -565,6 +581,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                 )
         state: dict[str, Any] = {
             "generation": runtime.generation,
+            "project": runtime.project,
             "container_name": container_name,
             "creator_pid": os.getpid(),
             "creator_token": process_token(os.getpid()),
@@ -586,7 +603,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
             runtime.agent = agent
             if agent is not None:
                 state.update(agent_pid=agent.pid, agent_token=process_token(agent.pid))
-            _save(root, state)
+            save_state(root, state)
             with (root / "observer.log").open("ab") as log:
                 runtime.observer = subprocess.Popen(
                     [
@@ -652,7 +669,7 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
     assert state is not None
     generation = state["generation"]
     state.update(observer_pid=os.getpid(), observer_token=process_token(os.getpid()))
-    _save(root, state)
+    save_state(root, state)
     allowed = frozenset(bytes.fromhex(key) for key in state["keys"])
     server = None
     worker = None
@@ -695,7 +712,7 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
                     if fresh is None or fresh["generation"] != generation:
                         break
                     fresh["dev_id"] = dev_id
-                    _save(root, fresh)
+                    save_state(root, fresh)
                     (root / "attached").touch(mode=0o600)
                     os.close(lock_fd)
                     lock_fd = -1
@@ -714,10 +731,31 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
                         break
                     if actual[1] != running:
                         for service, record in fresh["resources"].items():
+                            if service == "agent-docker":
+                                from djinn_in_a_box.core.docker import resume_agent_docker
+
+                                if actual[1]:
+                                    try:
+                                        resume_agent_docker(root, fresh, docker_path)
+                                    except (
+                                        OSError,
+                                        ValueError,
+                                        RuntimeError,
+                                        subprocess.SubprocessError
+                                    ):
+                                        run_runtime_command(
+                                            docker_path, "stop", "-t", "3", dev_id
+                                        )
+                                        raise
+                                elif inspect_owned_resource(record, generation, docker_path):
+                                    run_runtime_command(
+                                        docker_path, "stop", "-t", "3", record["id"]
+                                    )
+                                continue
                             if service.endswith("-helper") and inspect_owned_resource(
                                 record, generation, docker_path
                             ):
-                                _command(
+                                run_runtime_command(
                                     docker_path, "start" if actual[1] else "stop", record["id"]
                                 )
                         running = actual[1]

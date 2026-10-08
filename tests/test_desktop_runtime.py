@@ -51,7 +51,7 @@ elif args[:2] == ['rm', '-f'] or args[:2] == ['volume', 'rm']:
             data.pop(key, None)
     store.write_text(json.dumps(data))
 elif args[0] in ('stop', 'start'):
-    data[args[1]]['State']['Running'] = args[0] == 'start'
+    data[args[-1]].setdefault('State', {{}})['Running'] = args[0] == 'start'
     store.write_text(json.dumps(data))
 else:
     sys.exit(2)
@@ -187,27 +187,26 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
     _, binary, objects, log = fake_owner
     root = host_runtime.runtime_root(create=True)
     generation = "mine"
-    record = {"id": "proxy-id", "service": "docker-proxy"}
+    record = {"id": "agent-id", "service": "agent-docker"}
     state = {
         "generation": generation,
         "container_name": "djinn",
         "dev_id": "dev-id",
-        "resources": {"docker-proxy": record},
+        "resources": {"agent-docker": record},
         "volumes": [],
     }
     (root / "state.json").write_text(json.dumps(state))
     obj = {
-        "Id": "proxy-id",
+        "Id": "agent-id",
         "Config": {
             "Labels": {
                 host_runtime.GENERATION_LABEL: generation,
                 "com.docker.compose.project": "djinn-in-a-box",
-                "com.docker.compose.service": "docker-proxy",
+                "com.docker.compose.service": "agent-docker",
             }
         },
     }
-    objects.write_text(json.dumps({"proxy-id": obj}))
-    owner = host_runtime.GitRuntime(root, generation, docker_path=str(binary), owns_generation=True)
+    objects.write_text(json.dumps({"agent-id": obj}))
     if condition == "replacement":
         state["generation"] = "replacement"
         (root / "state.json").write_text(json.dumps(state))
@@ -221,7 +220,7 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
         objects.write_text(
             json.dumps(
                 {
-                    "proxy-id": obj,
+                    "agent-id": obj,
                     "djinn": {
                         "Id": "dev-id",
                         "State": {"Running": True},
@@ -230,10 +229,14 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
                 }
             )
         )
-    docker.cleanup_docker_proxy(docker.DockerMode.PROXY, owner=owner)
+    try:
+        host_runtime.cleanup_owned(root, generation, str(binary))
+    except GitSSHError:
+        assert condition == "unknown"
     mutations = [c for c in calls(log) if c[0] in {"rm", "stop", "volume"}]
-    assert mutations == ([["rm", "-f", "proxy-id"]] if condition == "owned" else [])
-    assert ("proxy-id" in json.loads(objects.read_text())) == (condition != "owned")
+    assert mutations == ([["stop", "-t", "3", "agent-id"], ["rm", "-f", "agent-id"]]
+                         if condition == "owned" else [])
+    assert ("agent-id" in json.loads(objects.read_text())) == (condition != "owned")
 
 
 def test_clean_removes_dev_before_helpers_and_joins_outside_guard(fake_owner, monkeypatch):
@@ -263,107 +266,6 @@ def test_clean_removes_dev_before_helpers_and_joins_outside_guard(fake_owner, mo
         owner.observer.wait(timeout=5)
 
 
-@pytest.mark.parametrize("caller", ["foreground", "headless"])
-@pytest.mark.parametrize("condition", ["refused", "replacement", "owned", "error", "timeout"])
-def test_actual_caller_finally_requires_acquired_owner(fake_owner, caller, condition, monkeypatch):
-    import typer
-
-    from djinn_in_a_box.commands import container
-    from djinn_in_a_box.core import agent_runner
-    from djinn_in_a_box.core.config_workflow import WorkflowPreparationResult
-
-    config, binary, objects, log = fake_owner
-    config = config.model_copy(update={"git": GitConfig()})
-    root = host_runtime.runtime_root(create=True)
-    owner = host_runtime.GitRuntime(root, "mine", docker_path=str(binary), owns_generation=True)
-    state = {
-        "generation": "winner" if condition == "refused" else "mine",
-        "container_name": "djinn",
-        "resources": {"docker-proxy": {"id": "proxy-id", "service": "docker-proxy"}},
-        "volumes": [],
-    }
-    (root / "state.json").write_text(json.dumps(state))
-    objects.write_text(
-        json.dumps(
-            {
-                "proxy-id": {
-                    "Id": "proxy-id",
-                    "Config": {
-                        "Labels": {
-                            host_runtime.GENERATION_LABEL: state["generation"],
-                            "com.docker.compose.project": "djinn-in-a-box",
-                            "com.docker.compose.service": "docker-proxy",
-                        }
-                    },
-                }
-            }
-        )
-    )
-
-    def execute(*args, **kwargs):
-        assert args[1].docker_mode is docker.DockerMode.PROXY
-        if condition == "refused":
-            raise GitSSHError("already owns the runtime")
-        if condition == "replacement":
-            state["generation"] = "replacement"
-            (root / "state.json").write_text(json.dumps(state))
-        return docker.RunResult(
-            124 if condition == "timeout" else 127 if condition == "error" else 0,
-            stdout="agent-output",
-            owner=owner,
-        )
-
-    if caller == "headless":
-        monkeypatch.setattr(agent_runner, "ensure_network", lambda: True)
-        monkeypatch.setattr(agent_runner, "compose_run", execute)
-        if condition == "refused":
-            with pytest.raises(GitSSHError, match="already owns"):
-                agent_runner.run_headless_agent(
-                    "codex",
-                    "fixture",
-                    app_config=config,
-                    resolved_mounts=(),
-                    docker_mode=docker.DockerMode.PROXY,
-                )
-        else:
-            result = agent_runner.run_headless_agent(
-                "codex",
-                "fixture",
-                app_config=config,
-                resolved_mounts=(),
-                docker_mode=docker.DockerMode.PROXY,
-            )
-            assert result.stdout == "agent-output"
-            assert result.returncode == (
-                124 if condition == "timeout" else 127 if condition == "error" else 0
-            )
-    else:
-        monkeypatch.setattr(container, "load_config", lambda: config)
-        monkeypatch.setattr(container, "preflight", lambda *args, **kwargs: None)
-        monkeypatch.setattr(container, "ensure_network", lambda: True)
-        monkeypatch.setattr(
-            container,
-            "prepare_config_workflow",
-            lambda *args, **kwargs: WorkflowPreparationResult(True),
-        )
-        monkeypatch.setattr(container, "get_shell_mount_args", lambda *args: [])
-        monkeypatch.setattr(container, "banner", lambda *args, **kwargs: None)
-        monkeypatch.setattr(container, "compose_run", execute)
-        with pytest.raises(typer.Exit) as raised:
-            container.start(docker=True)
-        assert raised.value.exit_code == (
-            1
-            if condition == "refused"
-            else 124
-            if condition == "timeout"
-            else 127
-            if condition == "error"
-            else 0
-        )
-    removals = [c for c in calls(log) if c[0] in {"rm", "stop"}]
-    assert removals == (
-        [["rm", "-f", "proxy-id"]] if condition in {"owned", "error", "timeout"} else []
-    )
 
 
 def test_creator_guard_survives_observer_failure_before_dev(fake_owner):
@@ -409,11 +311,11 @@ def test_degraded_detached_retain_never_rewrites_released_ownership(fake_owner, 
     owner = host_runtime.GitRuntime(
         root, "mine", git_enabled=False, docker_path=str(binary), owns_generation=True
     )
-    state = {"generation": "mine", "dev_id": "dev-id"}
+    state = {"generation": "mine", "dev_id": "dev-id", "container_name": "djinn"}
     (root / "state.json").write_text(json.dumps(state))
     objects.write_text(json.dumps({"djinn": dev(owner)}))
     monkeypatch.setattr(
-        host_runtime, "_save", lambda *args: pytest.fail("state rewritten after guard release")
+        host_runtime, "save_state", lambda *args: pytest.fail("state rewritten after guard release")
     )
     owner.retain()
     assert owner.detached

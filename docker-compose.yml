@@ -3,7 +3,7 @@
 # =============================================================================
 # Usage:
 #   djinn start              # Without Docker socket (secure)
-#   djinn start --docker     # With Docker socket + proxy
+#   djinn start --docker     # With rootless agent Docker daemon
 #   djinn start --firewall   # With network firewall
 #   djinn start --docker --firewall  # Both combined
 #

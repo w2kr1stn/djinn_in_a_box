@@ -572,7 +572,7 @@ class TestRunCommand:
         with pytest.raises(typer.Exit):
             run(agent="claude", prompt="test", docker=True)
 
-        assert run_mocks["run"].call_args.kwargs["docker_mode"] is DockerMode.PROXY
+        assert run_mocks["run"].call_args.kwargs["docker_mode"] is DockerMode.AGENT
 
     def test_run_with_docker_direct_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker-direct delegates the direct Docker mode."""

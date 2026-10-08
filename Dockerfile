@@ -42,6 +42,8 @@ RUN if [ -f /tmp/packages.txt ]; then \
 # -----------------------------------------------------------------------------
 ARG DOCKER_VERSION=27.4.1
 ARG COMPOSE_VERSION=2.32.4
+ARG BUILDX_VERSION=0.37.2
+ARG BUILDX_SHA256=982ca20490b45ed1ec8d99795974d3d874a358f75938c9c237305010e6b7e548
 
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" \
     | tar xz --strip-components=1 -C /usr/local/bin docker/docker \
@@ -52,6 +54,13 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
     && curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
        -o /usr/local/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Docker Buildx Plugin (verified before installation; no legacy builder fallback)
+RUN curl -fsSL "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-amd64" \
+       -o /tmp/docker-buildx \
+    && echo "${BUILDX_SHA256}  /tmp/docker-buildx" | sha256sum -c - \
+    && install -m 0755 /tmp/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && rm /tmp/docker-buildx
 
 # -----------------------------------------------------------------------------
 # GitHub CLI Installation

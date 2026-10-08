@@ -48,7 +48,8 @@ def test_status_declared_volume_categories(
 ) -> None:
     monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
     expected = {
-        "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"],
+        "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
+                  "djinn-vscode-server"],
         "data": ["djinn-opencode-data", "djinn-vscode-workspaces"],
         "none": ["djinn-desktop-dbus", "djinn-desktop-audio"],
         "protected (only clean all)": ["djinn-hostctl-state"],
@@ -94,10 +95,11 @@ def test_declared_cleanup_sets(
 ) -> None:
     monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
     config = declared_app_config
-    builtins_cache = {"djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"}
+    builtins_cache = {"djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
+                      "djinn-vscode-server"}
     builtins_data = {"djinn-opencode-data", "djinn-vscode-workspaces"}
     expected_volumes = {
-        "cache": {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch"},
+        "cache": {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch", "djinn-agent-docker"},
         "data": {"djinn-opencode-data", "djinn-journal"},
         "all": builtins_cache | builtins_data | {"djinn-journal", "djinn-scratch", "djinn-worker"},
         "name": {"djinn-worker"},
@@ -351,7 +353,6 @@ class TestStartCommand:
             patch(
                 "djinn_in_a_box.commands.container.is_container_running", return_value=False
             ) as mock_running,
-            patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.banner") as mock_banner,
             patch(
@@ -386,7 +387,6 @@ class TestStartCommand:
                 "run": mock_run,
                 "detached": mock_detached,
                 "running": mock_running,
-                "cleanup": mock_cleanup,
                 "config": mock_config,
                 "banner": mock_banner,
                 "workflow": mock_workflow,
@@ -431,11 +431,8 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(docker=True)
         options = start_mocks["run"].call_args[0][1]
-        assert options.docker_mode is DockerMode.PROXY
+        assert options.docker_mode is DockerMode.AGENT
         start_mocks["banner"].assert_called_once_with()
-        start_mocks["cleanup"].assert_called_once_with(
-            DockerMode.PROXY, start_mocks["config"], owner=None
-        )
 
     def test_start_with_firewall_flag(self, start_mocks: dict[str, Any]) -> None:
         with pytest.raises(typer.Exit):
@@ -497,7 +494,6 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(docker=True, detach=True)
 
-        start_mocks["cleanup"].assert_not_called()
 
     def test_start_detached_refuses_when_a_container_already_runs(
         self, start_mocks: dict[str, Any]
@@ -656,9 +652,6 @@ class TestStartCommand:
 
         assert exc_info.value.exit_code == 1
         assert "mount collision detail" in start_mocks["err_output"].getvalue()
-        start_mocks["cleanup"].assert_called_once_with(
-            DockerMode.NONE, start_mocks["config"], owner=None
-        )
 
     def test_start_reports_a_mount_specification_error_from_the_core(
         self, start_mocks: dict[str, Any]
@@ -744,9 +737,6 @@ class TestStartCommand:
             container.start(docker_direct=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.docker_mode is DockerMode.DIRECT
-        start_mocks["cleanup"].assert_called_once_with(
-            DockerMode.DIRECT, start_mocks["config"], owner=None
-        )
 
     def test_start_renders_environment_and_container_rules(
         self, start_mocks: dict[str, Any]
@@ -905,7 +895,7 @@ class TestCleanVolumesCommand:
         ):
             container.clean_volumes()
 
-        mock_table.assert_called_once()
+        assert mock_table.call_count == 2
         entries = mock_table.call_args.args[2]
         assert entries == {"credentials": [str(configured_root / "claude")]}
 
@@ -1422,7 +1412,7 @@ class TestResourceTable:
     def test_print_resource_table_volumes(self, capture_container_stdout: io.StringIO) -> None:
         """_print_resource_table renders volumes by category."""
         entries = {
-            "cache": ["djinn-uv-cache", "djinn-tools-cache"],
+            "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache"],
             "data": ["djinn-opencode-data"],
         }
         container._print_resource_table("Djinn Volumes", "Volume", entries)
