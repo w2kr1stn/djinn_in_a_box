@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import stat
 import subprocess
 import sys
+import traceback
+from collections import UserDict
 from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from djinn_in_a_box.config.declarations import RESERVED_ENVIRONMENT
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
@@ -808,3 +814,411 @@ def test_declarations_inherit_without_creation(tmp_path, monkeypatch, session_mg
     else:
         assert cmd[0] == "claude" and kwargs["env"]["CDP_HOST"] == "host-literal"
     forbidden.assert_not_called()
+
+
+# ── Per-session Environment Tests ──
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize("mode", ["container", "host"])
+def test_session_environment_is_literal_and_isolated(
+    session_mgr, tmp_path, monkeypatch, caplog, method, mode
+):
+    secret = "SYNTHETIC-SESSION-SECRET"
+    additions = {
+        "OPENAI_API_KEY": secret,
+        "SESSION_EMPTY": "",
+        "_SESSION_UNICODE": "Grüße 雪 😀 e\u0301",
+        "SESSION_LITERAL": "first\n$HOME 'single' \"double\" = last\r\n",
+    }
+    original = additions.copy()
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-inherited-key")
+    monkeypatch.setenv("SESSION_EMPTY", "synthetic-inherited-nonempty")
+    monkeypatch.setenv("SESSION_INHERITED", "synthetic-inherited-value")
+    monkeypatch.setenv("TERM", "inherited-term")
+    monkeypatch.setenv("COLORTERM", "inherited-colorterm")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///synthetic-docker.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "synthetic-context")
+    before = dict(os.environ)
+    workspace = tmp_path / "sessions" / "testproject" / "task with space"
+    target = SessionTarget(container_id="stable-container" if mode == "container" else None)
+    completed = MagicMock(returncode=0, stdout=secret + "\n", stderr="child diagnostic\n")
+    kwargs = {"prompt": "test prompt"} if method == "run_headless" else {
+        "initial_prompt": "test prompt"
+    }
+    caplog.set_level(logging.DEBUG, logger=_SESSION_MODULE)
+
+    with (
+        patch(f"{_SESSION_MODULE}._HOST_SESSIONS_BASE", tmp_path / "sessions"),
+        patch.object(session_mgr, "resolve_target") as resolve,
+        patch.object(session_mgr, "_git_init_workspace") as git_init,
+        patch(_SUBPROCESS_RUN, return_value=completed) as run,
+    ):
+        result = getattr(session_mgr, method)(
+            workspace_dir=workspace, target=target, model="selected-model", env=additions, **kwargs
+        )
+
+    resolve.assert_not_called()
+    run.assert_called_once()
+    cmd = run.call_args.args[0]
+    child_env = run.call_args.kwargs["env"]
+    for key, value in additions.items():
+        assert child_env[key] == value
+    assert child_env["SESSION_INHERITED"] == "synthetic-inherited-value"
+    assert child_env["DOCKER_HOST"] == "unix:///synthetic-docker.sock"
+    assert child_env["DOCKER_CONTEXT"] == "synthetic-context"
+    assert additions == original
+    environment_unchanged = dict(os.environ) == before
+    assert environment_unchanged
+    assert secret not in repr(cmd)
+    assert secret not in caplog.text
+    assert result.workspace_dir == workspace
+    assert result.returncode == 0
+    if method == "run_headless":
+        assert result.stdout == completed.stdout
+        assert result.stderr == completed.stderr
+    if mode == "container":
+        git_init.assert_not_called()
+        assert cmd[:2] == [DOCKER_EXECUTABLE, "exec"]
+        assert ("-it" in cmd) == (method == "run_interactive")
+        forwarded = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-e"]
+        expected_forwarded = {*additions, "TERM=xterm-256color", "COLORTERM=truecolor"}
+        if method == "run_headless":
+            expected_forwarded.add("AGENT_PROMPT=test prompt")
+        assert set(forwarded) == expected_forwarded
+        assert cmd[cmd.index("-w") + 1] == "/home/dev/sessions/testproject/task with space"
+        assert cmd[-4:-1] == [target.container_id, "bash", "-lc"]
+        assert "git init -q" in cmd[-1] and "selected-model" in cmd[-1]
+        if method == "run_headless":
+            assert "AGENT_PROMPT=test prompt" in forwarded
+            assert '"$AGENT_PROMPT"' in cmd[-1]
+        else:
+            assert "'test prompt'" in cmd[-1]
+    else:
+        git_init.assert_called_once_with(workspace)
+        assert cmd[0] == "claude"
+        assert cmd[cmd.index("--model") + 1] == "selected-model"
+        assert ("-p" in cmd) == (method == "run_headless")
+        assert cmd[-1] == "test prompt"
+        assert run.call_args.kwargs["cwd"] == workspace
+        assert child_env["TERM"] == "xterm-256color"
+        assert child_env["COLORTERM"] == "truecolor"
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize("mode", ["container", "host"])
+def test_session_environment_defaults_and_no_carryover(session_mgr, tmp_path, method, mode):
+    target = SessionTarget(container_id="stable-container" if mode == "container" else None)
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    completed = MagicMock(returncode=0, stdout="", stderr="")
+    with (
+        patch.object(session_mgr, "_git_init_workspace"),
+        patch(_SUBPROCESS_RUN, return_value=completed) as run,
+    ):
+        launch = getattr(session_mgr, method)
+        launch(workspace_dir=tmp_path, target=target, **kwargs)
+        launch(workspace_dir=tmp_path, target=target, env={"SESSION_ONCE": "synthetic"}, **kwargs)
+        for empty in (None, {}):
+            launch(workspace_dir=tmp_path, target=target, env=empty, **kwargs)
+
+    baseline = run.call_args_list[0]
+    for call in run.call_args_list[2:]:
+        assert call.args == baseline.args
+        same_options = call.kwargs == baseline.kwargs
+        assert same_options
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize("mode", ["container", "host"])
+def test_session_environment_snapshots_before_agent_resolution(
+    session_mgr, tmp_path, monkeypatch, method, mode
+):
+    additions = {"SESSION_SNAPSHOT": "synthetic-original"}
+    monkeypatch.delenv("SESSION_LATE", raising=False)
+    config = session_mgr._agents["claude"]
+
+    def mutate_input(agent):
+        additions["SESSION_SNAPSHOT"] = "synthetic-changed"
+        additions["SESSION_LATE"] = "synthetic-late"
+        return config
+
+    target = SessionTarget(container_id="stable-container" if mode == "container" else None)
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    with (
+        patch.object(session_mgr, "_resolve_agent", side_effect=mutate_input),
+        patch.object(session_mgr, "_git_init_workspace"),
+        patch(_SUBPROCESS_RUN, return_value=MagicMock(returncode=0, stdout="", stderr="")) as run,
+    ):
+        getattr(session_mgr, method)(workspace_dir=tmp_path, target=target, env=additions, **kwargs)
+
+    assert run.call_args.kwargs["env"]["SESSION_SNAPSHOT"] == "synthetic-original"
+    assert "SESSION_LATE" not in run.call_args.kwargs["env"]
+    assert additions["SESSION_SNAPSHOT"] == "synthetic-changed"
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize(
+    "invalid_env",
+    [
+        [], (), set(), "", b"", 0, False, UserDict(), MappingProxyType({}),
+        [("SESSION_VALUE", "synthetic")], "not a dictionary",
+        {"SESSION_VALUE": None}, {"SESSION_VALUE": 0}, {"SESSION_VALUE": False},
+        {"SESSION_VALUE": b"bytes"}, {"SESSION_VALUE": []},
+        {1: "SYNTHETIC-INVALID-SECRET"}, {None: "SYNTHETIC-INVALID-SECRET"},
+        {"": "SYNTHETIC-INVALID-SECRET"}, {"1KEY": "SYNTHETIC-INVALID-SECRET"},
+        {"BAD-KEY": "SYNTHETIC-INVALID-SECRET"}, {"KEY=VALUE": "SYNTHETIC-INVALID-SECRET"},
+        {"KEY\n": "SYNTHETIC-INVALID-SECRET"}, {"KEY\x00": "SYNTHETIC-INVALID-SECRET"},
+        {"ÄKEY": "SYNTHETIC-INVALID-SECRET"}, {"KEY\ud800": "SYNTHETIC-INVALID-SECRET"},
+        {"SESSION_VALUE": "SYNTHETIC-INVALID-SECRET\x00"},
+        {"SESSION_VALUE": "SYNTHETIC-INVALID-SECRET\ud800"},
+        {"SESSION_VALUE": "SYNTHETIC-INVALID-SECRET\udcff"},
+    ],
+)
+def test_invalid_session_environment_is_rejected_before_other_work(
+    session_mgr, tmp_path, method, invalid_env
+):
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    with (
+        patch.object(session_mgr, "_resolve_agent") as agent,
+        patch.object(session_mgr, "resolve_target") as resolve,
+        patch.object(session_mgr, "_git_init_workspace") as git_init,
+        patch(_SUBPROCESS_RUN) as run,
+        pytest.raises(ValueError) as exc,
+    ):
+        getattr(session_mgr, method)(workspace_dir=tmp_path, env=invalid_env, **kwargs)
+
+    agent.assert_not_called()
+    resolve.assert_not_called()
+    git_init.assert_not_called()
+    run.assert_not_called()
+    diagnostic = "".join(traceback.format_exception(exc.value))
+    assert "SYNTHETIC-INVALID-SECRET" not in diagnostic
+    assert "UnicodeEncodeError" not in diagnostic
+    assert exc.value.__suppress_context__
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize(
+    "name",
+    sorted(RESERVED_ENVIRONMENT)
+    + [
+        "DOCKER_CONFIG", "DOCKER_API_VERSION", "COMPOSE_FUTURE", "DJINN_FUTURE",
+        "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "BASH_FUNC_FUTURE", "ENV", "SHELLOPTS",
+        "BASHOPTS", "CDPATH", "GLOBIGNORE", "BASH_ENV", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "XDG_CONFIG_HOME", "GODEBUG", "GOTRACEBACK",
+        "BASH", "BASHPID", "COMP_WORDBREAKS", "EPOCHREALTIME", "EPOCHSECONDS",
+        "HISTCMD", "LINENO", "OLDPWD", "OPTERR", "OPTIND", "PPID", "PS1", "PS2",
+        "PWD", "RANDOM", "SHLVL", "SRANDOM", "_",
+        "http_proxy", "HTTP_PROXY", "HtTp_PrOxY",
+        "https_proxy", "HTTPS_PROXY", "hTtPs_pRoXy",
+        "all_proxy", "ALL_PROXY", "AlL_PrOxY", "no_proxy", "NO_PROXY", "No_PrOxY",
+    ],
+)
+def test_protected_session_environment_is_rejected(session_mgr, tmp_path, method, name):
+    secret = "SYNTHETIC-PROTECTED-SECRET"
+    additions = {name: secret}
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    with (
+        patch.object(session_mgr, "resolve_target") as resolve,
+        patch(_SUBPROCESS_RUN) as run,
+        pytest.raises(ValueError) as exc,
+    ):
+        getattr(session_mgr, method)(workspace_dir=tmp_path, env=additions, **kwargs)
+    resolve.assert_not_called()
+    run.assert_not_called()
+    assert secret not in "".join(traceback.format_exception(exc.value))
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize("encoding_failure", ["mismatch", "non_utf8", "unencodable"])
+def test_session_environment_checks_actual_host_encoding(
+    session_mgr, tmp_path, method, encoding_failure
+):
+    secret = "SYNTHETIC-ENCODING-SECRET-雪"
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    error = UnicodeEncodeError("ascii", secret, 0, len(secret), secret)
+    with (
+        patch(
+            f"{_SESSION_MODULE}.os.fsencode",
+            return_value=b"different" if encoding_failure == "mismatch" else b"\xff",
+            side_effect=error if encoding_failure == "unencodable" else None,
+        ) as encode,
+        patch.object(session_mgr, "_resolve_agent") as agent,
+        patch(_SUBPROCESS_RUN) as run,
+        pytest.raises(ValueError) as exc,
+    ):
+        getattr(session_mgr, method)(
+            workspace_dir=tmp_path, env={"SESSION_VALUE": secret}, **kwargs
+        )
+    encode.assert_called_once_with(secret)
+    agent.assert_not_called()
+    run.assert_not_called()
+    diagnostic = "".join(traceback.format_exception(exc.value))
+    assert secret not in diagnostic
+    assert "UnicodeEncodeError" not in diagnostic and "UnicodeDecodeError" not in diagnostic
+    assert exc.value.__suppress_context__
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+def test_session_environment_is_only_applied_to_host_agent_start(session_mgr, tmp_path, method):
+    secret = "SYNTHETIC-AGENT-ONLY-SECRET"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    completed = MagicMock(returncode=0, stdout="", stderr="")
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    with patch(_SUBPROCESS_RUN, return_value=completed) as run:
+        result = getattr(session_mgr, method)(
+            workspace_dir=workspace, env={"SESSION_VALUE": secret}, **kwargs
+        )
+    assert result.success
+    assert run.call_count == 3
+    discovery, git_init, agent = run.call_args_list
+    assert discovery.args[0][:2] == [DOCKER_EXECUTABLE, "ps"]
+    assert git_init.args[0] == ["git", "init", "-q"]
+    assert discovery.kwargs.get("env") is None
+    assert git_init.kwargs.get("env") is None
+    assert agent.kwargs["env"]["SESSION_VALUE"] == secret
+    assert not list(workspace.iterdir())
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+@pytest.mark.parametrize("mode", ["container", "host"])
+@pytest.mark.parametrize("error_type, code", [(FileNotFoundError, 127), (PermissionError, 126)])
+def test_session_environment_is_not_in_spawn_diagnostics(
+    session_mgr, tmp_path, caplog, method, mode, error_type, code
+):
+    secret = "SYNTHETIC-SPAWN-SECRET"
+    target = SessionTarget(container_id="stable-container" if mode == "container" else None)
+    kwargs = {"prompt": "test"} if method == "run_headless" else {}
+    caplog.set_level(logging.DEBUG, logger=_SESSION_MODULE)
+    with (
+        patch.object(session_mgr, "_git_init_workspace"),
+        patch(_SUBPROCESS_RUN, side_effect=error_type("synthetic spawn failure")) as run,
+    ):
+        result = getattr(session_mgr, method)(
+            workspace_dir=tmp_path, target=target, env={"SESSION_VALUE": secret}, **kwargs
+        )
+    assert result.returncode == code
+    assert secret not in repr(result)
+    assert secret not in repr(run.call_args.args)
+    assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["container", "host"])
+@pytest.mark.parametrize("output_type", ["none", "bytes", "text"])
+def test_session_environment_timeout_preserves_child_output(
+    session_mgr, tmp_path, caplog, mode, output_type
+):
+    secret = "SYNTHETIC-TIMEOUT-SECRET"
+    stdout = stderr = None
+    if output_type == "bytes":
+        stdout, stderr = secret.encode() + b"\xff", b"partial stderr\xff"
+    elif output_type == "text":
+        stdout, stderr = secret + "\n", "partial stderr\n"
+    timeout = subprocess.TimeoutExpired(cmd=[], timeout=9, output=stdout, stderr=stderr)
+    target = SessionTarget(container_id="stable-container" if mode == "container" else None)
+    caplog.set_level(logging.DEBUG, logger=_SESSION_MODULE)
+    with (
+        patch.object(session_mgr, "_git_init_workspace"),
+        patch(_SUBPROCESS_RUN, side_effect=timeout) as run,
+    ):
+        result = session_mgr.run_headless(
+            workspace_dir=tmp_path, prompt="test", timeout=9, target=target,
+            env={"SESSION_VALUE": secret},
+        )
+    assert result.returncode == 124 and result.workspace_dir == tmp_path
+    assert secret not in repr(run.call_args.args)
+    assert secret not in caplog.text
+    if output_type == "none":
+        assert result.stdout == "" and result.stderr == "Timeout after 9s"
+        assert secret not in repr(result)
+    elif output_type == "bytes":
+        assert result.stdout == secret + "�" and result.stderr == "partial stderr�"
+    else:
+        assert result.stdout == stdout and result.stderr == stderr
+
+
+def test_headless_host_child_receives_literal_session_environment(
+    session_mgr, tmp_path, monkeypatch
+):
+    additions = {
+        "SESSION_CHILD_SECRET": "SYNTHETIC-CHILD-SECRET",
+        "SESSION_CHILD_EMPTY": "",
+        "SESSION_CHILD_LITERAL": "first\n$HOME 'single' \"double\" = last",
+        "SESSION_CHILD_UNICODE": "Grüße 雪 😀 e\u0301",
+    }
+    monkeypatch.setenv("SESSION_CHILD_SECRET", "synthetic-inherited-secret")
+    monkeypatch.setenv("SESSION_CHILD_INHERITED", "synthetic-inherited-value")
+    before = dict(os.environ)
+    keys = [*additions, "SESSION_CHILD_INHERITED", "TERM", "COLORTERM"]
+    script = (
+        "import json, os; "
+        f"print(json.dumps({{key: os.environ[key] for key in {keys!r}}}))"
+    )
+    session_mgr._agents["python"] = AgentConfig(binary=sys.executable, headless_flags=["-c"])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+
+    result = session_mgr.run_headless(
+        workspace_dir=workspace, prompt=script, agent="python", target=SessionTarget(),
+        env=additions,
+    )
+
+    assert result.returncode == 0 and result.stderr == ""
+    observed = json.loads(result.stdout)
+    assert observed == {
+        **additions, "SESSION_CHILD_INHERITED": "synthetic-inherited-value",
+        "TERM": "xterm-256color", "COLORTERM": "truecolor",
+    }
+    environment_unchanged = dict(os.environ) == before
+    assert environment_unchanged
+    assert list(workspace.iterdir()) == [workspace / ".git"]
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+def test_container_session_shell_preserves_allowed_environment(session_mgr, tmp_path, method):
+    """Exercise the generated Bash command with real children, without a Docker daemon."""
+    additions = {
+        "OPENAI_API_KEY": "SYNTHETIC-SHELL-SECRET",
+        "SESSION_EMPTY": "",
+        "_SESSION_LITERAL": "first\n$HOME 'single' \"double\" = Grüße 雪 😀",
+    }
+    script = (
+        "import json, os; "
+        f"print(json.dumps({{key: os.environ[key] for key in {list(additions)!r}}}))"
+    )
+    session_mgr._agents["python"] = AgentConfig(
+        binary=sys.executable, headless_flags=["-I", "-c"], write_flags=["-I", "-c"]
+    )
+    kwargs = {"prompt": script} if method == "run_headless" else {"initial_prompt": script}
+    with (
+        patch.object(session_mgr, "_resolve_container_workdir", return_value=str(tmp_path)),
+        patch(_SUBPROCESS_RUN, return_value=MagicMock(returncode=0, stdout="", stderr="")) as run,
+    ):
+        getattr(session_mgr, method)(
+            workspace_dir=tmp_path, agent="python", target=SessionTarget(container_id="synthetic"),
+            env=additions, **kwargs,
+        )
+
+    # Docker forwarding is tested separately; this isolates its real Bash command.
+    shell_args = run.call_args.args[0][-2:]
+    child = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", *shell_args],
+        cwd=tmp_path,
+        env={
+            "PATH": os.defpath,
+            "HOME": str(tmp_path),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "AGENT_PROMPT": script,
+            **additions,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stderr == ""
+    assert json.loads(child.stdout) == additions

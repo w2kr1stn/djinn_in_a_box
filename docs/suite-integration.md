@@ -58,10 +58,80 @@ entry points are:
 
 - `preflight_check()`: verifies that a session can run in container mode or
   host fallback mode.
-- `run_interactive(workspace_dir=..., agent=..., model=..., initial_prompt=...)`:
+- `run_interactive(workspace_dir=..., agent=..., model=..., initial_prompt=..., env=...)`:
   starts an interactive session.
-- `run_headless(workspace_dir=..., prompt=..., agent=..., model=..., timeout=...)`:
+- `run_headless(workspace_dir=..., prompt=..., agent=..., model=..., timeout=..., env=...)`:
   runs a prompt and captures output.
+
+Both run methods accept the optional keyword-only parameter
+`env: dict[str, str] | None = None` for credentials and other additional variables
+needed by one session. For example:
+
+```python
+headless = manager.run_headless(
+    workspace_dir=workspace,
+    prompt="<prompt>",
+    agent="codex",
+    env={"OPENAI_API_KEY": "<provider-api-key>"},
+)
+interactive = manager.run_interactive(
+    workspace_dir=workspace,
+    agent="claude",
+    env={"ANTHROPIC_API_KEY": "<provider-api-key>"},
+)
+```
+
+`None` and `{}` preserve the defaults. Other types, including empty lists or
+other mappings, raise `ValueError`. Djinn snapshots the dictionary at method
+entry, before discovery, Git initialization, or launch. Allowed entries override
+inherited values for that session and its descendants. An empty string is a
+literal value, not a deletion request. Values are never interpolated, converted,
+normalized, or replaced; newlines, quotes, `$`, `=`, and Unicode remain literal.
+Neither the caller's map nor `os.environ` changes, and entries do not carry over
+to later calls or persist to configuration files.
+
+Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values must be strings without NUL or
+surrogates, strictly encodable as UTF-8, and must round-trip unchanged when the
+actual host environment encoding (`os.fsencode`) is decoded as strict UTF-8.
+Opaque surrogateescape values are rejected. These rules apply equally in host
+and container mode. Invalid entries and protected names raise a value-free
+`ValueError` before discovery, Git initialization, or launch; encoding exception
+details are suppressed.
+
+Protected names combine the complete shared Djinn/Compose
+[`RESERVED_ENVIRONMENT` policy](../src/djinn_in_a_box/config/declarations.py)
+with these additional session transport restrictions:
+
+- Prefixes: `DOCKER_`, `COMPOSE_`, `DJINN_`, `LD_`, `DYLD_`, `BASH_`.
+- Exact names: `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, `BASH_ENV`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`, `XDG_CONFIG_HOME`, `GODEBUG`, `GOTRACEBACK`.
+- Bash-managed names: `BASH`, `BASHPID`, `COMP_WORDBREAKS`, `EPOCHREALTIME`,
+  `EPOCHSECONDS`, `HISTCMD`, `LINENO`, `OLDPWD`, `OPTERR`, `OPTIND`, `PPID`,
+  `PS1`, `PS2`, `PWD`, `RANDOM`, `SHLVL`, `SRANDOM`, `_`. Bash changes or removes
+  these even without startup profiles, so both execution modes reject them.
+- Case-insensitive names: `http_proxy`, `https_proxy`, `all_proxy`, `no_proxy`.
+
+This deliberately includes shared reservations beyond transport names, such as
+`HOME`, `PATH`, `AGENT_PROMPT`, `TERM`, and `LOCAL_ENDPOINT`. Shared-policy changes
+therefore require compatibility consideration for this API. Protected names are
+rejected rather than ignored; the map cannot change the Docker connection or
+selected target.
+
+Host discovery, Git setup, and image/workflow preparation receive no additions.
+Host agent starts use a fresh inherited environment plus the validated entries
+and fixed terminal values. Container starts forward only the additional names
+with `docker exec -e NAME`; their values travel in the Docker subprocess
+environment, outside argv and Djinn-authored logs or diagnostics. The existing
+prompt transport is unchanged. Container session shells and their Git/agent
+descendants inherit the entries; login profiles can intentionally change them,
+and Djinn does not reapply them afterwards.
+
+Inherited credentials are not scrubbed. Values remain visible to the OS, Docker
+daemon, descendants, and user profile scripts. Child stdout/stderr passes through
+unchanged, even if a child prints a credential. The secrecy guarantee covers
+Djinn's handling of this map, not values independently placed in prompts or
+emitted by children. This Python API does not select providers, check credentials,
+or add a CLI environment flag.
 
 When a container is running, workspace paths under `~/.djinn/sessions/` are
 mapped 1:1 into `/home/dev/sessions/`. For example,

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from djinn_in_a_box.config.declarations import validate_environment
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY, LOCK_REMEDY
@@ -36,6 +37,42 @@ _SESSION_ENV: dict[str, str] = {
     "TERM": "xterm-256color",
     "COLORTERM": "truecolor",
 }
+_SESSION_PROTECTED_PREFIXES = ("DOCKER_", "COMPOSE_", "DJINN_", "LD_", "DYLD_", "BASH_")
+_SESSION_PROTECTED_NAMES = frozenset(
+    {
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "CDPATH",
+        "GLOBIGNORE",
+        "BASH_ENV",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "XDG_CONFIG_HOME",
+        "GODEBUG",
+        "GOTRACEBACK",
+        # Bash replaces or drops these even when startup profiles are disabled.
+        "BASH",
+        "BASHPID",
+        "COMP_WORDBREAKS",
+        "EPOCHREALTIME",
+        "EPOCHSECONDS",
+        "HISTCMD",
+        "LINENO",
+        "OLDPWD",
+        "OPTERR",
+        "OPTIND",
+        "PPID",
+        "PS1",
+        "PS2",
+        "PWD",
+        "RANDOM",
+        "SHLVL",
+        "SRANDOM",
+        "_",
+    }
+)
+_SESSION_PROXY_NAMES = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
 _CONTAINER_SESSIONS_BASE = "/home/dev/sessions"
 _HOST_SESSIONS_BASE = Path.home() / ".djinn" / "sessions"
 _DJINN_CONTAINER_NAME = "djinn"
@@ -47,6 +84,32 @@ _PUBLISHER_REMEDIES: dict[DriftClass, str] = {
     DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
     DriftClass.CLEAN: "",
 }
+
+
+def _validate_session_environment(env: object) -> dict[str, str]:
+    """Snapshot and validate additions without exposing their values in errors."""
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise ValueError("Session environment must be a dictionary") from None
+    snapshot = dict(cast(dict[object, object], env))
+    for key, value in snapshot.items():
+        if not isinstance(key, str):
+            raise ValueError("Invalid session environment") from None
+        try:
+            text = validate_environment(key, value)
+            if (
+                key.startswith(_SESSION_PROTECTED_PREFIXES)
+                or key in _SESSION_PROTECTED_NAMES
+                or key.casefold() in _SESSION_PROXY_NAMES
+            ):
+                raise ValueError("Protected session environment name")
+            text.encode("utf-8", errors="strict")
+            if os.fsencode(text).decode("utf-8", errors="strict") != text:
+                raise ValueError("Session environment value is not lossless UTF-8")
+        except ValueError:
+            raise ValueError("Invalid session environment") from None
+    return cast(dict[str, str], snapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +260,9 @@ class SessionManager:
         model: str | None = None,
         initial_prompt: str | None = None,
         target: SessionTarget | None = None,
+        env: dict[str, str] | None = None,
     ) -> SessionResult:
+        session_env = _validate_session_environment(env)
         agent_config = self._resolve_agent(agent)
         resolved_target = target if target is not None else self.resolve_target()
         container_id = resolved_target.container_id
@@ -210,13 +275,19 @@ class SessionManager:
             cmd: list[str] = [DOCKER_EXECUTABLE, "exec", "-it"]
             for key, value in _SESSION_ENV.items():
                 cmd.extend(["-e", f"{key}={value}"])
+            for key in session_env:
+                cmd.extend(["-e", key])
             cmd.extend(["-w", cwd])
             cmd.append(container_id)
             cmd.extend(["bash", "-lc", full_cmd])
 
             log.debug("Running interactive container command: %s", cmd)
             try:
-                result = subprocess.run(cmd, check=False)
+                result = subprocess.run(
+                    cmd,
+                    env={**os.environ, **session_env} if session_env else None,
+                    check=False,
+                )
             except FileNotFoundError:
                 return SessionResult(returncode=127, stderr="Docker command not found")
             except PermissionError as e:
@@ -232,7 +303,7 @@ class SessionManager:
             result = subprocess.run(
                 cmd,
                 cwd=workspace_dir,
-                env={**os.environ, **_SESSION_ENV},
+                env={**os.environ, **session_env, **_SESSION_ENV},
                 check=False,
             )
         except FileNotFoundError:
@@ -253,7 +324,9 @@ class SessionManager:
         model: str | None = None,
         timeout: int = 300,
         target: SessionTarget | None = None,
+        env: dict[str, str] | None = None,
     ) -> SessionResult:
+        session_env = _validate_session_environment(env)
         from djinn_in_a_box.commands.agent import build_agent_command
 
         agent_config = self._resolve_agent(agent)
@@ -269,6 +342,8 @@ class SessionManager:
             cmd.extend(["-e", f"AGENT_PROMPT={prompt}"])
             for key, value in _SESSION_ENV.items():
                 cmd.extend(["-e", f"{key}={value}"])
+            for key in session_env:
+                cmd.extend(["-e", key])
             cmd.extend(["-w", cwd])
             cmd.append(container_id)
             cmd.extend(["bash", "-lc", full_cmd])
@@ -277,6 +352,7 @@ class SessionManager:
             try:
                 result = subprocess.run(
                     cmd,
+                    env={**os.environ, **session_env} if session_env else None,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -320,7 +396,7 @@ class SessionManager:
             result = subprocess.run(
                 cmd,
                 cwd=workspace_dir,
-                env={**os.environ, **_SESSION_ENV},
+                env={**os.environ, **session_env, **_SESSION_ENV},
                 capture_output=True,
                 text=True,
                 timeout=timeout,

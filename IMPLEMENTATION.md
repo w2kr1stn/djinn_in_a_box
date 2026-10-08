@@ -1294,6 +1294,35 @@ the complete resolved mount collection before execution.
 `--model` is optional. Interactive and headless sessions use the selected
 agent's `default_model` when it is omitted.
 
+Both `SessionManager` run methods accept keyword-only
+`env: dict[str, str] | None = None`. The private validator snapshots this input
+before any agent resolution, target discovery, Git setup, or launch. It reuses
+`config/declarations.py::validate_environment`, including the complete shared
+`RESERVED_ENVIRONMENT` Djinn/Compose policy, and adds the session transport
+restrictions documented in [suite-integration.md](docs/suite-integration.md).
+These also reject Bash-managed names that the container shell changes or removes
+even without startup profiles, maintaining the same accepted names in both modes.
+This protection deliberately extends beyond transport names; shared-policy
+changes require API compatibility consideration. Invalid types, names, values,
+or protected entries raise a static, value-free `ValueError` with suppressed
+exception chaining. Values require strict UTF-8 plus an unchanged strict UTF-8
+round-trip of `os.fsencode`; NUL, surrogates, and lossy host encoding are rejected.
+
+`None` and `{}` preserve defaults. Allowed values override inheritance literally,
+including empty strings, without changing the input map, `os.environ`, later
+sessions, or persistent files. Host agent starts merge a fresh inherited
+environment, additions, and fixed terminal values; discovery, host Git setup,
+and image/workflow preparation receive no additions. Container starts use
+name-only `docker exec -e NAME` forwarding with values in the subprocess
+environment. The Docker connection, target, prompt transport, and TTY behavior
+retain their existing contracts. Session shells and their descendants inherit
+the additions, subject to intentional login-profile changes. Map values stay
+out of argv and Djinn-authored logs/errors; inherited credentials are not
+scrubbed and child output is preserved. OS, daemon, descendant, and profile
+visibility, or values independently supplied in prompts, are outside this
+secrecy guarantee. No provider selection, authentication checks, or CLI flags
+are added.
+
 Host workspaces live under:
 
 ```text
