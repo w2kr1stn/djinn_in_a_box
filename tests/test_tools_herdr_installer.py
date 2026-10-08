@@ -372,6 +372,7 @@ def test_local_failure_preserves_binary(installer_env: dict[str, str], step: str
     elif step == "mv":
         fake = """
         #!/bin/sh
+        [ "$1" = -T ] && shift
         echo "mv: cannot move '$1' to '$2': Permission denied" >&2
         exit 1
         """
@@ -409,6 +410,35 @@ def test_local_failure_preserves_binary(installer_env: dict[str, str], step: str
         )
         assert result.stderr.splitlines()[-1] == expected_error
     assert_preserved(env, original)
+
+
+def test_directory_at_target_is_not_entered(installer_env: dict[str, str]) -> None:
+    env = installer_env
+    target = Path(env["TOOLS_BIN"]) / "herdr"
+    target.mkdir(parents=True)
+    (target / "keep").write_text("keep\n", encoding="utf-8")
+    result = run_command([str(SCRIPT)], env)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.splitlines()[-1] == (
+        f"mv: cannot overwrite directory '{target}' with non-directory"
+    )
+    assert [path.name for path in target.iterdir()] == ["keep"]
+    assert not list(target.parent.glob(".herdr.*"))
+
+
+def test_backslash_in_tools_bin_still_matches_checksum(
+    installer_env: dict[str, str], tmp_path: Path
+) -> None:
+    env = installer_env
+    # sha256sum escapes such file names and prefixes the hash with a backslash.
+    env["TOOLS_BIN"] = str(tmp_path / "tools\\volume" / "bin")
+    result = run_command([str(SCRIPT)], env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == "herdr 0.9.3\n"
+    assert (Path(env["TOOLS_BIN"]) / "herdr").read_bytes() == Path(
+        env["DJINN_TEST_PAYLOAD"]
+    ).read_bytes()
 
 
 @pytest.mark.parametrize(

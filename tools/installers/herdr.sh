@@ -58,7 +58,8 @@ download_url="https://github.com/herdrdev/herdr/releases/download/v${version}/he
 echo "herdr: Installing version $version" >&2
 curl -fsSL "${CURL_GUARDS[@]}" "$download_url" -o "$staged"
 
-if ! actual=$(sha256sum "$staged"); then
+# Hash stdin: sha256sum escapes file names that contain a backslash or newline.
+if ! actual=$(sha256sum < "$staged"); then
     echo "herdr: Failed to compute SHA-256 for release '$tag', skipping" >&2
     exit 1
 fi
@@ -73,7 +74,8 @@ if ! staged_version=$("$staged" --version </dev/null) || [[ "$staged_version" !=
     echo "herdr: Invalid binary version (expected 'herdr $version', got '$staged_version'), skipping" >&2
     exit 1
 fi
-mv "$staged" "$INSTALL_DIR/herdr"
+# -T: never move into a directory that happens to sit at the target path.
+mv -T "$staged" "$INSTALL_DIR/herdr"
 trap - EXIT
 
 echo "$staged_version"
