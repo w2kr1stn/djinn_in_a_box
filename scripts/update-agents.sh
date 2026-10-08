@@ -1,12 +1,20 @@
 #!/bin/bash
 # =============================================================================
-# Update CLI Agent Versions in Dockerfile
+# Resolve CLI Agent Versions
 # =============================================================================
-# Fetches latest versions from npm and updates the Dockerfile ARG defaults.
-# After running this script, rebuild the image with: djinn build
+# No arguments: bump upstream Dockerfile defaults in a maintainer checkout.
+# --print: resolve ARG=x.y.z lines read-only for djinn update (diagnostics on stderr).
 # =============================================================================
 
 set -euo pipefail
+
+print_mode=false
+if (( $# == 1 )) && [[ "$1" == "--print" ]]; then
+    print_mode=true
+elif (( $# != 0 )); then
+    printf 'Usage: %s [--print]\n' "$0" >&2
+    exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE="$SCRIPT_DIR/../Dockerfile"
@@ -58,32 +66,57 @@ declare -A PACKAGES=(
     ["OPENCODE_VERSION"]="opencode-ai"
 )
 
-printf '%bFetching latest CLI agent versions...%b\n' \
-    "$(color_start "$UI_COLOR_INFO")" \
-    "$(color_reset)"
-echo ""
+if [[ "$print_mode" == "false" ]]; then
+    printf '%bFetching latest CLI agent versions...%b\n' \
+        "$(color_start "$UI_COLOR_INFO")" \
+        "$(color_reset)"
+    echo ""
+fi
 
 # Track if any updates were made
 updates_made=false
+lookup_failed=false
+if [[ "$print_mode" == "true" ]]; then
+    exec 3>&2
+else
+    exec 3>/dev/null
+fi
 
 for arg_name in "${!PACKAGES[@]}"; do
     package="${PACKAGES[$arg_name]}"
 
     # Get current version from Dockerfile
-    current=$(grep -oP "ARG ${arg_name}=\K[0-9.]+" "$DOCKERFILE" 2>/dev/null || echo "unknown")
+    if [[ "$print_mode" == "false" ]]; then
+        current=$(grep -oP "ARG ${arg_name}=\K[0-9.]+" "$DOCKERFILE" 2>/dev/null || echo "unknown")
+    fi
 
     # Fetch latest version from npm
-    latest=$(npm view "$package" version 2>/dev/null || echo "error")
+    latest=$(npm view "$package" version 2>&3 || echo "error")
 
     if [[ "$latest" == "error" ]]; then
-        printf '  %b\n' "$(color_text "$UI_COLOR_ERROR" "$package: Failed to fetch version")"
+        if [[ "$print_mode" == "true" ]]; then
+            printf '%s: Failed to fetch version\n' "$package" >&2
+            lookup_failed=true
+        else
+            printf '  %b\n' "$(color_text "$UI_COLOR_ERROR" "$package: Failed to fetch version")"
+        fi
         continue
     fi
 
     # Validate semver format to prevent sed injection
     if ! [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        printf '  %b\n' \
-            "$(color_text "$UI_COLOR_ERROR" "$package: Invalid version format '${latest}', skipping")"
+        if [[ "$print_mode" == "true" ]]; then
+            printf '%s: Invalid version format %s\n' "$package" "$latest" >&2
+            lookup_failed=true
+        else
+            printf '  %b\n' \
+                "$(color_text "$UI_COLOR_ERROR" "$package: Invalid version format '${latest}', skipping")"
+        fi
+        continue
+    fi
+
+    if [[ "$print_mode" == "true" ]]; then
+        printf '%s=%s\n' "$arg_name" "$latest"
         continue
     fi
 
@@ -102,6 +135,13 @@ for arg_name in "${!PACKAGES[@]}"; do
         updates_made=true
     fi
 done
+
+if [[ "$print_mode" == "true" ]]; then
+    if [[ "$lookup_failed" == "true" ]]; then
+        exit 1
+    fi
+    exit 0
+fi
 
 echo ""
 

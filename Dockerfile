@@ -97,7 +97,8 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$HOME/
 ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
-# CLI Agent versions - update with: ./scripts/update-agents.sh
+# Upstream CLI agent defaults - maintainers bump with: ./scripts/update-agents.sh
+# djinn update records local versions; builds pass higher versions as ARG overrides.
 ARG CLAUDE_CODE_VERSION=2.1.288
 ARG CODEX_VERSION=0.160.0
 ARG OPENCODE_VERSION=1.18.34
@@ -110,9 +111,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
 # Retry config is inline (build-scoped, not a persistent ENV) so it is also
 # inherited by the npm subprocess opencode's postinstall spawns to fetch its
 # platform binary — that postinstall hard-exits 1 on a failed fetch, and this
-# layer re-runs on every `djinn update` (ARG bump). Hardens the unattended
+# layer re-runs when effective Codex/OpenCode ARG versions change. Hardens the unattended
 # build against transient registry/CDN hiccups without slowing runtime npm.
-# The guard shares this RUN on purpose: this is the layer a `djinn update` bump
+# The guard shares this RUN on purpose: this is the layer an effective ARG bump
 # invalidates while everything above stays cached, and the layer whose failure mode is
 # pathological -- six retries per package with a backoff, measured at 70 minutes
 # before npm gave up. In the same instruction it cannot be cached away from the

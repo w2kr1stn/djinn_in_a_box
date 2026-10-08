@@ -50,6 +50,13 @@ def _forbid_real_docker(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_agent_versions(monkeypatch, tmp_path):
+    from djinn_in_a_box.core import paths
+
+    monkeypatch.setattr(paths, "AGENT_VERSIONS_FILE", tmp_path / "host-config/agent-versions.toml")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hostctl_state(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "hostctl-state-home"))
 

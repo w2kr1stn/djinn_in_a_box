@@ -15,6 +15,9 @@ CONFIG_DIR: Path = Path.home() / ".config" / "djinn_in_a_box"
 CONFIG_FILE: Path = CONFIG_DIR / "config.toml"
 """Main configuration file path."""
 
+AGENT_VERSIONS_FILE: Path = CONFIG_DIR / "agent-versions.toml"
+"""Host-local CLI agent versions for image builds."""
+
 AGENTS_FILE: Path = CONFIG_DIR / "agents.toml"
 """Agent definitions file path (optional user override)."""
 

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +24,15 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, host_runtime, hostctl, paths
+from djinn_in_a_box.core.agent_versions import (
+    KNOWN_AGENT_ARGS,
+    AgentVersionError,
+    bake_overrides,
+    effective_version,
+    load_versions,
+    save_versions,
+)
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
@@ -136,11 +148,16 @@ def build(
     Must be done before first use and after Dockerfile changes.
     """
     config = load_config()
+    try:
+        agent_args = bake_overrides(get_project_root(), load_versions())
+    except AgentVersionError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from None
     preflight(config)
     _sync_build_files(config)
     info("Building djinn-in-a-box image...")
 
-    result = compose_build(config, no_cache=no_cache)
+    result = compose_build(config, no_cache=no_cache, agent_args=agent_args)
     if result.success:
         info("Building hostctl supervisor...")
         result = hostctl.build_supervisor(no_cache=no_cache)
@@ -812,8 +829,25 @@ def clean_all(
         success("Cleanup complete.")
 
 
+UPDATE_TIMEOUT_SECONDS = 120
+
+
+def _parse_agent_versions(stdout: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for line in stdout.splitlines():
+        match = re.fullmatch(r"([A-Z_]+)=([0-9]+\.[0-9]+\.[0-9]+)", line)
+        if match is None or match[1] not in KNOWN_AGENT_ARGS or match[1] in versions:
+            raise AgentVersionError(f"Invalid update script output: {line!r}")
+        versions[match[1]] = match[2]
+    if versions.keys() != KNOWN_AGENT_ARGS:
+        raise AgentVersionError(
+            "Incomplete update script output: expected all three agent versions"
+        )
+    return versions
+
+
 def update() -> None:
-    """Update CLI agent versions in Dockerfile."""
+    """Record latest CLI agent versions locally for the next build."""
     info("Updating CLI agent versions...")
     blank()
 
@@ -824,18 +858,49 @@ def update() -> None:
         error(f"Update script not found: {script_path}")
         raise typer.Exit(1)
 
-    result = subprocess.run(
-        [str(script_path)],
-        cwd=project_root,
-        check=False,
-    )
-
-    if result.returncode != 0:
-        error(f"Update failed with exit code {result.returncode}")
-        raise typer.Exit(result.returncode)
+    try:
+        previous = load_versions()
+        before = {
+            arg: effective_version(project_root, arg, previous) for arg in sorted(KNOWN_AGENT_ARGS)
+        }
+        proc = subprocess.Popen(
+            [str(script_path), "--print"],
+            cwd=project_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=UPDATE_TIMEOUT_SECONDS)
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise
+        if proc.returncode != 0:
+            error(f"Update failed with exit code {proc.returncode}")
+            if stderr:
+                print_captured(stderr)
+            raise typer.Exit(1)
+        resolved = _parse_agent_versions(stdout)
+        after = {
+            arg: effective_version(project_root, arg, resolved) for arg in sorted(KNOWN_AGENT_ARGS)
+        }
+        save_versions(resolved)
+    except subprocess.TimeoutExpired:
+        error(f"Update timed out after {UPDATE_TIMEOUT_SECONDS} seconds; no versions were saved")
+        raise typer.Exit(1) from None
+    except (AgentVersionError, OSError, UnicodeError) as exc:
+        error(str(exc))
+        raise typer.Exit(1) from None
 
     blank()
-    success("Update completed successfully")
+    for arg in sorted(KNOWN_AGENT_ARGS):
+        info(f"{arg}: {before[arg]} -> {after[arg]}")
+    success(f"Agent versions saved to {paths.AGENT_VERSIONS_FILE}")
+    info("Run 'djinn build' to install these versions in the next image.")
 
 
 def enter() -> None:

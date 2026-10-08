@@ -1083,17 +1083,34 @@ setup first. The agent hands host-only build/sync/recreation commands back to yo
 `--rm` removes the assistant session container; approved file edits and Docker
 objects created during repairs persist.
 
-Update the pinned agent versions in the Dockerfile through the project script:
+Resolve the latest Claude Code, Codex and OpenCode versions from npm:
 
 ```sh
 djinn update
 ```
 
-Rebuild afterward:
+`djinn update` needs no `djinn init` and writes the versions atomically to
+`~/.config/djinn_in_a_box/agent-versions.toml`. It writes nothing in the installed
+checkout. If any lookup fails, times out or returns an invalid version, the
+previous record stays unchanged and the command exits with an error. npm's own
+cache and logs follow the operator's npm configuration (default `~/.npm`).
+
+Each image build uses the numerically higher `x.y.z` version from the record or
+the upstream Dockerfile default. A later pull with newer defaults therefore
+cannot downgrade an agent. Dev builds pass only higher local versions as build
+args; the assistant uses the same policy for its selected agent. An unreadable
+or invalid record stops either build with an error naming the file. Delete the
+record to return to upstream defaults.
+
+Rebuild afterward to install the resolved versions:
 
 ```sh
 djinn build
 ```
+
+Maintainers bump upstream defaults with `scripts/update-agents.sh` in a
+development checkout and submit the Dockerfile changes through a pull request.
+The script's `--print` mode resolves versions without editing files.
 
 ## Typical Workflows
 
