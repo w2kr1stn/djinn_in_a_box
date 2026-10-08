@@ -668,6 +668,8 @@ def config_show(
                 detail = f"bind source={mount.source} target={mount.target}"
                 if mount.marker is not None:
                     detail += f" marker={mount.marker}"
+                if mount.read_only:
+                    detail += " read_only=true"
             else:
                 detail = f"volume target={mount.target} backup={mount.backup}"
             console.print(Text(f"  {name}: {detail}"))

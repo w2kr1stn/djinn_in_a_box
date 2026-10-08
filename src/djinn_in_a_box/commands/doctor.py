@@ -699,9 +699,16 @@ def declaration_checks(
         config, docker_core.ContainerOptions(), runtime_targets=targets, caller_env=None,
         declarations=declarations,
     )
+    read_only_binds = {
+        f"mounts.{mount.name}" for mount in resolved.mounts
+        if mount.kind == "bind" and mount.read_only
+    }
     checks.extend(Check(
         diagnostic.identity, Status.FAIL if diagnostic.error else Status.PASS,
-        diagnostic.error or "valid declaration",
+        diagnostic.error or (
+            "valid declaration (read-only)" if diagnostic.identity in read_only_binds
+            else "valid declaration"
+        ),
         "Fix config.toml or the declared host path." if diagnostic.error else "",
     ) for diagnostic in resolved.diagnostics)
     return checks

@@ -846,6 +846,7 @@ class ResolvedDeclaration:
     kind: Literal["bind", "volume"]
     source: str
     target: Path
+    read_only: bool = False
 
 
 @dataclass(slots=True)
@@ -871,6 +872,8 @@ class ResolvedDeclarations:
             }
             if mount.kind == "bind":
                 entry["bind"] = {"create_host_path": False}
+                if mount.read_only:
+                    entry["read_only"] = True
             else:
                 volume_map[mount.source] = {"name": mount.source}
                 targets.append(str(mount.target))
@@ -1021,7 +1024,10 @@ def resolve_declared_entries(
             else:
                 source = _declared_bind_source(mount)
                 kind = "bind"
-            resolved.append(ResolvedDeclaration(name, kind, source, target))
+            resolved.append(ResolvedDeclaration(
+                name, kind, source, target,
+                mount.read_only if isinstance(mount, BindDeclaration) else False,
+            ))
         except (ValueError, MountSpecificationError) as exc:
             errors[identity] = declaration_error("mounts", name, str(exc))
 
@@ -1403,7 +1409,7 @@ def _prepare_workspace(
             for m in mounts
         ),
         *(
-            agent_docker.WorkspaceMount(m.kind, m.source, str(m.target))
+            agent_docker.WorkspaceMount(m.kind, m.source, str(m.target), m.read_only)
             for m in declarations.mounts
         ),
     ]

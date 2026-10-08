@@ -16,7 +16,7 @@ from pathlib import Path
 import tomli_w
 from pydantic import ValidationError
 
-from djinn_in_a_box.config.declarations import inspect_declarations
+from djinn_in_a_box.config.declarations import BindDeclaration, inspect_declarations
 from djinn_in_a_box.config.defaults import DEFAULT_AGENTS
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
@@ -164,6 +164,9 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
 
     # Transform AppConfig to TOML structure: [general] wraps top-level fields
     data = config.model_dump(mode="json", exclude_none=True)
+    for name, mount in config.mounts.items():
+        if isinstance(mount, BindDeclaration) and not mount.read_only:
+            data["mounts"][name].pop("read_only")
     toml_data = {
         "general": {
             "code_dir": data.pop("code_dir"),

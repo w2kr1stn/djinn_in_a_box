@@ -10,7 +10,7 @@ from djinn_in_a_box.core import docker
 from djinn_in_a_box.core.exceptions import ConfigValidationError
 
 
-@pytest.mark.parametrize("case", ["runtime", "schema", "optional-context", "syntax"])
+@pytest.mark.parametrize("case", ["runtime", "schema", "optional-context", "syntax", "mode"])
 def test_one_row_per_declaration(tmp_path, monkeypatch, case):
     path = tmp_path / "config.toml"
     path.write_text(f'''[general]
@@ -25,11 +25,19 @@ backup="none"
 [mounts.good]
 source="{tmp_path}"
 target="/good"
+read_only=true
+[mounts.rw]
+source="{tmp_path}"
+target="/rw"
 [environment]
 CDP_HOST="literal"
 ''')
     if case == "schema":
         path.write_text(path.read_text() + 'DOCKER_HOST="reserved"\nBAD=123\n')
+    elif case == "mode":
+        path.write_text(path.read_text().replace(
+            'target="/archive"', 'target="/archive"\nread_only="true"',
+        ))
     elif case == "syntax":
         path.write_text(path.read_text() + "[\n")
     monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", path)
@@ -75,7 +83,9 @@ CDP_HOST="literal"
     entries = {
         row.name: row for row in collected if row.name.startswith(("mounts.", "environment."))
     }
-    expected = {"mounts.archive", "mounts.worker", "mounts.good", "environment.CDP_HOST"}
+    expected = {
+        "mounts.archive", "mounts.worker", "mounts.good", "mounts.rw", "environment.CDP_HOST",
+    }
     if case == "schema":
         expected |= {"environment.DOCKER_HOST", "environment.BAD"}
     elif case == "syntax":
@@ -86,11 +96,19 @@ CDP_HOST="literal"
         assert entries["mounts.archive"].status is doctor_module.Status.FAIL
         assert (
             "archive" in entries["mounts.archive"].detail
-            and "does not exist" in entries["mounts.archive"].detail
+            and ("value must be a boolean" if case == "mode" else "does not exist")
+            in entries["mounts.archive"].detail
         )
         assert entries["mounts.worker"].status is doctor_module.Status.PASS
         assert entries["mounts.good"].status is doctor_module.Status.PASS
+        assert entries["mounts.good"].detail == "valid declaration (read-only)"
+        assert entries["mounts.rw"].detail == "valid declaration"
+        assert entries["mounts.worker"].detail == "valid declaration"
         assert entries["environment.CDP_HOST"].status is doctor_module.Status.PASS
+    if case == "mode":
+        assert entries["mounts.archive"].detail == (
+            "Declared mount 'archive': invalid read_only: value must be a boolean."
+        )
     if case == "schema":
         assert entries["environment.DOCKER_HOST"].status is doctor_module.Status.FAIL
         assert entries["environment.BAD"].status is doctor_module.Status.FAIL

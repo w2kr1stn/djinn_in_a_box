@@ -13,6 +13,8 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- Optional bind-only `read_only` declarations, delivered to dev and the agent
+  Docker workspace with matching modes and shown by `config show` and `doctor`.
 - Rootless agent Docker runtime for `--docker`, with generation-owned Unix endpoint,
   matching workspace mounts, persistent cache, resource limits and firewall gating.
 - Checksum-verified Buildx 0.37.2 in the dev image.

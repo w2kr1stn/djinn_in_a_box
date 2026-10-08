@@ -176,14 +176,18 @@ def test_profile_refuses_untrusted_delivery(evidence, section, key, value):
 
 
 @pytest.mark.parametrize("creator", ["foreground", "headless", "detached"])
-def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator):
+@pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])
+def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, read_only):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for name in ("code", "here", "ro", "declared"):
         (tmp_path / name).mkdir()
     config = AppConfig(
         code_dir=tmp_path / "code",
         mounts={
-            "bind": {"source": str(tmp_path / "declared"), "target": "/declared"},
+            "bind": {
+                "source": str(tmp_path / "declared"), "target": "/declared",
+                **({"read_only": read_only} if read_only is not None else {}),
+            },
             "data": {"volume": True, "target": "/data", "backup": "cache"},
         },
     )
@@ -227,7 +231,7 @@ def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator):
         (str(tmp_path / "home/.djinn/sessions"), "/home/dev/sessions", False),
         (str(tmp_path / "here"), "/home/dev/workspace", False),
         (str(tmp_path / "ro"), "/readonly", True),
-        (str(tmp_path / "declared"), "/declared", False),
+        (str(tmp_path / "declared"), "/declared", read_only is True),
         ("djinn-data", "/data", False),
     }
     assert all(
@@ -478,6 +482,27 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
     endpoint = json.loads((fixtures / "agent_docker_endpoint.json").read_text())[0]
     resolved = json.loads((fixtures / "agent_docker_compose.json").read_text())
     resolved["services"]["agent-docker"]["environment"]["DJINN_FIREWALL_GATE"] = "false"
+    declared = AppConfig(code_dir=tmp_path, mounts={
+        "ro": {"source": str(tmp_path), "target": "/declared-ro", "read_only": True},
+    })
+    declarations = docker.resolve_declared_entries(
+        declared, docker.ContainerOptions(), runtime_targets=[], caller_env=None,
+    )
+    declarations.require_valid()
+    declared_fragment = declarations.compose_fragment()
+    docker._prepare_workspace(
+        declared, docker.ContainerOptions(docker_mode=docker.DockerMode.AGENT),
+        declarations, (), declared_fragment,
+    )
+    ro = next(
+        row for row in declared_fragment["services"]["agent-docker"]["volumes"]
+        if row["target"] == "/declared-ro"
+    )
+    resolved["services"]["agent-docker"]["volumes"].append(ro)
+    actual["Mounts"].append({
+        "Type": "bind", "Source": str(tmp_path), "Destination": "/declared-ro",
+        "RW": False, "Propagation": "rprivate",
+    })
     generation = actual["Config"]["Labels"][host_runtime.GENERATION_LABEL]
     if failure == "literal-dollar":
         binding = next(
@@ -573,7 +598,10 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
         inventory[actual["Id"]] = actual
         return docker.RunResult(
             1 if failure == "partial" else 0,
-            stderr="creation failed" if failure == "partial" else "",
+            stderr=(
+                "Error response from daemon: failed to create task for container: "
+                "failed to create shim task: OCI runtime create failed"
+            ) if failure == "partial" else "",
         )
 
     def command(binary, *args, **kwargs):
@@ -611,6 +639,10 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
             assert delivered["target"] == agent_docker.DEV_ENDPOINT
             assert endpoint["Name"] == agent_docker.ENDPOINT_PREFIX + generation
             assert manifest["image_id"] == inventory[actual["Id"]]["Image"]
+            persisted = host_runtime.read_state(root)["agent_docker"]
+            assert [row for row in persisted["mounts"] if row[2] == "/declared-ro"] == [
+                ["bind", str(tmp_path), "/declared-ro", False],
+            ]
         else:
             with pytest.raises(RuntimeError):
                 docker._prepare_agent_docker(

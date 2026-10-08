@@ -527,6 +527,37 @@ class TestConfigSetCommand:
         updated = load_config_file(config_file)
         assert updated.resources.cpu_limit == 2
 
+    def test_config_set_preserves_declared_modes(self, tmp_path, monkeypatch, declared_app_config):
+        import tomli_w
+
+        path = tmp_path / "config.toml"
+        source = str(tmp_path / "external")
+        mounts = {
+            "ro": {"source": source, "target": "/ro", "marker": ".drive-ready", "read_only": True},
+            "rw": {"source": source, "target": "/rw", "read_only": False},
+            "default": {"source": source, "target": "/default"},
+            "worker": {"volume": True, "target": "/worker", "backup": "none"},
+        }
+        save_config_file(declared_app_config, path)
+        raw = tomllib.loads(path.read_text())
+        raw["mounts"] = mounts
+        path.write_text(tomli_w.dumps(raw))
+        monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", path)
+        result = runner.invoke(app, ["config", "set", "resources.cpu_limit", "2"])
+        assert result.exit_code == 0, result.output
+        reloaded = load_config_file(path)
+        assert reloaded.resources.cpu_limit == 2
+        assert reloaded.mounts["ro"].read_only is True
+        assert reloaded.mounts["rw"].read_only is False
+        assert reloaded.mounts["default"].read_only is False
+        assert tomllib.loads(path.read_text())["mounts"] == {
+            "ro": {"source": source, "target": "/ro", "marker": ".drive-ready", "read_only": True},
+            "rw": {"source": source, "target": "/rw"},
+            "default": {"source": source, "target": "/default"},
+            "worker": {"volume": True, "target": "/worker", "backup": "none"},
+        }
+        assert "read_only = false" not in path.read_text()
+
     def test_config_set_round_trips_source_under_exclusive_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -965,7 +996,11 @@ def test_show_declarations(tmp_path, monkeypatch, format_name):
     config = AppConfig(
         code_dir=tmp_path,
         mounts={
-            "archive.disk": {"source": "/offline", "target": "/archive", "marker": ".ready"},
+            "archive.disk": {
+                "source": "/offline", "target": "/archive", "marker": ".ready", "read_only": True,
+            },
+            "rw": {"source": "/offline2", "target": "/rw", "read_only": False},
+            "default": {"source": "/offline3", "target": "/default"},
             "worker": {"volume": True, "target": "/worker", "backup": "none"},
         },
         environment={
@@ -978,9 +1013,23 @@ def test_show_declarations(tmp_path, monkeypatch, format_name):
     assert result.exit_code == 0, result.output
     if format_name == "json":
         data = json.loads(result.output)
-        assert data["mounts"] == config.model_dump(mode="json")["mounts"]
+        assert data["mounts"] == {
+            "archive.disk": {
+                "source": "/offline", "target": "/archive", "marker": ".ready", "read_only": True,
+            },
+            "rw": {"source": "/offline2", "target": "/rw", "marker": None, "read_only": False},
+            "default": {
+                "source": "/offline3", "target": "/default", "marker": None, "read_only": False,
+            },
+            "worker": {"volume": True, "target": "/worker", "backup": "none"},
+        }
         assert data["environment"] == config.environment
     else:
+        assert "marker=.ready read_only=true" in " ".join(result.output.split())
+        assert result.output.count("read_only=true") == 1
+        assert "read_only=false" not in result.output
+        assert "rw: bind source=/offline2 target=/rw" in result.output
+        assert "default: bind source=/offline3 target=/default" in result.output
         for value in (
             "Mounts",
             "Environment",
@@ -997,7 +1046,7 @@ def test_show_declarations(tmp_path, monkeypatch, format_name):
             assert value in result.output
 
 
-@pytest.mark.parametrize("case", ["offline", "schema", "environment"])
+@pytest.mark.parametrize("case", ["offline", "readonly", "schema", "environment", "mode"])
 def test_edit_validates_declarations(tmp_path, monkeypatch, config_edit_project, case):
     path = tmp_path / "config.toml"
     save_config_file(AppConfig(code_dir=tmp_path), path)
@@ -1008,7 +1057,11 @@ def test_edit_validates_declarations(tmp_path, monkeypatch, config_edit_project,
 
     def editor(*args, **kwargs):
         suffix = '\n[mounts.archive]\nsource="/offline"\ntarget="/archive"\n'
-        if case == "schema":
+        if case == "readonly":
+            suffix += 'read_only=true\n'
+        elif case == "mode":
+            suffix += 'read_only="true"\n'
+        elif case == "schema":
             suffix += 'backup="data"\n'
         elif case == "environment":
             suffix += "\n[environment]\nCDP_HOST=123\n"
@@ -1019,7 +1072,13 @@ def test_edit_validates_declarations(tmp_path, monkeypatch, config_edit_project,
     monkeypatch.setattr("djinn_in_a_box.commands.config.subprocess.run", editor)
     result = runner.invoke(app, ["config", "edit"])
     assert result.exit_code == 0, result.output
-    assert ("Configuration problem" in result.output) is (case != "offline")
+    assert ("Configuration problem" in result.output) is (case not in ("offline", "readonly"))
+    if case == "readonly":
+        assert load_config_file(path).mounts["archive"].read_only is True
+    elif case == "mode":
+        assert (
+            "Declared mount 'archive': invalid read_only: value must be a boolean."
+        ) in " ".join(result.output.split())
     assert not (tmp_path / "offline").exists()
 
 
