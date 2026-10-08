@@ -817,6 +817,8 @@ variables are reserved against caller/declaration overrides.
 The host starts an empty `ssh-agent -D`, loads deduplicated explicit key paths with
 one `ssh-add` call on the host terminal; `ssh-add` tries the last entered
 passphrase on each following key, so keys that share a passphrase prompt once.
+Off a terminal, `ssh-add` runs in its own session with stdin from `/dev/null`, so
+piped input cannot unlock a key and encrypted keys refuse immediately.
 The host verifies the complete public blob set. The exported protocol filter
 permits list/sign only for that set; it rejects
 add/remove, lock, provider and extension requests. Host UID 1000 matches the image;
