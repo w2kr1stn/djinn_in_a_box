@@ -31,6 +31,7 @@
 # rust               # Rust toolchain via rustup (cargo, rustc, rustfmt, clippy)
 # just               # just command runner (justfiles)
 # pnpm               # pnpm via Corepack (follows a project's packageManager pin)
+# herdr              # herdr terminal workspace manager for AI coding agents
 
 # --- Browser Automation ---
 # playwright         # Playwright browser automation
