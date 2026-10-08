@@ -1,0 +1,87 @@
+[
+    {
+        "Architecture": "amd64",
+        "Author": "",
+        "Comment": "buildkit.dockerfile.v0",
+        "Config": {
+            "AttachStderr": false,
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "Cmd": null,
+            "Domainname": "",
+            "Entrypoint": [
+                "dockerd-entrypoint.sh"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "DOCKER_VERSION=29.8.2",
+                "DOCKER_BUILDX_VERSION=0.37.2",
+                "DOCKER_COMPOSE_VERSION=5.5.1",
+                "DOCKER_TLS_CERTDIR=/certs",
+                "DIND_COMMIT=8d9e3502aba39127e4d12196dae16d306f76993d"
+            ],
+            "ExposedPorts": {
+                "2375/tcp": {},
+                "2376/tcp": {}
+            },
+            "Hostname": "",
+            "Image": "",
+            "Labels": null,
+            "OnBuild": null,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Tty": false,
+            "User": "rootless",
+            "Volumes": {
+                "/home/rootless/.local/share/docker": {},
+                "/var/lib/docker": {}
+            },
+            "WorkingDir": "/"
+        },
+        "Created": "2026-10-01T01:09:52.253526793Z",
+        "DockerVersion": "",
+        "GraphDriver": {
+            "Data": null,
+            "Name": "overlayfs"
+        },
+        "Id": "sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0",
+        "Metadata": {
+            "LastTagTime": "2026-10-06T19:23:58.346243068Z"
+        },
+        "Os": "linux",
+        "Parent": "",
+        "RepoDigests": [
+            "docker@sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0"
+        ],
+        "RepoTags": [
+            "docker@sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+                "sha256:22955e1c58483c7bd55a7c896c90ae0080c62cf3f64245b0990a9a6ee06e0873",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:0c7079074b388c794d0798ddb0ae7eb3a7a21c343a87dc3a0d1e50a2f69af8ad",
+                "sha256:af24918c6f27d1e8c82ecb868c33dc725b2c4d2097d500b9b961532b4f30b264",
+                "sha256:170a9364c53a9940acb4c17c8cccda1f7eba9ef11cecf88761ea67b6c7e0843e",
+                "sha256:4bf8d2e9badcaec9013c2ad2f3167c16acc14daa12e6380f9808216b31bab05f",
+                "sha256:867e1dce7d26654058b5ecefcbd32c6022572bf111f4aaf6b5dc96872a88a683",
+                "sha256:89d0abc137ecb31ea23b280d5eb5ee6286f0563ca1e6c3341212866ab1fd6822",
+                "sha256:b64d8805724e34b75f75e83d166e0563b0dfdb85e1522946c5d3206c2e51224c",
+                "sha256:12cb03e16281bdd244b8d51fcbceacb6e627d226e2724fbdce7a37e0011b71fa",
+                "sha256:5ec4ccff9e1ba8b5dd0875516f04fc1bcf5a46d85f64d5266588e2a1ae351364",
+                "sha256:f6228fcc8485995ca6a2dea52c2f19b878f89a614c2d674587e2a771ab6b2277",
+                "sha256:9669ad2ca8d8e3d78b910b7e4393d4f8fa921b3c818f95f8d57856452108e1c6",
+                "sha256:ec19f68e0dca15a7d894e4feb8b21703d58b31bfd7c9025c17f0c9cfff74b5ca",
+                "sha256:2f8b52f2df1fef0d645d9a378081ddacce0fa2b200688a8d5f10d2f973f3888e",
+                "sha256:cbaac68c3a3e7a88d91647dcebf29685494dc532a87e03386d90a61bee12165c",
+                "sha256:31c50372965dbbda7fb7c5262bd68a95b752ec07ed412d2883c79af714a0ae67",
+                "sha256:24841ce0eb92097e6ed6429a4db222255fb8497f8ebe208bd0af695dfbc15fcf",
+                "sha256:dad689df0a5f5e9cdbc454ba02f0cbd22b8ff81572afce69b9c562c68673a050",
+                "sha256:009878d81103e365e00ddbe23e9dabd4660c8a0eeed38f7d8b67a4df4c22219b"
+            ],
+            "Type": "layers"
+        },
+        "Size": 560091915
+    }
+]

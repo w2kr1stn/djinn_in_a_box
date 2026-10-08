@@ -1,0 +1,64 @@
+{
+  "image": "docker:29-dind-rootless@sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0",
+  "image_id": "sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0",
+  "entrypoint": [
+    "/bin/sh",
+    "-ec",
+    "if [ \"${DJINN_FIREWALL_GATE}\" = true ]; then\n  while [ ! -f /home/rootless/.djinn-docker/firewall-ready ]; do sleep 0.1; done\n  rm /home/rootless/.djinn-docker/firewall-ready\nfi\nmkdir -p /home/rootless/.djinn-docker/socket\nexec /usr/local/bin/dockerd-entrypoint.sh \"$@\"\n",
+    "djinn-agent-docker"
+  ],
+  "name": "djinn-test-agent-docker",
+  "network": "djinn-test-network",
+  "endpoint_volume": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+  "dev_image_id": "sha256:7ed14e27fdd3b8dfd27a4d051da7e0edd3c647d2b41c7767363774878947fe40",
+  "firewall": false,
+  "mounts": [
+    [
+      "bind",
+      "/tmp/djinn-test/code",
+      "/home/dev/projects",
+      true
+    ],
+    [
+      "bind",
+      "/tmp/djinn-test/home/.djinn/sessions",
+      "/home/dev/sessions",
+      true
+    ],
+    [
+      "bind",
+      "/tmp/djinn-test/readonly",
+      "/fixture-readonly",
+      false
+    ],
+    [
+      "bind",
+      "/tmp/djinn-test/declared",
+      "/fixture-declared",
+      true
+    ],
+    [
+      "volume",
+      "djinn-test-inner-data",
+      "/fixture-volume",
+      true
+    ],
+    [
+      "volume",
+      "djinn-test-cache",
+      "/home/rootless/.local/share/docker",
+      true
+    ],
+    [
+      "volume",
+      "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+      "/home/rootless/.djinn-docker",
+      true
+    ]
+  ],
+  "limits": {
+    "NanoCpus": 2000000000,
+    "Memory": 3221225472,
+    "MemoryReservation": 536870912
+  }
+}

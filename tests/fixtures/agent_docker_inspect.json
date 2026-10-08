@@ -1,0 +1,402 @@
+{
+  "Id": "be556f8f163fca0aa0092b9e625d7485e7f56d1b31f4d362bbf7c9568351e1c7",
+  "Created": "2026-10-06T19:45:57.807327119Z",
+  "Path": "/bin/sh",
+  "Args": [
+    "-ec",
+    "if [ \"${DJINN_FIREWALL_GATE}\" = true ]; then\n  while [ ! -f /home/rootless/.djinn-docker/firewall-ready ]; do sleep 0.1; done\n  rm /home/rootless/.djinn-docker/firewall-ready\nfi\nmkdir -p /home/rootless/.djinn-docker/socket\nexec /usr/local/bin/dockerd-entrypoint.sh \"$@\"\n",
+    "djinn-agent-docker",
+    "dockerd",
+    "--host=unix:///home/rootless/.djinn-docker/socket/docker.sock",
+    "--config-file=/dev/null",
+    "--data-root=/home/rootless/.local/share/docker",
+    "--storage-driver=overlay2",
+    "--tls=false"
+  ],
+  "State": {
+    "Status": "running",
+    "Running": true,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 2769156,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-06T19:45:58.045808075Z",
+    "FinishedAt": "0001-01-01T00:00:00Z",
+    "Health": {
+      "Status": "healthy",
+      "FailingStreak": 0,
+      "Log": [
+        {
+          "Start": "2026-10-06T21:46:13.396076788+02:00",
+          "End": "2026-10-06T21:46:13.4289978+02:00",
+          "ExitCode": 0,
+          "Output": ""
+        },
+        {
+          "Start": "2026-10-06T21:46:15.429628905+02:00",
+          "End": "2026-10-06T21:46:15.462783829+02:00",
+          "ExitCode": 0,
+          "Output": ""
+        },
+        {
+          "Start": "2026-10-06T21:46:17.4641369+02:00",
+          "End": "2026-10-06T21:46:17.496354695+02:00",
+          "ExitCode": 0,
+          "Output": ""
+        },
+        {
+          "Start": "2026-10-06T21:46:19.496791147+02:00",
+          "End": "2026-10-06T21:46:19.527799551+02:00",
+          "ExitCode": 0,
+          "Output": ""
+        },
+        {
+          "Start": "2026-10-06T21:46:21.52895409+02:00",
+          "End": "2026-10-06T21:46:21.562347904+02:00",
+          "ExitCode": 0,
+          "Output": ""
+        }
+      ]
+    }
+  },
+  "Image": "sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0",
+  "ResolvConfPath": "/var/lib/docker/containers/be556f8f163fca0aa0092b9e625d7485e7f56d1b31f4d362bbf7c9568351e1c7/resolv.conf",
+  "HostnamePath": "/var/lib/docker/containers/be556f8f163fca0aa0092b9e625d7485e7f56d1b31f4d362bbf7c9568351e1c7/hostname",
+  "HostsPath": "/var/lib/docker/containers/be556f8f163fca0aa0092b9e625d7485e7f56d1b31f4d362bbf7c9568351e1c7/hosts",
+  "LogPath": "",
+  "Name": "/djinn-test-agent-docker",
+  "RestartCount": 0,
+  "Driver": "overlayfs",
+  "Platform": "linux",
+  "MountLabel": "",
+  "ProcessLabel": "",
+  "AppArmorProfile": "",
+  "ExecIDs": null,
+  "HostConfig": {
+    "Binds": [
+      "djinn-test-inner-data:/fixture-volume:rw",
+      "djinn-test-cache:/home/rootless/.local/share/docker:rw"
+    ],
+    "ContainerIDFile": "",
+    "LogConfig": {
+      "Type": "local",
+      "Config": {}
+    },
+    "NetworkMode": "djinn-test-network",
+    "PortBindings": {},
+    "RestartPolicy": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "AutoRemove": false,
+    "VolumeDriver": "",
+    "VolumesFrom": null,
+    "ConsoleSize": [
+      0,
+      0
+    ],
+    "CapAdd": null,
+    "CapDrop": null,
+    "CgroupnsMode": "private",
+    "Dns": null,
+    "DnsOptions": null,
+    "DnsSearch": null,
+    "ExtraHosts": [],
+    "GroupAdd": null,
+    "IpcMode": "private",
+    "Cgroup": "",
+    "Links": null,
+    "OomScoreAdj": 0,
+    "PidMode": "",
+    "Privileged": false,
+    "PublishAllPorts": false,
+    "ReadonlyRootfs": false,
+    "SecurityOpt": [
+      "seccomp=unconfined"
+    ],
+    "Tmpfs": {
+      "/var/lib/docker": ""
+    },
+    "UTSMode": "",
+    "UsernsMode": "",
+    "ShmSize": 67108864,
+    "Runtime": "runc",
+    "Isolation": "",
+    "CpuShares": 0,
+    "Memory": 3221225472,
+    "NanoCpus": 2000000000,
+    "CgroupParent": "",
+    "BlkioWeight": 0,
+    "BlkioWeightDevice": null,
+    "BlkioDeviceReadBps": null,
+    "BlkioDeviceWriteBps": null,
+    "BlkioDeviceReadIOps": null,
+    "BlkioDeviceWriteIOps": null,
+    "CpuPeriod": 0,
+    "CpuQuota": 0,
+    "CpuRealtimePeriod": 0,
+    "CpuRealtimeRuntime": 0,
+    "CpusetCpus": "",
+    "CpusetMems": "",
+    "Devices": [
+      {
+        "PathOnHost": "/dev/net/tun",
+        "PathInContainer": "/dev/net/tun",
+        "CgroupPermissions": "rwm"
+      }
+    ],
+    "DeviceCgroupRules": null,
+    "DeviceRequests": null,
+    "MemoryReservation": 536870912,
+    "MemorySwap": 6442450944,
+    "MemorySwappiness": null,
+    "OomKillDisable": null,
+    "PidsLimit": null,
+    "Ulimits": null,
+    "CpuCount": 0,
+    "CpuPercent": 0,
+    "IOMaximumIOps": 0,
+    "IOMaximumBandwidth": 0,
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/tmp/djinn-test/declared",
+        "Target": "/fixture-declared",
+        "BindOptions": {
+          "Propagation": "rprivate"
+        }
+      },
+      {
+        "Type": "volume",
+        "Source": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+        "Target": "/home/rootless/.djinn-docker",
+        "VolumeOptions": {
+          "NoCopy": true
+        }
+      },
+      {
+        "Type": "bind",
+        "Source": "/tmp/djinn-test/code",
+        "Target": "/home/dev/projects",
+        "BindOptions": {
+          "Propagation": "rprivate"
+        }
+      },
+      {
+        "Type": "bind",
+        "Source": "/tmp/djinn-test/home/.djinn/sessions",
+        "Target": "/home/dev/sessions",
+        "BindOptions": {
+          "Propagation": "rprivate"
+        }
+      },
+      {
+        "Type": "bind",
+        "Source": "/tmp/djinn-test/readonly",
+        "Target": "/fixture-readonly",
+        "ReadOnly": true,
+        "BindOptions": {
+          "Propagation": "rprivate"
+        }
+      }
+    ],
+    "MaskedPaths": [],
+    "ReadonlyPaths": []
+  },
+  "Storage": {
+    "RootFS": {
+      "Snapshot": {
+        "Name": "overlayfs"
+      }
+    }
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/tmp/djinn-test/declared",
+      "Destination": "/fixture-declared",
+      "Mode": "",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/tmp/djinn-test/readonly",
+      "Destination": "/fixture-readonly",
+      "Mode": "",
+      "RW": false,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "volume",
+      "Name": "djinn-test-inner-data",
+      "Source": "/var/lib/docker/volumes/djinn-test-inner-data/_data",
+      "Destination": "/fixture-volume",
+      "Driver": "local",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": ""
+    },
+    {
+      "Type": "bind",
+      "Source": "/tmp/djinn-test/code",
+      "Destination": "/home/dev/projects",
+      "Mode": "",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/tmp/djinn-test/home/.djinn/sessions",
+      "Destination": "/home/dev/sessions",
+      "Mode": "",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "volume",
+      "Name": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+      "Source": "/var/lib/docker/volumes/djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3/_data",
+      "Destination": "/home/rootless/.djinn-docker",
+      "Driver": "local",
+      "Mode": "z",
+      "RW": true,
+      "Propagation": ""
+    },
+    {
+      "Type": "volume",
+      "Name": "djinn-test-cache",
+      "Source": "/var/lib/docker/volumes/djinn-test-cache/_data",
+      "Destination": "/home/rootless/.local/share/docker",
+      "Driver": "local",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": ""
+    }
+  ],
+  "Config": {
+    "Hostname": "be556f8f163f",
+    "Domainname": "",
+    "User": "1000:1000",
+    "AttachStdin": false,
+    "AttachStdout": true,
+    "AttachStderr": true,
+    "ExposedPorts": {
+      "2375/tcp": {},
+      "2376/tcp": {}
+    },
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": [
+      "DJINN_FIREWALL_GATE=false",
+      "DOCKER_TLS_CERTDIR=",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "DOCKER_VERSION=29.8.2",
+      "DOCKER_BUILDX_VERSION=0.37.2",
+      "DOCKER_COMPOSE_VERSION=5.5.1",
+      "DIND_COMMIT=8d9e3502aba39127e4d12196dae16d306f76993d"
+    ],
+    "Cmd": [
+      "dockerd",
+      "--host=unix:///home/rootless/.djinn-docker/socket/docker.sock",
+      "--config-file=/dev/null",
+      "--data-root=/home/rootless/.local/share/docker",
+      "--storage-driver=overlay2",
+      "--tls=false"
+    ],
+    "Healthcheck": {
+      "Test": [
+        "CMD-SHELL",
+        "info=$(docker --host unix:///home/rootless/.djinn-docker/socket/docker.sock info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}') && case \"$info\" in 'overlay2 /home/rootless/.local/share/docker '*\\\"name=rootless\\\"*) exit 0;; *) exit 1;; esac"
+      ],
+      "Interval": 2000000000,
+      "Timeout": 5000000000,
+      "StartPeriod": 60000000000,
+      "Retries": 3
+    },
+    "Image": "sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0",
+    "Volumes": {
+      "/home/rootless/.local/share/docker": {},
+      "/var/lib/docker": {}
+    },
+    "WorkingDir": "/",
+    "Entrypoint": [
+      "/bin/sh",
+      "-ec",
+      "if [ \"${DJINN_FIREWALL_GATE}\" = true ]; then\n  while [ ! -f /home/rootless/.djinn-docker/firewall-ready ]; do sleep 0.1; done\n  rm /home/rootless/.djinn-docker/firewall-ready\nfi\nmkdir -p /home/rootless/.djinn-docker/socket\nexec /usr/local/bin/dockerd-entrypoint.sh \"$@\"\n",
+      "djinn-agent-docker"
+    ],
+    "Labels": {
+      "com.docker.compose.config-hash": "6b10cf5071610682f7c4dcc86fbc930ef8200a7ab29293c6f4fca210ce5515ca",
+      "com.docker.compose.container-number": "1",
+      "com.docker.compose.depends_on": "",
+      "com.docker.compose.image": "sha256:a8c74d29d1cc5fa424f2e56d8d56a0e1a75e4105a58d879c72d1c11d1141597f",
+      "com.docker.compose.oneoff": "False",
+      "com.docker.compose.project": "djinn-test",
+      "com.docker.compose.project.config_files": "/tmp/djinn-test/project/docker-compose.yml,/tmp/djinn-test/project/docker-compose.desktop.yml,/tmp/djinn-test/project/docker-compose.agent-docker.yml,/tmp/djinn-detach-pz3co1lm.yml",
+      "com.docker.compose.project.working_dir": "/tmp/djinn-test/project",
+      "com.docker.compose.service": "agent-docker",
+      "com.docker.compose.version": "5.6.0",
+      "djinn.git-agent.generation": "9acaf0657b764b17822c7f29b7c283a3"
+    },
+    "StopTimeout": 20
+  },
+  "NetworkSettings": {
+    "SandboxID": "9b0d197b85ce7170e63cc9c2442963477d1012dfbe56b14d07a52c9c787bbf7f",
+    "SandboxKey": "/var/run/docker/netns/9b0d197b85ce",
+    "Ports": {
+      "2375/tcp": null,
+      "2376/tcp": null
+    },
+    "Networks": {
+      "djinn-test-network": {
+        "IPAMConfig": {},
+        "Links": null,
+        "Aliases": [
+          "djinn-test-agent-docker",
+          "agent-docker",
+          "agent-docker"
+        ],
+        "DriverOpts": null,
+        "GwPriority": 0,
+        "NetworkID": "79d1fd69bdb600cf5992c662994751f6da95791acac1b7f254e06946f6501c26",
+        "EndpointID": "80f5dc0eed609d405f8d6176129bb2bc0fcc75cada9286ef4308d59daca8cb96",
+        "Gateway": "172.19.0.1",
+        "IPAddress": "172.19.0.2",
+        "MacAddress": "f2:d7:0b:46:4a:aa",
+        "IPPrefixLen": 16,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DNSNames": [
+          "djinn-test-agent-docker",
+          "agent-docker",
+          "be556f8f163f"
+        ]
+      }
+    }
+  },
+  "ImageManifestDescriptor": {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:a8c74d29d1cc5fa424f2e56d8d56a0e1a75e4105a58d879c72d1c11d1141597f",
+    "size": 4973,
+    "annotations": {
+      "com.docker.official-images.bashbrew.arch": "amd64",
+      "org.opencontainers.image.base.digest": "sha256:dcac6f16dc25ddec91e2d467605775b95a035ab884b94cb4c2cc7cbef6fd726d",
+      "org.opencontainers.image.base.name": "docker:29-dind",
+      "org.opencontainers.image.created": "2026-10-01T01:09:23Z",
+      "org.opencontainers.image.revision": "d576eb69d7bad654b934176e95644995aa85d8f8",
+      "org.opencontainers.image.source": "https://github.com/docker-library/docker.git#d576eb69d7bad654b934176e95644995aa85d8f8:29/dind-rootless",
+      "org.opencontainers.image.url": "https://hub.docker.com/_/docker",
+      "org.opencontainers.image.version": "29.8.2-dind-rootless"
+    },
+    "platform": {
+      "architecture": "amd64",
+      "os": "linux"
+    }
+  }
+}

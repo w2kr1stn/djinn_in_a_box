@@ -30,9 +30,10 @@ runner = CliRunner()
         ("default", {"djinn-opencode-data", "djinn-journal"},
          {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
         ("data", {"djinn-opencode-data", "djinn-journal"}, set()),
-        ("cache", {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch"}, set()),
+        ("cache", {"djinn-agent-docker", "djinn-uv-cache",
+                   "djinn-tools-cache", "djinn-scratch"}, set()),
         ("combined", {"djinn-opencode-data", "djinn-journal", "djinn-uv-cache",
-                      "djinn-tools-cache", "djinn-scratch"},
+                      "djinn-tools-cache", "djinn-scratch", "djinn-agent-docker"},
          {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
         ("credentials", set(), {"claude", "codex", "opencode", "gh", "age"}),
         ("repo-dotfiles", set(), {"repo-dotfiles"}),
@@ -56,7 +57,8 @@ def test_declared_backup_categories(
     original = {category: list(names) for category, names in VOLUME_CATEGORIES.items()}
     snapshot = volume_categories(config)
     assert snapshot == {
-        "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server", "djinn-scratch"],
+        "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
+                  "djinn-vscode-server", "djinn-scratch"],
         "data": ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-journal"],
         "none": ["djinn-desktop-dbus", "djinn-desktop-audio", "djinn-worker"],
     }

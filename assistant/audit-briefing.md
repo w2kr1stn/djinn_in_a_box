@@ -49,7 +49,6 @@ djinn config show
 djinn config sync
 djinn build
 djinn doctor
-djinn logs proxy --tail 100
 ```
 
 Recreation, when needed: hand back `djinn clean` followed by `djinn start` with

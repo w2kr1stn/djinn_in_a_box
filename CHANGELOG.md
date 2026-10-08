@@ -7,8 +7,15 @@ Versioning before and after the first stable release.
 
 ## [Unreleased]
 
+### Removed
+
+- Docker socket proxy service, Compose file and `djinn logs proxy` command.
+
 ### Added
 
+- Rootless agent Docker runtime for `--docker`, with generation-owned Unix endpoint,
+  matching workspace mounts, persistent cache, resource limits and firewall gating.
+- Checksum-verified Buildx 0.37.2 in the dev image.
 - Optional tools `rust` and `just` (`tools/installers/rust.sh`, `just.sh`). `rust`
   installs rustup into the tools cache volume (`RUSTUP_HOME` and `CARGO_HOME` under
   `~/.cache/djinn-tools`), so the toolchain, the crate registry cache and
@@ -33,7 +40,7 @@ Versioning before and after the first stable release.
   unset with `none`; other `config set` calls keep it.
 - `djinn start --detach` starts the container with `docker compose up -d` and
   returns, leaving no Compose client attached; attach afterwards with
-  `djinn enter`. The detached path keeps the `--docker` proxy running, refuses to
+  `djinn enter`. The detached path keeps the `--docker` companion running, refuses to
   start when a Djinn container is already running, and passes the dynamic mounts
   to Compose through a generated override file — including the `-e` half of the
   audio/D-Bus pairs, without which the sockets are mounted but `PULSE_SERVER`

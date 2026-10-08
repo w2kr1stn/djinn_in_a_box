@@ -242,8 +242,8 @@ override them. Reserved keys cover every Docker mode and everything the reposito
 ships into the image or runs at startup: Compose, Python, scripts, tools and
 Dockerfile exports or generated shell configuration. Keys set by mounted host
 shell startup files or third-party tools outside the repository are outside this
-reservation boundary. Declarations affect only the dev container, not builds,
-the proxy or host execution. No declared string may contain NUL.
+reservation boundary. Declared environment affects dev only. Declared mounts are also delivered to
+the agent daemon as workspace mounts; neither affects image builds or host execution. No declared string may contain NUL.
 
 `djinn config show` (text or JSON) includes declarations. `djinn config set`
 preserves their values but rewrites the file and loses TOML comments.
@@ -574,9 +574,9 @@ Common `start` options:
 
 | Option | Effect |
 | --- | --- |
-| `--docker`, `-d` | Adds `docker-compose.docker.yml`, starts the Docker socket proxy, and sets `DOCKER_HOST=tcp://docker-proxy:2375` inside the dev container |
+| `--docker`, `-d` | Starts the rootless `agent-docker` companion and sets a managed Unix `DOCKER_HOST` in dev |
 | `--docker-direct` | Adds `docker-compose.docker-direct.yml` and mounts `/var/run/docker.sock` directly into the dev container |
-| `--firewall`, `-f` | Sets `ENABLE_FIREWALL=true`; the entrypoint initializes the network firewall |
+| `--firewall`, `-f` | Applies the existing outbound rules in dev and, with `--docker`, before the companion daemon starts |
 | `--here` | Mounts the current directory as `/home/dev/workspace` and uses it as the working directory |
 | `--mount SRC[:DST[:ro\|rw]]`, `-m …` | Repeatable host-directory mount. Without `DST`, it maps to `/home/dev/mount/<basename>`; append `:ro` for read-only. |
 
@@ -609,15 +609,35 @@ before using the firewall with sensitive data.
 
 The base mode delivers no Docker socket or Docker endpoint.
 
-`djinn start --docker` enables Docker access through a Docker socket proxy. The
-dev container talks to `docker-proxy` over the internal Docker network, and the
-proxy bind-mounts the host socket read-only.
+`djinn start --docker` starts a rootless companion daemon from a pinned official
+image. Dev connects as UID 1000 through a read-only endpoint volume at
+`unix:///run/djinn/agent-docker/socket/docker.sock`. Djinn exposes no TCP Docker API
+to network peers. Published inner-container ports are reachable from dev at
+`agent-docker:<port>`; use that hostname instead of `localhost`.
 
-`djinn start --docker-direct` mounts `/var/run/docker.sock` directly into the
-container. Both Docker flags also work with `djinn run`.
+An agent can deliberately relay its inner API through a published workload port;
+that exposes the inner daemon and its delivered workspace, with no host-daemon
+authority.
 
+The daemon receives exactly dev's workspace delivery: the configured code directory,
+`--here` and CLI mounts, declared binds/volumes, and `/home/dev/sessions`, with the
+same targets and access modes. Dev's credential and desktop/Git mounts are separate.
+A workspace containing sensitive host files still exposes them; choose its scope
+carefully. Targets shadowing the companion's runtime or binaries are rejected.
+
+Buildx is included in dev. `docker buildx build --load .`, `docker run` and
+`docker compose up` use the inner daemon. Relative Compose binds must resolve to a
+delivered workspace path. Its images, volumes and BuildKit cache persist in
+`djinn-agent-docker`, a cache volume excluded from default backups. Normal clean
+removes the companion and temporary endpoint, keeping that cache; explicit cache
+clean removes it. Inner containers stop with dev and follow Docker restart policies
+when the daemon starts again.
+
+`djinn start --docker-direct` mounts `/var/run/docker.sock` directly into dev and
+grants host-daemon authority. Both Docker flags also work with `djinn run`.
+Agent mode remains unsealed until companion verification is integrated with hostctl.
 Read [host authority and Docker access](SECURITY-MODEL.md#host-authority-and-docker-access)
-for the implications of either mode.
+for the profile's limits and direct mode's implications.
 
 ## Storage and Mounts
 
@@ -1039,13 +1059,6 @@ flush them. Missing credentials require signing in through the normal agent
 setup first. The agent hands host-only build/sync/recreation commands back to you.
 `--rm` removes the assistant session container; approved file edits and Docker
 objects created during repairs persist.
-
-When the Docker proxy is running, show its recent logs:
-
-```sh
-djinn logs proxy
-djinn logs proxy --tail 200
-```
 
 Update the pinned agent versions in the Dockerfile through the project script:
 

@@ -1,0 +1,690 @@
+{
+  "name": "djinn-test",
+  "networks": {
+    "djinn-network": {
+      "name": "djinn-test-network",
+      "ipam": {},
+      "external": true
+    }
+  },
+  "services": {
+    "agent-docker": {
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 2,
+            "memory": "3221225472"
+          },
+          "reservations": {
+            "cpus": 1,
+            "memory": "536870912"
+          }
+        },
+        "placement": {}
+      },
+      "restart": "no",
+      "container_name": "djinn-test-agent-docker",
+      "command": [
+        "dockerd",
+        "--host=unix:///home/rootless/.djinn-docker/socket/docker.sock",
+        "--config-file=/dev/null",
+        "--data-root=/home/rootless/.local/share/docker",
+        "--storage-driver=overlay2",
+        "--tls=false"
+      ],
+      "devices": [
+        {
+          "source": "/dev/net/tun",
+          "target": "/dev/net/tun",
+          "permissions": "rwm"
+        }
+      ],
+      "entrypoint": [
+        "/bin/sh",
+        "-ec",
+        "if [ \"$${DJINN_FIREWALL_GATE}\" = true ]; then\n  while [ ! -f /home/rootless/.djinn-docker/firewall-ready ]; do sleep 0.1; done\n  rm /home/rootless/.djinn-docker/firewall-ready\nfi\nmkdir -p /home/rootless/.djinn-docker/socket\nexec /usr/local/bin/dockerd-entrypoint.sh \"$$@\"\n",
+        "djinn-agent-docker"
+      ],
+      "environment": {
+        "DJINN_FIREWALL_GATE": "true",
+        "DOCKER_TLS_CERTDIR": ""
+      },
+      "image": "sha256:3acba49741f1aedb28125ffb2307faaec8e870ebb9343de41c21ac549bd6abf0",
+      "labels": {
+        "djinn.git-agent.generation": "34bf8ae67c2b4b39b186e8e85792556d"
+      },
+      "networks": {
+        "djinn-network": {
+          "aliases": [
+            "agent-docker"
+          ]
+        }
+      },
+      "security_opt": [
+        "seccomp=unconfined",
+        "systempaths=unconfined"
+      ],
+      "stop_grace_period": "20s",
+      "tmpfs": [
+        "/var/lib/docker"
+      ],
+      "user": "1000:1000",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/code",
+          "target": "/home/dev/projects",
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/home/.djinn/sessions",
+          "target": "/home/dev/sessions",
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/readonly",
+          "target": "/fixture-readonly",
+          "read_only": true,
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/declared",
+          "target": "/fixture-declared",
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "volume",
+          "source": "djinn-test-inner-data",
+          "target": "/fixture-volume"
+        },
+        {
+          "type": "volume",
+          "source": "agent-docker-data",
+          "target": "/home/rootless/.local/share/docker"
+        },
+        {
+          "type": "volume",
+          "source": "agent-docker-endpoint",
+          "target": "/home/rootless/.djinn-docker",
+          "volume": {
+            "nocopy": true
+          }
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "info=$$(docker --host unix:///home/rootless/.djinn-docker/socket/docker.sock info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}') \u0026\u0026 case \"$$info\" in 'overlay2 /home/rootless/.local/share/docker '*\\\"name=rootless\\\"*) exit 0;; *) exit 1;; esac"
+        ],
+        "timeout": "5s",
+        "interval": "2s",
+        "retries": 3,
+        "start_period": "1m0s"
+      }
+    },
+    "dev": {
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 2,
+            "memory": "3221225472"
+          },
+          "reservations": {
+            "cpus": 1,
+            "memory": "536870912"
+          }
+        },
+        "placement": {}
+      },
+      "container_name": "djinn-test-dev",
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "DBUS_SESSION_BUS_ADDRESS": null,
+        "DJINN_DECLARED_VOLUME_TARGETS": "[\"/fixture-volume\"]",
+        "DJINN_DETACHED": "true",
+        "DJINN_TERM_WIDTH": "80",
+        "DOCKER_CERT_PATH": null,
+        "DOCKER_CONTEXT": null,
+        "DOCKER_ENABLED": "true",
+        "DOCKER_HOST": "unix:///run/djinn/agent-docker/socket/docker.sock",
+        "DOCKER_TLS_VERIFY": null,
+        "ENABLE_FIREWALL": "false",
+        "LOCAL_ENDPOINT": "http://host.docker.internal:11434/v1",
+        "NO_COLOR": "",
+        "PULSE_COOKIE": null,
+        "PULSE_SERVER": null,
+        "TZ": "UTC",
+        "UV_LINK_MODE": "copy"
+      },
+      "extra_hosts": [
+        "host.docker.internal=host-gateway"
+      ],
+      "hostname": "djinn-test-dev",
+      "image": "djinn-test-dev:live",
+      "labels": {
+        "djinn.git-agent.generation": "34bf8ae67c2b4b39b186e8e85792556d"
+      },
+      "networks": {
+        "djinn-network": null
+      },
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config/claude",
+          "target": "/home/dev/.claude",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config/codex",
+          "target": "/home/dev/.codex",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config/opencode",
+          "target": "/home/dev/.opencode",
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "source": "opencode-data",
+          "target": "/home/dev/.local/share/opencode",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config/gh",
+          "target": "/home/dev/.config/gh",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config/age",
+          "target": "/home/dev/.config/age",
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "source": "uv-cache",
+          "target": "/home/dev/.cache/uv",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "tools-cache",
+          "target": "/home/dev/.cache/djinn-tools",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "vscode-server",
+          "target": "/home/dev/.vscode-server",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "vscode-workspaces",
+          "target": "/home/dev/workspaces",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/home/.gitconfig",
+          "target": "/home/dev/.gitconfig",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude",
+          "target": "/home/dev/.claude_seed",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude/skills",
+          "target": "/home/dev/.claude/skills",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude/commands",
+          "target": "/home/dev/.claude/commands",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude/agents",
+          "target": "/home/dev/.claude/agents",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude/context",
+          "target": "/home/dev/.claude/context",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude/scripts",
+          "target": "/home/dev/.claude/scripts",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/claude/AGENTS.md",
+          "target": "/home/dev/.claude/AGENTS.md",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/templates/claude/CLAUDE.md",
+          "target": "/home/dev/.claude/CLAUDE.md",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/opencode",
+          "target": "/home/dev/.opencode/seed",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config",
+          "target": "/home/dev/.djinn-canonical",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/project/config/mcp-servers.json",
+          "target": "/home/dev/.config/mcp-servers.json",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/code",
+          "target": "/home/dev/projects",
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/home/.djinn/sessions",
+          "target": "/home/dev/sessions",
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/credential",
+          "target": "/fixture-credential",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/empty-tools.txt",
+          "target": "/home/dev/tools/tools.txt",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/jobs",
+          "target": "/home/dev/.claude/jobs",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/cache",
+          "target": "/home/dev/.claude/cache",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/file-history",
+          "target": "/home/dev/.claude/file-history",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/ide",
+          "target": "/home/dev/.claude/ide",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/paste-cache",
+          "target": "/home/dev/.claude/paste-cache",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/session-env",
+          "target": "/home/dev/.claude/session-env",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/shell-snapshots",
+          "target": "/home/dev/.claude/shell-snapshots",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/tasks",
+          "target": "/home/dev/.claude/tasks",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/telemetry",
+          "target": "/home/dev/.claude/telemetry",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/work",
+          "target": "/home/dev/.claude/work",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/sessions",
+          "target": "/home/dev/.claude/sessions",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/daemon",
+          "target": "/home/dev/.claude/daemon",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/plugins/marketplaces",
+          "target": "/home/dev/.claude/plugins/marketplaces",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/plugins/cache",
+          "target": "/home/dev/.claude/plugins/cache",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/state",
+          "target": "/home/dev/.claude/state",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/claude/feedback",
+          "target": "/home/dev/.claude/feedback",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.shared/claude/projects",
+          "target": "/home/dev/.claude/projects",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.shared/claude/transcripts",
+          "target": "/home/dev/.claude/transcripts",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/.tmp",
+          "target": "/home/dev/.codex/.tmp",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/tmp",
+          "target": "/home/dev/.codex/tmp",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/cache",
+          "target": "/home/dev/.codex/cache",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/log",
+          "target": "/home/dev/.codex/log",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/mcp-oauth-locks",
+          "target": "/home/dev/.codex/mcp-oauth-locks",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/shell_snapshots",
+          "target": "/home/dev/.codex/shell_snapshots",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/plugins/cache",
+          "target": "/home/dev/.codex/plugins/cache",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/packages",
+          "target": "/home/dev/.codex/packages",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/app-server-daemon",
+          "target": "/home/dev/.codex/app-server-daemon",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/app-server-control",
+          "target": "/home/dev/.codex/app-server-control",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/thread-writer-locks",
+          "target": "/home/dev/.codex/thread-writer-locks",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/tui-thread-reference-capabilities",
+          "target": "/home/dev/.codex/tui-thread-reference-capabilities",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.shared/codex/sessions",
+          "target": "/home/dev/.codex/sessions",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/opencode/node_modules",
+          "target": "/home/dev/.opencode/node_modules",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/config.local/opencode/native",
+          "target": "/home/dev/.opencode/native",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/readonly",
+          "target": "/fixture-readonly",
+          "read_only": true,
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/tmp/djinn-test/declared",
+          "target": "/fixture-declared",
+          "bind": {
+            "propagation": "rprivate",
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "volume",
+          "source": "djinn-test-inner-data",
+          "target": "/fixture-volume"
+        }
+      ],
+      "working_dir": "/fixture-readonly",
+      "stdin_open": true,
+      "tty": true
+    }
+  },
+  "volumes": {
+    "agent-docker-data": {
+      "name": "djinn-test-cache"
+    },
+    "agent-docker-endpoint": {
+      "name": "djinn-agent-docker-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
+      "external": true
+    },
+    "djinn-test-inner-data": {
+      "name": "djinn-test-inner-data"
+    },
+    "opencode-data": {
+      "name": "djinn-test-opencode-data"
+    },
+    "tools-cache": {
+      "name": "djinn-test-tools-cache"
+    },
+    "uv-cache": {
+      "name": "djinn-test-uv-cache"
+    },
+    "vscode-server": {
+      "name": "djinn-test-vscode-server"
+    },
+    "vscode-workspaces": {
+      "name": "djinn-test-vscode-workspaces"
+    }
+  },
+  "x-common-environment": {
+    "DJINN_TERM_WIDTH": "80",
+    "LOCAL_ENDPOINT": "http://host.docker.internal:11434/v1",
+    "NO_COLOR": "",
+    "TZ": "UTC",
+    "UV_LINK_MODE": "copy"
+  },
+  "x-common-volumes": [
+    "/tmp/djinn-test/config/claude:/home/dev/.claude",
+    "/tmp/djinn-test/config/codex:/home/dev/.codex",
+    "/tmp/djinn-test/config/opencode:/home/dev/.opencode",
+    "opencode-data:/home/dev/.local/share/opencode",
+    "/tmp/djinn-test/config/gh:/home/dev/.config/gh",
+    "/tmp/djinn-test/config/age:/home/dev/.config/age",
+    "uv-cache:/home/dev/.cache/uv",
+    "tools-cache:/home/dev/.cache/djinn-tools",
+    "vscode-server:/home/dev/.vscode-server",
+    "vscode-workspaces:/home/dev/workspaces",
+    "~/.gitconfig:/home/dev/.gitconfig:ro",
+    "./config/claude:/home/dev/.claude_seed",
+    "./config/claude/skills:/home/dev/.claude/skills",
+    "./config/claude/commands:/home/dev/.claude/commands",
+    "./config/claude/agents:/home/dev/.claude/agents",
+    "./config/claude/context:/home/dev/.claude/context",
+    "./config/claude/scripts:/home/dev/.claude/scripts",
+    "./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md",
+    "./templates/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md:ro",
+    "./config/opencode:/home/dev/.opencode/seed",
+    "./config:/home/dev/.djinn-canonical:ro",
+    "./config/mcp-servers.json:/home/dev/.config/mcp-servers.json:ro",
+    "/tmp/djinn-test/code:/home/dev/projects",
+    "/tmp/djinn-test/home/.djinn/sessions:/home/dev/sessions",
+    "/tmp/djinn-test/credential:/fixture-credential:ro"
+  ],
+  "x-desktop": {
+    "cap_add": [
+      "CHOWN",
+      "SETUID",
+      "SETGID",
+      "SETPCAP"
+    ],
+    "cap_drop": [
+      "ALL"
+    ],
+    "image": "djinn-desktop-helper:1",
+    "network_mode": "none",
+    "profiles": [
+      "desktop"
+    ],
+    "read_only": true,
+    "restart": "on-failure",
+    "security_opt": [
+      "no-new-privileges:true"
+    ],
+    "tmpfs": [
+      "/runtime:rw,nosuid,nodev,noexec,size=16m",
+      "/tmp:rw,nosuid,nodev,noexec,size=16m"
+    ],
+    "working_dir": "/"
+  },
+  "x-desktop-build": {
+    "context": ".",
+    "dockerfile": "helpers/desktop/Dockerfile",
+    "network": "default"
+  },
+  "x-resource-limits": {
+    "resources": {
+      "limits": {
+        "cpus": "2",
+        "memory": "3G"
+      },
+      "reservations": {
+        "cpus": "1",
+        "memory": "512M"
+      }
+    }
+  }
+}

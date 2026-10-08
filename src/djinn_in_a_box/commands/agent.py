@@ -97,8 +97,8 @@ def _show_run_status(
     else:
         status_line("Mode", "Read-only (plan/analysis)", "status.enabled")
 
-    if docker_mode is DockerMode.PROXY:
-        status_line("Docker", "Enabled (proxy)")
+    if docker_mode is DockerMode.AGENT:
+        status_line("Docker", "Enabled (agent daemon)")
     elif docker_mode is DockerMode.DIRECT:
         status_line("Docker", "Enabled (DIRECT)", "warning")
     if firewall:
@@ -135,11 +135,11 @@ def run(
     ] = None,
     docker: Annotated[
         bool,
-        typer.Option("--docker", "-d", help="Enable Docker socket access via proxy"),
+        typer.Option("--docker", "-d", help="Enable rootless agent Docker daemon"),
     ] = False,
     docker_direct: Annotated[
         bool,
-        typer.Option("--docker-direct", help="Enable direct Docker socket access (no proxy)"),
+        typer.Option("--docker-direct", help="Enable host Docker daemon access"),
     ] = False,
     firewall: Annotated[
         bool,

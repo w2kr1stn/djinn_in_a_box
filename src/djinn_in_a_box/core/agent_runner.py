@@ -13,7 +13,6 @@ from djinn_in_a_box.core.docker import (
     ContainerOptions,
     DockerMode,
     RunResult,
-    cleanup_docker_proxy,
     compose_run,
     ensure_network,
 )
@@ -100,16 +99,11 @@ def run_headless_agent(
         mounts=resolved_mounts,
     )
 
-    result = None
-    try:
-        result = compose_run(
-            checked_config,
-            options,
-            command=agent_command,
-            interactive=False,
-            env={"AGENT_PROMPT": prompt},
-            timeout=timeout,
-        )
-        return result
-    finally:
-        cleanup_docker_proxy(docker_mode, checked_config, owner=result.owner if result else None)
+    return compose_run(
+        checked_config,
+        options,
+        command=agent_command,
+        interactive=False,
+        env={"AGENT_PROMPT": prompt},
+        timeout=timeout,
+    )

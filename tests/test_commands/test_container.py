@@ -48,7 +48,8 @@ def test_status_declared_volume_categories(
 ) -> None:
     monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
     expected = {
-        "cache": ["djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"],
+        "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
+                  "djinn-vscode-server"],
         "data": ["djinn-opencode-data", "djinn-vscode-workspaces"],
         "none": ["djinn-desktop-dbus", "djinn-desktop-audio"],
         "protected (only clean all)": ["djinn-hostctl-state"],
@@ -94,10 +95,11 @@ def test_declared_cleanup_sets(
 ) -> None:
     monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
     config = declared_app_config
-    builtins_cache = {"djinn-uv-cache", "djinn-tools-cache", "djinn-vscode-server"}
+    builtins_cache = {"djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
+                      "djinn-vscode-server"}
     builtins_data = {"djinn-opencode-data", "djinn-vscode-workspaces"}
     expected_volumes = {
-        "cache": {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch"},
+        "cache": {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch", "djinn-agent-docker"},
         "data": {"djinn-opencode-data", "djinn-journal"},
         "all": builtins_cache | builtins_data | {"djinn-journal", "djinn-scratch", "djinn-worker"},
         "name": {"djinn-worker"},
@@ -259,12 +261,14 @@ class TestBuildCommand:
         assert "exit code 1" in captured
         assert "above" in captured
 
-    @pytest.mark.parametrize("failing", ["none", "compose", "supervisor", "install"])
+    @pytest.mark.parametrize(
+        "failing", ["none", "compose", "supervisor", "install", "pull", "present"]
+    )
     @pytest.mark.parametrize("no_cache", [False, True])
     def test_build_also_builds_and_installs_the_hostctl_supervisor(
-        self, failing: str, no_cache: bool
+        self, failing: str, no_cache: bool, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """The supervisor is no Compose service; build adds it and installs it after bake."""
+        """Build installs hostctl, then pulls the pinned companion image if absent."""
         steps: list[str] = []
 
         def compose(config: object, *, no_cache: bool) -> RunResult:
@@ -281,6 +285,26 @@ class TestBuildCommand:
                 raise container.hostctl.HostctlError("Docker cp failed (exit 1)")
             return Path("/state/bin/supervisor")
 
+        def inspect(name: str, docker_path: str, resource: str) -> dict[str, str] | None:
+            steps.append("inspect-image")
+            assert name == container.agent_docker.IMAGE
+            assert docker_path == container.DOCKER_EXECUTABLE
+            assert resource == "image"
+            return {"Id": "sha256:pinned"} if failing == "present" else None
+
+        def pull(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            steps.append("pull")
+            assert argv == [container.DOCKER_EXECUTABLE, "pull", container.agent_docker.IMAGE]
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            assert kwargs["timeout"] == 120
+            assert kwargs["cwd"] == "/"
+            return subprocess.CompletedProcess(
+                argv,
+                17 if failing == "pull" else 0,
+                "",
+                "registry unavailable" if failing == "pull" else "",
+            )
+
         with (
             patch("djinn_in_a_box.commands.container.load_config"),
             patch("djinn_in_a_box.commands.container.preflight"),
@@ -288,19 +312,30 @@ class TestBuildCommand:
             patch("djinn_in_a_box.commands.container.compose_build", side_effect=compose),
             patch.object(container.hostctl, "build_supervisor", side_effect=supervisor),
             patch.object(container.hostctl, "install_supervisor", side_effect=install),
+            patch.object(container.host_runtime, "inspect_object", side_effect=inspect),
+            patch.object(container.subprocess, "run", side_effect=pull),
         ):
-            if failing == "none":
+            if failing in ("none", "present"):
                 container.build(no_cache=no_cache)
             else:
                 with pytest.raises(typer.Exit) as exc_info:
                     container.build(no_cache=no_cache)
-                assert exc_info.value.exit_code == {"compose": 2, "supervisor": 3, "install": 1}[
-                    failing
-                ]
+                assert exc_info.value.exit_code == {
+                    "compose": 2,
+                    "supervisor": 3,
+                    "install": 1,
+                    "pull": 17,
+                }[failing]
 
         expected = [f"compose:{no_cache}", f"supervisor:{no_cache}", "install"]
-        stop = {"compose": 1, "supervisor": 2, "install": 3, "none": 3}[failing]
+        if failing in ("none", "pull", "present"):
+            expected.append("inspect-image")
+        if failing in ("none", "pull"):
+            expected.append("pull")
+        stop = {"compose": 1, "supervisor": 2, "install": 3}.get(failing, len(expected))
         assert steps == expected[:stop]
+        if failing == "pull":
+            assert "pinned agent Docker image failed" in capsys.readouterr().err
 
     def test_sync_build_files_uses_config_root_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -351,7 +386,6 @@ class TestStartCommand:
             patch(
                 "djinn_in_a_box.commands.container.is_container_running", return_value=False
             ) as mock_running,
-            patch("djinn_in_a_box.commands.container.cleanup_docker_proxy") as mock_cleanup,
             patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
             patch("djinn_in_a_box.commands.container.banner") as mock_banner,
             patch(
@@ -386,7 +420,6 @@ class TestStartCommand:
                 "run": mock_run,
                 "detached": mock_detached,
                 "running": mock_running,
-                "cleanup": mock_cleanup,
                 "config": mock_config,
                 "banner": mock_banner,
                 "workflow": mock_workflow,
@@ -431,11 +464,8 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(docker=True)
         options = start_mocks["run"].call_args[0][1]
-        assert options.docker_mode is DockerMode.PROXY
+        assert options.docker_mode is DockerMode.AGENT
         start_mocks["banner"].assert_called_once_with()
-        start_mocks["cleanup"].assert_called_once_with(
-            DockerMode.PROXY, start_mocks["config"], owner=None
-        )
 
     def test_start_with_firewall_flag(self, start_mocks: dict[str, Any]) -> None:
         with pytest.raises(typer.Exit):
@@ -497,7 +527,6 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(docker=True, detach=True)
 
-        start_mocks["cleanup"].assert_not_called()
 
     def test_start_detached_refuses_when_a_container_already_runs(
         self, start_mocks: dict[str, Any]
@@ -656,9 +685,6 @@ class TestStartCommand:
 
         assert exc_info.value.exit_code == 1
         assert "mount collision detail" in start_mocks["err_output"].getvalue()
-        start_mocks["cleanup"].assert_called_once_with(
-            DockerMode.NONE, start_mocks["config"], owner=None
-        )
 
     def test_start_reports_a_mount_specification_error_from_the_core(
         self, start_mocks: dict[str, Any]
@@ -744,9 +770,6 @@ class TestStartCommand:
             container.start(docker_direct=True)
         options = start_mocks["run"].call_args[0][1]
         assert options.docker_mode is DockerMode.DIRECT
-        start_mocks["cleanup"].assert_called_once_with(
-            DockerMode.DIRECT, start_mocks["config"], owner=None
-        )
 
     def test_start_renders_environment_and_container_rules(
         self, start_mocks: dict[str, Any]
@@ -1422,7 +1445,7 @@ class TestResourceTable:
     def test_print_resource_table_volumes(self, capture_container_stdout: io.StringIO) -> None:
         """_print_resource_table renders volumes by category."""
         entries = {
-            "cache": ["djinn-uv-cache", "djinn-tools-cache"],
+            "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache"],
             "data": ["djinn-opencode-data"],
         }
         container._print_resource_table("Djinn Volumes", "Volume", entries)

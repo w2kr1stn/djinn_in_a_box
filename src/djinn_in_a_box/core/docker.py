@@ -38,7 +38,7 @@ from djinn_in_a_box.config.defaults import (
     volume_categories,
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import desktop, host_runtime
+from djinn_in_a_box.core import agent_docker, desktop, host_runtime
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.exceptions import (
@@ -63,6 +63,8 @@ BUILD_NETWORK_VAR: Final = "DJINN_BUILD_NETWORK"
 _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
 }
+COMPOSE_PROJECT = "djinn-in-a-box"
+DECLARED_VOLUME_PREFIX = "djinn-"
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
@@ -173,7 +175,7 @@ class DockerMode(Enum):
     """Docker access mode for the development container."""
 
     NONE = "none"
-    PROXY = "proxy"
+    AGENT = "agent"
     DIRECT = "direct"
 
 
@@ -189,7 +191,7 @@ def resolve_docker_mode(docker: bool, docker_direct: bool) -> DockerMode:
         msg = "--docker and --docker-direct are mutually exclusive"
         raise ValueError(msg)
     if docker:
-        return DockerMode.PROXY
+        return DockerMode.AGENT
     if docker_direct:
         return DockerMode.DIRECT
     return DockerMode.NONE
@@ -309,7 +311,7 @@ class ContainerOptions:
     """Options for container execution (Docker access, firewall, mounts)."""
 
     docker_mode: DockerMode = DockerMode.NONE
-    """Docker access mode (none, proxy, or direct)."""
+    """Docker access mode (none, agent, or direct)."""
 
     firewall_enabled: bool = False
     """Enable network firewall (restricts outbound traffic)."""
@@ -465,14 +467,14 @@ def ensure_network(name: str = DJINN_NETWORK) -> bool:
 
 
 def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
-    """Get compose file arguments ["-f", "file.yml", ...] based on Docker mode."""
+    """Get project and compose file arguments based on Docker mode."""
     project_root = get_project_root()
-    files = ["-f", str(project_root / "docker-compose.yml")]
+    files = ["-p", COMPOSE_PROJECT, "-f", str(project_root / "docker-compose.yml")]
 
     files.extend(["-f", str(project_root / "docker-compose.desktop.yml")])
 
-    if docker_mode is DockerMode.PROXY:
-        files.extend(["-f", str(project_root / "docker-compose.docker.yml")])
+    if docker_mode is DockerMode.AGENT:
+        files.extend(["-f", str(project_root / "docker-compose.agent-docker.yml")])
     elif docker_mode is DockerMode.DIRECT:
         files.extend(["-f", str(project_root / "docker-compose.docker-direct.yml")])
 
@@ -760,6 +762,7 @@ def _reserved_mount_targets(
         *_COMPOSE_DEV_MOUNT_TARGETS,
         *MANAGED_SSH_TARGETS,
         *desktop.MANAGED_TARGETS,
+        Path(agent_docker.DEV_ENDPOINT),
         *([config.workspace_target] if config else []),
         *(zone_overlay_targets or ()),
         _MOUNT_ROOT,
@@ -902,6 +905,8 @@ class ComposeService(TypedDict, total=False):
     user: str
     network_mode: str
     profiles: list[str]
+    container_name: str
+    cap_add: list[str]
     depends_on: dict[str, object]
 
 
@@ -993,7 +998,8 @@ def resolve_declared_entries(
     entries = declarations or inspect_declarations(
         config.mounts if config else {}, config.environment if config else {}
     )
-    for key in GIT_ENVIRONMENT:
+    for key in (*GIT_ENVIRONMENT, *agent_docker.SELECTORS, "DOCKER_ENABLED",
+                "DOCKER_DIRECT", "DJINN_FIREWALL_GATE"):
         if caller_env and key in caller_env:
             raise DeclarationSpecificationError(f"caller environment.{key} is reserved by Djinn")
     errors = {d.identity: d.error for d in entries.diagnostics}
@@ -1005,7 +1011,9 @@ def resolve_declared_entries(
             target = _normalize_mount_target(mount.target)
             targets[name] = target
             if isinstance(mount, VolumeDeclaration):
-                source = f"djinn-{name}"
+                source = f"{DECLARED_VOLUME_PREFIX}{name}"
+                if source.startswith(agent_docker.ENDPOINT_PREFIX):
+                    raise ValueError("volume name is reserved for agent Docker endpoints")
                 if source in ({v for values in VOLUME_CATEGORIES.values() for v in values}
                               | PROTECTED_INTERNAL_VOLUMES):
                     raise ValueError(f"volume '{source}' conflicts with built-in volume '{source}'")
@@ -1032,6 +1040,7 @@ def resolve_declared_entries(
             *MANAGED_VOLUME_REPAIR_TARGETS,
             *MANAGED_SSH_TARGETS,
             *desktop.MANAGED_TARGETS,
+            Path(agent_docker.DEV_ENDPOINT),
         ):
             if target == repair or target.is_relative_to(repair):
                 errors[f"mounts.{name}"] = declaration_error(
@@ -1134,12 +1143,14 @@ def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) ->
     already on the terminal; there is nothing to print afterwards.
     """
     project_root = get_project_root()
+    compose_files = get_compose_files()
     env = _compose_host_env(config)
     cmd = [
         DOCKER_EXECUTABLE,
         "buildx",
         "bake",
-        *get_compose_files(),
+        # This direct Bake command needs the Compose file selectors only.
+        *compose_files[2:],
         "--progress",
         _build_progress(),
         "--load",
@@ -1217,7 +1228,7 @@ def _validate_desktop_env(env: dict[str, str] | None) -> None:
 def _operation_timeout(deadline: float | None, maximum: float) -> float:
     remaining = maximum if deadline is None else min(maximum, deadline - time.monotonic())
     if remaining <= 0:
-        raise RuntimeError("desktop overall readiness timeout")
+        raise RuntimeError("companion overall readiness timeout")
     return remaining
 
 
@@ -1228,7 +1239,7 @@ def _service_inspect(service: str, deadline: float | None = None) -> dict[str, A
             "ps",
             "-aq",
             "--filter",
-            "label=com.docker.compose.project=djinn-in-a-box",
+            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
             "--filter",
             f"label=com.docker.compose.service={service}",
         ],
@@ -1366,6 +1377,438 @@ def _downstream_probe(
                     raise RuntimeError("failed to remove invocation-owned downstream probe")
 
 
+def _require_agent_observer(options: ContainerOptions, owner: host_runtime.GitRuntime) -> None:
+    if options.docker_mode is DockerMode.AGENT and (
+        owner.observer is None or owner.observer.poll() is not None
+    ):
+        raise RuntimeMountSpecificationError("Agent Docker requires a functioning host observer")
+
+
+def _prepare_workspace(
+    config: AppConfig,
+    options: ContainerOptions,
+    declarations: ResolvedDeclarations,
+    mounts: tuple[ContainerMount, ...],
+    fragment: ComposeFragment,
+) -> None:
+    sessions = Path.home() / ".djinn/sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    delivery = [
+        agent_docker.WorkspaceMount(
+            "bind", str(config.code_dir.resolve()), str(config.workspace_target)
+        ),
+        agent_docker.WorkspaceMount("bind", str(sessions), "/home/dev/sessions"),
+        *(
+            agent_docker.WorkspaceMount("bind", str(m.source), str(m.target), m.read_only)
+            for m in mounts
+        ),
+        *(
+            agent_docker.WorkspaceMount(m.kind, m.source, str(m.target))
+            for m in declarations.mounts
+        ),
+    ]
+    targets: set[str] = set()
+    for mount in delivery:
+        if mount.target in targets:
+            raise MountSpecificationError(f"Duplicate workspace target: {mount.target}")
+        targets.add(mount.target)
+        if options.docker_mode is DockerMode.AGENT:
+            mount.require_safe_target()
+    workspace = [mount.compose() for mount in delivery]
+    dev = fragment["services"]["dev"]
+    dev["volumes"] = [
+        *[
+            v
+            for v in dev.get("volumes", [])
+            if (v.get("target") if isinstance(v, dict) else v.split(":")[1]) not in targets
+        ],
+        *workspace,
+    ]
+    if options.docker_mode is DockerMode.AGENT:
+        fragment["services"]["agent-docker"] = {"volumes": list(workspace)}
+
+
+def _require_agent_profile(actual: dict[str, Any], manifest: dict[str, Any]) -> None:
+    config, host = actual["Config"], actual["HostConfig"]
+    expected = manifest["mounts"]
+    mounts = actual["Mounts"]
+    observed = sorted(
+        (
+            m["Type"],
+            m.get("Name") if m["Type"] == "volume" else m["Source"],
+            m["Destination"],
+            m["RW"],
+        )
+        for m in mounts
+        if m["Type"] != "tmpfs"
+    )
+    if (
+        actual["Image"] != manifest["image_id"]
+        or config["User"] != "1000:1000"
+        or config["Cmd"] != agent_docker.COMMAND
+        or config["Entrypoint"] != manifest["entrypoint"]
+        or host["Privileged"]
+        or host.get("CapAdd")
+        or host.get("DeviceRequests")
+        or host.get("DeviceCgroupRules")
+        or host["SecurityOpt"] != ["seccomp=unconfined"]
+        or host["MaskedPaths"]
+        or host["ReadonlyPaths"]
+        or host["Devices"]
+        != [
+            {
+                "PathOnHost": "/dev/net/tun",
+                "PathInContainer": "/dev/net/tun",
+                "CgroupPermissions": "rwm",
+            }
+        ]
+        or host.get("PidMode")
+        or host.get("UTSMode")
+        or host.get("UsernsMode")
+        or host["IpcMode"] != "private"
+        or host["CgroupnsMode"] != "private"
+        or host["NetworkMode"] != manifest["network"]
+        or host.get("PortBindings")
+        or dict(item.split("=", 1) for item in config["Env"]).get("DJINN_FIREWALL_GATE")
+        != str(manifest["firewall"]).lower()
+        or dict(item.split("=", 1) for item in config["Env"]).get("DOCKER_TLS_CERTDIR") != ""
+        or host["RestartPolicy"]["Name"] != "no"
+        or host.get("Tmpfs", {}).keys() != {"/var/lib/docker"}
+        or observed != sorted(tuple(m) for m in expected)
+        or any(host[key] != value for key, value in manifest["limits"].items())
+    ):
+        raise RuntimeError("Agent Docker profile differs from trusted generation delivery")
+
+
+def _wait_agent_healthy(
+    record: dict[str, Any], owner: host_runtime.GitRuntime, deadline: float
+) -> None:
+    while True:
+        if owner.observer is None or owner.observer.poll() is not None:
+            raise RuntimeError("Agent Docker requires a functioning host observer")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Agent Docker readiness timeout")
+        actual = host_runtime.inspect_owned_resource(
+            record, owner.generation, owner.docker_path, timeout=min(5, remaining)
+        )
+        if actual is None or not actual["State"]["Running"]:
+            raise RuntimeError("Agent Docker exited before readiness")
+        health = actual["State"].get("Health", {}).get("Status")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Agent Docker readiness timeout")
+        if health == "healthy":
+            return
+        if health == "unhealthy" or time.monotonic() >= deadline:
+            raise RuntimeError(f"Agent Docker health {health or 'unknown'} (readiness timeout)")
+        time.sleep(0.1)
+
+
+def _agent_firewall(
+    owner: host_runtime.GitRuntime,
+    manifest: dict[str, Any],
+    *,
+    clear: bool = False,
+    deadline: float | None = None,
+) -> None:
+    service = "agent-docker-firewall"
+    name = manifest["name"] + "-firewall"
+    labels = {
+        host_runtime.GENERATION_LABEL: owner.generation,
+        "com.docker.compose.project": owner.project,
+        "com.docker.compose.service": service,
+    }
+    if (
+        host_runtime.inspect_object(
+            name, owner.docker_path, timeout=_operation_timeout(deadline, 5)
+        )
+        is not None
+    ):
+        raise RuntimeError("Existing firewall initializer is not invocation-owned")
+    command = (
+        "rm -f /endpoint/firewall-ready"
+        if clear
+        else "init-firewall.sh && touch /endpoint/firewall-ready"
+    )
+    args = [
+        owner.docker_path,
+        "create",
+        "--name",
+        name,
+        "--user",
+        "0",
+        "--network",
+        "none" if clear else "container:" + owner.resources["agent-docker"]["id"],
+        "--entrypoint",
+        "/bin/bash",
+        "--mount",
+        f"type=volume,source={manifest['endpoint_volume']},target=/endpoint,volume-nocopy",
+    ]
+    if not clear:
+        args.extend(["--cap-add", "NET_ADMIN"])
+    for key, value in labels.items():
+        args.extend(["--label", f"{key}={value}"])
+    result = _run_captured(
+        [*args, manifest["dev_image_id"], "-ec", command], timeout=_operation_timeout(deadline, 10)
+    )
+    actual = host_runtime.inspect_object(
+        name, owner.docker_path, timeout=_operation_timeout(deadline, 5)
+    )
+    if actual is not None:
+        owner.register(service, actual)
+    if not result.success or actual is None:
+        raise RuntimeError(result.stderr or "Firewall initializer creation failed")
+    host = actual["HostConfig"]
+    raw_caps: list[str] = host.get("CapAdd") or []
+    caps = [cap.removeprefix("CAP_") for cap in raw_caps]
+    mounts = actual["Mounts"]
+    if (
+        actual["Image"] != manifest["dev_image_id"]
+        or actual["Config"]["User"] != "0"
+        or actual["Config"]["Entrypoint"] != ["/bin/bash"]
+        or actual["Config"]["Cmd"] != ["-ec", command]
+        or host["NetworkMode"]
+        != ("none" if clear else "container:" + owner.resources["agent-docker"]["id"])
+        or caps != ([] if clear else ["NET_ADMIN"])
+        or host["Privileged"]
+        or host.get("Devices")
+        or host.get("DeviceRequests")
+        or host.get("PidMode")
+        or host.get("UsernsMode")
+        or host["RestartPolicy"]["Name"] != "no"
+        or len(mounts) != 1
+        or mounts[0]["Type"] != "volume"
+        or mounts[0]["Name"] != manifest["endpoint_volume"]
+        or mounts[0]["Destination"] != "/endpoint"
+        or not mounts[0]["RW"]
+    ):
+        raise RuntimeError("Firewall initializer differs from trusted delivery")
+    host_runtime.run_runtime_command(owner.docker_path, "start", actual["Id"])
+    result = _run_captured(
+        [owner.docker_path, "wait", actual["Id"]], timeout=_operation_timeout(deadline, 60)
+    )
+    if not result.success or result.stdout.strip() != "0":
+        logs = _run_captured([owner.docker_path, "logs", actual["Id"]], timeout=5)
+        raise RuntimeError(
+            f"Agent Docker firewall failed (exit {result.stdout.strip() or result.returncode}): "
+            + logs.stdout + logs.stderr + result.stderr
+        )
+    if host_runtime.inspect_owned_resource(
+        owner.resources[service], owner.generation, owner.docker_path
+    ):
+        host_runtime.run_runtime_command(owner.docker_path, "rm", actual["Id"])
+    owner.forget(service)
+
+
+def _prepare_agent_docker(
+    config: AppConfig,
+    options: ContainerOptions,
+    fragment: ComposeFragment,
+    owner: host_runtime.GitRuntime,
+) -> None:
+    if owner.root is None or owner.observer is None or owner.observer.poll() is not None:
+        raise RuntimeError("Agent Docker requires a functioning host observer")
+    if _service_inspect("agent-docker") is not None:
+        raise RuntimeError("Existing agent Docker has no invocation ownership; clean from the host")
+    image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image")
+    if image is None:
+        pull = _run_captured([DOCKER_EXECUTABLE, "pull", agent_docker.IMAGE], timeout=120)
+        if not pull.success:
+            raise RuntimeError(pull.stderr or "Pinned agent Docker image pull failed")
+        image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image")
+    digest = agent_docker.IMAGE.split("@", 1)[1]
+    if image is None or not any(r.endswith("@" + digest) for r in image.get("RepoDigests", [])):
+        raise RuntimeError("Pinned agent Docker image digest is unverified")
+    if image["Config"]["User"] != "rootless" or image["Config"]["Entrypoint"] != [
+        "dockerd-entrypoint.sh"
+    ]:
+        raise RuntimeError("Pinned image rootless entrypoint is unverified")
+    cache_definition = fragment.setdefault("volumes", {}).setdefault(
+        "agent-docker-data", {"name": agent_docker.CACHE}
+    )
+    cache = str(cache_definition["name"])
+    volume = host_runtime.inspect_object(cache, DOCKER_EXECUTABLE, "volume")
+    if volume is not None and (volume["Driver"] != "local" or volume.get("Options")):
+        raise RuntimeError("Agent Docker cache must use the plain local volume driver")
+    endpoint = agent_docker.ENDPOINT_PREFIX + owner.generation
+    if host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, "volume") is not None:
+        raise RuntimeError("Agent Docker endpoint already exists")
+    labels = {
+        host_runtime.GENERATION_LABEL: owner.generation,
+        "com.docker.compose.project": owner.project,
+    }
+    args = [DOCKER_EXECUTABLE, "volume", "create", "--driver", "local"]
+    for key, value in agent_docker.ENDPOINT_OPTIONS.items():
+        args.extend(["--opt", f"{key}={value}"])
+    for key, value in labels.items():
+        args.extend(["--label", f"{key}={value}"])
+    result = _run_captured([*args, endpoint], timeout=5)
+    owner.register_volume(endpoint)
+    if not result.success:
+        raise RuntimeError(result.stderr or "Endpoint volume creation failed")
+    volume = host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, "volume")
+    if (
+        volume is None
+        or volume["Driver"] != "local"
+        or volume["Options"] != agent_docker.ENDPOINT_OPTIONS
+    ):
+        raise RuntimeError("Agent Docker endpoint options differ from trusted tmpfs profile")
+    fragment.setdefault("volumes", {})["agent-docker-endpoint"] = {
+        "external": True,
+        "name": endpoint,
+    }
+    companion = fragment["services"]["agent-docker"]
+    companion.update(
+        image=str(image["Id"]),
+        labels={host_runtime.GENERATION_LABEL: owner.generation},
+        environment={"DJINN_FIREWALL_GATE": str(options.firewall_enabled).lower()},
+    )
+    companion.setdefault("volumes", []).extend(
+        [
+            {"type": "volume", "source": "agent-docker-data", "target": agent_docker.DATA_ROOT},
+            {
+                "type": "volume",
+                "source": "agent-docker-endpoint",
+                "target": agent_docker.ENDPOINT,
+                "volume": {"nocopy": True},
+            },
+        ]
+    )
+    deadline = time.monotonic() + 60
+    with _compose_override(fragment) as path:
+        resolved = _run_compose(
+            [*get_compose_files(DockerMode.AGENT), "-f", str(path), "config", "--format", "json"],
+            config=config,
+            cwd=get_project_root(),
+            timeout=10,
+        )
+        if not resolved.success:
+            raise RuntimeError(
+                resolved.stderr or "Agent Docker Compose delivery cannot be resolved"
+            )
+        delivery = json.loads(resolved.stdout)
+        spec = delivery["services"]["agent-docker"]
+        dev_spec = delivery["services"]["dev"]
+        dev_image = host_runtime.inspect_object(dev_spec["image"], DOCKER_EXECUTABLE, "image")
+        if dev_image is None:
+            raise RuntimeError("Dev image missing; run djinn build")
+        expected = [
+            (
+                m["type"],
+                (
+                    delivery["volumes"][m["source"]]["name"]
+                    if m["type"] == "volume"
+                    else m["source"]
+                ).replace("$$", "$"),
+                m["target"].replace("$$", "$"),
+                not m.get("read_only", False),
+            )
+            for m in spec["volumes"]
+        ]
+        manifest: dict[str, Any] = {
+            "image": agent_docker.IMAGE,
+            "image_id": image["Id"],
+            "entrypoint": [word.replace("$$", "$") for word in spec["entrypoint"]],
+            "name": spec["container_name"],
+            "network": delivery["networks"]["djinn-network"]["name"],
+            "endpoint_volume": endpoint,
+            "dev_image_id": dev_image["Id"],
+            "firewall": options.firewall_enabled,
+            "mounts": expected,
+            "limits": {},
+        }
+        state = host_runtime.read_state(owner.root)
+        if state is None or state["generation"] != owner.generation:
+            raise RuntimeError("Runtime generation changed")
+        state["agent_docker"] = manifest
+        host_runtime.save_state(owner.root, state)
+        result = _run_compose(
+            [
+                *get_compose_files(DockerMode.AGENT),
+                "-f",
+                str(path),
+                "up",
+                "-d",
+                "--no-deps",
+                "--no-build",
+                "--pull",
+                "never",
+                "agent-docker",
+            ],
+            config=config,
+            cwd=get_project_root(),
+            timeout=20,
+        )
+    actual = _service_inspect("agent-docker")
+    if actual is not None:
+        owner.register("agent-docker", actual)
+    if not result.success or actual is None:
+        raise RuntimeError(result.stderr or "Agent Docker creation failed")
+    # Persist the expected resource fields from trusted Compose limits, never from daemon claims.
+    limits = spec["deploy"]["resources"]
+    memory = limits["limits"]["memory"]
+    reservation = limits["reservations"]["memory"]
+    manifest["limits"] = {
+        "NanoCpus": int(float(limits["limits"]["cpus"]) * 1e9),
+        "Memory": int(memory),
+        "MemoryReservation": int(reservation),
+    }
+    state = host_runtime.read_state(owner.root)
+    assert state is not None
+    state["agent_docker"] = manifest
+    host_runtime.save_state(owner.root, state)
+    _require_agent_profile(actual, manifest)
+    if options.firewall_enabled:
+        _agent_firewall(owner, manifest, deadline=deadline)
+    _wait_agent_healthy(owner.resources["agent-docker"], owner, deadline)
+    fragment["services"]["dev"].setdefault("volumes", []).append(
+        {
+            "type": "volume",
+            "source": "agent-docker-endpoint",
+            "target": agent_docker.DEV_ENDPOINT,
+            "read_only": True,
+            "volume": {"nocopy": True},
+        }
+    )
+
+
+def resume_agent_docker(root: Path, state: dict[str, Any], docker_path: str) -> None:
+    manifest = state["agent_docker"]
+    record = state["resources"]["agent-docker"]
+    actual = host_runtime.inspect_owned_resource(record, state["generation"], docker_path)
+    if actual is None:
+        raise RuntimeError("Owning agent Docker disappeared")
+    _require_agent_profile(actual, manifest)
+    owner = host_runtime.GitRuntime(
+        root,
+        state["generation"],
+        docker_path=docker_path,
+        project=state.get("project", "djinn-in-a-box"),
+        resources=state["resources"],
+    )
+    deadline = time.monotonic() + 60
+    if manifest["firewall"]:
+        _agent_firewall(owner, manifest, clear=True, deadline=deadline)
+    host_runtime.run_runtime_command(docker_path, "start", record["id"])
+    if manifest["firewall"]:
+        _agent_firewall(owner, manifest, deadline=deadline)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Agent Docker restart readiness timeout")
+        actual = host_runtime.inspect_owned_resource(
+            record, owner.generation, docker_path, timeout=min(5, remaining)
+        )
+        if actual is None or not actual["State"]["Running"]:
+            raise RuntimeError("Agent Docker restart failed")
+        status = actual["State"].get("Health", {}).get("Status")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Agent Docker restart readiness timeout")
+        if status == "healthy":
+            return
+        if status == "unhealthy" or time.monotonic() >= deadline:
+            raise RuntimeError("Agent Docker restart readiness failed")
+        time.sleep(0.1)
 def _prepare_companions(
     config: AppConfig,
     options: ContainerOptions,
@@ -1373,33 +1816,12 @@ def _prepare_companions(
     owner: host_runtime.GitRuntime,
 ) -> None:
     # This runs only after declarations/caller mounts/env and ownership were checked.
-    if options.docker_mode is DockerMode.PROXY:
-        if _service_inspect("docker-proxy") is not None:
-            raise RuntimeError("existing proxy has no invocation ownership; clean from the host")
-        fragment["services"]["docker-proxy"] = {
-            "labels": {host_runtime.GENERATION_LABEL: owner.generation},
-        }
-        with _compose_override(fragment) as path:
-            result = _run_compose(
-                [
-                    *get_compose_files(options.docker_mode),
-                    "-f",
-                    str(path),
-                    "up",
-                    "-d",
-                    "--no-deps",
-                    "--force-recreate",
-                    "docker-proxy",
-                ],
-                config=config,
-                cwd=get_project_root(),
-                timeout=15,
-            )
-        actual = _service_inspect("docker-proxy")
-        if actual is not None:
-            owner.register("docker-proxy", actual)
-        if not result.success:
-            raise RuntimeError(result.stderr or "Docker proxy failed to start")
+    if options.docker_mode is DockerMode.AGENT:
+        try:
+            _prepare_agent_docker(config, options, fragment, owner)
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError,
+                subprocess.SubprocessError) as exc:
+            raise RuntimeMountSpecificationError(f"Agent Docker preparation failed: {exc}") from exc
     endpoints = desktop.discover_desktop_endpoints()
     for endpoint in endpoints:
         if endpoint.available is False:
@@ -1615,12 +2037,11 @@ def compose_run(
         zone_overlay_targets=zone_overlay_targets,
     )
 
-    for mount in mounts:
-        mount_target = _resolve_image_aliases(mount.target)
-        mount_str = f"{mount.source}:{mount_target}"
-        if mount.read_only:
-            mount_str += ":ro"
-        cmd.extend(["-v", mount_str])
+    if options.docker_mode is not DockerMode.AGENT or service != "dev":
+        for mount in mounts:
+            target = _resolve_image_aliases(mount.target)
+            spec = f"{mount.source}:{target}" + (":ro" if mount.read_only else "")
+            cmd.extend(["-v", spec])
 
     if mounts:
         workdir = mounts[0].target
@@ -1650,17 +2071,21 @@ def compose_run(
         fragment["services"]["dev"].setdefault("environment", {}).update(
             dict.fromkeys(desktop.MANAGED_ENV)
         )
+    if service == "dev" and options.docker_mode is DockerMode.AGENT:
+        _prepare_workspace(config, options, declarations, mounts, fragment)
     owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
     with owner_context as git_delivery:
         if git_delivery is not None:
             git_delivery.add_to_fragment(fragment)
             _prepare_companions(config, options, fragment, git_delivery)
+            _require_agent_observer(options, git_delivery)
             git_delivery.begin_creation()
         with _compose_override(fragment, prefix="djinn-run-") as override_path:
             cmd[2 + len(compose_files) : 2 + len(compose_files)] = ["-f", str(override_path)]
             if git_delivery is not None:
                 _guard_dev_creation(config, compose_files, override_path, git_delivery,
                                     _volume_specs_from_mount_args(cmd), env_vars)
+                _require_agent_observer(options, git_delivery)
             try:
                 if interactive:
                     # Interactive mode: inherit stdin/stdout/stderr
@@ -1810,12 +2235,10 @@ def compose_up_detached(
     )
 
     volume_specs: list[str] = []
-    for mount in mounts:
-        mount_target = _resolve_image_aliases(mount.target)
-        spec = f"{mount.source}:{mount_target}"
-        if mount.read_only:
-            spec += ":ro"
-        volume_specs.append(spec)
+    if options.docker_mode is not DockerMode.AGENT or service != "dev":
+        for mount in mounts:
+            target = _resolve_image_aliases(mount.target)
+            volume_specs.append(f"{mount.source}:{target}" + (":ro" if mount.read_only else ""))
     # Detached startup mounts every assigned overlay so writes reach its host zone.
     volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
     runtime_args = [*shell_args, *sops_args]
@@ -1845,15 +2268,19 @@ def compose_up_detached(
     service_override["environment"] = {**environment, **declared_service.get("environment", {})}
     fragment["services"][service] = service_override
     container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
+    if service == "dev" and options.docker_mode is DockerMode.AGENT:
+        _prepare_workspace(config, options, declarations, mounts, fragment)
     owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
     with owner_context as git_delivery:
         if git_delivery is not None:
             git_delivery.add_to_fragment(fragment)
             _prepare_companions(config, options, fragment, git_delivery)
+            _require_agent_observer(options, git_delivery)
             git_delivery.begin_creation()
         with _compose_override(fragment) as override_path:
             if git_delivery is not None:
                 _guard_dev_creation(config, compose_files, override_path, git_delivery)
+                _require_agent_observer(options, git_delivery)
             args = [*compose_files, "-f", str(override_path)]
             args.extend(["up", "-d", service])
             # ENABLE_FIREWALL rides the compose file's ${ENABLE_FIREWALL:-false}
@@ -1870,7 +2297,13 @@ def compose_up_detached(
                 },
             )
             if result.success and git_delivery is not None:
+                _require_agent_observer(options, git_delivery)
                 git_delivery.retain()
+                try:
+                    _require_agent_observer(options, git_delivery)
+                except RuntimeMountSpecificationError:
+                    git_delivery.detached = False
+                    raise
             return result
 
 
@@ -1990,32 +2423,70 @@ def is_own_container(name: str) -> bool:
 
 def compose_down(config: AppConfig | None = None) -> RunResult:
     """Config-independent teardown under the same guard, dev before helpers."""
-    if is_own_container("djinn"):
+    if is_own_container(_SERVICE_CONTAINER_NAMES["dev"]):
         return RunResult(returncode=1, stderr=SELF_TEARDOWN_ERROR)
     from djinn_in_a_box.core import hostctl
 
     observer_identity = None
     try:
         with hostctl.control_guard(), host_runtime.creation_guard() as root:
-            hostctl.stop_helper_locked(remove=True)
             state = host_runtime.read_state(root)
-            actual = host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE)
+            if state is not None:
+                for record in state.get("resources", {}).values():
+                    host_runtime.inspect_owned_resource(
+                        record, state["generation"], DOCKER_EXECUTABLE
+                    )
+                for name in state.get("volumes", []):
+                    volume = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, "volume")
+                    labels: dict[str, Any] = (volume.get("Labels") or {}) if volume else {}
+                    if volume and labels.get(host_runtime.GENERATION_LABEL) != state["generation"]:
+                        return RunResult(
+                            1, stderr="runtime volume ownership changed; preserving resources"
+                        )
+                if "agent_docker" in state:
+                    listed = _run_captured(
+                        [
+                            DOCKER_EXECUTABLE,
+                            "ps",
+                            "-aq",
+                            "--no-trunc",
+                            "--filter",
+                            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                        ],
+                        timeout=5,
+                    )
+                    owned = {r["id"] for r in state["resources"].values()}
+                    if state.get("dev_id"):
+                        owned.add(state["dev_id"])
+                    if not listed.success or set(listed.stdout.split()) - owned:
+                        return RunResult(
+                            1, stderr="unknown project resources; preserving resources"
+                        )
+            hostctl.stop_helper_locked(remove=True)
+            actual = host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
             if actual is not None:
                 labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
-                if labels.get("com.docker.compose.project") != "djinn-in-a-box":
+                if labels.get("com.docker.compose.project") != COMPOSE_PROJECT:
                     return RunResult(1, stderr="dev ownership is unknown; preserving resources")
                 result = _run_captured(
                     [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])], timeout=10
                 )
                 if not result.success:
                     return result
-                if host_runtime.inspect_object("djinn", DOCKER_EXECUTABLE) is not None:
+                if (
+                    host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
+                    is not None
+                ):
                     return RunResult(1, stderr="dev termination could not be verified")
-            result = _run_compose(
-                [*get_compose_files(), "down", "--remove-orphans"],
-                config=None,
-                cwd=get_project_root(),
-                timeout=15,
+            result = (
+                RunResult(0)
+                if state and "agent_docker" in state
+                else _run_compose(
+                    [*get_compose_files(), "down", "--remove-orphans"],
+                    config=None,
+                    cwd=get_project_root(),
+                    timeout=15,
+                )
             )
             if not result.success:
                 return result
@@ -2034,24 +2505,6 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
         return result
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         return RunResult(1, stderr=f"Cleanup preserved resources: {exc}")
-
-
-def cleanup_docker_proxy(
-    docker_mode: DockerMode,
-    config: AppConfig | None = None,
-    *,
-    owner: host_runtime.GitRuntime | None = None,
-) -> None:
-    """Caller finally can clean only its acquired generation, never by service name."""
-    if docker_mode is not DockerMode.PROXY or owner is None or owner.root is None:
-        return
-    try:
-        with host_runtime.creation_guard(owner.root):
-            host_runtime.cleanup_owned(owner.root, owner.generation, owner.docker_path)
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        warning(f"Proxy cleanup preserved resources: {exc}")
-
-
 def is_container_running(name: str) -> bool:
     names = _docker_list(
         [DOCKER_EXECUTABLE, "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"]

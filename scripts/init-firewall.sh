@@ -137,7 +137,7 @@ iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
 # -----------------------------------------------------------------------------
-# Allow Docker internal networks (for Docker Proxy)
+# Allow Docker internal networks
 # -----------------------------------------------------------------------------
 echo "" >&2
 ui_info "Allowing Docker internal networks..."
@@ -193,7 +193,7 @@ echo "" >&2
 ui_ok "Firewall initialized. Outbound traffic restricted to whitelist."
 echo "" >&2
 ui_info "Allowed:"
-ui_info "Docker internal networks (including the Docker Proxy)"
+ui_info "Docker internal networks"
 ui_info "Whitelisted domains (package registries, AI APIs, etc.)"
 echo "" >&2
 ui_info "To add domains at runtime:"

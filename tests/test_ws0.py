@@ -23,9 +23,7 @@ from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, BuildConfig
 from djinn_in_a_box.core.docker import (
     ContainerOptions,
-    DockerMode,
     build_compose_env,
-    cleanup_docker_proxy,
     compose_build,
     compose_down,
     compose_run,
@@ -144,8 +142,7 @@ class TestComposeEnvBridge:
         Compose skips ``compose run`` containers on a plain ``down`` — which is
         how ``start``/``run`` create the dev container — so without this flag
         ``djinn clean`` reports success while the live session survives and
-        ``djinn backup`` keeps refusing. It also reaps a proxy left by
-        ``--docker``.
+        ``djinn backup`` keeps refusing.
         """
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         compose_down(mock_app_config)
@@ -153,18 +150,6 @@ class TestComposeEnvBridge:
         assert "down" in argv
         assert "--remove-orphans" in argv
 
-    @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
-    @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_cleanup_docker_proxy_both_calls(
-        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig
-    ) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        cleanup_docker_proxy(DockerMode.PROXY, mock_app_config)
-        assert mock_run.call_count == 0  # A caller without ownership cannot touch the proxy.
-        for call in mock_run.call_args_list:
-            env = call.kwargs.get("env")
-            assert env is not None
-            self._assert_guarded(env, mock_app_config)
 
     @patch("djinn_in_a_box.core.docker.get_project_root", return_value=Path("/project"))
     @patch("djinn_in_a_box.core.docker.subprocess.run")

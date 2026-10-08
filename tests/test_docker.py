@@ -28,7 +28,6 @@ from djinn_in_a_box.core.docker import (
     backup_sync_path,
     backup_volume,
     build_compose_env,
-    cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
     compose_down,
@@ -644,8 +643,8 @@ class TestMountTargetCollisions:
         [
             (DockerMode.NONE, Path("/var/run/docker.sock")),
             (DockerMode.NONE, Path("/run/docker.sock")),
-            (DockerMode.PROXY, Path("/var/run/docker.sock")),
-            (DockerMode.PROXY, Path("/run/docker.sock")),
+            (DockerMode.AGENT, Path("/var/run/docker.sock")),
+            (DockerMode.AGENT, Path("/run/docker.sock")),
         ],
     )
     def test_allows_docker_socket_target_without_direct_socket(
@@ -923,32 +922,50 @@ class TestGetComposeFiles:
         """Test returns only base compose file when docker_mode=NONE."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.NONE)
-        assert len(files) == 4
-        assert files[0] == "-f"
-        assert "docker-compose.yml" in files[1]
-        assert "docker-compose.docker.yml" not in str(files)
+        assert len(files) == 6
+        assert files[:2] == ["-p", "djinn-in-a-box"]
+        assert files[2] == "-f"
+        assert "docker-compose.yml" in files[3]
+        assert "docker-compose.agent-docker.yml" not in str(files)
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_with_docker(self, mock_root: MagicMock) -> None:
         """Test returns both compose files when docker_mode=PROXY."""
         mock_root.return_value = Path("/project")
-        files = get_compose_files(DockerMode.PROXY)
-        assert len(files) == 6
+        files = get_compose_files(DockerMode.AGENT)
+        assert len(files) == 8
+        assert files[:2] == ["-p", "djinn-in-a-box"]
         assert files.count("-f") == 3
         # Check both files are present
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
-        assert any("docker-compose.docker.yml" in f for f in file_paths)
+        assert any("docker-compose.agent-docker.yml" in f for f in file_paths)
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     def test_with_docker_direct(self, mock_root: MagicMock) -> None:
         """Test returns docker-direct compose file when docker_mode=DIRECT."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.DIRECT)
-        assert len(files) == 6
+        assert len(files) == 8
+        assert files[:2] == ["-p", "djinn-in-a-box"]
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker-direct.yml" in f for f in file_paths)
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    def test_explicit_project_keeps_identity_substitution(
+        self, mock_root: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_root.return_value = Path("/project")
+        monkeypatch.setattr(docker_mod, "COMPOSE_PROJECT", "djinn-test")
+
+        files = get_compose_files()
+
+        assert files[:2] == ["-p", "djinn-test"]
+        compose = yaml.safe_load(
+            (Path(__file__).parents[1] / "docker-compose.yml").read_text()
+        )
+        assert compose["name"] == "djinn-in-a-box"
 
 
 class TestBuildComposeEnv:
@@ -1112,9 +1129,9 @@ class TestIsContainerRunning:
         """Test returns True when container is running."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="djinn-docker-proxy\n",
+            stdout="djinn-agent-docker\n",
         )
-        assert is_container_running("djinn-docker-proxy") is True
+        assert is_container_running("djinn-agent-docker") is True
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_container_not_running(self, mock_run: MagicMock) -> None:
@@ -1123,16 +1140,16 @@ class TestIsContainerRunning:
             returncode=0,
             stdout="",
         )
-        assert is_container_running("djinn-docker-proxy") is False
+        assert is_container_running("djinn-agent-docker") is False
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_partial_match_rejected(self, mock_run: MagicMock) -> None:
         """Test partial name matches are rejected."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="djinn-docker-proxy-2\n",
+            stdout="djinn-agent-docker-2\n",
         )
-        assert is_container_running("djinn-docker-proxy") is False
+        assert is_container_running("djinn-agent-docker") is False
 
 
 class TestGetRunningContainers:
@@ -1143,12 +1160,12 @@ class TestGetRunningContainers:
         """Test returns list of running containers."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="djinn\ndjinn-docker-proxy\n",
+            stdout="djinn\ndjinn-agent-docker\n",
         )
         containers = get_running_containers()
         assert containers is not None
         assert "djinn" in containers
-        assert "djinn-docker-proxy" in containers
+        assert "djinn-agent-docker" in containers
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_returns_unknown_on_error(self, mock_run: MagicMock) -> None:
@@ -1842,25 +1859,6 @@ class TestComposeRun:
         assert result.stdout == "captured"
 
 
-class TestCleanupDockerProxy:
-    """Tests for cleanup_docker_proxy function."""
-
-    @patch("djinn_in_a_box.core.docker.subprocess.run")
-    @patch("djinn_in_a_box.core.docker.get_project_root")
-    def test_skips_when_docker_disabled(self, mock_root: MagicMock, mock_run: MagicMock) -> None:
-        """Test does nothing when docker_mode=NONE."""
-        cleanup_docker_proxy(DockerMode.NONE)
-        mock_run.assert_not_called()
-
-    @patch("djinn_in_a_box.core.docker.subprocess.run")
-    @patch("djinn_in_a_box.core.docker.get_project_root")
-    def test_stops_and_removes_proxy(self, mock_root: MagicMock, mock_run: MagicMock) -> None:
-        """Test stops and removes docker-proxy when docker_mode=PROXY."""
-        mock_root.return_value = Path("/project")
-        mock_run.return_value = MagicMock(returncode=0)
-        cleanup_docker_proxy(DockerMode.PROXY)
-        assert mock_run.call_count == 0
-        # First call: stop docker-proxy
 
 
 class TestComposeRunErrorHandling:

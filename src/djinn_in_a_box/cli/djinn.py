@@ -29,7 +29,6 @@ from djinn_in_a_box.commands.container import (
 )
 from djinn_in_a_box.commands.doctor import doctor
 from djinn_in_a_box.commands.hostctl import app as hostctl_app
-from djinn_in_a_box.commands.logs import app as logs_app
 from djinn_in_a_box.commands.session import session
 
 app = typer.Typer(
@@ -87,7 +86,6 @@ config_app.command("status")(config_status)
 config_app.command("sync")(config_sync)
 app.add_typer(config_app, name="config")
 app.add_typer(hostctl_app, name="hostctl")
-app.add_typer(logs_app, name="logs")
 
 app.command()(build)
 app.command()(start)

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
-from djinn_in_a_box.commands import assistant, config, logs
+from djinn_in_a_box.commands import assistant, config
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, AssistantConfig
 from djinn_in_a_box.core.assistant import AssistantError
@@ -42,18 +42,6 @@ def test_old_audit_tail_and_invalid_agent_are_usage_errors(monkeypatch):
     assert calls == []
 
 
-def test_logs_cli_tail_alias_and_heading(monkeypatch):
-    monkeypatch.setattr(logs, "is_container_running", lambda name: True)
-    calls = []
-    monkeypatch.setattr(
-        logs.subprocess,
-        "run",
-        lambda argv, **kw: calls.append(argv) or type("Result", (), {"returncode": 0})(),
-    )
-    result = runner.invoke(app, ["logs", "proxy", "-n", "123"])
-    assert result.exit_code == 0
-    assert "last 123 lines" in result.output
-    assert calls == [[logs.DOCKER_EXECUTABLE, "logs", "--tail", "123", "djinn-docker-proxy"]]
 
 
 @pytest.mark.parametrize("agent", ("claude", "codex", "opencode"))

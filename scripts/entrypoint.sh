@@ -152,9 +152,9 @@ if [[ "${DOCKER_DIRECT:-false}" == "true" ]]; then
         fi
     fi
 
-    ui_ok "Docker Access: Direct socket (NO PROXY)"
+    ui_ok "Docker Access: Host daemon (direct socket)"
     ui_info "Socket: /var/run/docker.sock"
-    ui_warn "WARNING: Full Docker access — no API filtering!"
+    ui_warn "WARNING: Full host Docker authority!"
     ui_info "All operations allowed: build, exec, push, etc."
 
     if docker version &>/dev/null; then
@@ -164,26 +164,16 @@ if [[ "${DOCKER_DIRECT:-false}" == "true" ]]; then
         ui_info "Hint: Check socket permissions (host docker GID: ${SOCK_GID:-unknown})"
     fi
 elif [[ -n "${DOCKER_HOST:-}" ]]; then
-    ui_ok "Docker Access: Enabled via proxy"
-    ui_info "Host: $DOCKER_HOST"
-
-    # Test connection
-    if docker version &>/dev/null; then
+    unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+    docker context use default >/dev/null 2>&1 || true
+    ui_info "Docker Access: Agent daemon"
+    ui_info "Endpoint: $DOCKER_HOST"
+    if docker info >/dev/null 2>&1; then
         ui_ok "Status: Connected"
-
-        # Document proxy restrictions
-        ui_info "Allowed operations:"
-        ui_ok "docker ps, images, networks, volumes"
-        ui_ok "docker run, start, stop, rm"
-        ui_ok "docker pull"
-        ui_info "Blocked operations (security):"
-        ui_err "docker exec (use 'docker run' instead)"
-        ui_err "docker build (use pre-built images)"
-        ui_err "docker commit, push"
-        ui_err "swarm, secrets, configs"
+        ui_info "Build, run and compose use the agent daemon"
+        ui_info "Published ports: agent-docker:<port>"
     else
-        ui_err "Status: Connection failed"
-        ui_info "Hint: Is docker-proxy running? Check: docker ps | grep proxy"
+        ui_err "Status: Agent daemon connection failed"
     fi
 else
     ui_warn "Docker Access: Disabled"

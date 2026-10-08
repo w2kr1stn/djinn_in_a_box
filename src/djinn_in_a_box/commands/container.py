@@ -20,7 +20,7 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, host_runtime, hostctl
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
@@ -43,7 +43,6 @@ from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     ContainerOptions,
     MountCollisionError,
-    cleanup_docker_proxy,
     clear_sync_path,
     compose_build,
     compose_down,
@@ -97,6 +96,34 @@ def _sync_build_files(config: AppConfig | None = None) -> None:
             shutil.copy2(source, target)
 
 
+def _pull_agent_docker_image_if_missing() -> None:
+    if host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image") is not None:
+        return
+
+    info("Pulling the pinned agent Docker image...")
+    try:
+        result = subprocess.run(
+            [DOCKER_EXECUTABLE, "pull", agent_docker.IMAGE],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd="/",
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = str(exc) or type(exc).__name__
+        blank()
+        error(f"Pulling the pinned agent Docker image failed: {detail}")
+        raise typer.Exit(1) from None
+
+    if result.returncode:
+        detail = result.stderr.strip() or f"exit code {result.returncode}"
+        blank()
+        error(f"Pulling the pinned agent Docker image failed: {detail}")
+        raise typer.Exit(result.returncode or 1)
+
+
 @handle_config_errors
 def build(
     no_cache: Annotated[
@@ -126,6 +153,9 @@ def build(
             raise typer.Exit(1) from None
 
     if result.success:
+        _pull_agent_docker_image_if_missing()
+
+    if result.success:
         blank()
         success("Done! Run 'djinn start' to begin.")
     else:
@@ -145,11 +175,11 @@ def build(
 def start(
     docker: Annotated[
         bool,
-        typer.Option("--docker", "-d", help="Enable Docker access via secure proxy"),
+        typer.Option("--docker", "-d", help="Enable rootless agent Docker daemon"),
     ] = False,
     docker_direct: Annotated[
         bool,
-        typer.Option("--docker-direct", help="Enable direct Docker socket access (no proxy)"),
+        typer.Option("--docker-direct", help="Enable host Docker daemon access"),
     ] = False,
     firewall: Annotated[
         bool,
@@ -191,7 +221,7 @@ def start(
 
     Examples:
         djinn start                         # Basic interactive shell
-        djinn start --docker                # With Docker access (proxy)
+        djinn start --docker                # With agent Docker daemon
         djinn start --docker-direct         # With Docker access (direct)
         djinn start --here                  # Mount cwd as workspace
         djinn start --detach --docker-direct  # Background; then `djinn enter`
@@ -247,9 +277,9 @@ def start(
     status_line("Workspace", f"{config.workspace} ({config.workspace_target})")
 
     if docker:
-        status_line("Docker", "Enabled (via secure proxy)", "status.enabled")
+        status_line("Docker", "Enabled (agent daemon)", "status.enabled")
     elif docker_direct:
-        status_line("Docker", "Enabled (DIRECT — no proxy)", "warning")
+        status_line("Docker", "Enabled (host daemon)", "warning")
     else:
         status_line("Docker", "Disabled (use --docker to enable)", "status.disabled")
 
@@ -285,7 +315,7 @@ def start(
         warning(
             "Direct Docker socket access grants full Docker control. "
             "This is equivalent to root access on the host. "
-            "Use --docker (proxy) for safer operation."
+            "Use --docker for an isolated agent daemon."
         )
 
     rule("Container")
@@ -318,11 +348,6 @@ def start(
     except RuntimeMountSpecificationError as e:
         error(f"Internal runtime mount construction failed: {e}")
         raise typer.Exit(1) from None
-    finally:
-        # A detached container outlives this process, so the proxy it talks to has
-        # to stay up. Only the foreground path owns the proxy's lifetime.
-        if not detach:
-            cleanup_docker_proxy(docker_mode, config, owner=result.owner if result else None)
 
     assert result is not None
     if result.stderr:
@@ -528,11 +553,11 @@ def status() -> None:
     # Service Status
     rule("Services")
 
-    # Docker Proxy Status
-    if is_container_running("djinn-docker-proxy"):
-        status_line("Docker Proxy", "Running", "status.enabled")
+    # Agent Docker status
+    if is_container_running("djinn-agent-docker"):
+        status_line("Agent Docker", "Running", "status.enabled")
     else:
-        status_line("Docker Proxy", "Not running", "status.disabled")
+        status_line("Agent Docker", "Not running", "status.disabled")
 
 
 clean_app = typer.Typer(
