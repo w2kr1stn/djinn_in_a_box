@@ -16,6 +16,12 @@ Versioning before and after the first stable release.
 - Rootless agent Docker runtime for `--docker`, with generation-owned Unix endpoint,
   matching workspace mounts, persistent cache, resource limits and firewall gating.
 - Checksum-verified Buildx 0.37.2 in the dev image.
+- Optional tool `pnpm` (`tools/installers/pnpm.sh`) via Corepack, respecting a
+  project's `packageManager` pin. Corepack is installed from npm into the tools
+  cache volume because Node >= 25 no longer bundles it; `COREPACK_HOME` also
+  defaults to the volume, preserving downloaded package managers and the
+  known-good release for new containers. The `pnpm` and `pnpx` wrappers
+  call the volume's Corepack and respect an explicitly set `COREPACK_HOME`.
 - Optional tools `rust` and `just` (`tools/installers/rust.sh`, `just.sh`). `rust`
   installs rustup into the tools cache volume (`RUSTUP_HOME` and `CARGO_HOME` under
   `~/.cache/djinn-tools`), so the toolchain, the crate registry cache and
@@ -105,6 +111,11 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- `tools/install.sh` now runs cache verification and installers from `/`, so
+  project files in the container's starting directory (`packageManager` pins,
+  `rust-toolchain.toml`, uv configuration) cannot influence them. Relative
+  `TOOLS_FILE`, `CACHE_DIR`, and `INSTALLERS_DIR` overrides still refer to the
+  starting directory.
 - Djinn now uses `AGENTS.md` as the sole instruction file for Claude Code, Codex,
   and OpenCode across workflow sources, synchronized views, host delivery, and
   container mounts. The seeded instructions explain the per-directory `.agents/`
