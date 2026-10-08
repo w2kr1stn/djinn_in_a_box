@@ -1193,6 +1193,35 @@ class TestDeleteVolumes:
 class TestComposeBuild:
     """Tests for compose_build function."""
 
+    def test_agent_args_sorted_before_targets(self, monkeypatch, mock_app_config):
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: Path("/project"))
+        run = MagicMock(return_value=docker_mod.RunResult(returncode=0))
+        monkeypatch.setattr(docker_mod, "_run_streamed", run)
+        compose_build(mock_app_config, no_cache=True, agent_args={
+            "OPENCODE_VERSION": "1.18.40", "CODEX_VERSION": "0.161.0",
+            "CLAUDE_CODE_VERSION": "2.1.300",
+        })
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--no-cache") + 1:] == [
+            "--set", "dev.args.CLAUDE_CODE_VERSION=2.1.300",
+            "--set", "dev.args.CODEX_VERSION=0.161.0",
+            "--set", "dev.args.OPENCODE_VERSION=1.18.40", "dev", "dbus-helper",
+        ]
+
+    @pytest.mark.parametrize("agent_args", [None, {}])
+    def test_without_agent_args_argv_is_unchanged(self, monkeypatch, agent_args):
+        monkeypatch.delenv("DJINN_BUILD_NETWORK", raising=False)
+        monkeypatch.delenv("DJINN_BUILD_PROGRESS", raising=False)
+        monkeypatch.setattr(docker_mod, "get_project_root", lambda: Path("/project"))
+        run = MagicMock(return_value=docker_mod.RunResult(returncode=0))
+        monkeypatch.setattr(docker_mod, "_run_streamed", run)
+        compose_build(agent_args=agent_args)
+        assert run.call_args.args[0] == [
+            docker_mod.DOCKER_EXECUTABLE, "buildx", "bake", "-f", "/project/docker-compose.yml",
+            "-f", "/project/docker-compose.desktop.yml",
+            "--progress", "plain", "--load", "dev", "dbus-helper",
+        ]
+
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_build_success(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
@@ -1479,8 +1508,8 @@ class TestDockerfileDnsGuard:
 
         A guard in its own layer can stay cached while the download below re-runs —
         only sharing a RUN shares the cache decision. `npm install -g` is the layer
-        that matters most: a `djinn update` bump invalidates it while everything
-        above stays cached, and its failure mode cost 70 minutes.
+        that matters most: an agent ARG bump re-runs it (like every RUN after the ARG
+        block) while the layers above stay cached, and its failure mode cost 70 minutes.
         """
         instructions = self._run_instructions()
         assert instructions, "no RUN instructions parsed — has the Dockerfile moved?"

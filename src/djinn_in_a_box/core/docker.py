@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
@@ -1120,7 +1120,12 @@ def _build_progress() -> str:
     return requested
 
 
-def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) -> RunResult:
+def compose_build(
+    config: AppConfig | None = None,
+    *,
+    no_cache: bool = False,
+    agent_args: Mapping[str, str] | None = None,
+) -> RunResult:
     """Build the compose-defined image with ``docker buildx bake``, streaming its log.
 
     Bake reads ``docker-compose.yml`` itself, so the compose file stays the one
@@ -1165,6 +1170,8 @@ def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) ->
         cmd.append("--no-cache")
     if env.get(BUILD_NETWORK_VAR) == "host":
         cmd.extend(["--allow", "network.host"])
+    for arg, version in sorted((agent_args or {}).items()):
+        cmd.extend(["--set", f"dev.args.{arg}={version}"])
     cmd.extend(["dev", "dbus-helper"])
     return _run_streamed(cmd, cwd=project_root, env=env)
 

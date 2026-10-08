@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core import agent_versions, paths
 from djinn_in_a_box.core import assistant as a
 from djinn_in_a_box.core.exceptions import ConfigValidationError, ZoneConfigurationError
 
@@ -222,6 +223,7 @@ def test_redirected_credentials_refused(installation):
 @pytest.mark.parametrize("broken", ("TOML", "zones", "code_dir"))
 def test_broken_config_loads_default_session(installation, monkeypatch, broken):
     f = installation
+    agent_versions.save_versions({"CLAUDE_CODE_VERSION": "2.1.300"})
     # Exercise the actual recovery, not a stub returning a hand-built fallback.
     monkeypatch.setattr(a, "audit_config", AUDIT_CONFIG)
 
@@ -242,6 +244,8 @@ def test_broken_config_loads_default_session(installation, monkeypatch, broken):
     assert f"Invalid {broken}" in argv[-1]
     assert "investigate" in argv[-1]
     assert len([flag for flag in argv if flag == "--mount"]) == 4
+    build = next(argv for argv, _ in f.docker.calls if argv[1] == "buildx")
+    assert "AGENT_VERSION=2.1.300" in build
 
 
 def test_cache_rebuilds_only_changed_inputs(installation):
@@ -279,18 +283,85 @@ def test_build_flags_and_pins(installation, network):
 
 
 @pytest.mark.parametrize("pin", ("duplicate", "malformed", "missing"))
-def test_invalid_pins_abort(installation, pin):
+@pytest.mark.parametrize("name", ("CODEX_VERSION", "DOCKER_VERSION"))
+def test_invalid_pins_abort(installation, pin, name):
     f = installation
     path = f.project / "Dockerfile"
+    default = "0.160.0" if name == "CODEX_VERSION" else "27.4.1"
     value = {
-        "duplicate": path.read_text() + "ARG CODEX_VERSION=0.160.0\n",
-        "malformed": path.read_text().replace("0.160.0", "latest"),
-        "missing": path.read_text().replace("ARG CODEX_VERSION", "# ARG CODEX_VERSION"),
+        "duplicate": path.read_text() + f"ARG {name}={default}\n",
+        "malformed": path.read_text().replace(default, "latest"),
+        "missing": path.read_text().replace(f"ARG {name}", f"# ARG {name}"),
     }[pin]
     path.write_text(value)
-    with pytest.raises(a.AssistantError, match="numeric ARG"):
+    with pytest.raises(a.AssistantError, match="numeric x.y.z ARG") as exc:
         a.ensure_image(f.project, "codex", "linux/amd64", "default")
+    assert str(path) in str(exc.value) and name in str(exc.value)
     assert f.docker.calls == []
+
+
+@pytest.mark.parametrize(("agent", "arg", "new_version"), [
+    ("claude", "CLAUDE_CODE_VERSION", "2.1.300"),
+    ("codex", "CODEX_VERSION", "0.161.0"),
+    ("opencode", "OPENCODE_VERSION", "1.18.40"),
+])
+def test_record_version_reaches_agent_arg_and_fingerprint(installation, agent, arg, new_version):
+    f = installation
+    first = a.ensure_image(f.project, agent, "linux/amd64", "default")
+    first_fingerprint = a.label(f.docker.image, a.CONTENT_LABEL)
+    agent_versions.save_versions({arg: new_version})
+    updated = a.ensure_image(f.project, agent, "linux/amd64", "default")
+    assert updated != first
+    assert a.label(f.docker.image, a.CONTENT_LABEL) != first_fingerprint
+    builds = [argv for argv, _ in f.docker.calls if argv[1:3] == ["buildx", "build"]]
+    assert len(builds) == 2
+    assert f"AGENT_VERSION={new_version}" in builds[-1]
+    assert "DOCKER_VERSION=27.4.1" in builds[-1]
+    assert a.ensure_image(f.project, agent, "linux/amd64", "default") == updated
+    assert len([argv for argv, _ in f.docker.calls if argv[1] == "buildx"]) == 2
+
+
+@pytest.mark.parametrize(("agent", "arg", "default"), [
+    ("claude", "CLAUDE_CODE_VERSION", "2.1.288"),
+    ("codex", "CODEX_VERSION", "0.160.0"),
+    ("opencode", "OPENCODE_VERSION", "1.18.34"),
+])
+@pytest.mark.parametrize("local", ["equal", "lower"])
+def test_inert_record_keeps_agent_arg_and_fingerprint(installation, agent, arg, default, local):
+    f = installation
+    first = a.ensure_image(f.project, agent, "linux/amd64", "default")
+    fingerprint = a.label(f.docker.image, a.CONTENT_LABEL)
+    another = next(key for key in agent_versions.KNOWN_AGENT_ARGS if key != arg)
+    agent_versions.save_versions({arg: default if local == "equal" else "0.0.1", another: "99.0.0"})
+    assert a.ensure_image(f.project, agent, "linux/amd64", "default") == first
+    assert a.label(f.docker.image, a.CONTENT_LABEL) == fingerprint
+    agent_versions.save_versions({another: "100.0.0"})
+    assert a.ensure_image(f.project, agent, "linux/amd64", "default") == first
+    builds = [argv for argv, _ in f.docker.calls if argv[1] == "buildx"]
+    assert len(builds) == 1
+    assert f"AGENT_VERSION={default}" in builds[0]
+
+
+@pytest.mark.parametrize("failure", ["toml", "unknown", "value", "unselected", "read"])
+def test_invalid_record_aborts_assistant_before_docker(installation, monkeypatch, failure):
+    record = paths.AGENT_VERSIONS_FILE
+    record.parent.mkdir(parents=True)
+    record.write_text({"toml": "[", "unknown": 'DOCKER_VERSION = "29.0.0"',
+                       "value": 'CLAUDE_CODE_VERSION = "beta"',
+                       "unselected": 'OPENCODE_VERSION = "1.2.3-beta"', "read": ""}[failure])
+    if failure == "read":
+        original = Path.open
+
+        def opened(self, *args, **kwargs):
+            if self == record:
+                raise OSError("record permission denied")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", opened)
+    with pytest.raises(a.AssistantError) as exc:
+        a.ensure_image(installation.project, "claude", "linux/amd64", "default")
+    assert str(record) in str(exc.value)
+    assert installation.docker.calls == []
 
 
 def test_failed_rebuild_never_launches(installation):

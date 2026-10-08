@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -18,6 +17,12 @@ from typing import Any, cast
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig, AssistantAgent, AssistantConfig
 from djinn_in_a_box.config.zones import load_zone_assignments
+from djinn_in_a_box.core.agent_versions import (
+    AgentVersionError,
+    effective_version,
+    load_versions,
+    version_pin,
+)
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     _run_captured,  # pyright: ignore[reportPrivateUsage]
@@ -139,16 +144,13 @@ def local_daemon() -> tuple[Path, str]:
     return socket, platform
 
 
-def version_pin(project: Path, name: str) -> str:
-    values = re.findall(rf"^ARG {name}=([^\s]+)\s*$", (project / "Dockerfile").read_text(), re.M)
-    if len(values) != 1 or not re.fullmatch(r"\d+\.\d+\.\d+", values[0]):
-        raise AssistantError(f"Expected one numeric ARG {name} pin in the dev Dockerfile")
-    return values[0]
-
-
 def ensure_image(project: Path, agent: AssistantAgent, platform: str, network: str) -> str:
-    version = version_pin(project, PIN_NAMES[agent])
-    docker_version = version_pin(project, "DOCKER_VERSION")
+    try:
+        versions = load_versions()
+        version = effective_version(project, PIN_NAMES[agent], versions)
+        docker_version = version_pin(project, "DOCKER_VERSION")
+    except AgentVersionError as exc:
+        raise AssistantError(str(exc)) from exc
     context = project / "assistant"
     content = json.dumps(
         [agent, version, docker_version, platform, network, os.getuid(), os.getgid()]

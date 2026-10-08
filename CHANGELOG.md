@@ -178,6 +178,8 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `djinn update` leaves the checkout clean and records agent versions locally,
+  so dev and assistant builds use the newer of local versions and upstream defaults.
 - Git keys that share a passphrase now ask for it once at `djinn start` and
   `djinn run`, instead of once per key. One `ssh-add` call loads all declared
   keys; a different passphrase prompts again, so declare keys that share one

@@ -271,7 +271,8 @@ class TestBuildCommand:
         """Build installs hostctl, then pulls the pinned companion image if absent."""
         steps: list[str] = []
 
-        def compose(config: object, *, no_cache: bool) -> RunResult:
+        def compose(config: object, *, no_cache: bool, agent_args: object) -> RunResult:
+            assert agent_args == {}
             steps.append(f"compose:{no_cache}")
             return RunResult(returncode=2 if failing == "compose" else 0)
 
@@ -359,6 +360,75 @@ class TestBuildCommand:
 
         assert (project_root / "packages.txt").read_text() == "ripgrep\n"
         assert (project_root / "tools" / "tools.txt").read_text() == "codex\n"
+
+
+    @pytest.mark.parametrize("failure", ["toml", "unknown", "value", "read"])
+    def test_build_invalid_record_stops_before_preflight(
+        self, tmp_path, mock_app_config, monkeypatch, failure,
+    ):
+        from djinn_in_a_box.core import paths
+
+        record = paths.AGENT_VERSIONS_FILE
+        record.parent.mkdir(parents=True)
+        record.write_text({"toml": "[", "unknown": 'DOCKER_VERSION = "29.0.0"',
+                           "value": 'CODEX_VERSION = "beta"', "read": ""}[failure])
+        if failure == "read":
+            original = Path.open
+
+            def opened(self, *args, **kwargs):
+                if self == record:
+                    raise OSError("record permission denied")
+                return original(self, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "open", opened)
+        monkeypatch.setattr(container, "load_config", lambda: mock_app_config)
+        monkeypatch.setattr(container, "get_project_root", lambda: tmp_path)
+        stopped = {}
+        for name in ("preflight", "_sync_build_files", "compose_build",
+                     "_pull_agent_docker_image_if_missing"):
+            stopped[name] = MagicMock(side_effect=AssertionError(f"unexpected {name}"))
+            monkeypatch.setattr(container, name, stopped[name])
+        for name in ("build_supervisor", "install_supervisor"):
+            stopped[name] = MagicMock(side_effect=AssertionError(f"unexpected {name}"))
+            monkeypatch.setattr(container.hostctl, name, stopped[name])
+        result = runner.invoke(app, ["build"])
+        assert result.exit_code == 1
+        assert str(record) in result.output.replace("\n", "")
+        for called in stopped.values():
+            called.assert_not_called()
+
+    @pytest.mark.parametrize("recorded", [False, True])
+    def test_build_passes_resolved_agent_args(
+        self, tmp_path, mock_app_config, monkeypatch, recorded,
+    ):
+        from djinn_in_a_box.core import agent_versions
+
+        (tmp_path / "Dockerfile").write_text(
+            "ARG CLAUDE_CODE_VERSION=2.1.288\nARG CODEX_VERSION=0.160.0\n"
+        )
+        if recorded:
+            agent_versions.save_versions({
+                "CLAUDE_CODE_VERSION": "2.1.300", "CODEX_VERSION": "0.1.0",
+            })
+        monkeypatch.setattr(container, "load_config", lambda: mock_app_config)
+        monkeypatch.setattr(container, "get_project_root", lambda: tmp_path)
+        monkeypatch.setattr(container, "preflight", MagicMock())
+        monkeypatch.setattr(container, "_sync_build_files", MagicMock())
+        compose = MagicMock(return_value=RunResult(returncode=0))
+        monkeypatch.setattr(container, "compose_build", compose)
+        monkeypatch.setattr(container.hostctl, "build_supervisor",
+                            MagicMock(return_value=RunResult(returncode=0)))
+        monkeypatch.setattr(container.hostctl, "install_supervisor", MagicMock())
+        monkeypatch.setattr(container, "_pull_agent_docker_image_if_missing", MagicMock())
+        load = MagicMock(wraps=container.load_versions)
+        monkeypatch.setattr(container, "load_versions", load)
+        result = runner.invoke(app, ["build", "--no-cache"])
+        assert result.exit_code == 0, result.output
+        load.assert_called_once_with()
+        compose.assert_called_once_with(
+            mock_app_config, no_cache=True,
+            agent_args={"CLAUDE_CODE_VERSION": "2.1.300"} if recorded else {},
+        )
 
 
 class TestStartCommand:
@@ -1303,34 +1373,333 @@ class TestCleanAllCommand:
         mock_clear.assert_not_called()
 
 
+UPDATE_OUTPUT = (
+    "CLAUDE_CODE_VERSION=2.1.300\nCODEX_VERSION=0.161.0\nOPENCODE_VERSION=1.18.40\n"
+)
+UPDATE_NPM_ERROR = (
+    "npm error code EAI_AGAIN\nnpm error syscall getaddrinfo\n"
+    "npm error request to https://registry.npmjs.org/@openai%2fcodex failed, "
+    "reason: getaddrinfo EAI_AGAIN registry.npmjs.org\n"
+)
+
+
+class UpdateProcess:
+    def __init__(self, result, waiting_error=None):
+        self.result = result
+        self.returncode = result.returncode
+        self.pid = 4194305  # above pid_max: no real process can match
+        self.waiting_error = waiting_error
+        self.waits = []
+
+    def communicate(self, timeout=None):
+        self.waits.append(timeout)
+        if timeout is not None and self.waiting_error is not None:
+            raise self.waiting_error
+        return self.result.stdout, self.result.stderr
+
+
+@pytest.fixture
+def update_project(tmp_path, monkeypatch):
+    (tmp_path / "scripts").mkdir()
+    script = tmp_path / "scripts/update-agents.sh"
+    script.write_text("#!/bin/bash\nexit 0\n")
+    (tmp_path / "Dockerfile").write_text(
+        "ARG CLAUDE_CODE_VERSION=2.1.288\nARG CODEX_VERSION=0.160.0\nARG OPENCODE_VERSION=1.18.34\n"
+    )
+    monkeypatch.setattr(container, "get_project_root", lambda: tmp_path)
+    return tmp_path
+
+
 class TestUpdateCommand:
-    """Tests for the update command."""
+    """Tests for local, all-or-nothing discovery and persistence."""
 
-    def test_update_runs_script(self, tmp_path: Path) -> None:
-        """Test update runs update-agents.sh script."""
-        scripts_dir = tmp_path / "scripts"
-        scripts_dir.mkdir()
-        script_path = scripts_dir / "update-agents.sh"
-        script_path.write_text("#!/bin/bash\necho 'update'")
+    def test_update_runs_script(self, update_project, monkeypatch):
+        from djinn_in_a_box.core import agent_versions, paths
 
-        with (
-            patch("djinn_in_a_box.commands.container.get_project_root", return_value=tmp_path),
-            patch("subprocess.run") as mock_run,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
+        agent_versions.save_versions({"CLAUDE_CODE_VERSION": "2.1.1", "CODEX_VERSION": "0.162.0"})
+        proc = UpdateProcess(subprocess.CompletedProcess([], 0, UPDATE_OUTPUT, ""))
+        spawn = MagicMock(return_value=proc)
+        monkeypatch.setattr(container.subprocess, "Popen", spawn)
+        config = MagicMock(side_effect=AssertionError("update must not load config"))
+        monkeypatch.setattr(container, "load_config", config)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        spawn.assert_called_once_with(
+            [str(update_project / "scripts/update-agents.sh"), "--print"], cwd=update_project,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        assert proc.waits == [120]
+        config.assert_not_called()
+        assert agent_versions.load_versions() == {
+            "CLAUDE_CODE_VERSION": "2.1.300", "CODEX_VERSION": "0.161.0",
+            "OPENCODE_VERSION": "1.18.40",
+        }
+        assert "CLAUDE_CODE_VERSION: 2.1.288 -> 2.1.300" in result.output
+        assert "CODEX_VERSION: 0.162.0 -> 0.161.0" in result.output
+        assert "OPENCODE_VERSION: 1.18.34 -> 1.18.40" in result.output
+        assert str(paths.AGENT_VERSIONS_FILE) in result.output.replace("\n", "")
+        assert "djinn build" in result.output
 
-            container.update()
+    def test_update_errors_if_script_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(container, "get_project_root", lambda: tmp_path)
+        spawn = MagicMock()
+        save = MagicMock()
+        load = MagicMock()
+        monkeypatch.setattr(container.subprocess, "Popen", spawn)
+        monkeypatch.setattr(container, "save_versions", save)
+        monkeypatch.setattr(container, "load_versions", load)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        assert "Update script not found" in result.output
+        spawn.assert_not_called()
+        save.assert_not_called()
+        load.assert_not_called()
 
-            call_args = mock_run.call_args[0][0]
-            assert str(script_path) in call_args
+    @pytest.mark.parametrize("existing", [False, True])
+    @pytest.mark.parametrize("failure", [
+        "npm", "bad-version", "timeout", "malformed", "blank", "incomplete", "duplicate",
+        "extra", "unknown", "spawn", "encoding", "wait-error",
+    ])
+    def test_update_failure_preserves_record(self, update_project, monkeypatch, existing, failure):
+        from djinn_in_a_box.core import paths
 
-    def test_update_errors_if_script_missing(self, tmp_path: Path) -> None:
-        """Test update errors if script doesn't exist."""
-        with patch("djinn_in_a_box.commands.container.get_project_root", return_value=tmp_path):
-            with pytest.raises(typer.Exit) as exc_info:
+        record = paths.AGENT_VERSIONS_FILE
+        old = b'# previous\nCODEX_VERSION = "0.162.0"\n'
+        if existing:
+            record.parent.mkdir(parents=True)
+            record.write_bytes(old)
+        outputs = {
+            "bad-version": UPDATE_OUTPUT.replace("0.161.0", "0.161.0-beta"),
+            "malformed": UPDATE_OUTPUT + "resolved all agents\n",
+            "blank": UPDATE_OUTPUT + "\n",
+            "incomplete": "CLAUDE_CODE_VERSION=2.1.300\nCODEX_VERSION=0.161.0\n",
+            "duplicate": UPDATE_OUTPUT + "CODEX_VERSION=0.161.0\n",
+            "extra": UPDATE_OUTPUT + "DOCKER_VERSION=29.0.0\n",
+            "unknown": UPDATE_OUTPUT.replace("CODEX_VERSION", "OTHER_VERSION"),
+        }
+        waiting_error = {
+            "timeout": subprocess.TimeoutExpired(["update-agents.sh", "--print"], 120),
+            "encoding": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+            "wait-error": OSError("pipe read failed"),
+        }.get(failure)
+        proc = UpdateProcess(subprocess.CompletedProcess(
+            [], 1 if failure == "npm" else 0,
+            "CLAUDE_CODE_VERSION=2.1.300\n" if failure == "npm"
+            else outputs.get(failure, UPDATE_OUTPUT),
+            UPDATE_NPM_ERROR if failure == "npm" else "",
+        ), waiting_error)
+        spawn = MagicMock(return_value=proc)
+        if failure == "spawn":
+            spawn.side_effect = OSError("script is not executable")
+        monkeypatch.setattr(container.subprocess, "Popen", spawn)
+        monkeypatch.setattr(container.os, "killpg", MagicMock())
+        save = MagicMock()
+        monkeypatch.setattr(container, "save_versions", save)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "Error" in result.output
+        save.assert_not_called()
+        assert "Agent versions saved" not in result.output
+        if failure == "unknown":
+            assert "Invalid update script output" in result.output
+            assert "OTHER_VERSION=0.161.0" in result.output
+        if failure == "npm":
+            assert "npm error code EAI_AGAIN" in result.output
+            assert "getaddrinfo EAI_AGAIN registry.npmjs.org" in result.output
+        if existing:
+            assert record.read_bytes() == old
+        else:
+            assert not record.exists()
+
+    @pytest.mark.parametrize("failure", ["record", "default", "read"])
+    def test_update_invalid_inputs_abort_before_spawn(self, update_project, monkeypatch, failure):
+        from djinn_in_a_box.core import paths
+
+        record = paths.AGENT_VERSIONS_FILE
+        record.parent.mkdir(parents=True)
+        record.write_text("[" if failure == "record" else 'CODEX_VERSION = "0.160.0"')
+        if failure == "default":
+            (update_project / "Dockerfile").write_text("ARG CLAUDE_CODE_VERSION=beta\n")
+        if failure == "read":
+            original = Path.open
+
+            def opened(self, *args, **kwargs):
+                if self == record:
+                    raise OSError("record permission denied")
+                return original(self, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "open", opened)
+        old = record.read_bytes() if failure != "read" else None
+        spawn = MagicMock()
+        save = MagicMock()
+        monkeypatch.setattr(container.subprocess, "Popen", spawn)
+        monkeypatch.setattr(container, "save_versions", save)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "Error" in result.output
+        expected_file = "Dockerfile" if failure == "default" else "agent-versions.toml"
+        assert expected_file in result.output.replace("\n", "")
+        spawn.assert_not_called()
+        save.assert_not_called()
+        if old is not None:
+            assert record.read_bytes() == old
+
+    def test_update_write_failure_exits_nonzero(self, update_project, monkeypatch):
+        from djinn_in_a_box.core import agent_versions, paths
+
+        agent_versions.save_versions({"CODEX_VERSION": "0.160.0"})
+        record = paths.AGENT_VERSIONS_FILE
+        old = record.read_bytes()
+        proc = UpdateProcess(subprocess.CompletedProcess([], 0, UPDATE_OUTPUT, ""))
+        monkeypatch.setattr(container.subprocess, "Popen", MagicMock(return_value=proc))
+        monkeypatch.setattr(
+            agent_versions.os, "replace", MagicMock(side_effect=OSError("disk full")),
+        )
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "Error" in result.output
+        assert "Agent versions saved" not in result.output
+        assert "agent-versions.toml" in result.output.replace("\n", "")
+        assert record.read_bytes() == old
+        assert list(record.parent.iterdir()) == [record]
+
+    def test_update_resolves_effective_results_before_saving(self, update_project, monkeypatch):
+        from djinn_in_a_box.core import agent_versions, paths
+
+        agent_versions.save_versions({"CODEX_VERSION": "0.162.0"})
+        old = paths.AGENT_VERSIONS_FILE.read_bytes()
+
+        class ChangedDefaults(UpdateProcess):
+            def communicate(self, timeout=None):
+                (update_project / "Dockerfile").write_text("ARG CLAUDE_CODE_VERSION=beta\n")
+                return super().communicate(timeout)
+
+        proc = ChangedDefaults(subprocess.CompletedProcess([], 0, UPDATE_OUTPUT, ""))
+        monkeypatch.setattr(container.subprocess, "Popen", MagicMock(return_value=proc))
+        save = MagicMock(wraps=container.save_versions)
+        monkeypatch.setattr(container, "save_versions", save)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        # Rich wraps long temporary paths; the file name may span a line break.
+        assert "Dockerfile" in result.output.replace("\n", "")
+        save.assert_not_called()
+        assert paths.AGENT_VERSIONS_FILE.read_bytes() == old
+
+    @pytest.mark.parametrize("interrupted", [False, True])
+    @pytest.mark.parametrize("vanished", [False, True])
+    def test_update_interrupt_and_vanished_group_still_clean_up(
+        self, update_project, monkeypatch, interrupted, vanished,
+    ):
+        import signal
+
+        steps = []
+        waiting_error = KeyboardInterrupt() if interrupted else subprocess.TimeoutExpired([], 120)
+
+        class InterruptedProcess(UpdateProcess):
+            def communicate(self, timeout=None):
+                steps.append("wait" if timeout is not None else "reap")
+                return super().communicate(timeout)
+
+        proc = InterruptedProcess(subprocess.CompletedProcess([], -9, "", ""), waiting_error)
+        monkeypatch.setattr(container.subprocess, "Popen", MagicMock(return_value=proc))
+
+        def killpg(pid, sig):
+            assert pid == proc.pid and sig == signal.SIGKILL
+            steps.append("killpg")
+            if vanished:
+                raise ProcessLookupError
+
+        monkeypatch.setattr(container.os, "killpg", killpg)
+        save = MagicMock()
+        monkeypatch.setattr(container, "save_versions", save)
+        if interrupted:
+            with pytest.raises(KeyboardInterrupt):
                 container.update()
+        else:
+            with pytest.raises(typer.Exit) as exc:
+                container.update()
+            assert exc.value.exit_code == 1
+        assert steps == ["wait", "killpg", "reap"]
+        assert proc.waits == [120, None]
+        save.assert_not_called()
 
-            assert exc_info.value.exit_code == 1
+    def test_update_timeout_kills_the_whole_group(self, update_project, monkeypatch):
+        import contextlib
+        import os
+        import signal
+        import threading
+        import time
+
+        from djinn_in_a_box.core import paths
+
+        pidfile = update_project.parent / "grandchild-pid"
+        script = update_project / "scripts/update-agents.sh"
+        script.write_text(
+            "#!/bin/bash\n"
+            "echo 'npm error code EAI_AGAIN' >&2\n"
+            f"sleep 30 &\necho $! > '{pidfile}'\nwait\n"
+        )
+        script.chmod(0o755)
+        record = paths.AGENT_VERSIONS_FILE
+        record.parent.mkdir(parents=True)
+        record.write_text('CODEX_VERSION = "0.160.0"\n')
+        old = record.read_bytes()
+        monkeypatch.setattr(container, "UPDATE_TIMEOUT_SECONDS", 0.2)
+        shown = []
+        monkeypatch.setattr(container, "print_captured", shown.append)
+        processes = []
+        original_popen = subprocess.Popen
+
+        def popen(*args, **kwargs):
+            proc = original_popen(*args, **kwargs)
+            processes.append(proc)
+            return proc
+
+        monkeypatch.setattr(container.subprocess, "Popen", popen)
+        outcomes = []
+
+        def invoke():
+            try:
+                container.update()
+            except BaseException as exc:
+                outcomes.append(exc)
+
+        thread = threading.Thread(target=invoke, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        try:
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "update did not finish within its outer deadline"
+            assert time.monotonic() - started < 3
+            assert len(outcomes) == 1 and isinstance(outcomes[0], typer.Exit)
+            assert outcomes[0].exit_code == 1
+            assert any("npm error code EAI_AGAIN" in text for text in shown)
+            assert processes[0].poll() is not None
+            assert processes[0].stdout.closed and processes[0].stderr.closed
+            pid = int(pidfile.read_text())
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                stat = Path(f"/proc/{pid}/stat")
+                if not stat.exists() or stat.read_text().split(")", 1)[1].split()[0] == "Z":
+                    break
+                time.sleep(0.02)
+            else:
+                pytest.fail("npm grandchild remains running after timeout")
+            assert record.read_bytes() == old
+        finally:
+            # Only the session update() created for this test's own script: each
+            # recorded Popen leads its group. Nothing else is ever signalled here.
+            for proc in processes:
+                with contextlib.suppress(ProcessLookupError):
+                    if proc.poll() is None and os.getpgid(proc.pid) != proc.pid:
+                        continue
+                    os.killpg(proc.pid, signal.SIGKILL)
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "cleanup failed to release captured pipes"
 
 
 class TestEnterCommand:

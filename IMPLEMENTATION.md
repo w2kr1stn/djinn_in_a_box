@@ -57,6 +57,7 @@ stores, and local command choices remain outside the published source.
 │       ├── __init__.py
 │       ├── banner.py
 │       ├── agent_runner.py
+│       ├── agent_versions.py
 │       ├── config_lock.py
 │       ├── config_sync.py
 │       ├── config_sync_adapters.py
@@ -80,7 +81,7 @@ stores, and local command choices remain outside the published source.
 │   ├── opencode-credentials.sh
 │   ├── init-firewall.sh
 │   ├── check-build-dns.sh
-│   └── update-agents.sh
+│   └── update-agents.sh      # read-only discovery or maintainer default bumps
 ├── tools/
 │   ├── install.sh
 │   ├── installers/
@@ -131,6 +132,7 @@ core + config
   +-- core/config_lock.py    config-setting directory lock
   +-- core/docker.py         Compose env bridge, Docker operations, backup helpers
   +-- core/assistant.py      standalone assistant image and temporary session
+  +-- core/agent_versions.py numeric version policy and atomic host record
   +-- core/seeding.py        host-side first-run seed repair/copy
   +-- core/session.py        docker exec and host-mode session runner
   |
@@ -536,6 +538,10 @@ Captured Compose calls such as `compose_down()` and companion preparation route
 through `_run_compose()`. `compose_build()` is no compose call — it runs
 `docker buildx bake` on the compose file — but takes its env from the same
 `_compose_host_env(config)`.
+`build()` supplies resolved `agent_args`; bake adds sorted
+`--set dev.args.<ARG>=<version>` pairs before its targets only for recorded
+versions strictly above their upstream defaults. No overrides keep the existing
+argv. These are build args rather than runtime environment variables.
 `compose_run()` is the sanctioned interactive/headless run site; it also builds
 `host_env = _compose_host_env(config)` before calling `subprocess.run()`.
 When stdout or stderr is a TTY, `build_compose_env()` also renders
@@ -1050,8 +1056,9 @@ instructions rather than in a layer of its own — the base `apt-get`, the optio
 `packages.txt` install, and the global `npm install`. A guard in its own layer
 would be cache-independent of the download it protects: it can stay cached while
 the download re-runs. Sharing the instruction is what makes them share the cache
-decision, which matters most for the npm layer, since a `djinn update` version bump
-invalidates exactly that layer while everything above it stays cached. The
+decision, which matters most for the npm layer: any effective agent ARG change
+re-runs every `RUN` after the ARG block — the Claude installer and the npm layer —
+while the layers above the ARG block stay cached. The
 curl-based steps in between are deliberately unguarded: they fail in seconds with
 their own resolver error, so the guard would add noise without adding information.
 One script, so the check and its message have a single home; it uses `getent`,
@@ -1126,8 +1133,10 @@ backed by named volumes.
 
 `commands/container.py` implements:
 
-- `build()`: loads config, runs `preflight(config)`, refreshes build-time
-  local-only files via `_sync_build_files()`, then calls `compose_build()`.
+- `build()`: loads config, resolves the host agent record once before
+  `preflight(config)` or `_sync_build_files()`, then refreshes local build files
+  and calls `compose_build(agent_args=...)`. Invalid records fail before
+  provisioning, sync or Docker work, naming the record file.
 - `start()`: resolves Docker mode, preflights, ensures `djinn-network`, parses
   repeatable `--mount SRC[:DST[:ro|rw]]` values, and resolves each source with
   `resolve_container_mounts()`. `--here` is placed first at
@@ -1191,7 +1200,13 @@ backed by named volumes.
   local zone data.
   It attempts deletion of every built-in and declared volume, including absent
   ones and `none`. Default `clean` keeps all volumes and declared binds.
-- `update()`: runs `scripts/update-agents.sh`.
+- `update()`: runs `scripts/update-agents.sh --print` without loading AppConfig
+  or requiring init. Captured stdin is closed; discovery runs in a new session
+  with one aggregate 120-second timeout. Timeout or interruption kills the owned
+  process group and reaps it. npm errors retain their stderr diagnostics.
+  Exactly one numeric `ARG=x.y.z` line per agent is required before a single
+  atomic save. Failure leaves the old record unchanged; success prints effective
+  before/after versions and `djinn build` guidance. It writes no checkout file.
 - `enter()`: opens a zsh shell in the first running Djinn container.
 
 Status and `clean volumes` listing group declared data/cache/none volumes and
@@ -1209,6 +1224,24 @@ During `djinn build`, the loaded `AppConfig` is threaded through, so
 `general.config_root` from `config.toml` is honored unless `DJINN_CONFIG_ROOT`
 is exported in the host environment, which still takes precedence.
 
+`core/agent_versions.py` reads the upstream Dockerfile defaults and a separate
+host record at `~/.config/djinn_in_a_box/agent-versions.toml`, beside `config.toml`.
+Only update writes this flat TOML record, validating the complete mapping before
+creating its parent, writing sorted keys to a same-directory temporary file and
+replacing the destination after closing it. Allowed keys are the three agent ARG
+names; a missing file or key uses defaults. Invalid TOML, unknown keys,
+non-string/non-numeric values and read errors fail with the record path.
+Effective versions are the component-wise integer maximum of default and record,
+preferring the default on equality. Stale records are inert; deleting the file
+resets to defaults. No main-config write or migration is involved. npm's own
+cache/log locations follow operator configuration (default `~/.npm`).
+
+`scripts/update-agents.sh` owns the package map and npm discovery. `--print`
+emits protocol lines on stdout and diagnostics on stderr, exits nonzero on any
+failed lookup or invalid value and writes no files. No arguments retain the
+maintainer Dockerfile rewrite/diff/build guidance and skip-and-continue behavior.
+Upstream default bumps are reviewed through pull requests.
+
 ## Assistant Audit
 
 `commands/assistant.py` runs `core/assistant.py` independently of the dev image,
@@ -1218,8 +1251,11 @@ TOML, zones and missing workspace paths fall back to derivable default mounts
 and Claude (unless overridden), with the loader error in the initial message.
 
 `assistant/Dockerfile` installs the selected native CLI and basic diagnostic
-tools. Agent and Docker versions come from the dev Dockerfile ARG pins. One
-content label covers the selected pin, agent, Dockerfile/runtime bytes, host
+tools. The selected agent uses the shared effective version policy, independent
+of AppConfig recovery; `DOCKER_VERSION` stays an upstream-only Dockerfile pin.
+An invalid complete record aborts before image inspection/build even if the bad
+entry belongs to another agent. One content label covers the effective selected
+version, agent, Dockerfile/runtime bytes, host
 platform/UID/GID and build network. First use or a changed label rebuilds via
 buildx; a failed build aborts. Launch uses the inspected immutable image ID.
 
