@@ -454,7 +454,11 @@ The doctor command checks Docker, the Docker daemon, socket permissions, Compose
 v2, Buildx, the main config, the selected workspace root, the config root, the
 image, the Docker network, actual desktop helper delivery, and seed target presence.
 Desktop rows report off, filtered/locked, missing, or unknown; the raw-socket row
-checks the running dev container's actual mounts. Doctor never starts helpers.
+checks the running dev container's actual mounts. Docker rows report the observed
+endpoint (none, verified agent, host-direct or unknown), companion identity,
+health and cache storage. Unused companion rows say "not in use"; stale/orphan
+resources are listed separately. These checks use bounded, read-only host
+inspection and never start or repair a daemon. Doctor never starts helpers.
 
 For idempotent local repairs:
 
@@ -635,7 +639,9 @@ when the daemon starts again.
 
 `djinn start --docker-direct` mounts `/var/run/docker.sock` directly into dev and
 grants host-daemon authority. Both Docker flags also work with `djinn run`.
-Agent mode remains unsealed until companion verification is integrated with hostctl.
+A verified companion of dev's own generation contributes no Docker sealing
+cause. Direct mode remains unsealed; unknown or mismatched agent evidence refuses
+admission, including with `--allow-unsealed`. Other sealing causes still apply.
 Read [host authority and Docker access](SECURITY-MODEL.md#host-authority-and-docker-access)
 for the profile's limits and direct mode's implications.
 
@@ -837,7 +843,9 @@ so the dev user can read the owner-only public files.
 `--allow-unsealed` option and creator close/pause behavior are defined in
 [sealed deployments](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller).
 Run `djinn doctor` for sealing causes and per-address reached/blocked/unknown
-probe results; no dev or authenticated peer snapshot means deferred.
+probe results for both dev and its verified companion; every address must be
+blocked in both namespaces. Companion replacement or profile drift closes an open
+window. No dev or authenticated peer snapshot means deferred.
 Configure the [host networking prerequisite](SECURITY-MODEL.md#direct-routes-and-target-authority)
 before relying on these checks.
 

@@ -169,8 +169,10 @@ def _docker_installed() -> bool:
 
 def _command_ok(args: list[str]) -> bool:
     try:
-        result = subprocess.run(args, capture_output=True, check=False)
-    except (FileNotFoundError, PermissionError):
+        result = subprocess.run(
+            args, capture_output=True, check=False, stdin=subprocess.DEVNULL, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
 
@@ -557,12 +559,17 @@ def hostctl_boundary_checks(value: dict[str, Any], config: AppConfig | None) -> 
         }
         addresses = host_sealing.probe_addresses(selected)
         rows = host_sealing.run_probe(dev_id, selected)
+        agent = value.get("agent")
+        if agent:
+            rows.extend(host_sealing.run_probe(agent["id"], selected))
         hostctl.verify_dev(dev_id)
+        hostctl.verify_agent(dev_id, agent)
         for row in rows:
             state = row["state"]
             checks.append(
                 Check(
-                    f"Hostctl direct probe {row['host']} {row['address']}",
+                    f"Hostctl direct probe {row.get('namespace', 'dev')} "
+                    f"{row['host']} {row['address']}",
                     Status.FAIL
                     if state == "reached"
                     else (Status.PASS if state == "blocked" else Status.WARN),
@@ -590,6 +597,97 @@ def hostctl_boundary_checks(value: dict[str, Any], config: AppConfig | None) -> 
 
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
+def agent_docker_checks(*, daemon: bool) -> list[Check]:
+    from djinn_in_a_box.core import agent_docker, host_runtime
+
+    names = (
+        "Dev Docker endpoint",
+        "Agent Docker identity",
+        "Agent Docker health",
+        "Agent Docker storage",
+    )
+    if not daemon:
+        return [Check(name, Status.WARN, "unknown: Docker unavailable") for name in names]
+    verified = docker_core.inspect_agent_endpoint()
+    status = (
+        Status.PASS
+        if verified.kind in {"none", "agent"}
+        else Status.FAIL
+        if verified.in_use
+        else Status.WARN
+    )
+    detail = verified.kind + "; " + verified.detail
+    if not verified.in_use:
+        detail += "; agent mode not in use"
+    if verified.errors:
+        detail += "; " + "; ".join(verified.errors)
+    checks = [Check(names[0], status, detail)]
+    if verified.kind == "agent":
+        checks.extend(
+            [
+                Check(
+                    names[1],
+                    Status.PASS,
+                    f"{verified.companion_id}; generation {verified.generation}; "
+                    f"{agent_docker.IMAGE}; Engine {verified.version}",
+                ),
+                Check(names[2], Status.PASS, verified.health + " (host inspect healthcheck)"),
+                Check(
+                    names[3],
+                    Status.PASS,
+                    f"overlay2; {agent_docker.DATA_ROOT}; {verified.cache}; cache; "
+                    "plain local storage / managed tmpfs endpoint",
+                ),
+            ]
+        )
+    else:
+        checks.extend(
+            Check(
+                name,
+                Status.FAIL if verified.in_use else Status.PASS,
+                "unverified: " + "; ".join(verified.errors) if verified.in_use else "not in use",
+            )
+            for name in names[1:]
+        )
+    try:
+        # Include stopped resources; retained cache alone is ordinary persistence.
+        from djinn_in_a_box.core import hostctl
+
+        resources = hostctl.command(
+            "ps", "-aq", "--no-trunc", "--filter", "label=com.docker.compose.service=agent-docker"
+        ).split()
+        endpoints = hostctl.command(
+            "volume", "ls", "-q", "--filter", "name=^" + agent_docker.ENDPOINT_PREFIX
+        ).split()
+        stale = [item for item in resources if item != verified.companion_id]
+        for name in endpoints:
+            volume = host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE, "volume")
+            if volume is None:
+                raise ValueError("endpoint disappeared during inspection")
+            if (
+                verified.kind != "agent"
+                or volume["Labels"].get(host_runtime.GENERATION_LABEL) != verified.generation
+            ):
+                stale.append(name)
+        checks.append(
+            Check(
+                "Agent Docker stale/orphan resources",
+                Status.WARN if stale else Status.PASS,
+                "; ".join(stale) if stale else "none",
+            )
+        )
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        checks.append(Check("Agent Docker stale/orphan resources", Status.WARN, f"unknown: {exc}"))
+    return checks
+
+
 def declaration_checks(
     config: AppConfig | None, declarations: DeclarationSet | None = None,
 ) -> list[Check]:
@@ -752,6 +850,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             for row in git_diagnostics(config)
         )
 
+    checks.extend(agent_docker_checks(daemon=daemon))
     checks.extend(hostctl_checks(config, daemon=daemon))
 
     image = daemon and _image_built()

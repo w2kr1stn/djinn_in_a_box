@@ -355,12 +355,26 @@ def prepare_trust(gen: str, node: dict[str, Any]) -> dict[str, Any]:
 
 
 def verify_dev(dev_id: str | None) -> None:
+    from djinn_in_a_box.core import docker
     from djinn_in_a_box.core.host_runtime import inspect_dev
 
-    actual = inspect_dev("djinn", DOCKER_EXECUTABLE)
+    actual = inspect_dev(docker.service_container_name("dev"), DOCKER_EXECUTABLE)
     current = actual[0] if actual and actual[1] else None
     if current != dev_id:
         raise HostctlError("dev was removed or replaced during assessment")
+
+
+def verify_agent(dev_id: str | None, expected: dict[str, str] | None) -> None:
+    from djinn_in_a_box.core import docker, host_runtime
+
+    if expected is None:
+        return
+    actual = host_runtime.inspect_object(str(dev_id), DOCKER_EXECUTABLE)
+    if actual is None:
+        raise HostctlError("dev disappeared during companion verification")
+    current = docker.inspect_agent_endpoint(actual)
+    if current.errors or current.evidence != expected:
+        raise HostctlError("agent Docker companion changed or is unverifiable")
 
 
 def admission_assessment(trust: dict[str, Any]) -> dict[str, Any] | None:
@@ -381,7 +395,11 @@ def admission_assessment(trust: dict[str, Any]) -> dict[str, Any] | None:
     elif opening.get("dev_id") != assessment.dev_id:
         raise HostctlError("dev was removed or replaced during window opening")
     assessment.require(allow_unsealed=bool(opening.get("allow_unsealed")) and not creator)
+    if opening.get("agent") != assessment.agent:
+        raise HostctlError("agent Docker changed during window opening")
     rows = run_probe(assessment.dev_id, trust) if assessment.dev_id else []
+    if assessment.agent:
+        rows.extend(run_probe(assessment.agent["id"], trust))
     require_blocked(rows)
     return {
         "generation": trust["generation"],
@@ -390,13 +408,15 @@ def admission_assessment(trust: dict[str, Any]) -> dict[str, Any] | None:
         "sealing": assessment.state,
         "causes": assessment.causes,
         "probe": rows,
+        "agent": assessment.agent,
     }
 
 
 def host_runtime_dev() -> tuple[str, bool, str] | None:
+    from djinn_in_a_box.core import docker
     from djinn_in_a_box.core.host_runtime import inspect_dev
 
-    return inspect_dev("djinn", DOCKER_EXECUTABLE)
+    return inspect_dev(docker.service_container_name("dev"), DOCKER_EXECUTABLE)
 
 
 def guard_dev_start(planned: dict[str, Any], creator: str) -> None:
@@ -404,7 +424,7 @@ def guard_dev_start(planned: dict[str, Any], creator: str) -> None:
     from djinn_in_a_box.core.console import warning
     from djinn_in_a_box.core.host_sealing import assess
 
-    checked = assess(planned)
+    checked = assess(planned, planned_generation=creator)
     with control_guard():
         helper = inspect_helper()
         if helper is None or not helper["State"]["Running"]:
@@ -429,7 +449,7 @@ def guard_dev_start(planned: dict[str, Any], creator: str) -> None:
         ):
             stop_helper_locked()
             raise HostctlError("helper did not acknowledge admission pause")
-        opening.update(creator=creator, allow_unsealed=False)
+        opening.update(creator=creator, allow_unsealed=False, agent=checked.agent)
         save_private("opening.json", opening)
         journal("dev-start-paused", generation=generation(helper), creator=creator)
 
@@ -447,10 +467,12 @@ def resume_locked(helper: dict[str, Any]) -> None:
 
 def commit_assessment(checked: dict[str, Any]) -> None:
     verify_dev(checked["dev_id"])
+    verify_agent(checked["dev_id"], checked.get("agent"))
     opening = json.loads((state_root() / "opening.json").read_text())
     if (
         opening["generation"] != checked["generation"]
         or opening.get("creator") != checked["creator"]
+        or opening.get("agent") != checked.get("agent")
     ):
         raise HostctlError("dev transition changed during assessment")
     if checked["creator"]:
@@ -458,6 +480,7 @@ def commit_assessment(checked: dict[str, Any]) -> None:
         if actual is None or actual[2] != checked["creator"]:
             raise HostctlError("creator dev ID changed during assessment")
     opening["dev_id"] = checked["dev_id"]
+    opening["agent"] = checked.get("agent")
     opening.pop("creator", None)
     save_private("opening.json", opening)
     save_private("assessment.json", checked)
@@ -526,6 +549,7 @@ def open_window(
             raise HostctlError("Window is already open; use djinn hostctl limit <minutes>")
         control_journal("on-attempt", allow_unsealed=allow_unsealed)
         verify_dev(assessment.dev_id)
+        verify_agent(assessment.dev_id, assessment.agent)
         if allow_unsealed and assessment.causes:
             journal(
                 "unsealed-override",
@@ -549,6 +573,7 @@ def open_window(
                 "config": config.hostctl.model_dump(),
                 "allow_unsealed": allow_unsealed,
                 "dev_id": assessment.dev_id,
+                "agent": assessment.agent,
             },
         )
         argv = run_argv(binary, gen, deadline, boot_deadline)
@@ -663,6 +688,7 @@ def snapshot() -> dict[str, Any]:
         "sealing_causes": assessment.causes,
         "sealing_errors": assessment.errors,
         "dev_id": assessment.dev_id,
+        "agent": assessment.agent,
         "relay": "closed",
     }
     helper = inspect_helper()

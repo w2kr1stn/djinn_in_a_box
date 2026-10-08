@@ -1428,56 +1428,110 @@ def _prepare_workspace(
         fragment["services"]["agent-docker"] = {"volumes": list(workspace)}
 
 
-def _require_agent_profile(actual: dict[str, Any], manifest: dict[str, Any]) -> None:
+def require_agent_profile(actual: dict[str, Any], manifest: dict[str, Any]) -> None:
     config, host = actual["Config"], actual["HostConfig"]
-    expected = manifest["mounts"]
-    mounts = actual["Mounts"]
-    observed = sorted(
-        (
-            m["Type"],
-            m.get("Name") if m["Type"] == "volume" else m["Source"],
-            m["Destination"],
-            m["RW"],
-        )
-        for m in mounts
-        if m["Type"] != "tmpfs"
-    )
+    expected_host = {
+        **agent_docker.HOST_PROFILE,
+        **manifest["limits"],
+        "NetworkMode": manifest["network"],
+        "MemorySwap": 2 * manifest["limits"]["Memory"],
+    }
+    expected_config: dict[str, Any] = {
+        "User": manifest["user"],
+        "Cmd": manifest["command"],
+        "Entrypoint": manifest["entrypoint"],
+        "Healthcheck": manifest["healthcheck"],
+        "WorkingDir": "/",
+        "ExposedPorts": {"2375/tcp": {}, "2376/tcp": {}},
+    }
     if (
         actual["Image"] != manifest["image_id"]
         or config["User"] != "1000:1000"
         or config["Cmd"] != agent_docker.COMMAND
-        or config["Entrypoint"] != manifest["entrypoint"]
-        or host["Privileged"]
-        or host.get("CapAdd")
-        or host.get("DeviceRequests")
-        or host.get("DeviceCgroupRules")
-        or host["SecurityOpt"] != ["seccomp=unconfined"]
-        or host["MaskedPaths"]
-        or host["ReadonlyPaths"]
-        or host["Devices"]
-        != [
-            {
-                "PathOnHost": "/dev/net/tun",
-                "PathInContainer": "/dev/net/tun",
-                "CgroupPermissions": "rwm",
-            }
-        ]
-        or host.get("PidMode")
-        or host.get("UTSMode")
-        or host.get("UsernsMode")
-        or host["IpcMode"] != "private"
-        or host["CgroupnsMode"] != "private"
-        or host["NetworkMode"] != manifest["network"]
-        or host.get("PortBindings")
-        or dict(item.split("=", 1) for item in config["Env"]).get("DJINN_FIREWALL_GATE")
-        != str(manifest["firewall"]).lower()
-        or dict(item.split("=", 1) for item in config["Env"]).get("DOCKER_TLS_CERTDIR") != ""
-        or host["RestartPolicy"]["Name"] != "no"
-        or host.get("Tmpfs", {}).keys() != {"/var/lib/docker"}
-        or observed != sorted(tuple(m) for m in expected)
-        or any(host[key] != value for key, value in manifest["limits"].items())
+        or json.dumps({key: host[key] for key in expected_host}, sort_keys=True)
+        != json.dumps(expected_host, sort_keys=True)
+        or {key: config[key] for key in expected_config} != expected_config
+        or sorted(config["Env"]) != sorted(manifest["environment"])
+        or agent_docker.mount_delivery(actual["Mounts"])
+        != sorted(tuple(m) for m in manifest["mounts"])
+        or any(m["Type"] == "bind" and m["Propagation"] != "rprivate" for m in actual["Mounts"])
+        or set(actual["NetworkSettings"]["Networks"]) != {manifest["network"]}
+        or actual["NetworkSettings"]["Networks"][manifest["network"]]["NetworkID"]
+        != manifest["network_id"]
     ):
         raise RuntimeError("Agent Docker profile differs from trusted generation delivery")
+
+
+def inspect_agent_endpoint(
+    dev: dict[str, Any] | None = None,
+    *,
+    name: str | None = None,
+    planned_generation: str | None = None,
+) -> agent_docker.EndpointVerification:
+    """Bounded host reads; the shared verifier itself has no runtime operations."""
+    try:
+        if dev is None:
+            dev = host_runtime.inspect_object(
+                name or _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE
+            )
+            if dev is not None and dev["State"]["Running"] is False:
+                dev = None
+        selected = agent_docker.endpoint_selection(dev)
+        if not selected.in_use or selected.errors:
+            return selected
+        assert dev is not None
+        state = host_runtime.read_state(host_runtime.runtime_root())
+        if state is None:
+            raise ValueError("host-owned agent Docker generation state unavailable")
+        manifest = state["agent_docker"]
+        companion = host_runtime.inspect_owned_resource(
+            state["resources"]["agent-docker"], state["generation"], DOCKER_EXECUTABLE
+        )
+        objects = [
+            host_runtime.inspect_object(manifest["image"], DOCKER_EXECUTABLE, "image"),
+            host_runtime.inspect_object(manifest["endpoint_volume"], DOCKER_EXECUTABLE, "volume"),
+            host_runtime.inspect_object(manifest["cache_volume"], DOCKER_EXECUTABLE, "volume"),
+            host_runtime.inspect_object(manifest["network_id"], DOCKER_EXECUTABLE, "network"),
+        ]
+        if companion is None or any(obj is None for obj in objects):
+            raise ValueError("recorded agent Docker resource absent")
+        users = _run_captured(
+            [
+                DOCKER_EXECUTABLE,
+                "ps",
+                "-aq",
+                "--no-trunc",
+                "--filter",
+                "volume=" + manifest["endpoint_volume"],
+            ],
+            timeout=5,
+        )
+        if not users.success:
+            raise ValueError("agent Docker endpoint consumers unavailable")
+        image, endpoint, cache, network = objects
+        assert (
+            image is not None and endpoint is not None and cache is not None and network is not None
+        )
+        return agent_docker.verify_endpoint(
+            dev,
+            state,
+            companion,
+            image,
+            endpoint,
+            cache,
+            network,
+            users.stdout.split(),
+            planned_generation=planned_generation,
+        )
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        RuntimeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        return agent_docker.EndpointVerification("unknown", "unknown", True, errors=(str(exc),))
 
 
 def _wait_agent_healthy(
@@ -1705,9 +1759,37 @@ def _prepare_agent_docker(
             )
             for m in spec["volumes"]
         ]
+        network_name = delivery["networks"]["djinn-network"]["name"]
+        network = host_runtime.inspect_object(network_name, DOCKER_EXECUTABLE, "network")
+        if network is None:
+            raise RuntimeError("Agent Docker network unavailable")
+        environment = dict(item.split("=", 1) for item in image["Config"]["Env"])
+        environment.update(
+            {key: str(value).replace("$$", "$") for key, value in spec["environment"].items()}
+        )
+        healthcheck = spec["healthcheck"]
+        # These intervals are fixed in the trusted Compose profile.
+        if (healthcheck["interval"], healthcheck["timeout"], healthcheck["start_period"]) != (
+            "2s",
+            "5s",
+            "1m0s",
+        ):
+            raise RuntimeError("Agent Docker healthcheck intervals differ")
         manifest: dict[str, Any] = {
             "image": agent_docker.IMAGE,
             "image_id": image["Id"],
+            "environment": [f"{key}={value}" for key, value in environment.items()],
+            "command": spec["command"],
+            "user": spec["user"],
+            "healthcheck": {
+                "Test": [word.replace("$$", "$") for word in healthcheck["test"]],
+                "Interval": 2_000_000_000,
+                "Timeout": 5_000_000_000,
+                "StartPeriod": 60_000_000_000,
+                "Retries": healthcheck["retries"],
+            },
+            "cache_volume": cache,
+            "network_id": network["Id"],
             "entrypoint": [word.replace("$$", "$") for word in spec["entrypoint"]],
             "name": spec["container_name"],
             "network": delivery["networks"]["djinn-network"]["name"],
@@ -1757,7 +1839,7 @@ def _prepare_agent_docker(
     assert state is not None
     state["agent_docker"] = manifest
     host_runtime.save_state(owner.root, state)
-    _require_agent_profile(actual, manifest)
+    require_agent_profile(actual, manifest)
     if options.firewall_enabled:
         _agent_firewall(owner, manifest, deadline=deadline)
     _wait_agent_healthy(owner.resources["agent-docker"], owner, deadline)
@@ -1778,7 +1860,7 @@ def resume_agent_docker(root: Path, state: dict[str, Any], docker_path: str) -> 
     actual = host_runtime.inspect_owned_resource(record, state["generation"], docker_path)
     if actual is None:
         raise RuntimeError("Owning agent Docker disappeared")
-    _require_agent_profile(actual, manifest)
+    require_agent_profile(actual, manifest)
     owner = host_runtime.GitRuntime(
         root,
         state["generation"],
@@ -1809,6 +1891,8 @@ def resume_agent_docker(root: Path, state: dict[str, Any], docker_path: str) -> 
         if status == "unhealthy" or time.monotonic() >= deadline:
             raise RuntimeError("Agent Docker restart readiness failed")
         time.sleep(0.1)
+
+
 def _prepare_companions(
     config: AppConfig,
     options: ContainerOptions,
@@ -2320,6 +2404,78 @@ SELF_TEARDOWN_ERROR = (
 )
 
 
+def service_container_name(service: str) -> str:
+    return _SERVICE_CONTAINER_NAMES[service]
+
+
+def planned_dev_inspection(
+    delivery: dict[str, Any],
+    extra_volumes: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolved creator delivery in the same shape consumed by actual assessment."""
+    service = delivery["services"]["dev"]
+    mounts: list[dict[str, Any]] = []
+    for row in service.get("volumes", []):
+        source = row.get("source", "")
+        mount = {
+            "Type": row["type"],
+            "Source": source.replace("$$", "$"),
+            "Destination": row["target"].replace("$$", "$"),
+            "RW": not row.get("read_only", False),
+            "Propagation": row.get("bind", {}).get("propagation", "rprivate")
+            if row["type"] == "bind"
+            else "",
+        }
+        if row["type"] == "volume":
+            name = delivery["volumes"][source]["name"]
+            actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, "volume")
+            definition = delivery["volumes"][source]
+            mount.update(
+                Name=name,
+                Source=actual["Mountpoint"] if actual else "",
+                PlannedVolume=actual
+                if actual
+                else {
+                    "Driver": definition.get("driver", "local"),
+                    "Options": definition.get("driver_opts") or {},
+                },
+            )
+        mounts.append(mount)
+    for spec in extra_volumes or []:
+        parts = spec.split(":")
+        mounts = [m for m in mounts if m["Destination"] != parts[1]]
+        mounts.append(
+            {
+                "Type": "bind",
+                "Source": parts[0],
+                "Destination": parts[1],
+                "RW": len(parts) < 3 or parts[2] != "ro",
+                "Propagation": "rprivate",
+            }
+        )
+    environment = {**service.get("environment", {}), **(extra_env or {})}
+    networks = {}
+    for name in service.get("networks", {}):
+        network_name = delivery["networks"][name]["name"]
+        network = host_runtime.inspect_object(network_name, DOCKER_EXECUTABLE, "network")
+        if network is None:
+            raise ValueError("planned network unavailable")
+        networks[network_name] = {"NetworkID": network["Id"]}
+    return {
+        "Id": "planned",
+        "State": {"Running": True},
+        "Mounts": mounts,
+        "Config": {
+            "Env": [f"{k}={v}" for k, v in environment.items() if v is not None],
+            "Labels": service.get("labels", {}),
+            "Image": service["image"],
+        },
+        "HostConfig": {"NetworkMode": service.get("network_mode", "bridge")},
+        "NetworkSettings": {"Networks": networks},
+    }
+
+
 def _guard_dev_creation(
     config: AppConfig,
     compose_files: list[str],
@@ -2345,59 +2501,7 @@ def _guard_dev_creation(
         if not result.success:
             raise RuntimeError("resolved Compose delivery unavailable")
         delivery = json.loads(result.stdout)
-        service = delivery["services"]["dev"]
-        mounts: list[dict[str, Any]] = []
-        for row in service.get("volumes", []):
-            source = row.get("source", "")
-            mount = {
-                "Type": row["type"],
-                "Source": source,
-                "Destination": row["target"],
-                "RW": not row.get("read_only", False),
-            }
-            if row["type"] == "volume":
-                name = delivery["volumes"][source]["name"]
-                actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, "volume")
-                definition = delivery["volumes"][source]
-                mount.update(
-                    Name=name,
-                    Source=actual["Mountpoint"] if actual else "",
-                    PlannedVolume=actual
-                    if actual
-                    else {
-                        "Driver": definition.get("driver", "local"),
-                        "Options": definition.get("driver_opts") or {},
-                    },
-                )
-            mounts.append(mount)
-        for spec in extra_volumes or []:
-            parts = spec.split(":")
-            mounts = [m for m in mounts if m["Destination"] != parts[1]]
-            mounts.append(
-                {
-                    "Type": "bind",
-                    "Source": parts[0],
-                    "Destination": parts[1],
-                    "RW": len(parts) < 3 or parts[2] != "ro",
-                }
-            )
-        environment = {**service.get("environment", {}), **(extra_env or {})}
-        planned = {
-            "Id": "planned",
-            "State": {"Running": True},
-            "Mounts": mounts,
-            "Config": {
-                "Env": [f"{k}={v}" for k, v in environment.items() if v is not None],
-                "Labels": service.get("labels", {}),
-                "Image": service["image"],
-            },
-            "HostConfig": {"NetworkMode": service.get("network_mode", "bridge")},
-            "NetworkSettings": {
-                "Networks": {
-                    delivery["networks"][name]["name"]: {} for name in service.get("networks", {})
-                }
-            },
-        }
+        planned = planned_dev_inspection(delivery, extra_volumes, extra_env)
     except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError):
         # Incomplete delivery is an uncertain assessment; close before proceeding.
         pass
@@ -2505,6 +2609,8 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
         return result
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         return RunResult(1, stderr=f"Cleanup preserved resources: {exc}")
+
+
 def is_container_running(name: str) -> bool:
     names = _docker_list(
         [DOCKER_EXECUTABLE, "ps", "--format", "{{.Names}}", "--filter", f"name=^{name}$"]

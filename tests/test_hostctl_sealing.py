@@ -489,7 +489,9 @@ def test_resolved_creator_delivery_includes_all_producers(tmp_path, monkeypatch)
     config = AppConfig(code_dir=tmp_path)
     monkeypatch.setattr(hostctl, "inspect_helper", lambda: {"State": {"Running": True}})
     monkeypatch.setattr(
-        host_runtime, "inspect_object", lambda *a, **kw: {"Mountpoint": "/store/output"}
+        host_runtime,
+        "inspect_object",
+        lambda *a, **kw: {"Id": "network-id", "Mountpoint": "/store/output"},
     )
     delivery = {
         "services": {
@@ -531,7 +533,7 @@ def test_resolved_creator_delivery_includes_all_producers(tmp_path, monkeypatch)
         "/invocation",
     }
     assert {row["Destination"]: row["RW"] for row in planned["Mounts"]}["/workspace"] is False
-    assert planned["NetworkSettings"]["Networks"] == {"djinn-network": {}}
+    assert planned["NetworkSettings"]["Networks"] == {"djinn-network": {"NetworkID": "network-id"}}
     assert "CALLER=value" in planned["Config"]["Env"] and creator == "creator"
 
 
