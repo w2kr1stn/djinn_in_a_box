@@ -523,8 +523,8 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
 def hostctl_boundary_checks(value: dict[str, Any], config: AppConfig | None) -> list[Check]:
     from djinn_in_a_box.core import host_sealing, hostctl
 
-    causes = value.get("sealing_causes", ())
-    errors = value.get("sealing_errors", ())
+    causes = value.get("sealing_cause_details", ())
+    errors = value.get("sealing_error_details", ())
     checks = [
         Check(f"Hostctl sealing cause {i}", Status.FAIL, cause) for i, cause in enumerate(causes, 1)
     ]

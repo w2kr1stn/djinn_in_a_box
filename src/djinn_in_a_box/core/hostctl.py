@@ -687,6 +687,8 @@ def snapshot() -> dict[str, Any]:
         "sealing": assessment.state,
         "sealing_causes": assessment.causes,
         "sealing_errors": assessment.errors,
+        "sealing_cause_details": assessment.cause_details,
+        "sealing_error_details": assessment.error_details,
         "dev_id": assessment.dev_id,
         "agent": assessment.agent,
         "relay": "closed",

@@ -117,6 +117,9 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- `djinn hostctl` groups sealing causes and unknowns by bind in status, refusal
+  messages, dev-start warnings, journal records and saved assessments;
+  `djinn doctor` retains every individual finding.
 - `tools/install.sh` now runs cache verification and installers from `/`, so
   project files in the container's starting directory (`packageManager` pins,
   `rust-toolchain.toml`, uv configuration) cannot influence them. Relative

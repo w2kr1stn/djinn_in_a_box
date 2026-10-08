@@ -6,7 +6,8 @@ the session-oriented `djinn session --prompt` path.
 Host control runs on the host: `djinn hostctl on --for 10m`, `status`,
 `limit 5` and `off`. Enrollment is asynchronous and login time counts against
 the window. Once `status` reports open, headless agents use `ssh host-a`.
-Doctor reports sealing causes and address results. See
+Hostctl status groups sealing findings by bind; `djinn doctor` lists every cause
+and unknown item, plus address results. See
 [host control usage](../README.md#host-control-windows) and the
 [security model](../SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
 for creator close/pause behavior, `--allow-unsealed` and deployment requirements.

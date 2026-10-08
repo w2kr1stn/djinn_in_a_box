@@ -1016,18 +1016,23 @@ SOCKS5 without a direct connection fallback. Each relay stream has structured
 start/end records in the rotated Docker log.
 
 `core/host_sealing.py` supplies the shared assessment for on, doctor and both
-creators. It reads actual ID, mounts, environment and network peers,
-canonicalizes host sources/aliases, and consumes the desktop provenance
-inspector. `core/docker.py::inspect_agent_endpoint` collects bounded host-only
-inspection of recorded resource IDs, the pinned image, managed volumes, network
-and endpoint consumers. `agent_docker.verify_endpoint` consumes that evidence and
-host-owned generation state; doctor and sealing use the same result. The existing
-`require_agent_profile` checker compares complete image-plus-Compose environment,
-startup, healthcheck, security/namespaces/resources, exact mounts and network ID.
-Workspace delivery must also be a subset of dev's mounts; dev's existing content
-assessment covers those paths. Only a verified companion removes its Docker
-endpoint and inherited EXPOSE peer causes. The [sealed definition and override](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
-are documented in the model.
+creators. It reads actual ID, mounts, environment and network peers, canonicalizes
+host sources/aliases, and consumes the desktop provenance inspector. Assessment
+stores the ordered sealing findings with their bind, class and item, derives the
+per-item `cause_details` and `error_details` from them, and derives grouped
+`causes` and `errors` for status, refusals, warnings, journal records and
+`assessment.json`. `core/docker.py::inspect_agent_endpoint` collects bounded
+host-only inspection of recorded resource IDs, the pinned image, managed volumes,
+network and endpoint consumers. `agent_docker.verify_endpoint` consumes that
+evidence and host-owned generation state; doctor and sealing use the same result.
+The existing `require_agent_profile` checker compares complete image-plus-Compose
+environment, startup, healthcheck, security/namespaces/resources, exact mounts and
+network ID. Workspace delivery must also be a subset of dev's mounts; dev's
+existing content assessment covers those paths. Only a verified companion removes
+its Docker endpoint and inherited EXPOSE peer causes. The
+[sealed definition and override](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
+are documented in the model. Snapshot exposes `sealing_cause_details` and
+`sealing_error_details` so doctor retains one row per finding.
 
 The direct probe runs trusted raw-socket Python in a digest-pinned throwaway
 container sharing only the assessed network namespace, once for dev and once

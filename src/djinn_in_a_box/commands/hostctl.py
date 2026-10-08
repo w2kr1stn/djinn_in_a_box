@@ -92,5 +92,9 @@ def status() -> None:
     elif observation.get("error"):
         console.print(Text(f"Observation gap: {observation['error']}"))
     console.print(Text(f"Sealing: {value['sealing']}; relay: {value['relay']}"))
-    for cause in (*value.get("sealing_causes", ()), *value.get("sealing_errors", ())):
+    grouped = (*value.get("sealing_causes", ()), *value.get("sealing_errors", ()))
+    details = (*value.get("sealing_cause_details", ()), *value.get("sealing_error_details", ()))
+    for cause in grouped:
         console.print(Text(cause))
+    if grouped != details:
+        console.print("djinn doctor lists each item.")

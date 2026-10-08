@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from djinn_in_a_box.core import agent_docker, desktop, host_runtime, hostctl
 from djinn_in_a_box.core import paths as host_paths
@@ -42,12 +42,65 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
 """
 
 
+class Finding(NamedTuple):
+    detail: str
+    bind: tuple[str, str] | None = None
+    kind: str | None = None
+    item: str | None = None
+
+
+def _grouped_lines(findings: tuple[Finding, ...]) -> tuple[str, ...]:
+    slots: list[str | tuple[str, str]] = []
+    groups: dict[tuple[str, str], dict[str | None, list[str]]] = {}
+    for finding in dict.fromkeys(findings):
+        if finding.bind is None:
+            slots.append(finding.detail)
+            continue
+        if finding.bind not in groups:
+            groups[finding.bind] = {}
+            slots.append(finding.bind)
+        items = groups[finding.bind].setdefault(finding.kind, [])
+        if finding.item is not None:
+            items.append(finding.item)
+    lines: list[str] = []
+    for slot in slots:
+        if isinstance(slot, str):
+            lines.append(slot)
+            continue
+        parts: list[str] = []
+        for kind, items in groups[slot].items():
+            if not items:
+                parts.append(str(kind))
+            elif len(items) <= 3:
+                parts.append(f"{kind} " + ", ".join(items))
+            else:
+                parts.append(f"{kind} ({len(items)} items)")
+        lines.append(f"{slot[0]} -> {slot[1]}: " + "; ".join(parts))
+    return tuple(lines)
+
+
 @dataclass(frozen=True)
 class Assessment:
     dev_id: str | None
-    causes: tuple[str, ...] = ()
-    errors: tuple[str, ...] = ()
+    cause_findings: tuple[Finding, ...] = ()
+    error_findings: tuple[Finding, ...] = ()
     agent: dict[str, str] | None = None
+
+    @property
+    def cause_details(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(f.detail for f in self.cause_findings))
+
+    @property
+    def error_details(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(f.detail for f in self.error_findings))
+
+    @property
+    def causes(self) -> tuple[str, ...]:
+        return _grouped_lines(self.cause_findings)
+
+    @property
+    def errors(self) -> tuple[str, ...]:
+        return _grouped_lines(self.error_findings)
 
     @property
     def state(self) -> str:
@@ -102,44 +155,51 @@ def protected_overlap(source: Path, protected: Path) -> bool:
     )
 
 
-def execution_paths() -> dict[str, Path]:
+def execution_paths() -> dict[str, tuple[Path, str, str]]:
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     config = Path(os.environ.get("DOCKER_CONFIG", str(home / ".docker")))
+    djinn_kind = "writable Djinn installation and configuration"
+    python_kind = "writable Python environment"
+    docker_kind = "writable Docker CLI and plugins"
     paths = {
-        "Djinn installation/build context": get_project_root(),
-        "Djinn configuration": host_paths.CONFIG_DIR,
-        "Djinn configuration file": host_paths.CONFIG_FILE,
-        "Djinn agent definitions": host_paths.AGENTS_FILE,
-        "Djinn zone definitions": host_paths.ZONES_FILE,
-        "Python environment": Path(sys.prefix),
-        "Python base environment": Path(sys.base_prefix),
-        "Python executable": Path(sys.executable),
-        "Docker CLI": Path(hostctl.DOCKER_EXECUTABLE),
-        "Docker configuration": config,
-        "Docker plugins": config / "cli-plugins",
+        name: (path, kind, name)
+        for name, path, kind in (
+            ("Djinn installation/build context", get_project_root(), djinn_kind),
+            ("Djinn configuration", host_paths.CONFIG_DIR, djinn_kind),
+            ("Djinn configuration file", host_paths.CONFIG_FILE, djinn_kind),
+            ("Djinn agent definitions", host_paths.AGENTS_FILE, djinn_kind),
+            ("Djinn zone definitions", host_paths.ZONES_FILE, djinn_kind),
+            ("Python environment", Path(sys.prefix), python_kind),
+            ("Python base environment", Path(sys.base_prefix), python_kind),
+            ("Python executable", Path(sys.executable), python_kind),
+            ("Docker CLI", Path(hostctl.DOCKER_EXECUTABLE), docker_kind),
+            ("Docker configuration", config, docker_kind),
+            ("Docker plugins", config / "cli-plugins", docker_kind),
+        )
     }
     # Python's effective import directories are part of its execution inputs.
     for entry in sys.path:
-        paths[f"Python import directory {entry or os.getcwd()}"] = Path(entry or os.getcwd())
+        item = str(entry or os.getcwd())
+        paths[f"Python import directory {item}"] = (Path(item), python_kind, item)
     for name, module in tuple(sys.modules.items()):
         filename = getattr(module, "__file__", None)
         if filename and Path(filename).is_absolute():
-            paths[f"Python module {name}"] = Path(filename)
+            paths[f"Python module {name}"] = (Path(filename), python_kind, name)
     for entry in os.environ.get("PATH", "").split(os.pathsep):
-        paths[f"host PATH directory {entry or os.getcwd()}"] = Path(entry or os.getcwd())
-    for entry in (
+        item = str(entry or os.getcwd())
+        paths[f"host PATH directory {item}"] = (Path(item), "writable PATH directory", item)
+    plugin_dirs = [
         "/usr/local/lib/docker/cli-plugins",
         "/usr/local/libexec/docker/cli-plugins",
         "/usr/lib/docker/cli-plugins",
         "/usr/libexec/docker/cli-plugins",
-    ):
-        paths[f"Docker plugin directory {entry}"] = Path(entry)
+    ]
     config_file = config / "config.json"
     if config_file.exists():
-        data = json.loads(config_file.read_text())
-        for entry in data.get("cliPluginsExtraDirs", []):
-            paths[f"Docker plugin directory {entry}"] = Path(entry)
-    return {name: canonical(path) for name, path in paths.items()}
+        plugin_dirs += json.loads(config_file.read_text()).get("cliPluginsExtraDirs", [])
+    for entry in plugin_dirs:
+        paths[f"Docker plugin directory {entry}"] = (Path(entry), docker_kind, entry)
+    return {name: (canonical(path), kind, item) for name, (path, kind, item) in paths.items()}
 
 
 def _socket_is_docker(path: Path) -> bool:
@@ -226,11 +286,11 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
 
     if actual is None:
         return Assessment(None)
-    causes: list[str] = []
-    errors: list[str] = []
+    causes: list[Finding] = []
+    errors: list[Finding] = []
     identity = actual.get("Id")
     verified = docker.inspect_agent_endpoint(actual, planned_generation=planned_generation)
-    errors.extend(verified.errors)
+    errors.extend(Finding(text) for text in verified.errors)
     try:
         if not isinstance(identity, str) or not identity or actual["State"]["Running"] is not True:
             raise ValueError("running dev ID/state unavailable")
@@ -266,7 +326,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         effective: list[dict[str, Any]] = []
         for raw_mount in cast(list[Any], mounts):
             if not isinstance(raw_mount, dict):
-                errors.append("mount inspection uncertain: malformed mount object")
+                errors.append(Finding("mount inspection uncertain: malformed mount object"))
                 continue
             mount = cast(dict[str, Any], raw_mount)
             try:
@@ -288,7 +348,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                 RuntimeError,
                 subprocess.SubprocessError,
             ) as exc:
-                errors.append(f"volume inspection uncertain: {exc}")
+                errors.append(Finding(f"volume inspection uncertain: {exc}"))
             effective.append(mount)
         mounts = effective
         actual = {**actual, "Mounts": effective}
@@ -299,7 +359,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                 if mount["Type"] not in ("bind", "volume", "tmpfs"):
                     raise ValueError("unknown dev mount type")
                 if mount["Type"] == "volume" and mount.get("Name") == hostctl.HOSTCTL_STATE_VOLUME:
-                    causes.append("helper identity volume exposed to dev")
+                    causes.append(Finding("helper identity volume exposed to dev"))
                     continue
                 if mount["Type"] != "bind":
                     continue
@@ -309,22 +369,49 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                 if not host_file(source).exists():
                     raise ValueError(f"host bind source cannot be inspected: {mount['Source']}")
                 label = f"{mount['Source']} -> {mount['Destination']}"
+                pair = (mount["Source"], str(mount["Destination"]))
                 if protected_overlap(source, Path("/")) and host_file(source).samefile(
                     host_file(Path("/"))
                 ):
-                    causes.append(f"host root bind: {label}")
+                    causes.append(Finding(f"host root bind: {label}", pair, "host root"))
                 if protected_overlap(source, home) and (
                     source == home or not source.is_relative_to(home)
                 ):
-                    causes.append(f"user home or ancestor bind: {label}")
+                    causes.append(
+                        Finding(
+                            f"user home or ancestor bind: {label}",
+                            pair,
+                            "user home or ancestor",
+                        )
+                    )
                 if protected_overlap(source, backing) or protected_overlap(source, data_root):
-                    causes.append(f"Docker data root/helper backing storage bind: {label}")
+                    causes.append(
+                        Finding(
+                            f"Docker data root/helper backing storage bind: {label}",
+                            pair,
+                            "Docker data root/helper backing storage",
+                        )
+                    )
                 for name, path in private.items():
                     if protected_overlap(source, path):
-                        causes.append(f"exposed {name}: {label}")
+                        causes.append(
+                            Finding(
+                                f"exposed {name}: {label}",
+                                pair,
+                                "exposed controller/journal/agent state",
+                                name,
+                            )
+                        )
                 for path in sockets:
                     if protected_overlap(source, path):
-                        causes.append(f"Docker socket {path}: {label}")
+                        causes.append(
+                            Finding(
+                                f"Docker socket {path}: {label}",
+                                pair,
+                                "Docker socket",
+                                str(path),
+                            )
+                        )
                 if (
                     len(causes) == before
                     and label not in inspection.raw_sources
@@ -335,13 +422,27 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                 ):
                     try:
                         if _socket_is_docker(host_file(source)):
-                            causes.append(f"relocated Docker socket: {label}")
+                            causes.append(
+                                Finding(
+                                    f"relocated Docker socket: {label}",
+                                    pair,
+                                    "relocated Docker socket",
+                                    str(source),
+                                )
+                            )
                     except OSError:
-                        errors.append(f"socket provenance unknown: {label}")
+                        errors.append(
+                            Finding(
+                                f"socket provenance unknown: {label}",
+                                pair,
+                                "socket provenance unknown",
+                                str(source),
+                            )
+                        )
                 if mount["RW"]:
-                    for name, path in execution.items():
+                    for name, (path, kind, item) in execution.items():
                         if protected_overlap(source, path):
-                            causes.append(f"writable {name}: {label}")
+                            causes.append(Finding(f"writable {name}: {label}", pair, kind, item))
                 if (
                     len(causes) == before
                     and host_file(source).is_dir()
@@ -356,33 +457,64 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                             for name, path in private.items():
                                 if protected_overlap(candidate_source, path):
                                     causes.append(
-                                        f"exposed {name} inode alias {candidate}: {label}"
+                                        Finding(
+                                            f"exposed {name} inode alias {candidate}: {label}",
+                                            pair,
+                                            "exposed controller/journal/agent state",
+                                            f"{name} inode alias {candidate}",
+                                        )
                                     )
                             if mount["RW"]:
-                                for name, path in execution.items():
+                                for name, (path, kind, item) in execution.items():
                                     if protected_overlap(candidate_source, path):
                                         causes.append(
-                                            f"writable {name} inode alias {candidate}: {label}"
+                                            Finding(
+                                                f"writable {name} inode alias {candidate}: {label}",
+                                                pair,
+                                                kind,
+                                                f"{item} inode alias {candidate}",
+                                            )
                                         )
                             if len(causes) == known:
-                                errors.append(f"hard-link provenance unknown: {candidate}: {label}")
+                                errors.append(
+                                    Finding(
+                                        f"hard-link provenance unknown: {candidate}: {label}",
+                                        pair,
+                                        "hard-link provenance unknown",
+                                        str(candidate),
+                                    )
+                                )
                             continue
                         if any(
                             host_file(p).exists() and candidate.samefile(host_file(p))
                             for p in sockets
                         ) or _socket_is_docker(candidate):
-                            causes.append(f"relocated Docker socket {candidate}: {label}")
+                            causes.append(
+                                Finding(
+                                    f"relocated Docker socket {candidate}: {label}",
+                                    pair,
+                                    "relocated Docker socket",
+                                    str(candidate),
+                                )
+                            )
                 if (
                     len(causes) == before
                     and host_file(source).is_file()
                     and host_file(source).stat().st_nlink > 1
                 ):
-                    errors.append(f"hard-link provenance unknown: {label}")
+                    errors.append(
+                        Finding(
+                            f"hard-link provenance unknown: {label}",
+                            pair,
+                            "hard-link provenance unknown",
+                            str(source),
+                        )
+                    )
             except (OSError, ValueError, KeyError, TypeError) as exc:
-                errors.append(f"bind inspection uncertain: {exc}")
+                errors.append(Finding(f"bind inspection uncertain: {exc}"))
         endpoint = environment.get("DOCKER_HOST", "")
         if endpoint and verified.kind != "agent":
-            causes.append("Unverified Docker endpoint exposed in dev environment")
+            causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
         # A socket-bearing/proxy container on an attached network grants Docker
         # authority regardless of how this dev was originally started.
         for other_id in hostctl.command("ps", "-q").split():
@@ -431,15 +563,21 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                 route = ", ".join(sorted(shared)) or (
                     "host network" if host_network else "host published ports"
                 )
-                causes.append(f"reachable Docker proxy {other.get('Name', other_id)} on {route}")
+                causes.append(
+                    Finding(f"reachable Docker proxy {other.get('Name', other_id)} on {route}")
+                )
         for row in inspection.channels:
             if row.sealed_ok is False:
-                causes.extend(f"{row.channel}: {reason}" for reason in row.reasons or (row.state,))
+                causes.extend(
+                    Finding(f"{row.channel}: {reason}") for reason in row.reasons or (row.state,)
+                )
             elif row.sealed_ok is None:
-                errors.append(f"{row.channel} inspection unknown: {row.detail}")
-        causes.extend(f"raw host desktop endpoint: {source}" for source in inspection.raw_sources)
+                errors.append(Finding(f"{row.channel} inspection unknown: {row.detail}"))
+        causes.extend(
+            Finding(f"raw host desktop endpoint: {source}") for source in inspection.raw_sources
+        )
         if not inspection.raw_verified:
-            errors.append("raw desktop endpoint inspection unknown")
+            errors.append(Finding("raw desktop endpoint inspection unknown"))
     except (
         OSError,
         ValueError,
@@ -448,7 +586,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         RuntimeError,
         subprocess.SubprocessError,
     ) as exc:
-        errors.append(f"inspection uncertain: {exc}")
+        errors.append(Finding(f"inspection uncertain: {exc}"))
     return Assessment(
         identity, tuple(dict.fromkeys(causes)), tuple(dict.fromkeys(errors)), verified.evidence
     )
@@ -465,7 +603,7 @@ def inspect_assessment(name: str | None = None) -> Assessment:
             return Assessment(None)
         return assess(actual)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        return Assessment(None, errors=(f"dev inspection uncertain: {exc}",))
+        return Assessment(None, error_findings=(Finding(f"dev inspection uncertain: {exc}"),))
 
 
 def probe_addresses(trust: dict[str, Any]) -> list[list[str]]:

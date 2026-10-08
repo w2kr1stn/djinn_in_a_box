@@ -217,7 +217,7 @@ def test_verified_agent_removes_only_its_docker_causes(managed, monkeypatch):
     assert not any("djinn-test-agent-docker" in c for c in result.causes)
     m.peers.remove(peer["Id"])
     m.dev["Mounts"].append({"Type": "bind", "Source": "/", "Destination": "/host", "RW": False})
-    assert any("host root bind" in c for c in host_sealing.assess(m.dev).causes)
+    assert any("host root bind" in c for c in host_sealing.assess(m.dev).cause_details)
     # The pure verifier cannot issue inspections or commands.
     monkeypatch.setattr(
         host_runtime, "inspect_object", lambda *a, **k: pytest.fail("pure verifier IO")
