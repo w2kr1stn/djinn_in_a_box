@@ -771,7 +771,8 @@ variables rendered by `build_compose_env()`.
 
 `docker-compose.agent-docker.yml` defines the pinned UID-1000 rootless companion
 profile and healthcheck (rootless, overlay2, expected data root). `core/agent_docker.py`
-contains only profile constants and pure workspace delivery data. The shared dev
+contains profile constants, pure workspace delivery data and the side-effect-free
+endpoint verifier. The shared dev
 creators build that delivery once from host-resolved code, CLI, declaration and session
 mounts; only those mounts go to the companion. Preparation creates a generation-owned
 local tmpfs endpoint volume (UID/GID 1000, mode 0700) and a persistent cache volume,
@@ -996,11 +997,20 @@ start/end records in the rotated Docker log.
 `core/host_sealing.py` supplies the shared assessment for on, doctor and both
 creators. It reads actual ID, mounts, environment and network peers,
 canonicalizes host sources/aliases, and consumes the desktop provenance
-inspector. The [sealed definition and override](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
+inspector. `core/docker.py::inspect_agent_endpoint` collects bounded host-only
+inspection of recorded resource IDs, the pinned image, managed volumes, network
+and endpoint consumers. `agent_docker.verify_endpoint` consumes that evidence and
+host-owned generation state; doctor and sealing use the same result. The existing
+`require_agent_profile` checker compares complete image-plus-Compose environment,
+startup, healthcheck, security/namespaces/resources, exact mounts and network ID.
+Workspace delivery must also be a subset of dev's mounts; dev's existing content
+assessment covers those paths. Only a verified companion removes its Docker
+endpoint and inherited EXPOSE peer causes. The [sealed definition and override](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
 are documented in the model.
 
 The direct probe runs trusted raw-socket Python in a digest-pinned throwaway
-container sharing only the assessed dev network namespace. It validates results
+container sharing only the assessed network namespace, once for dev and once
+for its verified companion. Each result includes its namespace container ID. It validates results
 for every authenticated peer IPv4/IPv6 address and verifies removal after success,
 timeout and cancellation. Reached or unknown results refuse admission. Doctor
 uses the same probe with current/cached peers without starting a helper.
@@ -1010,8 +1020,11 @@ for the host prerequisite and diagnostic limits.
 Both creators inspect resolved Compose delivery before launch. Unsealed delivery
 closes and verifies the helper; sealed delivery pauses admission via private IPC.
 The existing asynchronous observer inspects the actual created dev and probes
-outside the control lock, then verifies generation/ID under the lock before
-admitting/resuming. Pause preserves immutable routes and helper-owned deadlines;
+outside the control lock, then re-inspects dev and companion IDs/profile under the lock before
+admitting/resuming. Planned and actual assessments carry companion generation,
+network ID and profile fingerprint; opening and commit bind the same evidence.
+The observer revalidates the companion throughout an open window and closes on
+replacement, profile/storage/network drift or inspection uncertainty. Pause preserves immutable routes and helper-owned deadlines;
 creator starts never inherit an override. External replacement/removal closes.
 
 ## Image Build
@@ -1231,7 +1244,8 @@ only the preflight provisioning, not provisioning as such.
 
 `run_checks(config, config_error)` reports Docker installation, daemon reach,
 socket permission, Compose v2, configuration, projects directory, config root,
-image, network, actual D-Bus/audio delivery and raw desktop exposure, and seed
+image, network, actual agent Docker endpoint/identity/health/storage (with separate
+stale/orphan reporting), actual D-Bus/audio delivery and raw desktop exposure, and seed
 config presence. It also includes the read-only `Config workflow` audit, which
 is `PASS` when clean and `WARN` when drift or validation needs attention.
 

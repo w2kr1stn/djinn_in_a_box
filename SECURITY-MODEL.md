@@ -54,8 +54,9 @@ The policy keeps its existing private-network/DNS allowances and fixed allowlist
 
 `--docker-direct` delivers the host socket read-write. The entrypoint adjusts socket
 group access for dev; a non-root client still has host-root-equivalent authority.
-Host workloads are independent of dev's firewall and resource limits. Both Docker
-modes are currently treated as unsealed. Prefer no Docker access when unnecessary.
+Host workloads are independent of dev's firewall and resource limits. Direct mode
+is unsealed. Agent mode contributes no Docker cause only after the same-generation
+verification described below. Prefer no Docker access when unnecessary.
 
 The temporary audit assistant holds host Docker authority and shares `djinn-network`.
 
@@ -103,9 +104,18 @@ hostctl window, whose helper uses `restart: no`.
 not a promise that every mounted secret or host-escape technique is blocked.
 For a running dev container it requires complete inspection and no named causes:
 
-- No Docker socket (including relocated sockets), nonempty `DOCKER_HOST`, or
-  Docker proxy exposed through shared networks, host networking or non-loopback
-  published ports. A leftover proxy matters even without a Docker start flag.
+- No host Docker socket (including relocated sockets) or unverified Docker
+  endpoint/context. The sole exception is the managed Unix endpoint of the
+  verified rootless companion belonging to this dev generation. Host-owned state
+  must record the dev and companion IDs and trusted manifest; host inspection
+  must match the pinned image, complete environment/startup/profile, network ID,
+  managed volumes and endpoint consumers. Companion workspace mounts must equal
+  the trusted delivery and be a subset of dev's own mounts, at the same paths and
+  modes. Names, labels and daemon-reported identity alone never qualify.
+- No other reachable Docker proxy through shared networks, host networking or
+  non-loopback published ports. Only the verified companion's inherited EXPOSE
+  2375/2376 metadata is exempt; all other peers are still inspected. A leftover
+  host proxy matters even without a Docker start flag.
 - No bind of host `/`, the controller user's home or its ancestors; no exposure
   of `djinn-hostctl-state`, its backing storage or the Docker data root.
 - No bind exposing private controller/journal, agent or runtime control state.
@@ -118,6 +128,13 @@ For a running dev container it requires complete inspection and no named causes:
 Inspection resolves canonical ancestors, inode aliases and local named-volume
 bind options, and inventories nested sockets/hardlinks with bounds. Missing,
 malformed, unsupported or incomplete provenance is **unknown**, not sealed.
+The exception removes only a Docker cause. A sensitive workspace, such as host
+`/`, remains a dev cause even when delivered identically to the companion.
+Sealed means verified provenance and absence of these named causes. It does not
+promise kernel-exploit resistance, isolation from every host/LAN TCP service, or
+absence of intentionally delivered credentials. The accepted rootless relaxations
+and shared-kernel exposure still apply. Companion inspection uses the host only;
+no companion exec or UID-map introspection contributes to sealing.
 Without a running dev the assessment is deferred. Install the controller and
 all its execution inputs outside dev-writable mounts; pinning an executable or
 image ID cannot establish trust in writable inputs. Host support is Linux with
@@ -129,8 +146,11 @@ The flag cannot override uncertain inspection, direct-route results, deadline,
 trust or journal failures. It applies to that opening only. Before any new
 interactive, headless or detached dev starts, unsealed/unknown planned delivery
 closes and verifies the helper; sealed delivery pauses admission until actual
-delivery and the probe pass. A creator never inherits the override. External
-dev removal or replacement closes the window.
+delivery and the probes in both dev and companion namespaces pass. Companion
+ID, profile, network and storage are revalidated at admission commit and during
+the open window; replacement, drift or uncertain inspection closes the window.
+A creator never inherits the override. External dev removal or replacement closes
+the window.
 
 ## Window state, expiry and logs
 

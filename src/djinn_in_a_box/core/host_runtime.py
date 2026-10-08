@@ -839,6 +839,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
     enrollment = None
     dev_id = None
     admitted = False
+    agent_evidence = None
     trust = None
     opening = json.loads((root / "opening.json").read_text())
     dev_id = opening.get("dev_id")
@@ -924,6 +925,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                         if checked["creator"]:
                             hostctl.resume_locked(fresh)
                         dev_id = checked["dev_id"]
+                        agent_evidence = checked.get("agent")
                         admitted = True
                     observation["relay"] = "open"
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -956,6 +958,8 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                         hostctl.stop_helper_locked()
                         hostctl.journal("external-dev-teardown", generation=generation)
                 return
+            if admitted and not opening.get("creator"):
+                hostctl.verify_agent(dev_id, agent_evidence)
             temporary = root / f"observation-{generation}.tmp"
             temporary.write_text(json.dumps(observation))
             temporary.chmod(0o600)

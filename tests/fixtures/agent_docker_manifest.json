@@ -60,5 +60,35 @@
     "NanoCpus": 2000000000,
     "Memory": 3221225472,
     "MemoryReservation": 536870912
-  }
+  },
+  "environment": [
+    "DJINN_FIREWALL_GATE=false",
+    "DOCKER_TLS_CERTDIR=",
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "DOCKER_VERSION=29.8.2",
+    "DOCKER_BUILDX_VERSION=0.37.2",
+    "DOCKER_COMPOSE_VERSION=5.5.1",
+    "DIND_COMMIT=8d9e3502aba39127e4d12196dae16d306f76993d"
+  ],
+  "user": "1000:1000",
+  "command": [
+    "dockerd",
+    "--host=unix:///home/rootless/.djinn-docker/socket/docker.sock",
+    "--config-file=/dev/null",
+    "--data-root=/home/rootless/.local/share/docker",
+    "--storage-driver=overlay2",
+    "--tls=false"
+  ],
+  "healthcheck": {
+    "Test": [
+      "CMD-SHELL",
+      "info=$(docker --host unix:///home/rootless/.djinn-docker/socket/docker.sock info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}') && case \"$info\" in 'overlay2 /home/rootless/.local/share/docker '*\\\"name=rootless\\\"*) exit 0;; *) exit 1;; esac"
+    ],
+    "Interval": 2000000000,
+    "Timeout": 5000000000,
+    "StartPeriod": 60000000000,
+    "Retries": 3
+  },
+  "network_id": "79d1fd69bdb600cf5992c662994751f6da95791acac1b7f254e06946f6501c26",
+  "cache_volume": "djinn-test-cache"
 }

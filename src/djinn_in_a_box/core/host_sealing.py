@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from djinn_in_a_box.core import desktop, host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, desktop, host_runtime, hostctl
 from djinn_in_a_box.core import paths as host_paths
 from djinn_in_a_box.core.paths import get_project_root
 
@@ -47,6 +47,7 @@ class Assessment:
     dev_id: str | None
     causes: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    agent: dict[str, str] | None = None
 
     @property
     def state(self) -> str:
@@ -220,12 +221,16 @@ def volume_bind_source(mount: dict[str, Any]) -> str | None:
     raise ValueError(f"volume storage provenance unknown: {mount['Name']}")
 
 
-def assess(actual: dict[str, Any] | None) -> Assessment:
+def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = None) -> Assessment:
+    from djinn_in_a_box.core import docker
+
     if actual is None:
         return Assessment(None)
     causes: list[str] = []
     errors: list[str] = []
     identity = actual.get("Id")
+    verified = docker.inspect_agent_endpoint(actual, planned_generation=planned_generation)
+    errors.extend(verified.errors)
     try:
         if not isinstance(identity, str) or not identity or actual["State"]["Running"] is not True:
             raise ValueError("running dev ID/state unavailable")
@@ -241,7 +246,7 @@ def assess(actual: dict[str, Any] | None) -> Assessment:
         mounts = cast(list[dict[str, Any]], mounts)
         env = cast(list[str], env)
         networks = cast(dict[str, Any], networks)
-        environment = dict(entry.split("=", 1) for entry in env)
+        environment = agent_docker.inspected_environment(env)
         home = canonical(pwd.getpwuid(os.getuid()).pw_dir)
         info = json.loads(hostctl.command("info", "--format", "{{json .}}"))
         data_root = canonical(info["DockerRootDir"])
@@ -266,6 +271,12 @@ def assess(actual: dict[str, Any] | None) -> Assessment:
             mount = cast(dict[str, Any], raw_mount)
             try:
                 if mount["Type"] == "volume" and mount.get("Name") != hostctl.HOSTCTL_STATE_VOLUME:
+                    if (
+                        verified.kind == "agent"
+                        and mount["Destination"] == agent_docker.DEV_ENDPOINT
+                    ):
+                        effective.append(mount)
+                        continue
                     source_alias = volume_bind_source(mount)
                     if source_alias is not None:
                         mount = {**mount, "Type": "bind", "Source": source_alias}
@@ -370,8 +381,8 @@ def assess(actual: dict[str, Any] | None) -> Assessment:
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 errors.append(f"bind inspection uncertain: {exc}")
         endpoint = environment.get("DOCKER_HOST", "")
-        if endpoint:
-            causes.append(f"Docker endpoint exposed in dev environment: {endpoint}")
+        if endpoint and verified.kind != "agent":
+            causes.append("Unverified Docker endpoint exposed in dev environment")
         # A socket-bearing/proxy container on an attached network grants Docker
         # authority regardless of how this dev was originally started.
         for other_id in hostctl.command("ps", "-q").split():
@@ -380,6 +391,8 @@ def assess(actual: dict[str, Any] | None) -> Assessment:
             other = host_runtime.inspect_object(other_id, hostctl.DOCKER_EXECUTABLE)
             if other is None:
                 raise ValueError("network peer disappeared during Docker inspection")
+            if verified.kind == "agent" and other["Id"] == verified.companion_id:
+                continue
             shared = set(networks).intersection(other["NetworkSettings"]["Networks"])
             published: dict[str, Any] = other["NetworkSettings"].get("Ports") or {}
             host_ports = any(
@@ -436,12 +449,18 @@ def assess(actual: dict[str, Any] | None) -> Assessment:
         subprocess.SubprocessError,
     ) as exc:
         errors.append(f"inspection uncertain: {exc}")
-    return Assessment(identity, tuple(dict.fromkeys(causes)), tuple(dict.fromkeys(errors)))
+    return Assessment(
+        identity, tuple(dict.fromkeys(causes)), tuple(dict.fromkeys(errors)), verified.evidence
+    )
 
 
-def inspect_assessment(name: str = "djinn") -> Assessment:
+def inspect_assessment(name: str | None = None) -> Assessment:
+    from djinn_in_a_box.core import docker
+
     try:
-        actual = host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE)
+        actual = host_runtime.inspect_object(
+            name or docker.service_container_name("dev"), hostctl.DOCKER_EXECUTABLE
+        )
         if actual is not None and actual.get("State", {}).get("Running") is False:
             return Assessment(None)
         return assess(actual)
@@ -501,7 +520,7 @@ def run_probe(dev_id: str, trust: dict[str, Any], *, timeout: float = 30) -> lis
                 or result["state"] not in ("reached", "blocked", "unknown")
             ):
                 raise ValueError("invalid per-address probe output")
-        return cast(list[dict[str, str]], output)
+        return [{**row, "namespace": dev_id} for row in cast(list[dict[str, str]], output)]
     finally:
         # Also runs for KeyboardInterrupt and killed/timed-out docker clients.
         if host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE) is not None:
@@ -512,7 +531,9 @@ def run_probe(dev_id: str, trust: dict[str, Any], *, timeout: float = 30) -> lis
 
 def require_blocked(rows: list[dict[str, str]]) -> None:
     failures = [
-        f"{r['host']} {r['address']}: {r['state']}" for r in rows if r["state"] != "blocked"
+        f"{r.get('namespace', 'dev')} {r['host']} {r['address']}: {r['state']}"
+        for r in rows
+        if r["state"] != "blocked"
     ]
     if failures:
         raise hostctl.HostctlError(

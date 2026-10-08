@@ -126,7 +126,7 @@ def test_companion_launcher_waits_for_and_consumes_firewall_marker(tmp_path):
 
 def test_real_profile_and_supported_limits(evidence):
     actual, manifest = evidence
-    docker._require_agent_profile(actual, manifest)
+    docker.require_agent_profile(actual, manifest)
     assert actual["HostConfig"]["NanoCpus"] == 2_000_000_000
     assert actual["HostConfig"]["Memory"] == 3 * 1024**3
     assert actual["HostConfig"]["MemoryReservation"] == 512 * 1024**2
@@ -172,7 +172,7 @@ def test_profile_refuses_untrusted_delivery(evidence, section, key, value):
     actual, manifest = evidence
     (actual if section is None else actual[section])[key] = value
     with pytest.raises(RuntimeError, match="profile differs"):
-        docker._require_agent_profile(actual, manifest)
+        docker.require_agent_profile(actual, manifest)
 
 
 @pytest.mark.parametrize("creator", ["foreground", "headless", "detached"])
@@ -477,6 +477,7 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
     image = json.loads((fixtures / "agent_docker_image.json").read_text())[0]
     endpoint = json.loads((fixtures / "agent_docker_endpoint.json").read_text())[0]
     resolved = json.loads((fixtures / "agent_docker_compose.json").read_text())
+    resolved["services"]["agent-docker"]["environment"]["DJINN_FIREWALL_GATE"] = "false"
     generation = actual["Config"]["Labels"][host_runtime.GENERATION_LABEL]
     if failure == "literal-dollar":
         binding = next(
@@ -532,6 +533,8 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
         inventory[actual["Id"]] = actual
 
     def inspect(name, binary, resource="container", **kwargs):
+        if resource == "network":
+            return {"Id": manifest["network_id"]}
         if resource == "image":
             return (
                 image if name == agent_docker.IMAGE else {**image, "Id": manifest["dev_image_id"]}
