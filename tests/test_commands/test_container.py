@@ -895,7 +895,7 @@ class TestCleanVolumesCommand:
         ):
             container.clean_volumes()
 
-        assert mock_table.call_count == 2
+        mock_table.assert_called_once()
         entries = mock_table.call_args.args[2]
         assert entries == {"credentials": [str(configured_root / "claude")]}
 
