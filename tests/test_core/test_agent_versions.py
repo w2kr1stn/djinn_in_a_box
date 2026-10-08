@@ -89,6 +89,7 @@ def test_load_versions_rejects_invalid_record(data):
     with pytest.raises(AgentVersionError) as exc:
         versions.load_versions()
     assert str(record) in str(exc.value)
+    assert "Delete the file to fall back to the Dockerfile defaults" in str(exc.value)
 
 
 def test_load_versions_read_error_is_not_missing(monkeypatch):
@@ -96,6 +97,7 @@ def test_load_versions_read_error_is_not_missing(monkeypatch):
     with pytest.raises(AgentVersionError) as exc:
         versions.load_versions()
     assert str(paths.AGENT_VERSIONS_FILE) in str(exc.value)
+    assert "Delete the file to fall back to the Dockerfile defaults" in str(exc.value)
 
 
 @pytest.mark.parametrize(("local", "expected"), [

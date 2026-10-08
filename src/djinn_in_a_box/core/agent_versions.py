@@ -13,6 +13,7 @@ import tomli_w
 from djinn_in_a_box.core import paths
 
 KNOWN_AGENT_ARGS = frozenset({"CLAUDE_CODE_VERSION", "CODEX_VERSION", "OPENCODE_VERSION"})
+_RESET_HINT = "Delete the file to fall back to the Dockerfile defaults"
 
 
 class AgentVersionError(RuntimeError):
@@ -79,8 +80,13 @@ def load_versions() -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as exc:
-        raise AgentVersionError(f"Cannot read agent versions from {record}: {exc}") from exc
-    return _validate_versions(data)
+        raise AgentVersionError(
+            f"Cannot read agent versions from {record}: {exc}. {_RESET_HINT}"
+        ) from exc
+    try:
+        return _validate_versions(data)
+    except AgentVersionError as exc:
+        raise AgentVersionError(f"{exc}. {_RESET_HINT}") from exc
 
 
 def save_versions(versions: Mapping[str, str]) -> None:

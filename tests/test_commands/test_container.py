@@ -1578,7 +1578,8 @@ class TestUpdateCommand:
         monkeypatch.setattr(container, "save_versions", save)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
-        assert "Dockerfile" in result.output
+        # Rich wraps long temporary paths; the file name may span a line break.
+        assert "Dockerfile" in result.output.replace("\n", "")
         save.assert_not_called()
         assert paths.AGENT_VERSIONS_FILE.read_bytes() == old
 
