@@ -11,7 +11,7 @@ import time
 import pytest
 
 from djinn_in_a_box.config.ssh import GitConfig
-from djinn_in_a_box.core import docker, host_runtime
+from djinn_in_a_box.core import docker, host_runtime, hostctl
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 
@@ -59,6 +59,7 @@ else:
     binary.chmod(0o700)
     monkeypatch.setattr(host_runtime, "DOCKER_EXECUTABLE", str(binary))
     monkeypatch.setattr(docker, "DOCKER_EXECUTABLE", str(binary))
+    monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", str(binary))
     monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
     try:
         yield git_inputs, binary, objects, log
@@ -473,3 +474,23 @@ def test_creator_reclaims_only_a_stopped_recorded_dev(fake_owner, condition):
     if observer:
         observer.terminate()
         observer.wait(timeout=5)
+
+
+def test_fixture_isolates_hostctl_docker(fake_owner, monkeypatch):
+    _, binary, _, log = fake_owner
+    execute = subprocess.run
+
+    def isolated(argv, **kwargs):
+        assert argv[0] == str(binary), "test reached a real Docker client"
+        return execute(argv, **kwargs)
+
+    monkeypatch.setattr(host_runtime.subprocess, "run", isolated)
+    assert hostctl.inspect_helper() is None
+    assert calls(log) == [["container", "inspect", "djinn-hostctl"]]
+
+
+def test_unit_tests_cannot_change_the_real_docker_host():
+    from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+
+    with pytest.raises(AssertionError, match="would change the real Docker host"):
+        subprocess.run([DOCKER_EXECUTABLE, "rm", "-f", "djinn-unit-test-guard"], check=False)

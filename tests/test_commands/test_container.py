@@ -900,6 +900,7 @@ class TestCleanVolumesCommand:
                 {"credentials": ["claude"]},
                 clear=True,
             ),
+            patch("djinn_in_a_box.commands.container.volume_exists", return_value=False),
             patch("djinn_in_a_box.commands.container._print_resource_table") as mock_table,
         ):
             container.clean_volumes()
