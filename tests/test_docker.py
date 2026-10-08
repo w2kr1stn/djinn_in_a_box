@@ -1508,8 +1508,8 @@ class TestDockerfileDnsGuard:
 
         A guard in its own layer can stay cached while the download below re-runs —
         only sharing a RUN shares the cache decision. `npm install -g` is the layer
-        that matters most: a `djinn update` bump invalidates it while everything
-        above stays cached, and its failure mode cost 70 minutes.
+        that matters most: an agent ARG bump re-runs it (like every RUN after the ARG
+        block) while the layers above stay cached, and its failure mode cost 70 minutes.
         """
         instructions = self._run_instructions()
         assert instructions, "no RUN instructions parsed — has the Dockerfile moved?"

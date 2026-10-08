@@ -874,11 +874,19 @@ def update() -> None:
         )
         try:
             stdout, stderr = proc.communicate(timeout=UPDATE_TIMEOUT_SECONDS)
-        except BaseException:
+        except BaseException as exc:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise
+            _, late_stderr = proc.communicate()
+            if not isinstance(exc, subprocess.TimeoutExpired):
+                raise
+            error(
+                f"Update timed out after {UPDATE_TIMEOUT_SECONDS} seconds; no versions were saved"
+            )
+            # A fast-failing lookup may have explained the stall before it.
+            if late_stderr:
+                print_captured(late_stderr)
+            raise typer.Exit(1) from None
         if proc.returncode != 0:
             error(f"Update failed with exit code {proc.returncode}")
             if stderr:
@@ -889,9 +897,6 @@ def update() -> None:
             arg: effective_version(project_root, arg, resolved) for arg in sorted(KNOWN_AGENT_ARGS)
         }
         save_versions(resolved)
-    except subprocess.TimeoutExpired:
-        error(f"Update timed out after {UPDATE_TIMEOUT_SECONDS} seconds; no versions were saved")
-        raise typer.Exit(1) from None
     except (AgentVersionError, OSError, UnicodeError) as exc:
         error(str(exc))
         raise typer.Exit(1) from None

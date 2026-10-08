@@ -1498,6 +1498,8 @@ class TestUpdateCommand:
         monkeypatch.setattr(container, "save_versions", save)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "Error" in result.output
         save.assert_not_called()
         assert "Agent versions saved" not in result.output
         if failure == "unknown":
@@ -1536,6 +1538,8 @@ class TestUpdateCommand:
         monkeypatch.setattr(container, "save_versions", save)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "Error" in result.output
         expected_file = "Dockerfile" if failure == "default" else "agent-versions.toml"
         assert expected_file in result.output.replace("\n", "")
         spawn.assert_not_called()
@@ -1556,6 +1560,8 @@ class TestUpdateCommand:
         )
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "Error" in result.output
         assert "Agent versions saved" not in result.output
         assert "agent-versions.toml" in result.output.replace("\n", "")
         assert record.read_bytes() == old
@@ -1632,13 +1638,19 @@ class TestUpdateCommand:
 
         pidfile = update_project.parent / "grandchild-pid"
         script = update_project / "scripts/update-agents.sh"
-        script.write_text(f"#!/bin/bash\nsleep 30 &\necho $! > '{pidfile}'\nwait\n")
+        script.write_text(
+            "#!/bin/bash\n"
+            "echo 'npm error code EAI_AGAIN' >&2\n"
+            f"sleep 30 &\necho $! > '{pidfile}'\nwait\n"
+        )
         script.chmod(0o755)
         record = paths.AGENT_VERSIONS_FILE
         record.parent.mkdir(parents=True)
         record.write_text('CODEX_VERSION = "0.160.0"\n')
         old = record.read_bytes()
         monkeypatch.setattr(container, "UPDATE_TIMEOUT_SECONDS", 0.2)
+        shown = []
+        monkeypatch.setattr(container, "print_captured", shown.append)
         processes = []
         original_popen = subprocess.Popen
 
@@ -1665,6 +1677,7 @@ class TestUpdateCommand:
             assert time.monotonic() - started < 3
             assert len(outcomes) == 1 and isinstance(outcomes[0], typer.Exit)
             assert outcomes[0].exit_code == 1
+            assert any("npm error code EAI_AGAIN" in text for text in shown)
             assert processes[0].poll() is not None
             assert processes[0].stdout.closed and processes[0].stderr.closed
             pid = int(pidfile.read_text())

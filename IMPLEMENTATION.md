@@ -1056,9 +1056,9 @@ instructions rather than in a layer of its own — the base `apt-get`, the optio
 `packages.txt` install, and the global `npm install`. A guard in its own layer
 would be cache-independent of the download it protects: it can stay cached while
 the download re-runs. Sharing the instruction is what makes them share the cache
-decision, which matters most for the npm layer: effective Codex/OpenCode ARG
-changes from local overrides invalidate it while preceding layers stay cached.
-A Claude ARG change also invalidates its earlier installer layer. The
+decision, which matters most for the npm layer: any effective agent ARG change
+re-runs every `RUN` after the ARG block — the Claude installer and the npm layer —
+while the layers above the ARG block stay cached. The
 curl-based steps in between are deliberately unguarded: they fail in seconds with
 their own resolver error, so the guard would add noise without adding information.
 One script, so the check and its message have a single home; it uses `getent`,

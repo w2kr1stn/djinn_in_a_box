@@ -111,10 +111,10 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
 # Retry config is inline (build-scoped, not a persistent ENV) so it is also
 # inherited by the npm subprocess opencode's postinstall spawns to fetch its
 # platform binary — that postinstall hard-exits 1 on a failed fetch, and this
-# layer re-runs when effective Codex/OpenCode ARG versions change. Hardens the unattended
+# layer re-runs whenever an effective agent ARG version changes. Hardens the unattended
 # build against transient registry/CDN hiccups without slowing runtime npm.
-# The guard shares this RUN on purpose: this is the layer an effective ARG bump
-# invalidates while everything above stays cached, and the layer whose failure mode is
+# The guard shares this RUN on purpose: an effective agent ARG bump re-runs this layer
+# (like every RUN after the ARG block) while the layers above stay cached, and its failure mode is
 # pathological -- six retries per package with a backoff, measured at 70 minutes
 # before npm gave up. In the same instruction it cannot be cached away from the
 # install it protects.
