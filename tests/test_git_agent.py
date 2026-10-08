@@ -99,7 +99,11 @@ finally:
                     answered += 1
             elif process.poll() is not None:
                 break
-        return process.wait(timeout=2), output, answered
+        try:
+            returncode = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"driver did not finish before deadline: {output!r}")
+        return returncode, output, answered
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
