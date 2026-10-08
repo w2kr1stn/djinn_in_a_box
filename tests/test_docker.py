@@ -320,6 +320,74 @@ class TestMountTargetCollisions:
             ["--volume", "/host/source:/container/target:ro"]
         ) == [Path("/container/target")]
 
+    @pytest.mark.parametrize("docker_mode", list(DockerMode), ids=lambda mode: mode.value)
+    @pytest.mark.parametrize("root", docker_mod.MANAGED_VOLUME_REPAIR_TARGETS, ids=str)
+    @pytest.mark.parametrize("child", [False, True], ids=["root", "child"])
+    @pytest.mark.parametrize("mode", ["rw", "ro"])
+    def test_rejects_managed_volume_repair_target(
+        self,
+        mock_app_config: AppConfig,
+        tmp_path: Path,
+        root: Path,
+        child: bool,
+        mode: str,
+        docker_mode: DockerMode,
+    ) -> None:
+        target = root / "child" if child else root
+        mounts = resolve_container_mounts((f"{tmp_path}:{target}:{mode}",))
+
+        with pytest.raises(MountCollisionError) as exc_info:
+            validate_container_mounts(
+                mounts, mock_app_config, docker_mode,
+                shell_args=[], sops_args=[], zone_overlay_targets=(),
+            )
+
+        assert str(exc_info.value) == (
+            f"Mount {tmp_path} -> {target} conflicts with Djinn-managed path {root} "
+            f"(conflict path: {root})"
+        )
+
+    @pytest.mark.parametrize("docker_mode", list(DockerMode), ids=lambda mode: mode.value)
+    @pytest.mark.parametrize(
+        "target", ["/run/djinn/agent-docker/child", "/var/run/djinn/agent-docker/child"]
+    )
+    def test_rejects_agent_docker_endpoint_child(
+        self, mock_app_config: AppConfig, tmp_path: Path, docker_mode: DockerMode, target: str
+    ) -> None:
+        mounts = resolve_container_mounts((f"{tmp_path}:{target}",))
+
+        with pytest.raises(MountCollisionError) as exc_info:
+            validate_container_mounts(
+                mounts, mock_app_config, docker_mode,
+                shell_args=[], sops_args=[], zone_overlay_targets=(),
+            )
+
+        assert str(exc_info.value) == (
+            f"Mount {tmp_path} -> /run/djinn/agent-docker/child conflicts with "
+            "Djinn-managed path /run/djinn/agent-docker "
+            "(conflict path: /run/djinn/agent-docker)"
+        )
+
+    @pytest.mark.parametrize(
+        "root",
+        [*docker_mod.MANAGED_TARGET_ROOTS, None],
+        ids=lambda root: str(root) if root is not None else "existing-cache-other",
+    )
+    def test_allows_managed_root_sibling(
+        self, mock_app_config: AppConfig, tmp_path: Path, root: Path | None
+    ) -> None:
+        target = (
+            root.with_name(root.name + "2")
+            if root is not None
+            else Path("/home/dev/.cache/other")
+        )
+        mounts = resolve_container_mounts((f"{tmp_path}:{target}",))
+
+        validate_container_mounts(
+            mounts, mock_app_config, DockerMode.NONE,
+            shell_args=[], sops_args=[], zone_overlay_targets=(),
+        )
+
     def test_mount_targets_from_args_rejects_unknown_volume_flag(self) -> None:
         with pytest.raises(RuntimeMountSpecificationError, match="Unknown volume flag"):
             docker_mod._mount_targets_from_args(["--volumes-from", "other-container"])

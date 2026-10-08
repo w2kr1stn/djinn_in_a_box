@@ -756,6 +756,51 @@ class TestStartCommand:
         assert exc_info.value.exit_code == 1
         assert "mount collision detail" in start_mocks["err_output"].getvalue()
 
+    @pytest.mark.parametrize(
+        ("flags", "root", "mode"),
+        [
+            ([], "/home/dev/.cache/uv", "rw"),
+            (["--detach"], "/home/dev/.vscode-server", "ro"),
+        ],
+        ids=["foreground-rw", "detached-ro"],
+    )
+    def test_start_cli_refuses_managed_mount_before_creation(
+        self, mock_app_config: AppConfig, tmp_path: Path, flags: list[str], root: str, mode: str
+    ) -> None:
+        target = f"{root}/x"
+        with (
+            patch("djinn_in_a_box.commands.container.load_config", return_value=mock_app_config),
+            patch("djinn_in_a_box.commands.container.preflight"),
+            patch("djinn_in_a_box.commands.container.ensure_network", return_value=True),
+            patch("djinn_in_a_box.commands.container.is_container_running", return_value=False),
+            patch(
+                "djinn_in_a_box.commands.container.prepare_config_workflow",
+                return_value=WorkflowPreparationResult(True),
+            ),
+            patch("djinn_in_a_box.commands.container.get_shell_mount_args", return_value=[]),
+            patch("djinn_in_a_box.core.docker.get_shell_mount_args", return_value=[]),
+            patch("djinn_in_a_box.core.docker.get_sops_age_key_mount_args", return_value=[]),
+            patch(
+                "djinn_in_a_box.core.docker._zone_overlay_mount_args_and_targets",
+                return_value=([], ()),
+            ),
+            patch("djinn_in_a_box.core.docker.is_background_process_group", return_value=False),
+            patch("djinn_in_a_box.core.docker.subprocess.run") as docker_run,
+            patch("djinn_in_a_box.core.docker.subprocess.Popen") as docker_popen,
+            patch("djinn_in_a_box.core.docker.tempfile.mkstemp") as override,
+            patch("djinn_in_a_box.core.console.err_console", Console(width=1000, no_color=True)),
+        ):
+            result = runner.invoke(app, ["start", *flags, "--mount", f"{tmp_path}:{target}:{mode}"])
+
+        assert result.exit_code == 1, result.output
+        assert (
+            f"Mount {tmp_path} -> {target} conflicts with Djinn-managed path {root} "
+            f"(conflict path: {root})"
+        ) in result.output
+        docker_run.assert_not_called()
+        docker_popen.assert_not_called()
+        override.assert_not_called()
+
     def test_start_reports_a_mount_specification_error_from_the_core(
         self, start_mocks: dict[str, Any]
     ) -> None:

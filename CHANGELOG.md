@@ -183,6 +183,9 @@ Versioning before and after the first stable release.
 
 - `djinn update` leaves the checkout clean and records agent versions locally,
   so dev and assistant builds use the newer of local versions and upstream defaults.
+- `djinn start` and `djinn run` refuse invocation mounts at or below Djinn-managed
+  roots, including the five recursively repaired paths, before container creation.
+  Read-only mounts follow the same shared managed-root rule as declared mounts.
 - Git keys that share a passphrase now ask for it once at `djinn start` and
   `djinn run`, instead of once per key. One `ssh-add` call loads all declared
   keys; a different passphrase prompts again, so declare keys that share one

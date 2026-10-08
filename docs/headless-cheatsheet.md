@@ -156,6 +156,8 @@ The configured `general.code_dir` is always mounted as one workspace root:
 `"aios"` selects `/home/dev/aios`. `--here` and the first user mount still decide
 the run's workdir. A user target cannot equal or contain the active workspace
 target; children and explicit mounts at the unused root remain valid.
+Targets at or below Djinn-managed roots are refused for both `:rw` and `:ro`,
+following the [same rule as declared mounts](../README.md#storage-and-mounts).
 
 ---
 
