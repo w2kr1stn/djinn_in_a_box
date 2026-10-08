@@ -20,6 +20,7 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, cast
 
+from djinn_in_a_box.core import agent_docker
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.git_agent import AgentFilter, agent_keys, start_agent, stop_agent
@@ -191,12 +192,12 @@ def inspect_owned_resource(
     return actual
 
 
-def run_runtime_command(docker_path: str, *args: str) -> None:
+def run_runtime_command(docker_path: str, *args: str, timeout: float = 5) -> None:
     result = subprocess.run(
         [docker_path, *args],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=timeout,
         cwd="/",
         check=False,
         stdin=subprocess.DEVNULL,
@@ -232,7 +233,14 @@ def cleanup_owned(
     for record in state.get("resources", {}).values():
         if inspect_owned_resource(record, generation, docker_path) is not None:
             if record["service"] == "agent-docker":
-                run_runtime_command(docker_path, "stop", "-t", "3", record["id"])
+                run_runtime_command(
+                    docker_path,
+                    "stop",
+                    "-t",
+                    str(agent_docker.STOP_GRACE_SECONDS),
+                    record["id"],
+                    timeout=agent_docker.STOP_TIMEOUT_SECONDS,
+                )
             run_runtime_command(docker_path, "rm", "-f", record["id"])
     for name in state.get("volumes", []):
         volume = inspect_object(name, docker_path, "volume")
@@ -749,7 +757,12 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
                                         raise
                                 elif inspect_owned_resource(record, generation, docker_path):
                                     run_runtime_command(
-                                        docker_path, "stop", "-t", "3", record["id"]
+                                        docker_path,
+                                        "stop",
+                                        "-t",
+                                        str(agent_docker.STOP_GRACE_SECONDS),
+                                        record["id"],
+                                        timeout=agent_docker.STOP_TIMEOUT_SECONDS,
                                     )
                                 continue
                             if service.endswith("-helper") and inspect_owned_resource(

@@ -9,7 +9,7 @@
   ],
   "name": "djinn-test-agent-docker",
   "network": "djinn-test-network",
-  "endpoint_volume": "djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+  "endpoint_volume": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
   "dev_image_id": "sha256:7ed14e27fdd3b8dfd27a4d051da7e0edd3c647d2b41c7767363774878947fe40",
   "firewall": false,
   "mounts": [
@@ -51,7 +51,7 @@
     ],
     [
       "volume",
-      "djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+      "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
       "/home/rootless/.djinn-docker",
       true
     ]

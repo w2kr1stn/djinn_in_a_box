@@ -261,12 +261,14 @@ class TestBuildCommand:
         assert "exit code 1" in captured
         assert "above" in captured
 
-    @pytest.mark.parametrize("failing", ["none", "compose", "supervisor", "install"])
+    @pytest.mark.parametrize(
+        "failing", ["none", "compose", "supervisor", "install", "pull", "present"]
+    )
     @pytest.mark.parametrize("no_cache", [False, True])
     def test_build_also_builds_and_installs_the_hostctl_supervisor(
-        self, failing: str, no_cache: bool
+        self, failing: str, no_cache: bool, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """The supervisor is no Compose service; build adds it and installs it after bake."""
+        """Build installs hostctl, then pulls the pinned companion image if absent."""
         steps: list[str] = []
 
         def compose(config: object, *, no_cache: bool) -> RunResult:
@@ -283,6 +285,26 @@ class TestBuildCommand:
                 raise container.hostctl.HostctlError("Docker cp failed (exit 1)")
             return Path("/state/bin/supervisor")
 
+        def inspect(name: str, docker_path: str, resource: str) -> dict[str, str] | None:
+            steps.append("inspect-image")
+            assert name == container.agent_docker.IMAGE
+            assert docker_path == container.DOCKER_EXECUTABLE
+            assert resource == "image"
+            return {"Id": "sha256:pinned"} if failing == "present" else None
+
+        def pull(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            steps.append("pull")
+            assert argv == [container.DOCKER_EXECUTABLE, "pull", container.agent_docker.IMAGE]
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            assert kwargs["timeout"] == 120
+            assert kwargs["cwd"] == "/"
+            return subprocess.CompletedProcess(
+                argv,
+                17 if failing == "pull" else 0,
+                "",
+                "registry unavailable" if failing == "pull" else "",
+            )
+
         with (
             patch("djinn_in_a_box.commands.container.load_config"),
             patch("djinn_in_a_box.commands.container.preflight"),
@@ -290,19 +312,30 @@ class TestBuildCommand:
             patch("djinn_in_a_box.commands.container.compose_build", side_effect=compose),
             patch.object(container.hostctl, "build_supervisor", side_effect=supervisor),
             patch.object(container.hostctl, "install_supervisor", side_effect=install),
+            patch.object(container.host_runtime, "inspect_object", side_effect=inspect),
+            patch.object(container.subprocess, "run", side_effect=pull),
         ):
-            if failing == "none":
+            if failing in ("none", "present"):
                 container.build(no_cache=no_cache)
             else:
                 with pytest.raises(typer.Exit) as exc_info:
                     container.build(no_cache=no_cache)
-                assert exc_info.value.exit_code == {"compose": 2, "supervisor": 3, "install": 1}[
-                    failing
-                ]
+                assert exc_info.value.exit_code == {
+                    "compose": 2,
+                    "supervisor": 3,
+                    "install": 1,
+                    "pull": 17,
+                }[failing]
 
         expected = [f"compose:{no_cache}", f"supervisor:{no_cache}", "install"]
-        stop = {"compose": 1, "supervisor": 2, "install": 3, "none": 3}[failing]
+        if failing in ("none", "pull", "present"):
+            expected.append("inspect-image")
+        if failing in ("none", "pull"):
+            expected.append("pull")
+        stop = {"compose": 1, "supervisor": 2, "install": 3}.get(failing, len(expected))
         assert steps == expected[:stop]
+        if failing == "pull":
+            assert "pinned agent Docker image failed" in capsys.readouterr().err
 
     def test_sync_build_files_uses_config_root_from_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

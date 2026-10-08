@@ -171,7 +171,7 @@
       },
       {
         "Type": "volume",
-        "Source": "djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+        "Source": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
         "Target": "/home/rootless/.djinn-docker",
         "VolumeOptions": {
           "NoCopy": true
@@ -258,8 +258,8 @@
     },
     {
       "Type": "volume",
-      "Name": "djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3",
-      "Source": "/var/lib/docker/volumes/djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3/_data",
+      "Name": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+      "Source": "/var/lib/docker/volumes/djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3/_data",
       "Destination": "/home/rootless/.djinn-docker",
       "Driver": "local",
       "Mode": "z",

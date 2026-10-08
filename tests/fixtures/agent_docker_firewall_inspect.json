@@ -108,7 +108,7 @@
     "Mounts": [
       {
         "Type": "volume",
-        "Source": "djinn-test-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
+        "Source": "djinn-agent-docker-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
         "Target": "/endpoint",
         "VolumeOptions": {
           "NoCopy": true
@@ -147,8 +147,8 @@
   "Mounts": [
     {
       "Type": "volume",
-      "Name": "djinn-test-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
-      "Source": "/var/lib/docker/volumes/djinn-test-endpoint-34bf8ae67c2b4b39b186e8e85792556d/_data",
+      "Name": "djinn-agent-docker-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
+      "Source": "/var/lib/docker/volumes/djinn-agent-docker-endpoint-34bf8ae67c2b4b39b186e8e85792556d/_data",
       "Destination": "/endpoint",
       "Driver": "local",
       "Mode": "z",

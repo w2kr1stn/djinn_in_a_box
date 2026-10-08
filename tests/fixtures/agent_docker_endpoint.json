@@ -6,8 +6,8 @@
             "com.docker.compose.project": "djinn-test",
             "djinn.git-agent.generation": "9acaf0657b764b17822c7f29b7c283a3"
         },
-        "Mountpoint": "/var/lib/docker/volumes/djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3/_data",
-        "Name": "djinn-test-endpoint-9acaf0657b764b17822c7f29b7c283a3",
+        "Mountpoint": "/var/lib/docker/volumes/djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3/_data",
+        "Name": "djinn-agent-docker-endpoint-9acaf0657b764b17822c7f29b7c283a3",
         "Options": {
             "device": "tmpfs",
             "o": "uid=1000,gid=1000,mode=0700,size=1m",

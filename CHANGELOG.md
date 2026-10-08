@@ -16,7 +16,6 @@ Versioning before and after the first stable release.
 - Rootless agent Docker runtime for `--docker`, with generation-owned Unix endpoint,
   matching workspace mounts, persistent cache, resource limits and firewall gating.
 - Checksum-verified Buildx 0.37.2 in the dev image.
-
 - Optional tools `rust` and `just` (`tools/installers/rust.sh`, `just.sh`). `rust`
   installs rustup into the tools cache volume (`RUSTUP_HOME` and `CARGO_HOME` under
   `~/.cache/djinn-tools`), so the toolchain, the crate registry cache and

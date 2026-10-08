@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import time
 from contextlib import contextmanager
@@ -10,31 +12,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from test_desktop_runtime import calls, dev
 from test_desktop_runtime import fake_owner as daemon_owner_fixture
 
 from djinn_in_a_box.config.defaults import volume_categories
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core import agent_docker, docker, host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, docker, host_runtime
 from djinn_in_a_box.core.exceptions import DeclarationSpecificationError
 from djinn_in_a_box.core.host_runtime import GitRuntime
 
 # Reuse the isolated daemon/observer fixture without duplicating a fake executable.
 fake_owner = daemon_owner_fixture
-
-
-def test_cleanup_fixture_isolates_hostctl_docker(fake_owner, monkeypatch):
-    _, binary, _, log = fake_owner
-    execute = subprocess.run
-
-    def isolated(argv, **kwargs):
-        assert argv[0] == str(binary), "test reached a real Docker client"
-        assert kwargs["stdin"] is subprocess.DEVNULL
-        return execute(argv, **kwargs)
-
-    monkeypatch.setattr(host_runtime.subprocess, "run", isolated)
-    assert hostctl.inspect_helper() is None
-    assert calls(log) == [["container", "inspect", "djinn-hostctl"]]
 
 
 @pytest.fixture
@@ -45,6 +34,96 @@ def evidence():
     return actual, manifest
 
 
+def test_companion_launcher_waits_for_and_consumes_firewall_marker(tmp_path):
+    compose_path = Path(__file__).parents[1] / "docker-compose.agent-docker.yml"
+    compose = yaml.safe_load(compose_path.read_text())
+    service = compose["services"]["agent-docker"]
+    assert service["stop_grace_period"] == "20s"
+
+    rootless = tmp_path / "rootless"
+    runtime = rootless / ".djinn-docker"
+    marker = runtime / "firewall-ready"
+    stub = tmp_path / "dockerd-entrypoint-stub"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "if [ -e \"$MARKER_PATH\" ]; then printf 'present\\n' > \"$ARG_RECORD\"; "
+        "else printf 'absent\\n' > \"$ARG_RECORD\"; fi\n"
+        "printf '%s\\n' \"$@\" >> \"$ARG_RECORD\"\n"
+    )
+    stub.chmod(0o755)
+
+    entrypoint = service["entrypoint"]
+    launcher = entrypoint[2].replace("$$", "$").replace(
+        "/home/rootless", shlex.quote(str(rootless))
+    )
+    launcher = launcher.replace(
+        "/usr/local/bin/dockerd-entrypoint.sh", shlex.quote(str(stub))
+    )
+    command = [arg.replace("/home/rootless", str(rootless)) for arg in service["command"]]
+    argv = [*entrypoint[:2], launcher, *entrypoint[3:], *command]
+
+    def env(record: Path, gate: str) -> dict[str, str]:
+        result = os.environ.copy()
+        result.update(
+            {
+                "DJINN_FIREWALL_GATE": gate,
+                "MARKER_PATH": str(marker),
+                "ARG_RECORD": str(record),
+            }
+        )
+        return result
+
+    waiting_record = tmp_path / "waiting-args"
+    waiting = subprocess.Popen(
+        argv,
+        env=env(waiting_record, "true"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        time.sleep(0.25)
+        assert waiting.poll() is None
+        assert not waiting_record.exists()
+    finally:
+        if waiting.poll() is None:
+            waiting.terminate()
+        waiting.communicate(timeout=2)
+
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+    ready_record = tmp_path / "ready-args"
+    ready = subprocess.run(
+        argv,
+        env=env(ready_record, "true"),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+    assert ready.returncode == 0, ready.stderr
+    assert ready_record.read_text().splitlines() == [
+        "absent",
+        *command,
+    ]
+    assert not marker.exists()
+
+    off_record = tmp_path / "gate-off-args"
+    off = subprocess.run(
+        argv,
+        env=env(off_record, "false"),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=1,
+        check=False,
+    )
+    assert off.returncode == 0, off.stderr
+    assert off_record.read_text().splitlines() == ["absent", *command]
+
+
 def test_real_profile_and_supported_limits(evidence):
     actual, manifest = evidence
     docker._require_agent_profile(actual, manifest)
@@ -52,8 +131,14 @@ def test_real_profile_and_supported_limits(evidence):
     assert actual["HostConfig"]["Memory"] == 3 * 1024**3
     assert actual["HostConfig"]["MemoryReservation"] == 512 * 1024**2
     assert manifest["image"] == agent_docker.IMAGE
+    assert manifest["endpoint_volume"] == (
+        agent_docker.ENDPOINT_PREFIX + actual["Config"]["Labels"][host_runtime.GENERATION_LABEL]
+    )
     assert all(
-        m["Type"] != "volume" or m["Name"].startswith("djinn-test-") for m in actual["Mounts"]
+        m["Type"] != "volume"
+        or m["Name"] == manifest["endpoint_volume"]
+        or m["Name"].startswith("djinn-test-")
+        for m in actual["Mounts"]
     )
 
 
@@ -230,7 +315,7 @@ def test_observer_stops_and_resumes_daemon_by_id(fake_owner, evidence, git_enabl
         data["djinn"]["State"]["Running"] = False
         objects.write_text(json.dumps(data))
         deadline = time.monotonic() + 5
-        while ["stop", "-t", "3", "agent-id"] not in calls(log):
+        while ["stop", "-t", "20", "agent-id"] not in calls(log):
             assert time.monotonic() < deadline
             time.sleep(0.05)
         data = json.loads(objects.read_text())
@@ -244,6 +329,122 @@ def test_observer_stops_and_resumes_daemon_by_id(fake_owner, evidence, git_enabl
         owner.observer.wait(timeout=5)
         assert not json.loads(objects.read_text())
         assert not (owner.root / "state.json").exists()
+
+
+@pytest.mark.parametrize(
+    "path", ["observer", "cleanup", "clean", "resume-failure", "firewall-failure"]
+)
+def test_companion_stop_subprocess_outlasts_grace(fake_owner, evidence, monkeypatch, path):
+    _, binary, objects, _ = fake_owner
+    monkeypatch.setattr(host_runtime, "stop_owned_process", lambda *args: None)
+    root = host_runtime.runtime_root(create=True)
+    actual, manifest = evidence
+    generation = actual["Config"]["Labels"][host_runtime.GENERATION_LABEL]
+    project = actual["Config"]["Labels"]["com.docker.compose.project"]
+    owner = GitRuntime(root, generation, docker_path=str(binary), project=project,
+                       owns_generation=True)
+    owner.resources["agent-docker"] = {
+        "id": actual["Id"], "service": "agent-docker", "project": project,
+    }
+    state = {
+        "generation": generation, "container_name": "djinn", "dev_id": "djinn",
+        "resources": owner.resources, "volumes": [], "agent_docker": manifest,
+        "keys": [], "git_enabled": False, "agent_pid": -1,
+        "observer_pid": -1, "observer_token": "", "creator_pid": os.getpid(),
+        "creator_token": host_runtime.process_token(os.getpid()),
+    }
+    host_runtime.save_state(root, state)
+    inventory = {actual["Id"]: actual}
+    if path in {"observer", "clean", "resume-failure"}:
+        inventory["djinn"] = dev(owner, identifier="djinn")
+        inventory["djinn"]["Config"]["Labels"]["com.docker.compose.project"] = project
+    objects.write_text(json.dumps(inventory))
+    stops = []
+    original_run = subprocess.run
+
+    def run(argv, **kwargs):
+        assert argv[0] == str(binary), "All Docker calls must use the isolated executable"
+        if argv[1] == "stop" and argv[-1] == actual["Id"]:
+            grace = int(argv[argv.index("-t") + 1])
+            assert grace == agent_docker.STOP_GRACE_SECONDS == 20
+            assert kwargs["timeout"] > grace
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            stops.append((grace, kwargs["timeout"]))
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if path in {"observer", "resume-failure"}:
+        class Transitions:
+            tick = 0
+
+            def wait(self, seconds):
+                self.tick += 1
+                data = json.loads(objects.read_text())
+                if self.tick == 2:
+                    data["djinn"]["State"]["Running"] = False
+                elif self.tick == 3 and path == "resume-failure":
+                    data["djinn"]["State"]["Running"] = True
+                objects.write_text(json.dumps(data))
+                return self.tick > (3 if path == "resume-failure" else 2)
+
+        monkeypatch.setattr(host_runtime.threading, "Event", Transitions)
+        monkeypatch.setattr(host_runtime.signal, "signal", lambda *args: None)
+        (root / "loaded").touch()
+        if path == "resume-failure":
+            def failed_resume(*args):
+                raise RuntimeError("restart readiness failed")
+
+            monkeypatch.setattr(docker, "resume_agent_docker", failed_resume)
+            with pytest.raises(RuntimeError, match="restart readiness failed"):
+                host_runtime.observe(root, host_runtime.acquire_creation_lock(root), str(binary))
+        else:
+            host_runtime.observe(root, host_runtime.acquire_creation_lock(root), str(binary))
+    elif path == "clean":
+        monkeypatch.setattr(docker, "COMPOSE_PROJECT", project)
+        monkeypatch.setattr(docker, "is_own_container", lambda *args: False)
+        assert docker.compose_down().success
+    elif path == "firewall-failure":
+        fixture = Path(__file__).parent / "fixtures" / "agent_docker_firewall_inspect.json"
+        initializer = json.loads(fixture.read_text())
+        initializer["Image"] = manifest["dev_image_id"]
+        initializer["HostConfig"]["NetworkMode"] = "container:" + actual["Id"]
+        initializer["Mounts"][0]["Name"] = manifest["endpoint_volume"]
+        initializer["Config"]["Labels"].update({
+            host_runtime.GENERATION_LABEL: generation, "com.docker.compose.project": project,
+        })
+
+        def captured(argv, **kwargs):
+            if argv[1] == "create":
+                data = json.loads(objects.read_text())
+                data[initializer["Id"]] = initializer
+                data[manifest["name"] + "-firewall"] = initializer
+                objects.write_text(json.dumps(data))
+                return docker.RunResult(0, initializer["Id"] + "\n")
+            return docker.RunResult(0, "23\n" if argv[1] == "wait" else "firewall failed")
+
+        monkeypatch.setattr(docker, "_run_captured", captured)
+        try:
+            with pytest.raises(RuntimeError, match="Agent Docker firewall failed"):
+                docker._agent_firewall(owner, manifest)
+        finally:
+            owner.close()
+    else:
+        assert host_runtime.cleanup_owned(root, generation, str(binary))
+    assert stops, "The requested path must actually stop the companion"
+
+
+def test_runtime_command_default_and_explicit_timeout(monkeypatch):
+    timeouts = []
+
+    def run(argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    host_runtime.run_runtime_command("/isolated/docker", "start", "helper")
+    host_runtime.run_runtime_command("/isolated/docker", "start", "helper", timeout=9)
+    assert timeouts == [5, 9]
 
 
 @pytest.mark.parametrize(
@@ -372,7 +573,7 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
             stderr="creation failed" if failure == "partial" else "",
         )
 
-    def command(binary, *args):
+    def command(binary, *args, **kwargs):
         if args[0] == "stop":
             inventory[args[-1]]["State"]["Running"] = False
         else:
@@ -405,6 +606,7 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
             delivered = fragment["services"]["dev"]["volumes"][-1]
             assert delivered["read_only"] is True
             assert delivered["target"] == agent_docker.DEV_ENDPOINT
+            assert endpoint["Name"] == agent_docker.ENDPOINT_PREFIX + generation
             assert manifest["image_id"] == inventory[actual["Id"]]["Image"]
         else:
             with pytest.raises(RuntimeError):
@@ -474,7 +676,7 @@ def test_firewall_initializer_provenance_and_partial_cleanup(tmp_path, monkeypat
         assert argv[1] == "logs"
         return docker.RunResult(0, "initializer failed\n")
 
-    def command(binary, *args):
+    def command(binary, *args, **kwargs):
         commands.append(args)
         if args[0] == "rm":
             inventory.pop(args[-1])

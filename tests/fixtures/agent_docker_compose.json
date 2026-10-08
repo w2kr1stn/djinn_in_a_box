@@ -588,7 +588,7 @@
       "name": "djinn-test-cache"
     },
     "agent-docker-endpoint": {
-      "name": "djinn-test-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
+      "name": "djinn-agent-docker-endpoint-34bf8ae67c2b4b39b186e8e85792556d",
       "external": true
     },
     "djinn-test-inner-data": {

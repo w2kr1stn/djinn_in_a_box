@@ -20,7 +20,7 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, host_runtime, hostctl
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
@@ -96,6 +96,34 @@ def _sync_build_files(config: AppConfig | None = None) -> None:
             shutil.copy2(source, target)
 
 
+def _pull_agent_docker_image_if_missing() -> None:
+    if host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image") is not None:
+        return
+
+    info("Pulling the pinned agent Docker image...")
+    try:
+        result = subprocess.run(
+            [DOCKER_EXECUTABLE, "pull", agent_docker.IMAGE],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd="/",
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = str(exc) or type(exc).__name__
+        blank()
+        error(f"Pulling the pinned agent Docker image failed: {detail}")
+        raise typer.Exit(1) from None
+
+    if result.returncode:
+        detail = result.stderr.strip() or f"exit code {result.returncode}"
+        blank()
+        error(f"Pulling the pinned agent Docker image failed: {detail}")
+        raise typer.Exit(result.returncode or 1)
+
+
 @handle_config_errors
 def build(
     no_cache: Annotated[
@@ -123,6 +151,9 @@ def build(
             blank()
             error(f"Installing the hostctl supervisor failed: {exc}")
             raise typer.Exit(1) from None
+
+    if result.success:
+        _pull_agent_docker_image_if_missing()
 
     if result.success:
         blank()

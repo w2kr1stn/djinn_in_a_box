@@ -922,9 +922,10 @@ class TestGetComposeFiles:
         """Test returns only base compose file when docker_mode=NONE."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.NONE)
-        assert len(files) == 4
-        assert files[0] == "-f"
-        assert "docker-compose.yml" in files[1]
+        assert len(files) == 6
+        assert files[:2] == ["-p", "djinn-in-a-box"]
+        assert files[2] == "-f"
+        assert "docker-compose.yml" in files[3]
         assert "docker-compose.agent-docker.yml" not in str(files)
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
@@ -932,7 +933,8 @@ class TestGetComposeFiles:
         """Test returns both compose files when docker_mode=PROXY."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.AGENT)
-        assert len(files) == 6
+        assert len(files) == 8
+        assert files[:2] == ["-p", "djinn-in-a-box"]
         assert files.count("-f") == 3
         # Check both files are present
         file_paths = [f for f in files if f != "-f"]
@@ -944,10 +946,26 @@ class TestGetComposeFiles:
         """Test returns docker-direct compose file when docker_mode=DIRECT."""
         mock_root.return_value = Path("/project")
         files = get_compose_files(DockerMode.DIRECT)
-        assert len(files) == 6
+        assert len(files) == 8
+        assert files[:2] == ["-p", "djinn-in-a-box"]
         file_paths = [f for f in files if f != "-f"]
         assert any("docker-compose.yml" in f for f in file_paths)
         assert any("docker-compose.docker-direct.yml" in f for f in file_paths)
+
+    @patch("djinn_in_a_box.core.docker.get_project_root")
+    def test_explicit_project_keeps_identity_substitution(
+        self, mock_root: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_root.return_value = Path("/project")
+        monkeypatch.setattr(docker_mod, "COMPOSE_PROJECT", "djinn-test")
+
+        files = get_compose_files()
+
+        assert files[:2] == ["-p", "djinn-test"]
+        compose = yaml.safe_load(
+            (Path(__file__).parents[1] / "docker-compose.yml").read_text()
+        )
+        assert compose["name"] == "djinn-in-a-box"
 
 
 class TestBuildComposeEnv:

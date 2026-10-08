@@ -467,11 +467,9 @@ def ensure_network(name: str = DJINN_NETWORK) -> bool:
 
 
 def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
-    """Get compose file arguments ["-f", "file.yml", ...] based on Docker mode."""
+    """Get project and compose file arguments based on Docker mode."""
     project_root = get_project_root()
-    files = ["-f", str(project_root / "docker-compose.yml")]
-    if COMPOSE_PROJECT != "djinn-in-a-box":
-        files = ["-p", COMPOSE_PROJECT, *files]
+    files = ["-p", COMPOSE_PROJECT, "-f", str(project_root / "docker-compose.yml")]
 
     files.extend(["-f", str(project_root / "docker-compose.desktop.yml")])
 
@@ -1145,12 +1143,14 @@ def compose_build(config: AppConfig | None = None, *, no_cache: bool = False) ->
     already on the terminal; there is nothing to print afterwards.
     """
     project_root = get_project_root()
+    compose_files = get_compose_files()
     env = _compose_host_env(config)
     cmd = [
         DOCKER_EXECUTABLE,
         "buildx",
         "bake",
-        *get_compose_files(),
+        # This direct Bake command needs the Compose file selectors only.
+        *compose_files[2:],
         "--progress",
         _build_progress(),
         "--load",
@@ -1631,8 +1631,6 @@ def _prepare_agent_docker(
     if volume is not None and (volume["Driver"] != "local" or volume.get("Options")):
         raise RuntimeError("Agent Docker cache must use the plain local volume driver")
     endpoint = agent_docker.ENDPOINT_PREFIX + owner.generation
-    if owner.project != "djinn-in-a-box":
-        endpoint = owner.project + "-endpoint-" + owner.generation
     if host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, "volume") is not None:
         raise RuntimeError("Agent Docker endpoint already exists")
     labels = {

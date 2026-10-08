@@ -611,11 +611,13 @@ The base mode delivers no Docker socket or Docker endpoint.
 
 `djinn start --docker` starts a rootless companion daemon from a pinned official
 image. Dev connects as UID 1000 through a read-only endpoint volume at
-`unix:///run/djinn/agent-docker/socket/docker.sock`. Djinn exposes no TCP Docker API to network peers. Published inner-container ports are reachable from dev at
+`unix:///run/djinn/agent-docker/socket/docker.sock`. Djinn exposes no TCP Docker API
+to network peers. Published inner-container ports are reachable from dev at
 `agent-docker:<port>`; use that hostname instead of `localhost`.
- An agent can deliberately relay its inner API through a published workload port;
-that exposes the inner daemon and its delivered workspace, with no host-daemon authority.
 
+An agent can deliberately relay its inner API through a published workload port;
+that exposes the inner daemon and its delivered workspace, with no host-daemon
+authority.
 
 The daemon receives exactly dev's workspace delivery: the configured code directory,
 `--here` and CLI mounts, declared binds/volumes, and `/home/dev/sessions`, with the

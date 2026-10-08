@@ -234,8 +234,11 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
     except GitSSHError:
         assert condition == "unknown"
     mutations = [c for c in calls(log) if c[0] in {"rm", "stop", "volume"}]
-    assert mutations == ([["stop", "-t", "3", "agent-id"], ["rm", "-f", "agent-id"]]
-                         if condition == "owned" else [])
+    assert mutations == (
+        [["stop", "-t", "20", "agent-id"], ["rm", "-f", "agent-id"]]
+        if condition == "owned"
+        else []
+    )
     assert ("agent-id" in json.loads(objects.read_text())) == (condition != "owned")
 
 

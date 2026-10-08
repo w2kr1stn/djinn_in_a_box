@@ -9,6 +9,8 @@ IMAGE = (
 )
 CACHE = "djinn-agent-docker"
 ENDPOINT_PREFIX = "djinn-agent-docker-endpoint-"
+STOP_GRACE_SECONDS = 20
+STOP_TIMEOUT_SECONDS = STOP_GRACE_SECONDS + 5
 ENDPOINT = "/home/rootless/.djinn-docker"
 DEV_ENDPOINT = "/run/djinn/agent-docker"
 DATA_ROOT = "/home/rootless/.local/share/docker"

@@ -36,9 +36,10 @@ Dev has full inner-daemon API access through a read-only Unix socket mount. Read
 prevents unlinking/replacing the endpoint through that mount; it permits API writes.
 The daemon has no TCP API listener or host port publication. Network peers can reach
 published workload ports at `agent-docker:<port>` but receive no endpoint volume.
- An agent can deliberately relay its inner API through a published workload port;
-that exposes the inner daemon and its delivered workspace, with no host-daemon authority.
 
+An agent can deliberately relay its inner API through a published workload port;
+that exposes the inner daemon and its delivered workspace, with no host-daemon
+authority.
 
 Only the workspace delivery is shared with the companion, including sessions.
 Choosing host `/` or a home directory exposes whatever it contains, even read-only.
@@ -54,8 +55,7 @@ The policy keeps its existing private-network/DNS allowances and fixed allowlist
 `--docker-direct` delivers the host socket read-write. The entrypoint adjusts socket
 group access for dev; a non-root client still has host-root-equivalent authority.
 Host workloads are independent of dev's firewall and resource limits. Both Docker
-modes remain unsealed in this package; the verified companion sealing exception is
-separate work. Prefer no Docker access when unnecessary.
+modes are currently treated as unsealed. Prefer no Docker access when unnecessary.
 
 The temporary audit assistant holds host Docker authority and shares `djinn-network`.
 
