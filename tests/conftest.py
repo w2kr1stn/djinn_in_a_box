@@ -19,6 +19,34 @@ os.environ.pop("FORCE_COLOR", None)
 from djinn_in_a_box.config.models import AppConfig, ResourceLimits, ShellConfig
 from djinn_in_a_box.core.paths import get_project_root
 
+_MUTATING_DOCKER_VERBS = frozenset({
+    "attach", "build", "bake", "commit", "connect", "create", "disconnect", "down", "exec", "kill",
+    "load", "pause", "prune", "pull", "push", "rename", "restart", "rm", "rmi", "run", "start",
+    "stop", "tag", "unpause", "up", "update",
+})
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_docker(request, monkeypatch):
+    """Unit tests never change the host daemon; opt-in live modules are exempt."""
+    if request.module.__name__.endswith("_live_docker"):
+        return
+    from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+
+    original = subprocess.Popen.__init__
+
+    def guarded(self, args, *rest, **kwargs):
+        argv = [str(arg) for arg in args] if isinstance(args, list | tuple) else [str(args)]
+        if (
+            argv[0] in {DOCKER_EXECUTABLE, "docker"}
+            and "--help" not in argv
+            and _MUTATING_DOCKER_VERBS.intersection(argv[1:])
+        ):
+            raise AssertionError(f"unit test would change the real Docker host: {argv!r}")
+        original(self, args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_hostctl_state(monkeypatch, tmp_path):
