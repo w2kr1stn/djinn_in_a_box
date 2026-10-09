@@ -295,6 +295,7 @@ def test_caller_cannot_override_endpoint(creator, key, tmp_path, monkeypatch):
         "independent",
         "missing-image",
         "unhealthy",
+        "starting",
         "auth-failure",
     ],
 )
@@ -363,6 +364,10 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
     monkeypatch.setattr(docker, "_service_inspect", service)
     if outcome in {"unhealthy", "independent"}:
         helper["State"]["Health"]["Status"] = "unhealthy"
+    if outcome == "starting":
+        # Failed probes inside start_period keep a broken helper starting until the deadline.
+        helper["State"]["Health"]["Status"] = "starting"
+        monkeypatch.setattr(desktop, "HELPER_SECONDS", 0.3)
 
     def actual(name, path, resource="container", **kwargs):
         if name == "djinn-hostctl" and resource == "container":
@@ -434,6 +439,10 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
     assert ("Desktop dbus missing" in warning) == (
         outcome not in {"healthy", "absent", "both", "audio-only"}
     )
+    if outcome == "starting":
+        assert "Desktop dbus missing: helper health starting (readiness timeout)" in " ".join(
+            warning.split()
+        )
     assert events[-1] == ("retain" if creator == "detached" else "close")
 
 
@@ -448,6 +457,7 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         "source",
         "health-uid",
         "isolated",
+        "cadence",
         "digest",
         "floor",
         "readonly",
@@ -492,6 +502,21 @@ def test_packaged_boundary_policy(case):
                 channel,
             ]
         assert "working_dir: /" in compose
+    elif case == "cadence":
+        import yaml
+
+        # Probe every 2 s only while starting; the gates run their own fresh health probes.
+        services = yaml.safe_load(compose)["services"]
+        for channel, timeout in (("dbus", "8s"), ("audio", "12s")):
+            check = dict(services[f"{channel}-helper"]["healthcheck"])
+            assert check.pop("test") == ["CMD", "python3", "-I", "/etc/djinn/health.py", channel]
+            assert check == {
+                "interval": "30s",
+                "timeout": timeout,
+                "retries": 3,
+                "start_period": "30s",
+                "start_interval": "2s",
+            }
     elif case == "digest":
         assert __import__("re").search(r"FROM debian:trixie-slim@sha256:[0-9a-f]{64}", dockerfile)
     elif case == "floor":

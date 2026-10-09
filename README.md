@@ -64,8 +64,8 @@ read a mounted key, so also deny it in their permission settings, for example
 
 Install these on the host:
 
-- Docker Engine or Docker Desktop
-- Docker Compose v2, available as `docker compose`
+- Docker Engine 25 or later, or Docker Desktop with such an engine
+- Docker Compose v2.20.2 or later, available as `docker compose`
 - Docker Buildx, available as `docker buildx`, used by `djinn build`
 - `uv`, used to install and run the Python CLI
 

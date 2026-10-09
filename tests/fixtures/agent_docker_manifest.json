@@ -84,9 +84,10 @@
       "CMD-SHELL",
       "info=$(docker --host unix:///home/rootless/.djinn-docker/socket/docker.sock info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}') && case \"$info\" in 'overlay2 /home/rootless/.local/share/docker '*\\\"name=rootless\\\"*) exit 0;; *) exit 1;; esac"
     ],
-    "Interval": 2000000000,
+    "Interval": 30000000000,
     "Timeout": 5000000000,
     "StartPeriod": 60000000000,
+    "StartInterval": 2000000000,
     "Retries": 3
   },
   "network_id": "79d1fd69bdb600cf5992c662994751f6da95791acac1b7f254e06946f6501c26",

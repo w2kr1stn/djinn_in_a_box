@@ -33,6 +33,17 @@ Versioning before and after the first stable release.
   is refused instead of skipped. Symlinked canonical and target roots are refused
   (`Not a directory` or `Too many levels of symbolic links`).
 
+### Changed
+
+- Desktop helpers and the agent Docker companion run their healthcheck every 2 s
+  only while starting and every 30 s afterwards, instead of every 2 s for their
+  whole lifetime; each probe is an exec and filled the Docker event stream.
+  **Requires Docker Engine 25 or later and Docker Compose 2.20.2 or later**
+  (`start_interval`). After startup, Docker reports a failed helper as
+  `unhealthy` after about 60–90 s instead of about 6 s. A desktop helper that
+  never passes its probe now fails creation at the 15 s deadline with
+  `helper health starting (readiness timeout)`.
+
 ### Removed
 
 - Docker socket proxy service, Compose file and `djinn logs proxy` command.
