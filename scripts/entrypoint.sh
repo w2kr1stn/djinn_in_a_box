@@ -187,25 +187,122 @@ echo "" >&2
 # =============================================================================
 # Settings persistence has to survive BOTH ways this container ends: the
 # interactive shell exiting normally, and SIGTERM from `docker stop` — the only
-# way a detached container (`djinn start --detach`) is ever shut down. Without
-# the signal path, every detached session would silently lose its settings.
+# way a detached container (`djinn start --detach`) is ever shut down. The signal
+# path flushes changes made since the latest checkpoint.
 
 _DJINN_STATE_PERSISTED=0
+djinn_state_dir=''
+djinn_checkpoint_pid=''
+
+initialize_session_state() {
+    local runtime_file acknowledged_file i
+    local -a runtime_files=("$HOME/.claude.json" "$HOME/.claude/settings.json" "$OPENCODE_RUNTIME_SETTINGS")
+    local -a names=(claude-state claude-settings opencode-settings)
+    if ! djinn_state_dir=$(mktemp -d -t djinn-session-state.XXXXXXXX 2>/dev/null); then
+        return 1
+    fi
+    for i in 1 2 3; do
+        runtime_file=${runtime_files[$i]}
+        acknowledged_file="$djinn_state_dir/${names[$i]}.ack"
+        if [[ -f "$runtime_file" ]]; then
+            if ! _capture_session_runtime "$runtime_file" "$acknowledged_file" 2>/dev/null; then
+                rm -rf -- "$djinn_state_dir" 2>/dev/null || :
+                djinn_state_dir=''
+                return 1
+            fi
+        fi
+    done
+    return 0
+}
+
+sync_session_state() {
+    local mode=$1
+    if [[ "$mode" == final && ! -d "$djinn_state_dir" ]]; then
+        if ! djinn_state_dir=$(mktemp -d -t djinn-session-state.XXXXXXXX 2>/dev/null); then
+            local i
+            local -a runtime_files=("$HOME/.claude.json" "$HOME/.claude/settings.json" "$OPENCODE_RUNTIME_SETTINGS")
+            local -a target_files=("$HOME/.claude/claude.json" "$HOME/.claude_seed/settings.local.json" "$OPENCODE_PERSISTENT_SETTINGS")
+            for i in 1 2 3; do
+                if [[ -f "${runtime_files[$i]}" && -d "${target_files[$i]:h}" ]]; then
+                    ui_warn "could not persist ${runtime_files[$i]} → ${target_files[$i]}"
+                fi
+            done
+            return 0
+        fi
+    fi
+    [[ "$mode" == checkpoint && "${djinn_checkpoint_stopping:-0}" == 1 ]] && return 0
+    reverse_sync_file "$HOME/.claude.json" "$HOME/.claude/claude.json" \
+        "$djinn_state_dir/claude-state.ack" "$mode"
+    [[ "$mode" == checkpoint && "${djinn_checkpoint_stopping:-0}" == 1 ]] && return 0
+    reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json" \
+        "$djinn_state_dir/claude-settings.ack" "$mode"
+    [[ "$mode" == checkpoint && "${djinn_checkpoint_stopping:-0}" == 1 ]] && return 0
+    reverse_sync_file "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
+        "$djinn_state_dir/opencode-settings.ack" "$mode"
+    return 0
+}
+
+_session_checkpoint_on_stop() {
+    djinn_checkpoint_stopping=1
+    if [[ -n "$djinn_checkpoint_sleep_pid" ]]; then
+        kill -TERM "$djinn_checkpoint_sleep_pid" 2>/dev/null || :
+    fi
+}
+
+_session_checkpoint_loop() {
+    set -euo pipefail
+    local djinn_checkpoint_stopping=0 djinn_checkpoint_sleep_pid=''
+    typeset -A djinn_checkpoint_warned
+    trap '_session_checkpoint_on_stop' TERM INT
+    while [[ "$djinn_checkpoint_stopping" == 0 ]]; do
+        sleep 30 </dev/null >/dev/null 2>&1 &
+        djinn_checkpoint_sleep_pid=$!
+        # A stop can arrive between spawning the sleeper and recording its PID.
+        if [[ "$djinn_checkpoint_stopping" == 1 ]]; then
+            kill -TERM "$djinn_checkpoint_sleep_pid" 2>/dev/null || :
+        fi
+        wait "$djinn_checkpoint_sleep_pid" 2>/dev/null || :
+        djinn_checkpoint_sleep_pid=''
+        [[ "$djinn_checkpoint_stopping" == 1 ]] && break
+        sync_session_state checkpoint || :
+    done
+    return 0
+}
+
+start_session_checkpointer() {
+    if ! initialize_session_state; then
+        ui_warn 'settings checkpoints disabled for this session'
+        return 0
+    fi
+    _session_checkpoint_loop </dev/null 3<&- &
+    djinn_checkpoint_pid=$!
+}
+
+stop_session_checkpointer() {
+    [[ -n "$djinn_checkpoint_pid" ]] || return 0
+    local job rc=0
+    # Signal only a live job still owned by this shell, never a reused PID.
+    for job in ${(v)jobstates}; do
+        if [[ "$job" == *":${djinn_checkpoint_pid}=running"* ]]; then
+            kill -TERM "$djinn_checkpoint_pid" 2>/dev/null || :
+            break
+        fi
+    done
+    wait "$djinn_checkpoint_pid" 2>/dev/null || rc=$?
+    djinn_checkpoint_pid=''
+    [[ "$rc" == 0 ]] || ui_warn 'settings checkpoints stopped unexpectedly'
+    return 0
+}
 
 persist_session_state() {
     # Idempotent: the signal path and the normal path must never both run this.
     [[ "$_DJINN_STATE_PERSISTED" == "1" ]] && return 0
     _DJINN_STATE_PERSISTED=1
 
-    # Copy Claude's state to the persistent config-root store.
-    reverse_sync_file "$HOME/.claude.json"                    "$HOME/.claude/claude.json"
-    # → settings.local.json (personal overlay, git-ignored): in-session changes persist there, NOT the tracked baseline
-    reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json"
-    if ! python3 "$SETTINGS_COPY_HELPER" \
-        --copy-settings "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
-        --missing-ok >&2; then
-        ui_warn "could not persist OpenCode personal settings"
-    fi
+    stop_session_checkpointer || :
+    sync_session_state final || :
+    [[ -z "$djinn_state_dir" ]] || rm -rf -- "$djinn_state_dir" 2>/dev/null || :
+    return 0
 }
 
 _djinn_on_termination_signal() {
@@ -220,6 +317,8 @@ _djinn_on_termination_signal() {
 
 trap '_djinn_on_termination_signal 15' TERM
 trap '_djinn_on_termination_signal 2' INT
+
+start_session_checkpointer
 
 # The shell runs as a background job so that `wait` stays interruptible. As a
 # foreground command it would defer every trap until it returned — which under

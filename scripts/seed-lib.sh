@@ -130,54 +130,78 @@ claude_settings_merge() {
     fi
 }
 
-# Reverse-sync: copy a file changed inside the container back to its persistent host location.
-reverse_sync_file() {
-    local runtime_file=$1 target_file=$2
-    local seed_dir_path
-    seed_dir_path="$(dirname "$target_file")"
-    # Missing runtime file or missing target directory are normal states — skip silently.
-    [[ -f "$runtime_file" && -d "$seed_dir_path" ]] && {
-        if [[ ! -w "$seed_dir_path" ]]; then
-            # Same user outcome as a failed cp — same signal (not a silent skip).
-            ui_warn "could not persist ${runtime_file} → ${target_file} (target directory not writable)"
-        elif ! diff -q "$runtime_file" "$target_file" &>/dev/null; then
-            # Best-effort with warning: a single failed persist must not abort the
-            # session-end sync chain or clobber the shell's exit code (set -e).
-            cp "$runtime_file" "$target_file" \
-                || ui_warn "could not persist ${runtime_file} → ${target_file}"
+# Warning state belongs to the worker, so scratch failures cannot reset it.
+_session_sync_warn() {
+    local runtime_file=$1 mode=$2 message=$3
+    if [[ "$mode" == checkpoint ]]; then
+        [[ -n "${djinn_checkpoint_warned[$runtime_file]:-}" ]] && return 0
+        djinn_checkpoint_warned[$runtime_file]=1
+    fi
+    ui_warn "$message"
+}
+
+_capture_session_runtime() {
+    cat -- "$1" > "$2" 2>/dev/null
+}
+
+# Validate, commit and acknowledge one capture; never re-read the live file.
+_sync_session_carrier() {
+    local runtime_file=$1 target_file=$2 acknowledged_file=$3 mode=$4 filter_kind=$5
+    local seed_dir_path=${target_file:h} state_dir=${acknowledged_file:h}
+    local capture='' filtered='' payload message
+    message="could not persist ${runtime_file} → ${target_file}"
+    [[ -f "$runtime_file" && -d "$seed_dir_path" ]] || return 0
+
+    if ! capture=$(mktemp "$state_dir/capture.XXXXXXXX" 2>/dev/null); then
+        _session_sync_warn "$runtime_file" "$mode" "$message"
+        return 0
+    fi
+    if ! _capture_session_runtime "$runtime_file" "$capture" 2>/dev/null; then
+        _session_sync_warn "$runtime_file" "$mode" "$message"
+    elif ! jq -s -e 'length == 1' "$capture" >/dev/null 2>&1; then
+        [[ "$mode" == final ]] && ui_warn "$message (settings are not valid JSON)"
+    else
+        payload=$capture
+        if [[ "$filter_kind" == claude ]]; then
+            if ! filtered=$(mktemp "$state_dir/filter.XXXXXXXX" 2>/dev/null); then
+                _session_sync_warn "$runtime_file" "$mode" "$message"
+                rm -f -- "$capture" 2>/dev/null || :
+                return 0
+            fi
+            if ! _claude_filter_managed_hooks "$capture" "$filtered" 2>/dev/null; then
+                [[ "$mode" == final ]] && ui_warn "$message (settings are not valid JSON)"
+                rm -f -- "$capture" "$filtered" 2>/dev/null || :
+                return 0
+            fi
+            payload=$filtered
         fi
-    }
+
+        if [[ -f "$acknowledged_file" ]] && cmp -s "$capture" "$acknowledged_file"; then
+            :
+        elif [[ ! -w "$seed_dir_path" ]]; then
+            _session_sync_warn "$runtime_file" "$mode" "$message (target directory not writable)"
+        elif { [[ "$mode" == checkpoint ]] &&
+            python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null 2>&1; } ||
+            { [[ "$mode" == final ]] &&
+            python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null; }; then
+            if ! mv -f -- "$capture" "$acknowledged_file" 2>/dev/null; then
+                _session_sync_warn "$runtime_file" "$mode" "$message"
+            fi
+        else
+            if [[ "$mode" == final && "$runtime_file" == "${OPENCODE_RUNTIME_SETTINGS:-}" ]]; then
+                message='could not persist OpenCode personal settings'
+            fi
+            _session_sync_warn "$runtime_file" "$mode" "$message"
+        fi
+    fi
+    rm -f -- "$capture" ${filtered:+"$filtered"} 2>/dev/null || :
     return 0
 }
 
-# Claude settings need a narrow reverse-sync: workflow-owned hook fragments are
-# generated from the baseline and must never become personal overlay state.
+reverse_sync_file() {
+    _sync_session_carrier "$1" "$2" "$3" "$4" raw
+}
+
 reverse_sync_claude_settings() {
-    local runtime_file=$1 target_file=$2
-    local seed_dir_path tmp
-    seed_dir_path="$(dirname "$target_file")"
-    tmp="${target_file}.tmp"
-
-    # Missing runtime file or missing target directory are normal states — skip silently.
-    [[ -f "$runtime_file" && -d "$seed_dir_path" ]] || return 0
-
-    if [[ ! -w "$seed_dir_path" ]]; then
-        ui_warn "could not persist ${runtime_file} → ${target_file} (target directory not writable)"
-        return 0
-    fi
-
-    if ! _claude_filter_managed_hooks "$runtime_file" "$tmp"; then
-        rm -f "$tmp"
-        ui_warn "could not persist ${runtime_file} → ${target_file} (settings are not valid JSON)"
-        return 0
-    fi
-
-    if [[ -f "$target_file" ]] && diff -q "$tmp" "$target_file" &>/dev/null; then
-        rm -f "$tmp"
-    elif ! mv "$tmp" "$target_file"; then
-        rm -f "$tmp"
-        ui_warn "could not persist ${runtime_file} → ${target_file}"
-    fi
-
-    return 0
+    _sync_session_carrier "$1" "$2" "$3" "$4" claude
 }

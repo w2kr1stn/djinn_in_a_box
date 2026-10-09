@@ -645,8 +645,9 @@ container start
   +-- source mcp-register.sh and register MCP servers
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
+  +-- start checkpointing changed settings every 30 s
   +-- run interactive zsh as a background job, waited on by PID 1
-  +-- reverse-sync selected settings files on shell exit OR on SIGTERM
+  +-- stop/join checkpointer and sync once on shell exit or SIGTERM/SIGINT
 ```
 
 Both shutdown paths reach the reverse-sync, which matters because a detached
@@ -655,7 +656,7 @@ SIGTERM to PID 1 and that is its only shutdown. `entrypoint.sh` therefore:
 
 - collects the reverse-sync calls in `persist_session_state()`, guarded by
   `_DJINN_STATE_PERSISTED` so the signal path and the normal path cannot both
-  run it;
+  run it; stops and joins the checkpoint worker before the final shared sync;
 - traps TERM and INT into `_djinn_on_termination_signal`, which persists
   immediately and exits `128 + signal`. It deliberately does not signal the
   shell and wait for it: an interactive zsh ignores SIGTERM, so waiting would
@@ -715,6 +716,35 @@ root-level `config/claude` directly into the live `~/.claude` tree, including
 merged. This Compose-Claude runtime is manifestless: the publisher never writes
 to `${DJINN_CONFIG_ROOT}/claude`. In-session settings changes are reverse-synced
 to `config/claude/settings.local.json`, not to the tracked baseline template.
+
+The entrypoint captures initial runtime references in a private mode-0700
+directory, then checkpoints Claude state, filtered Claude personal settings and
+OpenCode personal settings every fixed 30 s. Changes older than about 30 s
+survive a crash, qualified by checkpoint duration, scheduling, valid JSON and
+writable healthy storage. Each carrier is captured once, validated as exactly
+one JSON document, compared with its last acknowledged runtime bytes, copied
+atomically through `settings-copy.py`, and acknowledged only after file fsync,
+replacement and directory fsync succeed. Destination files have mode 0600.
+Claude acknowledgement retains raw captured bytes; only the destination has the
+three managed hook keys removed. Unchanged runtime content leaves host edits
+alone, including a host-only `settings.local.json` edit at clean stop; when both
+changed, runtime wins. Checkpoint failures warn once per carrier per session and
+retry; invalid JSON is silent until final sync. Clean stop joins any in-flight
+write, runs that same sync, and keeps shell/TERM/INT exit codes. Failed initial
+capture or state creation disables checkpointing with one warning. Final sync
+recreates missing private state once; failure warns per existing carrier and
+writes nothing. Without references, every valid carrier is written, so a
+host-only overlay edit can be overwritten in that degraded path.
+
+Limits: JSON validation cannot detect coherent-looking mixed bytes from an
+in-place writer; carriers are independent snapshots. Invalid input, storage
+failures or blocked I/O extend the bound and join time. Real overlay changes
+still participate in workflow source audits. Fsync durability depends on the
+filesystem and mirroring; hosts remain last-writer-wins. A second termination
+signal during finalization can act like a crash. Copier `.djinn-settings-*`
+residue is inert but can accumulate: doctor reports zone drift in config-root
+`claude/` and `opencode/`, while residue beside the `config/claude/` overlay is
+unreported. Startup reads exact filenames and delivery never projects residue.
 
 `core/config_workflow.prepare_config_workflow()` is the common preparation path
 for `djinn start`, `djinn run`, and `djinn session`: it verifies image
@@ -1532,7 +1562,8 @@ entrypoint.sh
   +-- Tools: install optional tools
   +-- Security: summarize firewall and Docker access
   +-- run interactive shell as a background job
-  +-- reverse-sync selected settings on shell exit or on SIGTERM
+  +-- checkpoint changed settings every 30 s during the session
+  +-- stop/join checkpointer and sync once on shell exit or SIGTERM/SIGINT
 ```
 
 Backup:

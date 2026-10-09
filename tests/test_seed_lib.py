@@ -9,6 +9,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "seed-lib.sh"
 OUTPUT_LIB = ROOT / "scripts" / "output-lib.sh"
@@ -41,12 +43,17 @@ def run_seed_lib(tmp_path: Path, command: str) -> subprocess.CompletedProcess[st
             "-c",
             "set -euo pipefail; "
             f"source {shlex.quote(str(OUTPUT_LIB))}; "
-            f"source {shlex.quote(str(SCRIPT))}; {command}",
+            f"source {shlex.quote(str(SCRIPT))}; "
+            f"SETTINGS_COPY_HELPER={shlex.quote(str(ROOT / 'scripts/settings-copy.py'))}; "
+            f"typeset -A djinn_checkpoint_warned; {command}",
         ],
         check=False,
         capture_output=True,
         env=env,
         text=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        timeout=20,
     )
 
 
@@ -275,13 +282,19 @@ def test_reverse_sync_file_copies_changed_file_and_skips_unchanged_file(tmp_path
     seed_unchanged.write_text('{"value":"same"}\n', encoding="utf-8")
     os.utime(seed_unchanged, ns=(1_000_000_000, 1_000_000_000))
     unchanged_mtime_ns = seed_unchanged.stat().st_mtime_ns
+    changed_ack = tmp_path / "changed.ack"
+    unchanged_ack = tmp_path / "unchanged.ack"
+    changed_ack.write_bytes(seed_changed.read_bytes())
+    unchanged_ack.write_bytes(volume_unchanged.read_bytes())
 
     result = run_seed_lib(
         tmp_path,
         "reverse_sync_file "
-        f"{shlex.quote(str(volume_changed))} {shlex.quote(str(seed_changed))}; "
+        f"{shlex.quote(str(volume_changed))} {shlex.quote(str(seed_changed))} "
+        f"{shlex.quote(str(changed_ack))} final; "
         "reverse_sync_file "
-        f"{shlex.quote(str(volume_unchanged))} {shlex.quote(str(seed_unchanged))}",
+        f"{shlex.quote(str(volume_unchanged))} {shlex.quote(str(seed_unchanged))} "
+        f"{shlex.quote(str(unchanged_ack))} final",
     )
 
     assert result.returncode == 0, result.stderr
@@ -313,7 +326,8 @@ def test_reverse_sync_claude_settings_strips_only_managed_hooks(tmp_path: Path) 
     result = run_seed_lib(
         tmp_path,
         "reverse_sync_claude_settings "
-        f"{shlex.quote(str(runtime_file))} {shlex.quote(str(target_file))}",
+        f"{shlex.quote(str(runtime_file))} {shlex.quote(str(target_file))} "
+        f"{shlex.quote(str(tmp_path / 'settings.ack'))} final",
     )
 
     assert result.returncode == 0, result.stderr
@@ -327,8 +341,10 @@ def test_reverse_sync_claude_settings_strips_only_managed_hooks(tmp_path: Path) 
     assert persisted["theme"] == "kept"
 
 
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
 def test_reverse_sync_claude_settings_keeps_existing_on_invalid_json(
     tmp_path: Path,
+    mode: str,
 ) -> None:
     runtime_file = tmp_path / "volume" / "settings.json"
     target_file = tmp_path / "seed" / "settings.local.json"
@@ -337,14 +353,271 @@ def test_reverse_sync_claude_settings_keeps_existing_on_invalid_json(
     runtime_file.write_text("{not valid json", encoding="utf-8")
     original_bytes = b'{"personal":true}\n'
     target_file.write_bytes(original_bytes)
+    ack = tmp_path / "settings.ack"
+    ack.write_bytes(original_bytes)
 
     result = run_seed_lib(
         tmp_path,
         "reverse_sync_claude_settings "
-        f"{shlex.quote(str(runtime_file))} {shlex.quote(str(target_file))}",
+        f"{shlex.quote(str(runtime_file))} {shlex.quote(str(target_file))} "
+        f"{shlex.quote(str(ack))} {mode}",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "settings are not valid JSON" in result.stderr
+    if mode == "final":
+        assert "settings are not valid JSON" in result.stderr
+    else:
+        assert result.stderr == ""
+    assert result.stdout == ""
     assert target_file.read_bytes() == original_bytes
+    assert ack.read_bytes() == original_bytes
     assert not (target_file.parent / "settings.local.json.tmp").exists()
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+    assert not list(target_file.parent.glob(".djinn-settings-*"))
+
+
+@pytest.mark.parametrize("kind", ("raw", "claude"))
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+def test_reverse_sync_host_edit_does_not_trigger_write(
+    tmp_path: Path, kind: str, mode: str
+) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    runtime.write_bytes(b'{"runtime":1}\n')
+    ack.write_bytes(runtime.read_bytes())
+    target.write_bytes(b'{"host":2}\n')
+    before = target.stat().st_mtime_ns
+    function = "reverse_sync_file" if kind == "raw" else "reverse_sync_claude_settings"
+    result = run_seed_lib(tmp_path, f'{function} "{runtime}" "{target}" "{ack}" {mode} || :')
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert target.read_bytes() == b'{"host":2}\n'
+    assert target.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize("kind", ("raw", "claude"))
+def test_reverse_sync_failure_keeps_reference_and_retries(tmp_path: Path, kind: str) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    runtime.write_bytes(b'{"runtime":2}\n')
+    target.write_bytes(b'{"runtime":1}\n')
+    ack.write_bytes(target.read_bytes())
+    helper = tmp_path / "fault.py"
+    helper.write_text(
+        "import runpy, sys\n"
+        f"m = runpy.run_path({str(ROOT / 'scripts/settings-copy.py')!r})\n"
+        'def fail(*args): raise OSError("injected replacement failure")\n'
+        'm["os"].replace = fail\n'
+        'sys.exit(m["main"]())\n'
+    )
+    function = "reverse_sync_file" if kind == "raw" else "reverse_sync_claude_settings"
+    call = f'{function} "{runtime}" "{target}" "{ack}" checkpoint || :'
+    result = run_seed_lib(tmp_path, f'SETTINGS_COPY_HELPER="{helper}"; {call}')
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == f"  [warn] could not persist {runtime} → {target}\n"
+    assert target.read_bytes() == ack.read_bytes() == b'{"runtime":1}\n'
+    result = run_seed_lib(tmp_path, call)
+    assert result.returncode == 0
+    assert result.stderr == result.stdout == ""
+    assert ack.read_bytes() == runtime.read_bytes()
+    if kind == "raw":
+        assert target.read_bytes() == runtime.read_bytes()
+    else:
+        assert json.loads(target.read_bytes()) == json.loads(runtime.read_bytes())
+    target.write_bytes(b'{"host":3}\n')
+    assert run_seed_lib(tmp_path, call).returncode == 0
+    assert target.read_bytes() == b'{"host":3}\n'
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+    assert not list(tmp_path.glob(".djinn-settings-*"))
+
+
+def test_reverse_sync_snapshot_filters_and_acknowledges_one_capture(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    first = b'{"version":1,"hooks":{"Stop":[],"Notification":[]}}\n'
+    second = b'{"version":2,"hooks":{"Stop":[],"Notification":[]}}\n'
+    runtime.write_bytes(first)
+    helper = tmp_path / "rewrite.py"
+    helper.write_text(
+        "import runpy, sys\nfrom pathlib import Path\n"
+        f"Path({str(runtime)!r}).write_bytes({second!r})\n"
+        f"m = runpy.run_path({str(ROOT / 'scripts/settings-copy.py')!r})\n"
+        'sys.exit(m["main"]())\n'
+    )
+    result = run_seed_lib(
+        tmp_path,
+        f'SETTINGS_COPY_HELPER="{helper}"; '
+        f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" checkpoint || :',
+    )
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert ack.read_bytes() == first
+    assert runtime.read_bytes() == second
+    assert json.loads(target.read_bytes()) == {"version": 1, "hooks": {"Notification": []}}
+    result = run_seed_lib(
+        tmp_path, f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" checkpoint || :'
+    )
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert ack.read_bytes() == second
+    assert json.loads(target.read_bytes())["version"] == 2
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "missing",
+        "invalid",
+        "filter",
+        "unreadable",
+        "scratch",
+        "filter-scratch",
+        "destination",
+        "ack",
+    ),
+)
+def test_reverse_sync_failure_classes(tmp_path: Path, mode: str, fault: str) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "destination/target.json"
+    target.parent.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    ack = state / "runtime.ack"
+    previous = b'{"previous":true}\n'
+    runtime.write_bytes(b'{"next":true}\n')
+    target.write_bytes(previous)
+    ack.write_bytes(previous)
+    prefix = ""
+    if fault == "missing":
+        runtime.unlink()
+    elif fault == "invalid":
+        runtime.write_bytes(b'{"partial":')
+    elif fault == "filter":
+        runtime.write_bytes(b"[]")
+    elif fault == "unreadable":
+        assert os.geteuid() != 0, "permission tests require non-root execution"
+        runtime.chmod(0)
+    elif fault == "scratch":
+        assert os.geteuid() != 0, "permission tests require non-root execution"
+        state.chmod(0o500)
+    elif fault == "destination":
+        target.parent.chmod(0o500)
+    elif fault == "filter-scratch":
+        prefix = 'mktemp() { [[ "$1" == */filter.* ]] && return 1; command mktemp "$@"; }; '
+    else:
+        prefix = "mv() { return 1; }; "
+    try:
+        result = run_seed_lib(
+            tmp_path,
+            prefix
+            + f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" {mode} || :; '
+            + "echo continued >&2",
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+        invalid = fault in {"invalid", "filter"}
+        silent = fault == "missing" or (invalid and mode == "checkpoint")
+        message = f"  [warn] could not persist {runtime} → {target}"
+        if fault == "destination":
+            message += " (target directory not writable)"
+        if invalid:
+            message += " (settings are not valid JSON)"
+        assert result.stderr == ("" if silent else message + "\n") + "continued\n"
+        assert ack.read_bytes() == previous
+        if fault != "ack":
+            assert target.read_bytes() == previous
+        else:
+            assert json.loads(target.read_bytes()) == {"next": True}
+        assert not list(state.glob("capture.*"))
+        assert not list(state.glob("filter.*"))
+    finally:
+        runtime.chmod(0o600) if runtime.exists() else None
+        state.chmod(0o700)
+        target.parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("document", (b"null\n", b"false\n", b"", b"{} {}", b'{"bad":'))
+def test_raw_sync_requires_exactly_one_json_document(tmp_path: Path, document: bytes) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    previous = b'{"previous":true}\n'
+    runtime.write_bytes(document)
+    target.write_bytes(previous)
+    ack.write_bytes(previous)
+    result = run_seed_lib(
+        tmp_path, f'reverse_sync_file "{runtime}" "{target}" "{ack}" checkpoint || :'
+    )
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    expected = document if document in (b"null\n", b"false\n") else previous
+    assert target.read_bytes() == ack.read_bytes() == expected
+
+
+def test_final_warning_does_not_consult_checkpoint_throttle(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    runtime.write_bytes(b'{"new":true}')
+    target.write_bytes(b'{"old":true}')
+    target.parent.chmod(0o500)
+    try:
+        result = run_seed_lib(
+            tmp_path,
+            f'reverse_sync_file "{runtime}" "{target}" "{ack}" checkpoint || :; '
+            f'reverse_sync_file "{runtime}" "{target}" "{ack}" final || :',
+        )
+        # This directory is both scratch and destination; creation failure is class 3.
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert result.stderr == f"  [warn] could not persist {runtime} → {target}\n" * 2
+        assert target.read_bytes() == b'{"old":true}'
+        assert not ack.exists()
+    finally:
+        target.parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+@pytest.mark.parametrize("content", (b'[]', b'false'))
+def test_unchanged_claude_filter_failure_still_has_final_warning(
+    tmp_path: Path, mode: str, content: bytes
+) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    runtime.write_bytes(content)
+    ack.write_bytes(content)
+    target.write_bytes(b'{"previous":true}')
+    result = run_seed_lib(
+        tmp_path,
+        f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" {mode} || :',
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+    message = f'  [warn] could not persist {runtime} → {target} (settings are not valid JSON)\n'
+    assert result.stderr == (message if mode == "final" else "")
+    assert target.read_bytes() == b'{"previous":true}'
+    assert ack.read_bytes() == content
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+
+
+
+def test_capture_failure_returns_failure_without_os_chatter(tmp_path: Path) -> None:
+    result = run_seed_lib(
+        tmp_path,
+        f'if _capture_session_runtime "{tmp_path / "missing"}" "{tmp_path / "capture"}"; '
+        'then echo unexpected; else echo continued; fi',
+    )
+    assert result.returncode == 0
+    assert result.stdout == "continued\n"
+    assert result.stderr == ""
