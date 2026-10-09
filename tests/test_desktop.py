@@ -296,6 +296,7 @@ def test_caller_cannot_override_endpoint(creator, key, tmp_path, monkeypatch):
         "missing-image",
         "unhealthy",
         "starting",
+        "late-healthy",
         "auth-failure",
     ],
 )
@@ -368,6 +369,10 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         # Failed probes inside start_period keep a broken helper starting until the deadline.
         helper["State"]["Health"]["Status"] = "starting"
         monkeypatch.setattr(desktop, "HELPER_SECONDS", 0.3)
+    if outcome == "late-healthy":
+        # The first poll after creation precedes the first probe; the wait must poll again.
+        monkeypatch.setattr(desktop, "HELPER_SECONDS", 1.5)
+    polls = []
 
     def actual(name, path, resource="container", **kwargs):
         if name == "djinn-hostctl" and resource == "container":
@@ -376,7 +381,12 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
             return None
         if resource == "image":
             return None if outcome == "missing-image" else image
-        return next(obj for obj in services.values() if obj["Id"] == name)
+        found = next(obj for obj in services.values() if obj["Id"] == name)
+        if found is helper:
+            polls.append(name)
+            if outcome == "late-healthy" and len(polls) == 1:
+                return {**found, "State": {**found["State"], "Health": {"Status": "starting"}}}
+        return found
 
     monkeypatch.setattr(host_runtime, "inspect_object", actual)
     monkeypatch.setattr(docker, "_helper_evidence", lambda *args: evidence)
@@ -414,9 +424,11 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         for m in delivery.get("volumes", [])
         if isinstance(m, dict) and m.get("target") == e.target
     ]
-    assert bool(output) == (outcome in {"healthy", "both"})
+    assert bool(output) == (outcome in {"healthy", "both", "late-healthy"})
     assert delivery["environment"].get("DBUS_SESSION_BUS_ADDRESS") == (
-        e.environment["DBUS_SESSION_BUS_ADDRESS"] if outcome in {"healthy", "both"} else None
+        e.environment["DBUS_SESSION_BUS_ADDRESS"]
+        if outcome in {"healthy", "both", "late-healthy"}
+        else None
     )
     assert delivery["environment"].get("PULSE_COOKIE") == (
         other.environment["PULSE_COOKIE"] if audio_delivered else None
@@ -437,8 +449,10 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
     )
     warning = capsys.readouterr().err
     assert ("Desktop dbus missing" in warning) == (
-        outcome not in {"healthy", "absent", "both", "audio-only"}
+        outcome not in {"healthy", "absent", "both", "audio-only", "late-healthy"}
     )
+    if outcome == "late-healthy":
+        assert len(polls) >= 2
     if outcome == "starting":
         assert "Desktop dbus missing: helper health starting (readiness timeout)" in " ".join(
             warning.split()

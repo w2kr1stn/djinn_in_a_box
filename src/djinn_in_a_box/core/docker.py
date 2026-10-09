@@ -1990,8 +1990,9 @@ def _prepare_companions(
                 health = actual["State"].get("Health", {}).get("Status")
                 if health == "healthy":
                     break
-                # Failed probes inside start_period keep a broken helper "starting". Stop while
-                # one more poll (sleep plus inspect) still fits, so the error names that state.
+                # Failed probes inside start_period keep a broken helper "starting". Stop once less
+                # than one more poll (sleep plus inspect) fits, so the error names that state
+                # rather than _operation_timeout's generic one.
                 if health == "unhealthy" or time.monotonic() + 1 >= deadline:
                     raise RuntimeError(f"helper health {health or 'unknown'} (readiness timeout)")
                 time.sleep(0.1)

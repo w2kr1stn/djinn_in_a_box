@@ -984,16 +984,17 @@ See [desktop boundaries](SECURITY-MODEL.md#desktop-boundaries) for policy and li
 
 Helper and companion healthchecks probe every 2 s only while Docker reports them
 `starting` (`start_interval`), then every 30 s; each probe is an exec and would
-otherwise fill the Docker event stream. Docker counts failed probes only after the
-start period (30 s for desktop helpers, 60 s for the companion), so a desktop helper
-that runs but never passes its probe stays `starting` and fails creation at the 15 s
-deadline with `helper health starting (readiness timeout)`. After startup, Docker
+otherwise fill the Docker event stream. Until the first successful probe, Docker
+ignores failed probes inside the start period (30 s for desktop helpers, 60 s for the
+companion), so a desktop helper that runs but never passes its probe stays `starting`
+and fails creation at the 15 s deadline with `helper health starting (readiness
+timeout)`. After startup, Docker
 reports a failure as `unhealthy` only after about 60–90 s (up to about 2 minutes
 with probe timeouts) and a recovery as `healthy` within 30 s. Desktop creation,
-doctor and the version query add their own fresh `health.py` probe to the Docker
-status, so they see a failure at once. The companion is never probed with exec:
-doctor and sealing still check its profile by host inspection against the trusted
-manifest, but take its liveness from the Docker status, which lags accordingly.
+doctor and sealing add their own fresh `health.py` probe to the Docker status, so
+they see a failure at once. Djinn never execs into the companion itself: doctor and
+sealing still check its profile by host inspection against the trusted manifest,
+but take its liveness from the Docker status, which lags accordingly.
 
 `core/host_runtime.py` always takes the canonical creation guard, including without
 Git identities. Generation labels, actual container IDs and persisted ownership
