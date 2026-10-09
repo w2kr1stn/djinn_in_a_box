@@ -1587,21 +1587,20 @@ def test_host_trust_redirected_atomic_save_and_permissions(host_case, monkeypatc
         return original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
 
     def mkstemp(*args, **kwargs):
-        if kwargs.get("prefix") != ".djinn-publisher-":
-            assert kwargs["dir"] == record.parent
-            events.append("temp")
+        assert kwargs["dir"] == record.parent
+        events.append("temp")
         return original_temp(*args, **kwargs)
 
     def fsync(fd):
         events.append("sync")
         return original_sync(fd)
 
-    def replace(src, dst):
+    def replace(src, dst, **kwargs):
         if Path(dst) == record:
             assert Path(src).parent == record.parent
             assert stat.S_IMODE(Path(src).stat().st_mode) == 0o600
             events.append("replace")
-        return original_replace(src, dst)
+        return original_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", mkdir)
     monkeypatch.setattr(workflow_module.tempfile, "mkstemp", mkstemp)
@@ -1635,10 +1634,10 @@ def test_host_trust_save_failure(host_case, monkeypatch, failure):
     else:
         original = os.replace
 
-        def refuse(src, dst):
+        def refuse(src, dst, **kwargs):
             if Path(dst) == record:
                 raise PermissionError(errno.EACCES, "Permission denied", dst)
-            return original(src, dst)
+            return original(src, dst, **kwargs)
 
         monkeypatch.setattr(os, "replace", refuse)
     result = _host_prepare(host_case, lambda review: True)

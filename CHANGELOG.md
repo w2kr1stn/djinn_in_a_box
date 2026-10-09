@@ -26,6 +26,12 @@ Versioning before and after the first stable release.
   container changes to published content require another, while personal
   `settings.local.json` write-back does not. Container workflow editing and
   delivery remain unchanged.
+- The host-side workflow publisher and config sync no longer follow symlinks in
+  dev-writable workflow trees. A symlinked or non-directory path component, a
+  symlinked file and any special file are refused as a collision instead of being
+  written, removed or read through; a symlinked directory in the selected source
+  is refused instead of skipped. Symlinked canonical and target roots are refused
+  (`Not a directory` or `Too many levels of symbolic links`).
 
 ### Removed
 

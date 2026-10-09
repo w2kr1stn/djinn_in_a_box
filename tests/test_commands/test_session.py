@@ -787,10 +787,10 @@ def test_host_workflow_acceptance_modified_hook(tmp_path, monkeypatch):
     hook_version("v3")
     original_replace = os.replace
 
-    def refuse_record(src, dst):
+    def refuse_record(src, dst, **kwargs):
         if Path(dst) == record:
             raise PermissionError("trust directory is read-only")
-        return original_replace(src, dst)
+        return original_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(os, "replace", refuse_record)
     launches.clear()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import stat
 import tomllib
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
@@ -17,8 +16,10 @@ from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.workflow_publisher import (
     NATIVE_ONLY_SPEC_MATRIX,
     ManifestError,
+    PublishError,
     is_runtime_residue,
     load_strict_json,
+    read_regular_file,
     runtime_residue_prefixes,
 )
 
@@ -216,7 +217,6 @@ def read_native_workflow(root: Path, tool: ConfigSyncSource) -> AdapterReadResul
 
 
 def read_native_only_workflow(root: Path, tool: ConfigSyncSource) -> NativeOnlyReadResult:
-    root = root.resolve()
     artifacts: list[WorkflowArtifact] = []
     fragments: list[SettingsFragment] = []
     issues: list[ValidationIssue] = []
@@ -472,23 +472,24 @@ def _append_portable_fragment(
 
 
 def _read(root: Path, path: PurePosixPath, issues: list[ValidationIssue]) -> _File | None:
-    candidate = root.joinpath(*path.parts)
-    if not candidate.exists() and not candidate.is_symlink():
-        return None
+    # No symlink is followed at or below the root: live tool roots are
+    # container-writable, and a link there must not pull host files into a view.
     try:
-        resolved = candidate.resolve(strict=True)
-        if not resolved.is_relative_to(root) or not resolved.is_file():
-            raise OSError
-        content = resolved.read_bytes()
-        content.decode()
-        return path, content, bool(resolved.stat().st_mode & stat.S_IXUSR)
-    except UnicodeDecodeError:
-        issues.append(_issue(f"invalid-utf8:{path}", "Workflow files must be UTF-8.", path))
-    except (OSError, RuntimeError):
+        read = read_regular_file(root, path)
+    except (OSError, PublishError):
         issues.append(
             _issue(f"external-path:{path}", "Path is unreadable or escapes its root.", path)
         )
-    return None
+        return None
+    if read is None:
+        return None
+    content, executable = read
+    try:
+        content.decode()
+    except UnicodeDecodeError:
+        issues.append(_issue(f"invalid-utf8:{path}", "Workflow files must be UTF-8.", path))
+        return None
+    return path, content, executable
 
 
 def _scan(

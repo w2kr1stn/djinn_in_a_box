@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -10,7 +11,6 @@ import os
 import re
 import stat
 import sys
-import tempfile
 import tomllib
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -423,10 +423,13 @@ def _publish_with_lease(
     preflight_manifest: bytes | None,
 ) -> PublishResult:
     if canonical_target:
+        # The held lease descriptor is the I/O anchor; it must be the target.
+        if not _holds_directory(lease.descriptor, target_root):
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         return _publish_locked(
             desired,
             view,
-            target_root,
+            lease.descriptor,
             manifest_relative,
             source_root,
             source_inputs,
@@ -436,11 +439,11 @@ def _publish_with_lease(
             preflight_manifest,
             canonical_target=True,
         )
-    with _target_lock(target_root):
+    with _target_lock(target_root) as target_descriptor:
         return _publish_locked(
             desired,
             view,
-            target_root,
+            target_descriptor,
             manifest_relative,
             source_root,
             source_inputs,
@@ -455,7 +458,7 @@ def _publish_with_lease(
 def _publish_locked(
     desired: _Desired,
     view: WorkflowView,
-    target_root: Path,
+    target_root: int,
     manifest_relative: PurePosixPath,
     source_root: Path | None,
     source_inputs: Collection[Path],
@@ -477,7 +480,7 @@ def _publish_locked(
     else:
         if not canonical_target:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
-        manifest_snapshot = _read_snapshot(target_root / manifest_relative)
+        manifest_snapshot = _read_relative(target_root, manifest_relative)
         if manifest_snapshot is None:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         try:
@@ -525,7 +528,7 @@ def _publish_locked(
 
 
 @contextmanager
-def _target_lock(root: Path) -> Iterator[None]:
+def _target_lock(root: Path) -> Iterator[int]:
     descriptor = _open_directory(root)
     locked = False
     try:
@@ -534,7 +537,7 @@ def _target_lock(root: Path) -> Iterator[None]:
         except OSError as error:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
         locked = True
-        yield
+        yield descriptor
     finally:
         _release_directory_lock(descriptor, locked)
 
@@ -542,7 +545,7 @@ def _target_lock(root: Path) -> Iterator[None]:
 def _validate_lease(
     lease: CanonicalLockLease, canonical_root: Path, canonical_target: bool
 ) -> None:
-    if not _same_directory(lease.root, canonical_root):
+    if not _holds_directory(lease.descriptor, canonical_root):
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     if canonical_target and not lease.exclusive:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
@@ -600,7 +603,7 @@ def _manifest_relative(target_root: Path, manifest_path: Path) -> PurePosixPath:
 
 
 def _preflight(
-    target_root: Path,
+    target_root: int,
     desired: _Desired,
     prior: _Manifest | None,
     manifest_snapshot: _Snapshot | None,
@@ -619,8 +622,7 @@ def _preflight(
             path, canonical_target, target_tool
         ):
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
-        _check_parent_paths(target_root, path)
-        current = _read_snapshot(target_root / path)
+        current = _read_relative(target_root, path)
         files[path] = current
         wanted = desired.manifest.files.get(path)
         previous = prior_files.get(path)
@@ -636,8 +638,7 @@ def _preflight(
     carrier_paths = {key[0] for key in desired.fragments} | {key[0] for key in prior_fragments}
     carrier_outputs: dict[PurePosixPath, bytes | None] = {}
     for path in sorted(carrier_paths):
-        _check_parent_paths(target_root, path)
-        current = _read_snapshot(target_root / path)
+        current = _read_relative(target_root, path)
         if current is not None and path.suffix not in {".json", ".toml"}:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
         desired_for_path = _fragments_for(path, desired.fragments)
@@ -709,7 +710,7 @@ def _carrier_classes(
 
 
 def _commit(
-    target_root: Path,
+    target_root: int,
     manifest_relative: PurePosixPath,
     desired: _Desired,
     preflight: _Preflight,
@@ -747,22 +748,22 @@ def _commit(
         commit_checked = True
 
     for path, item in sorted(desired.files.items()):
-        current = _read_snapshot(target_root / path)
+        current = _read_relative(target_root, path)
         if current is not None and current.state == desired.manifest.files[path]:
             continue
         allow_mutation()
-        _atomic_replace(target_root / path, item.content, item.executable)
+        _replace_relative(target_root, path, item.content, item.executable)
         changed.append(path)
         mutation_count += 1
         _after_target_mutation(mutation_count)
     for path, output in sorted(preflight.carrier_outputs.items()):
         if output is None:
             continue
-        current = _read_snapshot(target_root / path)
+        current = _read_relative(target_root, path)
         if current is not None and current.content == output:
             continue
         allow_mutation()
-        _atomic_replace(target_root / path, output, current.executable if current else False)
+        _replace_relative(target_root, path, output, current.executable if current else False)
         changed.append(path)
         mutation_count += 1
         _after_target_mutation(mutation_count)
@@ -770,18 +771,26 @@ def _commit(
     for path, state in sorted(prior_files.items()):
         if path in desired.files:
             continue
-        current = _read_snapshot(target_root / path)
-        if current is not None and current.state == state:
+        parent = _open_parent(target_root, path, create=False)
+        if parent is None:
+            continue
+        try:
+            current = _read_at(parent, path.name)
+            if current is None or current.state != state:
+                continue
             allow_mutation()
-            (target_root / path).unlink()
-            removed.append(path)
-            mutation_count += 1
-            _after_target_mutation(mutation_count)
+            os.unlink(path.name, dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+        removed.append(path)
+        mutation_count += 1
+        _after_target_mutation(mutation_count)
     manifest = _encode_manifest(desired.manifest)
-    current_manifest = _read_snapshot(target_root / manifest_relative)
+    current_manifest = _read_relative(target_root, manifest_relative)
     if current_manifest is None or current_manifest.content != manifest:
         allow_mutation()
-        _atomic_replace(target_root / manifest_relative, manifest, False)
+        _replace_relative(target_root, manifest_relative, manifest, False)
         mutation_count += 1
         _after_target_mutation(mutation_count)
     return PublishResult(DriftClass.CLEAN, tuple(changed), tuple(removed))
@@ -1030,13 +1039,13 @@ def _fragment_states_for(
 
 
 def _load_manifest(
-    target_root: Path,
+    target_root: int,
     manifest_relative: PurePosixPath,
     *,
     canonical_target: bool,
     target_tool: str | None,
 ) -> tuple[_Manifest | None, _Snapshot | None]:
-    snapshot = _read_snapshot(target_root / manifest_relative)
+    snapshot = _read_relative(target_root, manifest_relative)
     if snapshot is None:
         return None, None
     try:
@@ -1205,48 +1214,178 @@ def _string_object_mapping(value: object, error_type: type[Exception]) -> dict[s
     return {cast(str, key): item for key, item in mapping.items()}
 
 
-def _check_parent_paths(root: Path, path: PurePosixPath) -> None:
-    current = root
-    for part in path.parts[:-1]:
-        current = current / part
-        if current.exists() and not current.is_dir():
-            raise PublishError(DriftClass.COLLISION)
+# Every access below a root goes through an opened directory descriptor and
+# never follows a symlink: the container can write these trees, so a link or a
+# swapped name there must not steer a host-side read or write elsewhere.
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_REFUSED_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
+_TEMPORARY_PREFIX = ".djinn-publisher-"
 
 
-def _read_snapshot(path: Path) -> _Snapshot | None:
-    try:
-        result = path.lstat()
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(result.st_mode):
+def _require_entry_name(name: str) -> None:
+    if not name or "/" in name or name in {".", ".."}:
         raise PublishError(DriftClass.COLLISION)
+
+
+def _refuse_link_or_non_directory(error: OSError) -> None:
+    if error.errno in _REFUSED_ERRNOS:
+        raise PublishError(DriftClass.COLLISION) from error
+
+
+def _open_child_directory(parent: int, name: str, *, create: bool) -> int | None:
     try:
-        return _Snapshot(path.read_bytes(), bool(result.st_mode & stat.S_IXUSR))
+        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    except FileNotFoundError:
+        if not create:
+            return None
     except OSError as error:
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
-
-
-def _atomic_replace(path: Path, content: bytes, executable: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=".djinn-publisher-", dir=path.parent)
+        _refuse_link_or_non_directory(error)
+        raise
+    with suppress(FileExistsError):
+        os.mkdir(name, 0o777, dir_fd=parent)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o755 if executable else 0o644)
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    except BaseException:
-        with suppress(FileNotFoundError):
-            os.unlink(temporary)
+        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+    except OSError as error:
+        _refuse_link_or_non_directory(error)
         raise
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+def _open_parent(root: int, path: PurePosixPath, *, create: bool) -> int | None:
+    """Open the parent directory of `path` below `root` component by component.
+
+    Returns None when a component is missing and `create` is false. The caller
+    owns the returned descriptor; `root` stays open.
+    """
+    if not _safe_relative(path):
+        raise PublishError(DriftClass.COLLISION)
+    descriptor = os.dup(root)
     try:
-        os.fsync(descriptor)
+        for part in path.parts[:-1]:
+            child = _open_child_directory(descriptor, part, create=create)
+            if child is None:
+                return None
+            os.close(descriptor)
+            descriptor = child
+        opened, descriptor = descriptor, -1
+        return opened
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _read_at(directory: int, name: str) -> _Snapshot | None:
+    """Read a regular file without opening anything else for I/O.
+
+    The entry is pinned with O_PATH, which runs no driver open and does not
+    block on a FIFO; only a regular inode is then reopened through /proc, so a
+    name swapped after the pin is never read.
+    """
+    _require_entry_name(name)
+    try:
+        pin = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(pin)
+        if not stat.S_ISREG(info.st_mode):
+            raise PublishError(DriftClass.COLLISION)
+        try:
+            content = _read_pinned(pin)
+        except OSError as error:
+            raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
+    finally:
+        os.close(pin)
+    return _Snapshot(content, bool(info.st_mode & stat.S_IXUSR))
+
+
+def _read_pinned(pin: int) -> bytes:
+    descriptor = os.open(f"/proc/self/fd/{pin}", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _read_relative(root: int, path: PurePosixPath) -> _Snapshot | None:
+    parent = _open_parent(root, path, create=False)
+    if parent is None:
+        return None
+    try:
+        return _read_at(parent, path.name)
+    finally:
+        os.close(parent)
+
+
+def _replace_relative(root: int, path: PurePosixPath, content: bytes, executable: bool) -> None:
+    parent = _open_parent(root, path, create=True)
+    if parent is None:  # pragma: no cover - create=True never reports a missing parent
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
+    try:
+        _replace_at(parent, path.name, content, executable)
+    finally:
+        os.close(parent)
+
+
+def _replace_at(directory: int, name: str, content: bytes, executable: bool) -> None:
+    _require_entry_name(name)
+    temporary = _TEMPORARY_PREFIX + os.urandom(8).hex()
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        try:
+            remaining = memoryview(content)
+            while remaining:
+                remaining = remaining[os.write(descriptor, remaining) :]
+            os.fchmod(descriptor, 0o755 if executable else 0o644)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory)
+        raise
+
+
+def _open_root(path: Path) -> int | None:
+    try:
+        return os.open(path, _DIRECTORY_FLAGS)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        _refuse_link_or_non_directory(error)
+        raise
+
+
+def read_regular_file(root: Path, relative: PurePosixPath) -> tuple[bytes, bool] | None:
+    """Read `root/relative` without following a symlink at or below `root`.
+
+    Returns the content and owner-executable bit, or None when an entry on the
+    path is absent. Raises PublishError: COLLISION for an unsafe relative path,
+    a symlinked or non-directory component or a non-regular leaf, and
+    INVALID_OR_SEMANTIC when reading the regular file fails. Other OSErrors
+    from opening the root or a component propagate.
+    """
+    snapshot = _read_beneath(root, relative)
+    return None if snapshot is None else (snapshot.content, snapshot.executable)
+
+
+def _read_beneath(root: Path, relative: PurePosixPath) -> _Snapshot | None:
+    if not _safe_relative(relative):
+        raise PublishError(DriftClass.COLLISION)
+    descriptor = _open_root(root)
+    if descriptor is None:
+        return None
+    try:
+        return _read_relative(descriptor, relative)
     finally:
         os.close(descriptor)
 
@@ -1257,18 +1396,74 @@ def _read_file_tree(
     profile: str | None = None,
     residue_prefixes: Collection[PurePosixPath] = (),
 ) -> tuple[list[PublishedFile], str]:
-    if not root.is_dir():
-        raise OSError("View root is not a directory")
+    try:
+        descriptor = os.open(root, _DIRECTORY_FLAGS)
+    except OSError as error:
+        raise OSError("View root is not a directory") from error
     files: list[PublishedFile] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_dir():
-            continue
-        relative = PurePosixPath(path.relative_to(root).as_posix())
+    # Depth-first: only the directories on the current path stay open, so wide
+    # trees cost no descriptors and deep ones no recursion.
+    open_directories: list[tuple[int, PurePosixPath, Iterator[str]]] = []
+    try:
+        directory, prefix = descriptor, PurePosixPath()
+        while True:
+            open_directories.append((directory, prefix, iter(())))
+            subdirectories = _read_directory(
+                directory, prefix, files, ignored_paths, profile, residue_prefixes
+            )
+            open_directories[-1] = (directory, prefix, iter(subdirectories))
+            following = _next_subdirectory(open_directories)
+            if following is None:
+                break
+            parent, prefix = following
+            try:
+                directory = os.open(prefix.name, _DIRECTORY_FLAGS, dir_fd=parent)
+            except OSError as error:
+                raise OSError("View root contains an unreadable or non-regular entry") from error
+    finally:
+        for directory, _prefix, _remaining in open_directories:
+            os.close(directory)
+    files.sort(key=lambda item: item.relative_path)
+    return files, _fingerprint_files(files)
+
+
+def _next_subdirectory(
+    open_directories: list[tuple[int, PurePosixPath, Iterator[str]]],
+) -> tuple[int, PurePosixPath] | None:
+    """Return the parent fd and path of the next directory; close finished ones."""
+    while open_directories:
+        directory, prefix, remaining = open_directories[-1]
+        name = next(remaining, None)
+        if name is not None:
+            return directory, prefix / name
+        open_directories.pop()
+        os.close(directory)
+    return None
+
+
+def _read_directory(
+    directory: int,
+    prefix: PurePosixPath,
+    files: list[PublishedFile],
+    ignored_paths: Collection[PurePosixPath],
+    profile: str | None,
+    residue_prefixes: Collection[PurePosixPath],
+) -> list[str]:
+    """Read the regular files of one directory; return its subdirectory names."""
+    with os.scandir(directory) as entries:
+        names = sorted(entry.name for entry in entries)
+    subdirectories: list[str] = []
+    for name in names:
+        relative = prefix / name
         # Skipped before any stat/read so a tool rewriting its own runtime tree
         # cannot make an unrelated view unreadable or shift its fingerprint.
         if is_runtime_residue(relative, residue_prefixes):
             continue
-        if not path.is_file() or path.is_symlink():
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            subdirectories.append(name)
+            continue
+        if not stat.S_ISREG(info.st_mode):
             raise OSError("View root contains a non-regular file")
         if not _safe_relative(relative):
             raise OSError("View root contains an unsafe path")
@@ -1276,8 +1471,13 @@ def _read_file_tree(
             continue
         if profile == "opencode" and not _opencode_owned(relative):
             raise OSError("OpenCode view contains an unowned path")
-        info = path.stat()
-        content = path.read_bytes()
+        try:
+            snapshot = _read_at(directory, name)
+        except PublishError as error:
+            raise OSError("View root contains an unreadable or non-regular file") from error
+        if snapshot is None:
+            raise OSError("View root contains a non-regular file")
+        content = snapshot.content
         if profile == "opencode" and relative in _NATIVE_ONLY_PATHS["opencode"]:
             try:
                 valid_plugin = "export" in content.decode()
@@ -1285,8 +1485,8 @@ def _read_file_tree(
                 raise OSError("OpenCode plugin is not UTF-8") from error
             if not valid_plugin:
                 raise OSError("OpenCode plugin export marker is missing")
-        files.append(PublishedFile(relative, content, bool(info.st_mode & stat.S_IXUSR)))
-    return files, _fingerprint_files(files)
+        files.append(PublishedFile(relative, content, snapshot.executable))
+    return subdirectories
 
 
 def _fingerprint_tree(
@@ -1311,7 +1511,11 @@ def fingerprint_source_inputs(
     profile: str | None = None,
     residue_prefixes: Collection[PurePosixPath] = (),
 ) -> str:
-    """Fingerprint the source view and every separately-read native input."""
+    """Fingerprint the source view and every separately-read native input.
+
+    Native inputs must lie below the canonical root (the parent of
+    `source_root`); each one is read from there without following a symlink.
+    """
     if not source_inputs:
         return _fingerprint_tree(source_root, ignored_paths, profile, residue_prefixes)
     digest = hashlib.sha256()
@@ -1319,26 +1523,23 @@ def fingerprint_source_inputs(
     digest.update(
         _fingerprint_tree(source_root, ignored_paths, profile, residue_prefixes).encode()
     )
+    anchor = source_root.absolute().parent
     for path in sorted({item.absolute() for item in source_inputs}, key=str):
         digest.update(str(path).encode())
         digest.update(b"\0")
         try:
-            info = path.lstat()
-        except FileNotFoundError:
+            relative = PurePosixPath(path.relative_to(anchor).as_posix())
+            snapshot = _read_beneath(anchor, relative)
+        except (OSError, ValueError, PublishError) as error:
+            raise PublishError(DriftClass.SOURCE_CHANGED) from error
+        if snapshot is None:
             digest.update(b"missing\0")
             continue
-        except OSError as error:
-            raise PublishError(DriftClass.SOURCE_CHANGED) from error
-        if path.is_symlink() or not stat.S_ISREG(info.st_mode):
-            raise PublishError(DriftClass.SOURCE_CHANGED)
-        try:
-            digest.update(b"file\0")
-            digest.update(b"1" if info.st_mode & stat.S_IXUSR else b"0")
-            digest.update(b"\0")
-            digest.update(_digest(path.read_bytes()).encode())
-            digest.update(b"\0")
-        except OSError as error:
-            raise PublishError(DriftClass.SOURCE_CHANGED) from error
+        digest.update(b"file\0")
+        digest.update(b"1" if snapshot.executable else b"0")
+        digest.update(b"\0")
+        digest.update(_digest(snapshot.content).encode())
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -1356,14 +1557,24 @@ def _fingerprint_files(files: Sequence[PublishedFile]) -> str:
 
 def _open_directory(path: Path) -> int:
     try:
-        return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        return os.open(path, _DIRECTORY_FLAGS)
     except OSError as error:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
 
 
 def _same_directory(first: Path, second: Path) -> bool:
+    """Compare two roots without following a final symlink: a link is never a root."""
     try:
-        return os.path.samefile(first, second)
+        first_info = first.lstat()
+        second_info = second.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(first_info.st_mode) and os.path.samestat(first_info, second_info)
+
+
+def _holds_directory(descriptor: int, path: Path) -> bool:
+    try:
+        return os.path.samestat(os.fstat(descriptor), path.lstat())
     except OSError:
         return False
 
@@ -1483,7 +1694,7 @@ def _before_target_commit() -> None:
     return None
 
 
-def _canonical_manifest(canonical_root: Path) -> _Manifest:
+def _canonical_manifest(canonical_root: int) -> _Manifest:
     manifest, _snapshot = _load_manifest(
         canonical_root,
         PurePosixPath(CANONICAL_MANIFEST_NAME),
@@ -1560,7 +1771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not all(_safe_relative(item) for item in ignored_paths):
                 raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
             with canonical_lock(canonical_root, exclusive=canonical_target) as lease:
-                manifest = _canonical_manifest(canonical_root)
+                manifest = _canonical_manifest(lease.descriptor)
                 view = snapshot_file_view(
                     Path(arguments.view),
                     source=manifest.source,
