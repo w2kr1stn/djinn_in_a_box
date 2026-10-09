@@ -451,6 +451,31 @@ def test_runtime_command_default_and_explicit_timeout(monkeypatch):
     assert timeouts == [5, 9]
 
 
+def test_companion_healthcheck_polls_fast_only_while_starting():
+    compose_path = Path(__file__).parents[1] / "docker-compose.agent-docker.yml"
+    service = yaml.safe_load(compose_path.read_text())["services"]["agent-docker"]
+    check = dict(service["healthcheck"])
+    check.pop("test")
+    assert check == {
+        "interval": "30s",
+        "timeout": "5s",
+        "retries": 3,
+        "start_period": "60s",
+        "start_interval": "2s",
+    }
+
+
+HEALTHCHECK_DRIFT = {
+    "hc-interval": ("interval", "3s"),
+    "hc-timeout": ("timeout", "3s"),
+    "hc-start-period": ("start_period", "3s"),
+    "hc-start-interval": ("start_interval", "3s"),
+    "hc-start-interval-missing": ("start_interval", None),
+    "hc-retries": ("retries", 4),
+    "hc-extra": ("disable", True),
+}
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -464,6 +489,7 @@ def test_runtime_command_default_and_explicit_timeout(monkeypatch):
         "health",
         "success",
         "literal-dollar",
+        *HEALTHCHECK_DRIFT,
     ],
 )
 def test_preparation_fails_closed_and_cleans_partial_resources(
@@ -482,6 +508,13 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
     endpoint = json.loads((fixtures / "agent_docker_endpoint.json").read_text())[0]
     resolved = json.loads((fixtures / "agent_docker_compose.json").read_text())
     resolved["services"]["agent-docker"]["environment"]["DJINN_FIREWALL_GATE"] = "false"
+    if failure in HEALTHCHECK_DRIFT:
+        key, value = HEALTHCHECK_DRIFT[failure]
+        check = resolved["services"]["agent-docker"]["healthcheck"]
+        if value is None:
+            del check[key]
+        else:
+            check[key] = value
     declared = AppConfig(code_dir=tmp_path, mounts={
         "ro": {"source": str(tmp_path), "target": "/declared-ro", "read_only": True},
     })
@@ -644,7 +677,10 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
                 ["bind", str(tmp_path), "/declared-ro", False],
             ]
         else:
-            with pytest.raises(RuntimeError):
+            with pytest.raises(
+                RuntimeError,
+                match="healthcheck intervals differ" if failure in HEALTHCHECK_DRIFT else None,
+            ):
                 docker._prepare_agent_docker(
                     config,
                     docker.ContainerOptions(docker_mode=docker.DockerMode.AGENT),
@@ -657,7 +693,8 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
         assert list(inventory) == [actual["Id"]]
     else:
         assert inventory == {}
-    if failure in ("observer", "image", "existing", "cache-driver", "endpoint-options"):
+    if failure in ("observer", "image", "existing", "cache-driver", "endpoint-options",
+                   *HEALTHCHECK_DRIFT):
         assert not created
     assert not (root / "state.json").exists()
 

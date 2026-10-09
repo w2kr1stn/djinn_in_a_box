@@ -1783,12 +1783,14 @@ def _prepare_agent_docker(
             {key: str(value).replace("$$", "$") for key, value in spec["environment"].items()}
         )
         healthcheck = spec["healthcheck"]
-        # These intervals are fixed in the trusted Compose profile.
-        if (healthcheck["interval"], healthcheck["timeout"], healthcheck["start_period"]) != (
-            "2s",
-            "5s",
-            "1m0s",
-        ):
+        # These intervals are fixed in the trusted Compose profile, as Compose renders them.
+        if {key: value for key, value in healthcheck.items() if key != "test"} != {
+            "interval": "30s",
+            "timeout": "5s",
+            "retries": 3,
+            "start_period": "1m0s",
+            "start_interval": "2s",
+        }:
             raise RuntimeError("Agent Docker healthcheck intervals differ")
         manifest: dict[str, Any] = {
             "image": agent_docker.IMAGE,
@@ -1798,9 +1800,10 @@ def _prepare_agent_docker(
             "user": spec["user"],
             "healthcheck": {
                 "Test": [word.replace("$$", "$") for word in healthcheck["test"]],
-                "Interval": 2_000_000_000,
+                "Interval": 30_000_000_000,
                 "Timeout": 5_000_000_000,
                 "StartPeriod": 60_000_000_000,
+                "StartInterval": 2_000_000_000,
                 "Retries": healthcheck["retries"],
             },
             "cache_volume": cache,
@@ -1987,7 +1990,10 @@ def _prepare_companions(
                 health = actual["State"].get("Health", {}).get("Status")
                 if health == "healthy":
                     break
-                if health == "unhealthy" or time.monotonic() >= deadline:
+                # Failed probes inside start_period keep a broken helper "starting". Stop once less
+                # than one more poll (sleep plus inspect) fits, so the error names that state
+                # rather than _operation_timeout's generic one.
+                if health == "unhealthy" or time.monotonic() + 1 >= deadline:
                     raise RuntimeError(f"helper health {health or 'unknown'} (readiness timeout)")
                 time.sleep(0.1)
             evidence = _helper_evidence(actual, endpoint.channel, deadline)

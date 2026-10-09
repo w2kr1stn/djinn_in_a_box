@@ -132,9 +132,10 @@
           "info=$$(docker --host unix:///home/rootless/.djinn-docker/socket/docker.sock info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}') \u0026\u0026 case \"$$info\" in 'overlay2 /home/rootless/.local/share/docker '*\\\"name=rootless\\\"*) exit 0;; *) exit 1;; esac"
         ],
         "timeout": "5s",
-        "interval": "2s",
+        "interval": "30s",
         "retries": 3,
-        "start_period": "1m0s"
+        "start_period": "1m0s",
+        "start_interval": "2s"
       }
     },
     "dev": {
