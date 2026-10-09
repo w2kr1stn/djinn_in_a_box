@@ -220,13 +220,52 @@ command restrictions on the target with controls supported by its SSH server.
 Tailscale SSH uses its own server; ordinary OpenSSH `sshd_config` and
 `authorized_keys` do not constrain that server.
 
-One known host path remains open:
-[#81](https://github.com/w2kr1stn/djinn_in_a_box/issues/81), host-mode session
-fallback executing container-writable workflows. Without a running container,
-`djinn session` can deliver the selected agent's workflow to its native host
-root and run the agent there. The sealed check does not close this execution
-path. Treat these workflows as trusted host inputs and avoid host fallback with
-container-writable workflows. See [session integration](docs/suite-integration.md).
+The container can edit the workflow source in `config/`. Without a running
+container, `djinn session` publishes the selected agent's workflow to its native
+host root and runs it as the host user. Before that publication, Djinn requires
+confirmation of the managed item set for that host root: relative file paths,
+SHA-256 hashes of the final bytes, executable flags, and managed settings
+fragments identified by carrier and key path. This includes Claude's host hook
+rewrite and `CLAUDE.md` bridge. Changed, added or removed items require another
+confirmation at a terminal; non-TTY callers refuse with exit 1 until confirmed.
+The prompt defaults to No and lists the changes and their feeding source paths.
+Review output shows names literally, without markup or emoji codes, and escapes
+non-printable characters; an exclusive directory lock serializes trust-record
+updates.
+
+Confirmation is recorded in
+`~/.config/djinn_in_a_box/host-workflow-trust.json`, separate from the publisher's
+last-published manifest. Missing, unreadable or malformed records count as
+unconfirmed. Djinn releases the config lease while waiting for the user, then
+reloads the final payload under a new lease and compares it with the approved
+set. A changed or unloadable payload, or a source change detected by the
+publisher before its first write, aborts publication and launch. Only the
+approved immutable bytes are written; trust is saved atomically with owner-only
+permissions after successful publication. A record-save failure prevents launch.
+Container delivery and in-place workflow editing remain unchanged.
+
+This protection covers managed items, not every byte in the host root:
+neighbouring personal settings remain host-owned, and managed removals follow
+the runtime manifest. Confirmed hook commands can reference files outside the
+published payload; changes to those files are not covered. Deliberately widened
+mounts (`--mount`, `CODE_DIR`, or `--here`) can expose a native host root or the
+trust record. A config root whose tool directory is the native host root also
+allows direct container writes and is outside this protection. Docker-direct
+and `djinn audit` have host authority; audit mounts the Djinn configuration
+directory alongside the Docker socket. The trust directory has no dedicated
+mount in the normal container setup, but is not protected against those routes.
+Symlink-following host-side publisher writes into container-writable trees remain
+a separate issue, [#133](https://github.com/w2kr1stn/djinn_in_a_box/issues/133).
+The sealed check is unchanged. See [session integration](docs/suite-integration.md).
+
+Another container-to-host path remains open: the host agent runs in the session
+workspace `~/.djinn/sessions/<project>`, which every container mounts read-write.
+Host agent CLIs load project-scope configuration from that directory, such as
+Claude Code `.claude/settings.json` hooks or OpenCode project plugins, and
+interactive host sessions start Claude Code and Codex with their permission
+prompts disabled. Host workflow confirmation does not cover that configuration. Avoid host fallback in session
+workspaces a container has written to; the fix is tracked in
+[#140](https://github.com/w2kr1stn/djinn_in_a_box/issues/140).
 
 ## Git keys and browser identity
 

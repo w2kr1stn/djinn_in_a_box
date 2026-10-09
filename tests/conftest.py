@@ -140,6 +140,16 @@ def _forbid_foreign_signals(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_host_workflow_trust(monkeypatch, tmp_path):
+    from djinn_in_a_box.core import config_workflow
+
+    monkeypatch.setattr(
+        config_workflow, "HOST_WORKFLOW_TRUST_FILE",
+        tmp_path / "trust-home" / "host-workflow-trust.json",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_agent_versions(monkeypatch, tmp_path):
     from djinn_in_a_box.core import paths
 

@@ -153,9 +153,21 @@ djinn session --project <project> --create   # create the workspace if missing
 Without `--create`, the workspace directory must exist before the command runs.
 
 Without a running container, session preflight checks the selected agent on host
-`PATH`; the CLI prepares its native host workflow before invocation. See the
+`PATH`; the CLI prepares its confirmed native host workflow before invocation.
+Non-TTY `djinn session` callers receive exit 1 with the item changes and a remedy
+until the user runs `djinn session --agent <agent>` at a terminal, reviews the
+sources and confirms. The first host fallback asks once per native root;
+changed published content requires another confirmation. An unchanged confirmed
+workflow runs headlessly as before. Confirmation is stored
+in `~/.config/djinn_in_a_box/host-workflow-trust.json`; personal
+`settings.local.json` write-back is excluded from the host payload.
+Direct `SessionManager` callers never publish workflow and continue to run
+whatever the CLI last published. The host agent also loads project-scope agent
+configuration from the session workspace, which the container can write; this
+is not covered by the confirmation
+([#140](https://github.com/w2kr1stn/djinn_in_a_box/issues/140)). See the
 [security model](../SECURITY-MODEL.md#direct-routes-and-target-authority) for the
-open host-fallback workflow path and target authority limits.
+host workflow protection and target authority limits.
 
 ## Suite mode (optional)
 
