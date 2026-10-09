@@ -450,9 +450,9 @@ Tool-owned runtime state inside a source root is not a workflow source.
 (`skills/synced/**` under a Claude source; none for Codex and OpenCode), and
 `is_runtime_residue()` adds `__pycache__` unconditionally, because the
 interpreter defines it as a regenerable cache. Both are skipped at every point
-that reads the source — the adapter scan, `_read_file_tree`, and the
-`shutil.copytree` that builds the audit snapshot — so the bytes are never read,
-decoded, fingerprinted, copied or projected. The exclusion is deliberately not a
+that reads the source — the adapter scan and `_read_file_tree`, whose result
+also becomes the audit snapshot — so the bytes are never read, decoded,
+fingerprinted, copied or projected. The exclusion is deliberately not a
 binary filter: a `.pyc` outside `__pycache__` and a `.pyd` shipped inside a skill
 are still UTF-8 failures. Excluded paths are never deleted; the writing tool owns
 them, and a change to one is not drift, which is what keeps repeated audits
@@ -472,8 +472,10 @@ cross-tool views, reads each tool's native-only artifacts for delivery, audits
 the canonical tree, and invokes the publisher in canonical mode. Canonical
 projection excludes hooks and hook registrations; runtime delivery retains them
 in the complete tool view, so the Claude host-path rewrite and Compose-Claude
-settings merge keep their existing inputs. It uses the publisher's content
-fingerprint both after snapshot creation and at the commit point. A source
+settings merge keep their existing inputs. The private snapshot is written from
+the bytes `snapshot_file_view()` read and fingerprinted; the live source tree is
+never copied. It uses the publisher's content fingerprint both after snapshot
+creation and at the commit point. A source
 change before the first target mutation returns `source-changed` without a
 write; after that point the frozen generation finishes, with the manifest
 written last.
@@ -488,6 +490,21 @@ does not manage those native artifacts.
 A canonical publication holds one exclusive canonical lock. A runtime
 publication holds a shared canonical lock plus an exclusive target lock; an
 already-held canonical lease is inherited rather than reacquired.
+
+Dev can write the target and source trees, so every access below a root is
+anchored to the root's locked directory descriptor and follows no symlink. Each
+path component is opened with `O_DIRECTORY|O_NOFOLLOW`; a symlinked or
+non-directory component is `collision`. A file is pinned with `O_PATH|O_NOFOLLOW`
+and read through `/proc/self/fd` only when the pinned inode is regular, so links,
+FIFOs, sockets and devices are never opened for I/O. A write creates a random
+`.djinn-publisher-*` file with `O_EXCL|O_NOFOLLOW` in the verified parent and
+renames it there; a stale entry is unlinked in the verified parent. Roots are
+opened without following, and root identity is decided by `lstat`/`fstat`, so a
+symlinked canonical or target root is refused. The source walk works the same
+way and refuses a symlinked directory instead of skipping it. Config sync and the
+native-only adapter reads use the same reader, `read_regular_file()`. Ancestors
+of the roots are trusted; dev can still rewrite a managed file after a publish,
+which the next publish reports as drift or collision.
 
 The one manifest schema is `{source, items}`. An item is either a file path or a
 carrier path plus key path and records `content_hash` and `executable`. The

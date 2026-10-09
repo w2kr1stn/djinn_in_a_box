@@ -65,6 +65,20 @@ steps, including access to loopback-only host services. It applies to the whole
 build, so use it only with trusted Dockerfiles and build inputs. It affects
 build-time networking, not the resulting container's runtime network.
 
+## Host-side workflow publishing
+
+The host CLI reads and writes workflow trees that dev can write: the per-CLI
+config roots and the `config/claude` and `config/opencode` seeds. The workflow
+publisher and config sync anchor every access there to an opened root directory
+and follow no symlink at or below it. A symlinked or non-directory path component
+is refused as a collision, and links, FIFOs, sockets and devices are never opened
+for I/O. Ancestors of these roots are trusted; placing the project or config root
+inside a writable mount such as the workspace is outside this guarantee. The
+publisher contains its own I/O; it does not protect a dev-writable tree from dev.
+Other host operations on these trees (provisioning, seeding, doctor repair,
+session workspaces, backup and restore) are tracked in
+[#138](https://github.com/w2kr1stn/djinn_in_a_box/issues/138).
+
 ## Desktop boundaries
 
 The delivered D-Bus and audio helpers close the raw desktop paths tracked by

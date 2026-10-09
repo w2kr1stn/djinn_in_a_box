@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
 import json
+import os
 import stat
 from itertools import product
 from pathlib import Path, PurePosixPath
@@ -137,28 +138,32 @@ def _canonical_outcomes(
 
 
 def _runtime_audit(target: Path) -> DriftClass:
+    descriptor = publisher_module._open_directory(target)
     try:
         publisher_module._load_manifest(
-            target,
+            descriptor,
             PurePosixPath(RUNTIME_MANIFEST_NAME),
             canonical_target=False,
             target_tool="claude",
         )
     except publisher_module.PublishError as error:
         return error.drift_class
+    finally:
+        os.close(descriptor)
     return DriftClass.CLEAN
 
 
 def _runtime_preflight(target: Path) -> DriftClass:
+    descriptor = publisher_module._open_directory(target)
     try:
         prior, snapshot = publisher_module._load_manifest(
-            target,
+            descriptor,
             PurePosixPath(RUNTIME_MANIFEST_NAME),
             canonical_target=False,
             target_tool="claude",
         )
         publisher_module._preflight(
-            target,
+            descriptor,
             publisher_module._validate_view(_runtime_view()),
             prior,
             snapshot,
@@ -167,6 +172,8 @@ def _runtime_preflight(target: Path) -> DriftClass:
         )
     except publisher_module.PublishError as error:
         return error.drift_class
+    finally:
+        os.close(descriptor)
     return DriftClass.CLEAN
 
 

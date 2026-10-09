@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import shutil
-import stat
+import os
 import tempfile
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -38,9 +37,9 @@ from djinn_in_a_box.core.workflow_publisher import (
     canonical_lock,
     decode_lean_manifest,
     fingerprint_source_inputs,
-    is_runtime_residue,
     load_strict_json,
     publish_workflow_view,
+    read_regular_file,
     runtime_residue_prefixes,
     snapshot_file_view,
 )
@@ -167,7 +166,7 @@ def sync_config(
                 return ConfigSyncResult(False, _invalid_audit(source, build.problems))
             manifest_path = config_root / MANIFEST_NAME
             preflight_manifest = _release_manifest_records(
-                manifest_path, source, build.fingerprint, config_root
+                config_root, source, build.fingerprint
             )
             result = publish_workflow_view(
                 build.canonical,
@@ -251,7 +250,9 @@ def _load_canonical_delivery_view_locked(
     if build.problems:
         return CanonicalDeliveryViewResult(False, _invalid_audit(source, build.problems))
     view = build.views[tool]
-    manifest = (project_root / "config" / MANIFEST_NAME).read_bytes()
+    manifest = _read_manifest(project_root / "config")
+    if manifest is None:
+        raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
     revision = _digest(manifest + (view.source_fingerprint or "").encode())
     return CanonicalDeliveryViewResult(
         True, audit, view, revision, build.source_inputs[tool]
@@ -265,15 +266,18 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
         return _audit_for(source, error.drift)
     if build.problems:
         return _invalid_audit(source, build.problems)
-    manifest_path = project_root / "config" / MANIFEST_NAME
-    if not manifest_path.exists():
+    try:
+        raw = _read_manifest(project_root / "config")
+    except (OSError, PublishError):
+        return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+    if raw is None:
         drifts = _compare_manifest(project_root / "config", build.canonical, ())
         kind = _worst_drift(drifts)
         filtered = [item for item in drifts if item.kind is kind] if kind is not None else []
         return ConfigSyncAudit(source, None, tuple(_deduplicate(filtered)))
     try:
-        manifest_source, items = _lean_items(manifest_path.read_bytes())
-    except (OSError, ValueError):
+        manifest_source, items = _lean_items(raw)
+    except ValueError:
         return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
     drifts = _compare_manifest(project_root / "config", build.canonical, items)
     if manifest_source != source:
@@ -283,36 +287,14 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
     return ConfigSyncAudit(source, manifest_source, tuple(_deduplicate(filtered)))
 
 
-def _ignore_residue(
-    source_root: Path, residue: frozenset[PurePosixPath]
-) -> Callable[[str, list[str]], set[str]]:
-    """Keep tool-owned runtime state out of the snapshot that is copied and read.
-
-    Excluding it at copy time is what makes the exclusion hold for every later
-    stage: the adapter, the validator and the renderer only ever see the
-    snapshot, so none of them can read, decode or project what was never copied.
-    The live source tree is untouched — nothing is moved or deleted.
-    """
-
-    def ignore(directory: str, entries: list[str]) -> set[str]:
-        try:
-            base = PurePosixPath(Path(directory).relative_to(source_root).as_posix())
-        except ValueError:  # pragma: no cover - copytree only walks below the root
-            return set()
-        return {entry for entry in entries if is_runtime_residue(base / entry, residue)}
-
-    return ignore
-
-
 def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
     source_root = project_root / "config" / source
     if source_root.is_symlink() or not source_root.is_dir():
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
     residue = runtime_residue_prefixes(source)
     try:
-        before = snapshot_file_view(
-            source_root, source=source, residue_prefixes=residue
-        ).source_fingerprint
+        read = snapshot_file_view(source_root, source=source, residue_prefixes=residue)
+        before = read.source_fingerprint
         if before is None:
             raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
         source_inputs: dict[ConfigSyncSource, tuple[Path, ...]] = {}
@@ -332,12 +314,10 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
             )
         with tempfile.TemporaryDirectory(prefix="djinn-sync-") as temporary:
             snapshot_root = Path(temporary) / source
-            shutil.copytree(
-                source_root, snapshot_root, ignore=_ignore_residue(source_root, residue)
-            )
-            after = _fingerprint(source_root, residue)
-            snapshot_fingerprint = _fingerprint(snapshot_root, residue)
-            if before != after or before != snapshot_fingerprint:
+            # Built from the bytes just read and fingerprinted, never by copying
+            # the live tree, which the container can rewrite and relink.
+            _write_snapshot(snapshot_root, read.files)
+            if _fingerprint(source_root, residue) != before:
                 raise _BuildError(DriftClass.SOURCE_CHANGED)
             build = _build_views(
                 snapshot_root,
@@ -492,7 +472,7 @@ def _source_view(
     for hook in OWNERSHIP_MATRIX[read.tool].hooks:
         if hook.carrier_path is None or hook.event is None:
             continue
-        value, issue = _carrier_value(root / hook.carrier_path, ("hooks", hook.event))
+        value, issue = _carrier_value(root, hook.carrier_path, ("hooks", hook.event))
         if issue:
             problems.append(
                 SyncProblem(
@@ -513,7 +493,7 @@ def _source_view(
             )
     if read.tool == "codex":
         carrier = PurePosixPath("config.toml")
-        value, issue = _carrier_value(root / carrier, ("project_doc_fallback_filenames",))
+        value, issue = _carrier_value(root, carrier, ("project_doc_fallback_filenames",))
         if issue:
             problems.append(
                 SyncProblem(
@@ -551,13 +531,13 @@ def _compare_manifest(
     for path in sorted(set(wanted_files) | set(recorded_files)):
         wanted = wanted_files.get(path)
         recorded = recorded_files.get(path)
-        actual = _file_item_at(config_root / path, path)
+        actual = _file_item_at(config_root, path)
         drifts.extend(_item_drift(wanted, recorded, actual, path))
     for key in sorted(set(wanted_fragments) | set(recorded_fragments)):
         wanted = wanted_fragments.get(key)
         recorded = recorded_fragments.get(key)
         path, key_path = key
-        actual, issue = _carrier_item_at(config_root / path, path, key_path)
+        actual, issue = _carrier_item_at(config_root, path, key_path)
         if issue:
             drifts.append(_drift(DriftClass.COLLISION, path))
         else:
@@ -589,14 +569,14 @@ def _item_drift(
 
 
 def _release_manifest_records(
-    manifest_path: Path,
+    config_root: Path,
     source: ConfigSyncSource,
     fingerprint: str,
-    config_root: Path,
 ) -> bytes | None:
-    if not manifest_path.exists():
-        return
-    manifest_source, items = _lean_items(manifest_path.read_bytes())
+    raw = _read_manifest(config_root)
+    if raw is None:
+        return None
+    manifest_source, items = _lean_items(raw)
     kept = tuple(
         item for item in items if not _release_canonical_manifest_item(item, source)
     )
@@ -639,12 +619,29 @@ def _encode_lean(source: ConfigSyncSource, items: tuple[_ManifestItem, ...]) -> 
     ).encode()
 
 
-def _carrier_value(path: Path, keys: tuple[str, ...]) -> tuple[object | None, bool]:
-    if not path.exists():
-        return None, False
+def _write_snapshot(root: Path, files: tuple[PublishedFile, ...]) -> None:
+    root.mkdir()
+    for item in files:
+        path = root.joinpath(*item.relative_path.parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(item.content)
+        os.chmod(path, 0o755 if item.executable else 0o644)
+
+
+def _read_manifest(config_root: Path) -> bytes | None:
+    read = read_regular_file(config_root, PurePosixPath(MANIFEST_NAME))
+    return None if read is None else read[0]
+
+
+def _carrier_value(
+    root: Path, relative: PurePosixPath, keys: tuple[str, ...]
+) -> tuple[object | None, bool]:
     try:
-        raw = path.read_bytes()
-        decoded = _json_load(raw) if path.suffix == ".json" else _toml_load(raw)
+        read = read_regular_file(root, relative)
+        if read is None:
+            return None, False
+        raw = read[0]
+        decoded = _json_load(raw) if relative.suffix == ".json" else _toml_load(raw)
         value: object = _object_mapping(decoded)
         current: object = value
         for key in keys:
@@ -652,14 +649,14 @@ def _carrier_value(path: Path, keys: tuple[str, ...]) -> tuple[object | None, bo
                 return None, False
             current = _object_mapping(cast(object, current))[key]
         return current, False
-    except (ManifestError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (ManifestError, OSError, PublishError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None, True
 
 
 def _carrier_item_at(
-    path: Path, manifest_path: PurePosixPath, keys: tuple[str, ...]
+    config_root: Path, manifest_path: PurePosixPath, keys: tuple[str, ...]
 ) -> tuple[_ManifestItem | None, bool]:
-    value, issue = _carrier_value(path, keys)
+    value, issue = _carrier_value(config_root, manifest_path, keys)
     if issue:
         return None, True
     if value is None:
@@ -679,21 +676,15 @@ def _fragment_item(item: CarrierFragment) -> _ManifestItem:
     return _ManifestItem(item.carrier_path, _digest(_json_value(value)), False, item.key_path)
 
 
-def _file_item_at(path: Path, manifest_path: PurePosixPath) -> _ManifestItem | None:
+def _file_item_at(config_root: Path, manifest_path: PurePosixPath) -> _ManifestItem | None:
     try:
-        info = path.lstat()
-    except FileNotFoundError:
+        read = read_regular_file(config_root, manifest_path)
+    except (OSError, PublishError):
         return None
-    except OSError:
+    if read is None:
         return None
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    try:
-        return _ManifestItem(
-            manifest_path, _digest(path.read_bytes()), bool(info.st_mode & stat.S_IXUSR)
-        )
-    except OSError:
-        return None
+    content, executable = read
+    return _ManifestItem(manifest_path, _digest(content), executable)
 
 
 def _fingerprint(root: Path, residue: frozenset[PurePosixPath] = frozenset()) -> str:
