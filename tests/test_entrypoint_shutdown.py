@@ -909,7 +909,13 @@ def test_worker_exit_status_controls_unexpected_stop_warning(sessions, worker_si
     sleeper = session.sleepers()[0]
     worker = int(Path(f"/proc/{sleeper}/stat").read_text().rsplit(")", 1)[1].split()[1])
     os.kill(worker, worker_signal)
-    _wait_for(lambda: not _pid_running(worker), "worker did not exit")
+    if worker_signal == signal.SIGINT:
+        # The worker inherits SIGINT as ignored, so a group-wide Ctrl-C cannot kill
+        # an in-flight checkpoint child; only the parent's INT trap stops it.
+        time.sleep(0.5)
+        assert _pid_running(worker), "worker must ignore SIGINT"
+    else:
+        _wait_for(lambda: not _pid_running(worker), "worker did not exit")
     for index, path in enumerate(session.runtimes):
         _atomic_edit(path, _changed_settings(12) if index == 1 else b'{"version":12}\n')
     stderr = session.finish()

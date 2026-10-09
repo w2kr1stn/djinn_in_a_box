@@ -253,7 +253,9 @@ _session_checkpoint_loop() {
     set -euo pipefail
     local djinn_checkpoint_stopping=0 djinn_checkpoint_sleep_pid=''
     typeset -A djinn_checkpoint_warned
-    trap '_session_checkpoint_on_stop' TERM INT
+    # TERM only: a background job keeps SIGINT ignored, so a Ctrl-C sent to the whole
+    # process group cannot kill an in-flight copy. The parent's INT trap stops us.
+    trap '_session_checkpoint_on_stop' TERM
     while [[ "$djinn_checkpoint_stopping" == 0 ]]; do
         sleep 30 </dev/null >/dev/null 2>&1 &
         djinn_checkpoint_sleep_pid=$!

@@ -387,7 +387,8 @@ a crash, plus checkpoint duration and scheduling delay, when JSON is valid and
 storage is writable and healthy. Unchanged runtime content leaves host edits
 alone, including `settings.local.json` at clean stop; when both changed, runtime
 wins. Without checkpoint references (failed setup or lost private state), final
-sync writes every valid carrier and can overwrite a host-only edit.
+sync writes every valid carrier and can overwrite a host-only edit, provided it
+can recreate its private state at stop; otherwise it warns and writes nothing.
 
 Crash residue (`.djinn-settings-*`) is never restored or projected into workflow
 delivery. `djinn doctor` reports it as zone drift in config-root `claude/` and
