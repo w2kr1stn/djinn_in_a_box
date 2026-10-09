@@ -944,11 +944,13 @@ def test_exhausted_descriptors_fail_closed(
 ) -> None:
     _chain(tmp_path / "source", 200)
     descriptor_limit(64)
+    before = len(os.listdir("/proc/self/fd"))
 
     with pytest.raises(PublishError) as refused:
         snapshot_file_view(tmp_path / "source", source="claude")
 
     assert refused.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert len(os.listdir("/proc/self/fd")) == before
 
 
 def test_directory_relinked_between_stat_and_open_is_refused(
@@ -984,3 +986,28 @@ def test_directory_relinked_between_stat_and_open_is_refused(
 
     assert refused.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
     assert changed.value.drift_class is DriftClass.SOURCE_CHANGED
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.parametrize("kind", ("directory-link", "file-link", "fifo"))
+def test_refused_walk_closes_every_descriptor(tmp_path: Path, kind: str) -> None:
+    _canonical, _target, outside = _roots(tmp_path)
+    source = tmp_path / "source"
+    deep = source / "a/b/c"
+    deep.mkdir(parents=True)
+    (source / "AGENTS.md").write_bytes(b"x\n")
+    if kind == "directory-link":
+        (deep / "skills").symlink_to(outside, target_is_directory=True)
+    elif kind == "file-link":
+        (deep / "x.md").symlink_to(outside / "keep.md")
+    else:
+        os.mkfifo(deep / "x.md")
+    before = _open_descriptors()
+
+    with pytest.raises(PublishError):
+        snapshot_file_view(source, source="claude")
+
+    assert _open_descriptors() == before
