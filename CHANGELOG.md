@@ -7,6 +7,14 @@ Versioning before and after the first stable release.
 
 ## [Unreleased]
 
+### Fixed
+
+- Checkpoint Claude state and Claude/OpenCode personal settings every 30 s with
+  atomic writes: changes older than about 30 s survive a crash, plus checkpoint
+  duration and scheduling delay, given valid JSON and healthy writable storage.
+  Host-only overlay edits survive clean stop; runtime wins when both changed.
+  Missing checkpoint references can let final sync overwrite host-only edits.
+
 ### Removed
 
 - Docker socket proxy service, Compose file and `djinn logs proxy` command.

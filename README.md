@@ -381,6 +381,19 @@ for the per-tool tables, container paths, and validation behavior.
 
 ### Tool-Owned Runtime State
 
+Claude state, Claude personal settings and OpenCode personal settings are
+checkpointed every 30 s with atomic writes. Changes older than about 30 s survive
+a crash, plus checkpoint duration and scheduling delay, when JSON is valid and
+storage is writable and healthy. Unchanged runtime content leaves host edits
+alone, including `settings.local.json` at clean stop; when both changed, runtime
+wins. Without checkpoint references (failed setup or lost private state), final
+sync writes every valid carrier and can overwrite a host-only edit, provided it
+can recreate its private state at stop; otherwise it warns and writes nothing.
+
+Crash residue (`.djinn-settings-*`) is never restored or projected into workflow
+delivery. `djinn doctor` reports it as zone drift in config-root `claude/` and
+`opencode/`; beside the seed overlay in `config/claude/` it is unreported.
+
 The agent CLIs write into their own config root while they run, and those writes
 land in the workflow source because `config/claude/skills` and
 `config/claude/scripts` are bind-mounted read-write so you can edit skills in

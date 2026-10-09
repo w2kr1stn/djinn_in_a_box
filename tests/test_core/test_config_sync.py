@@ -97,6 +97,34 @@ def test_representative_sync_publishes_all_views_and_lean_manifest(tmp_path: Pat
     )
 
 
+def test_settings_copy_residue_is_inert_in_real_audit_and_delivery(tmp_path: Path) -> None:
+    project, config_path = _workspace(tmp_path)
+    assert sync_config(project, config_path=config_path).success
+    residue = project / "config/claude/.djinn-settings-Ab12Cd34"
+    residue.write_bytes(b'{"partial":')
+    residue.chmod(0o600)
+
+    audit = audit_config_sync(project, config_path=config_path)
+    assert DriftClass.INVALID_OR_SEMANTIC not in audit.drift_classes
+    runtime = tmp_path / "delivery"
+    runtime.mkdir()
+    result = prepare_config_workflow(
+        project, (WorkflowDeliveryTarget("claude", runtime),), config_path=config_path
+    )
+    assert result.success
+    assert (
+        DriftClass.INVALID_OR_SEMANTIC
+        not in audit_config_sync(project, config_path=config_path).drift_classes
+    )
+    assert residue.read_bytes() == b'{"partial":'
+    assert stat.S_IMODE(residue.stat().st_mode) == 0o600
+    assert not list(runtime.rglob(".djinn-settings-*"))
+    assert not list((project / "config/codex").rglob(".djinn-settings-*"))
+    assert not list((project / "config/opencode").rglob(".djinn-settings-*"))
+    manifest = json.loads((project / "config" / MANIFEST_NAME).read_bytes())
+    assert all(".djinn-settings-" not in item["path"] for item in manifest["items"])
+
+
 @pytest.mark.parametrize("source", ("claude", "codex", "opencode"))
 def test_each_source_delivers_one_global_instruction_file(
     tmp_path: Path, source: ConfigSyncSource
@@ -318,8 +346,9 @@ def test_unmanaged_claude_instructions_block_non_claude_source_without_mutation(
     assert _tree(project / "config") == before
 
 
+@pytest.mark.parametrize("source_file", ("AGENTS.md", "settings.local.json"))
 def test_snapshot_before_commit_blocks_without_writing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_file: str
 ) -> None:
     project, config_path = _workspace(tmp_path)
     before = _tree(project / "config")
@@ -331,7 +360,9 @@ def test_snapshot_before_commit_blocks_without_writing(
         result = original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         if not changed:
             changed = True
-            (project / "config/claude/AGENTS.md").write_text("operator change\n")
+            (project / "config/claude" / source_file).write_text(
+                "operator change\n" if source_file == "AGENTS.md" else '{"personal":true}\n'
+            )
         return result
 
     monkeypatch.setattr(sync_module, "_build_views", race)

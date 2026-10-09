@@ -50,6 +50,9 @@ def run_output_lib(env_updates: dict[str, str | None]) -> subprocess.CompletedPr
         ],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         env=env,
         text=True,
     )
@@ -76,6 +79,9 @@ def run_output_lib_command(
         ],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         env=env,
         text=True,
     )
@@ -283,12 +289,17 @@ def test_entrypoint_continues_with_plain_startup_messages_when_output_lib_absent
         "SEED_LIB": str(missing_seed_lib),
         "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
         "ENABLE_FIREWALL": "false",
+        "DJINN_DECLARED_VOLUME_TARGETS": "[]",
+        "DJINN_GIT_MANIFEST": "",
     }
 
     result = subprocess.run(
         [zsh, "-n", str(ROOT / "scripts" / "entrypoint.sh")],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
@@ -297,6 +308,9 @@ def test_entrypoint_continues_with_plain_startup_messages_when_output_lib_absent
         [zsh, str(ROOT / "scripts" / "entrypoint.sh")],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         env=env,
         text=True,
     )
@@ -307,7 +321,7 @@ def test_entrypoint_continues_with_plain_startup_messages_when_output_lib_absent
     assert "[err] seed library not found" in result.stderr
 
 
-def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) -> None:
+def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
     zsh = shutil.which("zsh")
     jq = shutil.which("jq")
     assert zsh is not None
@@ -316,13 +330,14 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     mcp_config = tmp_path / "mcp-servers.json"
     mcp_config.write_text("{}", encoding="utf-8")
     opencode_seed = tmp_path / ".opencode" / "seed"
-    opencode_seed.mkdir(parents=True)
+    opencode_seed.mkdir(parents=True, exist_ok=True)
     instructions = b"OpenCode instructions.\n"
     (opencode_seed / "AGENTS.md").write_bytes(instructions)
     personal_opencode_settings = b'{"personal":true}\n'
-    (tmp_path / ".opencode" / ".opencode.json").write_bytes(personal_opencode_settings)
+    if not (tmp_path / ".opencode" / ".opencode.json").exists():
+        (tmp_path / ".opencode" / ".opencode.json").write_bytes(personal_opencode_settings)
     canonical = tmp_path / "canonical"
-    canonical.mkdir()
+    canonical.mkdir(exist_ok=True)
     (canonical / ".djinn-config-sync.json").write_text(
         json.dumps(
             {
@@ -347,9 +362,7 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
         "MCP_REGISTER": str(ROOT / "scripts" / "mcp-register.sh"),
         "SETTINGS_COPY_HELPER": str(ROOT / "scripts" / "settings-copy.py"),
         "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
-        "OPENCODE_CREDENTIALS_HELPER": str(
-            ROOT / "scripts" / "opencode-credentials.sh"
-        ),
+        "OPENCODE_CREDENTIALS_HELPER": str(ROOT / "scripts" / "opencode-credentials.sh"),
         "WORKFLOW_PUBLISHER": str(
             ROOT / "src" / "djinn_in_a_box" / "core" / "workflow_publisher.py"
         ),
@@ -365,16 +378,33 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     env.pop("DOCKER_HOST", None)
     env.pop("DJINN_FORCE_UI_COLOR", None)
 
+    env["TMPDIR"] = str(tmp_path)
+    env["DJINN_DECLARED_VOLUME_TARGETS"] = "[]"
+    env["DJINN_GIT_MANIFEST"] = ""
+    env["DJINN_DETACHED"] = ""
+    return env
+
+
+def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) -> None:
+    env = _entrypoint_environment(tmp_path)
+    zsh = shutil.which("zsh")
+    assert zsh is not None
+    personal_opencode_settings = b'{"personal":true}\n'
     result = subprocess.run(
         [zsh, str(ROOT / "scripts" / "entrypoint.sh"), "-c", "true"],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        timeout=20,
         env=env,
         text=True,
     )
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+    assert "checkpoints" not in result.stderr
+    assert not list(tmp_path.glob("djinn-session-state.*"))
     assert_plain_startup_output(result.stderr)
     assert "\n- Security" in result.stderr
     assert "[warn] Firewall:     Disabled" in result.stderr
@@ -385,6 +415,23 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert json.loads(persistent_settings.read_bytes())["personal"] is True
     runtime_settings = tmp_path / "runtime-opencode" / ".opencode.json"
     assert runtime_settings.read_bytes() == personal_opencode_settings
+
+    from test_entrypoint_shutdown import Session, _atomic_edit, _pid_running
+
+    session = Session(tmp_path / "checkpoint-session")
+    try:
+        session.start()
+        startup = session.err.read_bytes()
+        _atomic_edit(session.runtimes[0], b'{"checkpoint-output":true}\n')
+        session.tick()
+        assert session.acknowledgements()[0].read_bytes() == b'{"checkpoint-output":true}\n'
+        assert session.err.read_bytes() == startup
+        sleeper = session.sleepers()[-1]
+        assert session.finish().encode() == startup
+        assert not _pid_running(sleeper)
+        assert not session.state.exists()
+    finally:
+        session.close()
 
 
 def test_firewall_startup_uses_plain_ascii_markers(tmp_path: Path) -> None:
@@ -399,11 +446,11 @@ def test_firewall_startup_uses_plain_ascii_markers(tmp_path: Path) -> None:
     getent = bin_dir / "getent"
     getent.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"ahostsv4\" ]; then\n"
+        'if [ "$1" = "ahostsv4" ]; then\n'
         "  printf '203.0.113.10 STREAM %s\\n' \"$2\"\n"
         "  exit 0\n"
         "fi\n"
-        "exec /usr/bin/getent \"$@\"\n",
+        'exec /usr/bin/getent "$@"\n',
         encoding="utf-8",
     )
     getent.chmod(0o755)
@@ -420,6 +467,9 @@ def test_firewall_startup_uses_plain_ascii_markers(tmp_path: Path) -> None:
         [bash, str(ROOT / "scripts" / "init-firewall.sh")],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         env=env,
         text=True,
     )
@@ -443,6 +493,9 @@ def test_output_lib_is_bash_compatible_and_resource_safe() -> None:
         [bash, "-n", str(ROOT / "scripts" / "output-lib.sh")],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         text=True,
     )
     assert syntax.returncode == 0, syntax.stderr
@@ -456,6 +509,9 @@ def test_output_lib_is_bash_compatible_and_resource_safe() -> None:
         [bash, "-c", script],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=20,
+        start_new_session=True,
         text=True,
         env={"PATH": "/usr/bin:/bin"},
     )
