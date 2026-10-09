@@ -1401,34 +1401,58 @@ def _read_file_tree(
     except OSError as error:
         raise OSError("View root is not a directory") from error
     files: list[PublishedFile] = []
-    pending: list[tuple[int, PurePosixPath]] = [(descriptor, PurePosixPath())]
+    # Depth-first: only the directories on the current path stay open, so wide
+    # trees cost no descriptors and deep ones no recursion.
+    open_directories: list[tuple[int, PurePosixPath, Iterator[str]]] = []
     try:
-        while pending:
-            directory, prefix = pending.pop()
+        directory, prefix = descriptor, PurePosixPath()
+        while True:
+            open_directories.append((directory, prefix, iter(())))
+            subdirectories = _read_directory(
+                directory, prefix, files, ignored_paths, profile, residue_prefixes
+            )
+            open_directories[-1] = (directory, prefix, iter(subdirectories))
+            following = _next_subdirectory(open_directories)
+            if following is None:
+                break
+            parent, prefix = following
             try:
-                _read_directory(
-                    directory, prefix, files, pending, ignored_paths, profile, residue_prefixes
-                )
-            finally:
-                os.close(directory)
+                directory = os.open(prefix.name, _DIRECTORY_FLAGS, dir_fd=parent)
+            except OSError as error:
+                raise OSError("View root contains an unreadable or non-regular entry") from error
     finally:
-        for directory, _prefix in pending:
+        for directory, _prefix, _remaining in open_directories:
             os.close(directory)
     files.sort(key=lambda item: item.relative_path)
     return files, _fingerprint_files(files)
+
+
+def _next_subdirectory(
+    open_directories: list[tuple[int, PurePosixPath, Iterator[str]]],
+) -> tuple[int, PurePosixPath] | None:
+    """Return the parent fd and path of the next directory; close finished ones."""
+    while open_directories:
+        directory, prefix, remaining = open_directories[-1]
+        name = next(remaining, None)
+        if name is not None:
+            return directory, prefix / name
+        open_directories.pop()
+        os.close(directory)
+    return None
 
 
 def _read_directory(
     directory: int,
     prefix: PurePosixPath,
     files: list[PublishedFile],
-    pending: list[tuple[int, PurePosixPath]],
     ignored_paths: Collection[PurePosixPath],
     profile: str | None,
     residue_prefixes: Collection[PurePosixPath],
-) -> None:
+) -> list[str]:
+    """Read the regular files of one directory; return its subdirectory names."""
     with os.scandir(directory) as entries:
         names = sorted(entry.name for entry in entries)
+    subdirectories: list[str] = []
     for name in names:
         relative = prefix / name
         # Skipped before any stat/read so a tool rewriting its own runtime tree
@@ -1437,10 +1461,7 @@ def _read_directory(
             continue
         info = os.stat(name, dir_fd=directory, follow_symlinks=False)
         if stat.S_ISDIR(info.st_mode):
-            try:
-                pending.append((os.open(name, _DIRECTORY_FLAGS, dir_fd=directory), relative))
-            except OSError as error:
-                raise OSError("View root contains a non-regular file") from error
+            subdirectories.append(name)
             continue
         if not stat.S_ISREG(info.st_mode):
             raise OSError("View root contains a non-regular file")
@@ -1465,6 +1486,7 @@ def _read_directory(
             if not valid_plugin:
                 raise OSError("OpenCode plugin export marker is missing")
         files.append(PublishedFile(relative, content, snapshot.executable))
+    return subdirectories
 
 
 def _fingerprint_tree(

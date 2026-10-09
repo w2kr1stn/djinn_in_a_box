@@ -11,10 +11,11 @@ from __future__ import annotations
 import errno
 import json
 import os
+import resource
 import stat
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -96,6 +97,24 @@ def _link_into_outside(target: Path, component: str, outside: Path) -> None:
 
 def _no_hook(_count: int) -> None:
     return None
+
+
+@pytest.fixture(autouse=True)
+def fail_before_a_fifo_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A FIFO opened for I/O would block forever; fail the test instead."""
+    original_open = os.open
+
+    def guarded(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if not flags & os.O_PATH:
+            try:
+                info = os.stat(path, dir_fd=dir_fd)
+            except OSError:
+                info = None
+            if info is not None and stat.S_ISFIFO(info.st_mode):
+                pytest.fail(f"FIFO {path!r} opened for I/O")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(workflow_publisher.os, "open", guarded)
 
 
 # --- the issue probe and every level of a nested write -----------------------
@@ -863,25 +882,105 @@ def test_missing_proc_fails_closed_instead_of_reading_absent(
     assert read.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
 
 
-def test_deep_source_chain_is_walked_without_recursion(tmp_path: Path) -> None:
-    source = tmp_path / "source"
+@pytest.fixture
+def descriptor_limit() -> Iterator[Callable[[int], None]]:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+    def set_soft(limit: int) -> None:
+        if hard != resource.RLIM_INFINITY and limit > hard:
+            pytest.skip("hard descriptor limit too low")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+
+    yield set_soft
+    resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def _chain(source: Path, depth: int) -> None:
     source.mkdir()
     (source / "AGENTS.md").write_bytes(b"x\n")
-    descriptor = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = _REAL_OPEN(source, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for _level in range(1100):
+        for _level in range(depth):
             os.mkdir("d", dir_fd=descriptor)
-            child = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=descriptor)
+            child = _REAL_OPEN("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
-        leaf = os.open("leaf.md", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=descriptor)
+        leaf = _REAL_OPEN("leaf.md", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=descriptor)
         os.write(leaf, b"deep\n")
         os.close(leaf)
     finally:
         os.close(descriptor)
 
-    view = snapshot_file_view(source, source="claude")
+
+def test_deep_source_chain_is_walked_without_recursion(
+    tmp_path: Path, descriptor_limit: Callable[[int], None]
+) -> None:
+    descriptor_limit(4096)
+    _chain(tmp_path / "source", 1100)
+
+    view = snapshot_file_view(tmp_path / "source", source="claude")
 
     assert len(view.files) == 2
     assert view.files[-1].relative_path.name == "leaf.md"
     assert len(view.files[-1].relative_path.parts) == 1101
+
+
+def test_wide_source_tree_holds_no_descriptor_per_sibling(
+    tmp_path: Path, descriptor_limit: Callable[[int], None]
+) -> None:
+    source = tmp_path / "source"
+    for index in range(300):
+        (source / f"skills/s{index:03d}").mkdir(parents=True)
+        (source / f"skills/s{index:03d}/SKILL.md").write_bytes(b"s\n")
+    descriptor_limit(128)
+
+    view = snapshot_file_view(source, source="claude")
+
+    assert len(view.files) == 300
+
+
+def test_exhausted_descriptors_fail_closed(
+    tmp_path: Path, descriptor_limit: Callable[[int], None]
+) -> None:
+    _chain(tmp_path / "source", 200)
+    descriptor_limit(64)
+
+    with pytest.raises(PublishError) as refused:
+        snapshot_file_view(tmp_path / "source", source="claude")
+
+    assert refused.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
+
+
+def test_directory_relinked_between_stat_and_open_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _canonical, _target, outside = _roots(tmp_path)
+    (outside / "secret.md").write_bytes(_SECRET)
+    source = tmp_path / "source"
+    (source / "agents").mkdir(parents=True)
+    (source / "AGENTS.md").write_bytes(b"x\n")
+    (source / "agents/reviewer.md").write_bytes(b"r\n")
+    original_stat = os.stat
+    relinked: list[bool] = []
+
+    def stat_then_relink(
+        path: Any, *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> Any:
+        info = original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path == "agents" and dir_fd is not None and not relinked:
+            relinked.append(True)
+            os.rename("agents", "agents.real", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.symlink(str(outside), "agents", dir_fd=dir_fd)
+        return info
+
+    monkeypatch.setattr(workflow_publisher.os, "stat", stat_then_relink)
+    with pytest.raises(PublishError) as refused:
+        snapshot_file_view(source, source="claude")
+    (source / "agents").unlink()
+    (source / "agents.real").rename(source / "agents")
+    relinked.clear()
+    with pytest.raises(PublishError) as changed:
+        fingerprint_source_inputs(source)
+
+    assert refused.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert changed.value.drift_class is DriftClass.SOURCE_CHANGED
