@@ -758,10 +758,73 @@ compatibility for Compose paths, provisions only required runtime roots, audits,
 auto-repairs deterministic `source-changed` drift, and publishes only explicit
 runtime targets. It never seeds. `target-drift`, `collision`, and
 `invalid-or-semantic` stop the command before agent or Compose invocation. Host
-fallback publishes the selected Claude/Codex/OpenCode view to its native host
-root. A running-container OpenCode session invokes the copied publisher with the
+fallback publishes the selected confirmed Claude/Codex/OpenCode view to its native
+host root. A running-container OpenCode session invokes the copied publisher with the
 same canonical-root, target, state-manifest, and profile arguments as the
 entrypoint.
+
+### Host workflow confirmation
+
+Preparation gates every delivery target whose destination differs from
+`get_config_root(config) / target.tool`. The equal config-root destination is
+container delivery and keeps its existing provisioning and Compose-Claude skip.
+A config-root tool directory that overlaps a native host root is therefore
+outside this protection: the container can write that root directly. Sealing
+and symlink-following publisher writes are unchanged; the latter belongs to
+[#133](https://github.com/w2kr1stn/djinn_in_a_box/issues/133).
+
+For gated targets, the destination is inspected with `lstat` before approval,
+without creating a missing root or parent. Under a shared canonical lease, the
+delivery view is loaded and Claude's host hook rewrite and bridge are applied.
+The reviewed `frozenset[ManifestItem]` contains each relative file path, SHA-256
+content hash and executable flag, plus each fragment's carrier path, key path
+and SHA-256 hash of its canonical JSON value. It covers the final managed
+payload; neighbouring host-owned settings and manifest-driven removals retain
+the publisher's existing semantics. Personal `settings.local.json` content is
+excluded and does not cause re-confirmation.
+
+The host-only record at
+`~/.config/djinn_in_a_box/host-workflow-trust.json` maps absolute destination
+roots to lists of items with exactly `path` (relative POSIX string), `key_path`
+(null for files, a nonempty array of nonempty strings for fragments),
+`content_hash` (64 lowercase hexadecimal characters), and `executable`
+(boolean, always false for fragments). Strict JSON decoding rejects duplicate
+keys. Non-absolute or empty roots, wrong field types, parent-traversing or
+absolute item paths, invalid hashes and duplicate `(path, key_path)` identities
+invalidate the entire record. Missing, unreadable or malformed records mean
+unconfirmed; an empty item list is a confirmed empty set. The existing runtime
+manifest records publication and is never interpreted as user approval.
+
+An identical confirmed set publishes under the current lease without rewriting
+the record. Otherwise the lease is released and a frozen `HostWorkflowReview`
+lists the complete proposed set, sorted new/changed/removed labels, selected
+source directory, any distinct target-native directory and the actual Claude
+bridge template. The session command renders this on stderr and uses
+`typer.confirm(default=False, err=True)` only when stdin is a TTY; a missing
+callback or refusal stops before any host-root writes and before launch.
+
+After approval, preparation re-acquires a shared lease and reloads the payload
+without auto-repair. An unloadable or different set, or the publisher's
+pre-write `SOURCE_CHANGED`, produces `host-workflow-changed` and asks for a
+retry. Canonical-lock and host publisher lock/drift/collision/write errors
+retain their existing mappings. An abort before the first write (changed or
+unloadable set, `SOURCE_CHANGED`, lock, drift or collision) can leave the
+destination directory prepared for the attempt, empty; a write error after the
+first write can leave approved files without a manifest or trust entry. Djinn
+does not remove directories, because a path-based cleanup cannot prove which
+ones it created. Publication writes the immutable approved bytes. Only after
+successful publication and lease release does Djinn re-read
+the trust record, preserve other valid roots, and atomically replace it using
+a same-parent temporary file, mode 0600, and fsync; a new record parent uses
+0700. Every record operation derives from the call-time
+`HOST_WORKFLOW_TRUST_FILE`. Save failure reports the path/cause and stops launch.
+Review output disables Rich markup and emoji codes and escapes non-printable
+characters with `unicode_escape`; a directory lock serializes each trust-record
+load/update/atomic-replace transaction.
+The first host fallback asks once per root, and any subsequent
+container change to published content requires review again. See the
+[security model](SECURITY-MODEL.md#direct-routes-and-target-authority) for external
+hook references, widened mounts and tools with host authority.
 
 ## Docker Compose Runtime
 

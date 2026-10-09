@@ -109,7 +109,10 @@ def test_settings_copy_residue_is_inert_in_real_audit_and_delivery(tmp_path: Pat
     runtime = tmp_path / "delivery"
     runtime.mkdir()
     result = prepare_config_workflow(
-        project, (WorkflowDeliveryTarget("claude", runtime),), config_path=config_path
+        project,
+        (WorkflowDeliveryTarget("claude", runtime),),
+        config_path=config_path,
+        confirm_host_workflow=lambda review: True,
     )
     assert result.success
     assert (
@@ -152,7 +155,8 @@ def test_each_source_delivers_one_global_instruction_file(
         runtime = tmp_path / f"host-{tool}"
         runtime.mkdir()
         published = prepare_config_workflow(
-            project, (WorkflowDeliveryTarget(tool, runtime),), config_path=config_path
+            project, (WorkflowDeliveryTarget(tool, runtime),), config_path=config_path,
+            confirm_host_workflow=lambda review: True,
         )
         assert published.success
         expected = {"AGENTS.md", "CLAUDE.md"} if tool == "claude" else {"AGENTS.md"}

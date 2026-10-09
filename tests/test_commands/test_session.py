@@ -455,3 +455,401 @@ class TestSessionCommand:
             assert headless_kwargs["agent"] == "codex"
             assert headless_kwargs["model"] is None
             assert headless_kwargs["target"] is target
+
+
+def test_host_workflow_confirmation_output_and_default(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from djinn_in_a_box.commands import session as command_module
+    from djinn_in_a_box.core.config_workflow import HostWorkflowChange, HostWorkflowReview
+
+    review = HostWorkflowReview(
+        "claude",
+        (tmp_path / "source[1]",),
+        tmp_path / "host[1]",
+        frozenset(),
+        (
+            HostWorkflowChange("new", "a[1]"),
+            HostWorkflowChange("changed", "b (executable)"),
+            HostWorkflowChange("removed", "settings.json: hooks.Stop"),
+        ),
+    )
+    output = []
+    monkeypatch.setattr(
+        command_module.err_console, "print", lambda *args, **kwargs: output.append((args, kwargs))
+    )
+    monkeypatch.setattr(
+        command_module, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    )
+    prompts = []
+
+    def confirm(prompt, **kwargs):
+        prompts.append((prompt, kwargs))
+        return False
+
+    monkeypatch.setattr(command_module.typer, "confirm", confirm)
+    assert command_module._confirm_host_workflow(review) is False
+    assert prompts == [
+        (
+            f"Publish this workflow to {review.destination_root} and run claude on the host?",
+            {"default": False, "err": True},
+        )
+    ]
+    assert [args[0] for args, _kwargs in output] == [
+        "Host workflow for claude differs from your last confirmation.",
+        "Sources:",
+        f"  {review.sources[0]}",
+        "+ a[1]",
+        "~ b (executable)",
+        "- settings.json: hooks.Stop",
+    ]
+    assert all(
+        kwargs.get("markup") is False
+        and kwargs.get("emoji") is False
+        and kwargs.get("soft_wrap") is True
+        for _args, kwargs in output
+        if _args[0] != "Sources:"
+    )
+    monkeypatch.setattr(
+        command_module, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: False))
+    )
+    prompts.clear()
+    assert command_module._confirm_host_workflow(review) is False
+    assert prompts == []
+
+
+def test_host_workflow_review_escapes_nonprintable_text(tmp_path, monkeypatch):
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from djinn_in_a_box.commands import session as command_module
+    from djinn_in_a_box.core.config_workflow import HostWorkflowChange, HostWorkflowReview
+
+    characters = ("\n", "\r", "\x1b[2J\x1b[H", "\u202e", "\x85", "\u2028")
+    escaped = (r"\n", r"\r", r"\x1b[2J\x1b[H", r"\u202e", r"\x85", r"\u2028")
+    review = HostWorkflowReview(
+        "claude",
+        (*(tmp_path / f"source{ch}[1]é" for ch in characters), tmp_path / "source:smile:"),
+        tmp_path / ("hosté" + "".join(characters)),
+        frozenset(),
+        (
+            *(HostWorkflowChange("new", f"item{ch}[1]é") for ch in characters),
+            # Rich turns :name: codes into emoji unless disabled; names must stay literal.
+            HostWorkflowChange("new", "context/:england: notes.md"),
+        ),
+    )
+    stream = StringIO()
+    monkeypatch.setattr(
+        command_module,
+        "err_console",
+        Console(file=stream, force_terminal=True, color_system=None, highlight=False, width=20),
+    )
+    monkeypatch.setattr(
+        command_module, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    )
+    prompts = []
+    monkeypatch.setattr(
+        command_module.typer, "confirm", lambda prompt, **kwargs: prompts.append(prompt) or False
+    )
+    assert command_module._confirm_host_workflow(review) is False
+    lines = stream.getvalue().splitlines()
+    assert lines == [
+        "Host workflow for claude differs from your last confirmation.",
+        "Sources:",
+        *(f"  {tmp_path}/source{value}[1]é" for value in escaped),
+        f"  {tmp_path}/source:smile:",
+        *(f"+ item{value}[1]é" for value in escaped),
+        "+ context/:england: notes.md",
+    ]
+    assert all(ch.isprintable() for line in lines for ch in line)
+    assert prompts == [
+        f"Publish this workflow to {tmp_path}/hosté{''.join(escaped)} and run claude on the host?"
+    ]
+    assert all(ch.isprintable() for ch in prompts[0])
+
+
+def test_host_workflow_eof_refuses_without_host_writes_or_launch(tmp_path, monkeypatch):
+    from functools import partial
+    from types import SimpleNamespace
+
+    from djinn_in_a_box.commands import session as command_module
+    from djinn_in_a_box.config.loader import save_config
+    from djinn_in_a_box.config.models import AppConfig
+    from djinn_in_a_box.core import config_workflow
+
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    for tool in ("claude", "codex", "opencode"):
+        (project / "config" / tool).mkdir(parents=True)
+    (project / "config/claude/AGENTS.md").write_text("workflow\n")
+    bridge = tmp_path / "CLAUDE.md"
+    bridge.write_text("@AGENTS.md\n")
+    config = AppConfig(code_dir=tmp_path, config_root=tmp_path / "runtime")
+    config_path = tmp_path / "djinn.toml"
+    save_config(config, config_path)
+    monkeypatch.setattr(command_module, "load_config", lambda: config)
+    monkeypatch.setattr(command_module, "get_project_root", lambda: project)
+    monkeypatch.setattr(
+        command_module,
+        "prepare_config_workflow",
+        partial(config_workflow.prepare_config_workflow, config_path=config_path),
+    )
+    monkeypatch.setattr(config_workflow, "_claude_bridge_path", lambda: bridge)
+    monkeypatch.setattr(
+        command_module, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    )
+    with (
+        patch("djinn_in_a_box.commands.session.Path.home", return_value=home),
+        patch("djinn_in_a_box.commands.session.SessionManager") as manager,
+    ):
+        instance = manager.return_value
+        instance.resolve_target.return_value = SessionTarget()
+        instance.preflight_check.return_value = None
+        instance.run_headless.return_value = SessionResult(0)
+        result = runner.invoke(
+            app, ["session", "--project", "eof", "--create", "--prompt", "hello"], input=""
+        )
+    assert result.exit_code == 1, (result.output, result.exception)
+    stderr = " ".join(result.stderr.split())
+    assert "Host workflow for claude was not confirmed; nothing was published." in stderr
+    assert (
+        "Run `djinn session --agent claude` in a terminal, review the listed changes and confirm."
+        in stderr
+    )
+    assert list(home.iterdir()) == []
+    assert not config_workflow.HOST_WORKFLOW_TRUST_FILE.exists()
+    instance.preflight_check.assert_not_called()
+    instance.run_headless.assert_not_called()
+    instance.run_interactive.assert_not_called()
+
+
+def test_host_workflow_acceptance_modified_hook(tmp_path, monkeypatch):
+    import builtins
+    import io
+    import json
+    import os
+    import subprocess
+    from types import SimpleNamespace
+
+    from djinn_in_a_box.commands import session as command_module
+    from djinn_in_a_box.config import loader
+    from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig
+    from djinn_in_a_box.core import config_workflow, docker
+    from djinn_in_a_box.core import session as core_session
+    from djinn_in_a_box.core.workflow_publisher import RUNTIME_MANIFEST_NAME
+
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    for tool in ("claude", "codex", "opencode"):
+        (project / "config" / tool).mkdir(parents=True)
+    source = project / "config/claude"
+    (source / "AGENTS.md").write_text("shared workflow\n")
+    bridge = tmp_path / "bridge/CLAUDE.md"
+    bridge.parent.mkdir()
+    bridge.write_text("@AGENTS.md\n")
+    hook = source / "security_reminder_hook.py"
+    marker = tmp_path / "executions"
+
+    def hook_version(version):
+        hook.write_text(
+            "from pathlib import Path\n"
+            + f"with Path({str(marker)!r}).open('a') as stream:\n"
+            + f"    stream.write({version!r} + '\\n')\n"
+        )
+        hook.chmod(0o700)
+
+    hook_version("v1")
+    (source / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python3 ~/.claude_seed/security_reminder_hook.py",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    config_path = tmp_path / "djinn.toml"
+    loader.save_config(
+        AppConfig(
+            code_dir=tmp_path,
+            config_root=tmp_path / "runtime",
+            config_sync=ConfigSyncConfig(source="claude"),
+        ),
+        config_path,
+    )
+    (home / ".djinn/sessions/acceptance").mkdir(parents=True)
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    fake_agent = binaries / "claude"
+    fake_agent.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, subprocess\n"
+        "from pathlib import Path\n"
+        "settings = json.loads((Path(os.environ['HOME']) / '.claude/settings.json').read_text())\n"
+        "command = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']\n"
+        "subprocess.run(['sh', '-c', command], stdin=subprocess.DEVNULL, check=True)\n"
+    )
+    fake_agent.chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(binaries) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    original_config_file = loader.CONFIG_FILE
+    original_config_dir = config_workflow.CONFIG_DIR
+    monkeypatch.setattr(loader, "CONFIG_FILE", config_path)
+    monkeypatch.setattr(command_module, "load_config", loader.load_config)
+    monkeypatch.setattr(
+        command_module, "prepare_config_workflow", config_workflow.prepare_config_workflow
+    )
+    monkeypatch.setattr(command_module, "get_project_root", lambda: project)
+    monkeypatch.setattr(command_module, "get_config_root", docker.get_config_root)
+    monkeypatch.setattr(config_workflow, "_claude_bridge_path", lambda: bridge)
+    monkeypatch.setattr(core_session.SessionManager, "_find_container", lambda self: None)
+
+    # Trap both built-in and pathlib opens of the original host configuration.
+    def guard_open(original):
+        def guarded(path, *args, **kwargs):
+            if isinstance(path, (str, os.PathLike)):
+                selected = Path(path).absolute()
+                assert selected != original_config_file
+                assert not selected.is_relative_to(original_config_dir)
+            return original(path, *args, **kwargs)
+
+        return guarded
+
+    monkeypatch.setattr(builtins, "open", guard_open(builtins.open))
+    monkeypatch.setattr(io, "open", guard_open(io.open))
+    original_run = subprocess.run
+    launches = []
+
+    def run(cmd, *args, **kwargs):
+        if cmd[0] == "claude":
+            launches.append(tuple(cmd))
+        if kwargs.get("capture_output"):
+            kwargs.setdefault("stdin", subprocess.DEVNULL)
+        return original_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(core_session.subprocess, "run", run)
+    arguments = ["session", "--project", "acceptance", "--agent", "claude", "--prompt", "hello"]
+
+    def invoke(tty, answer=""):
+        monkeypatch.setattr(
+            command_module, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: tty))
+        )
+        return runner.invoke(app, arguments, input=answer)
+
+    first = invoke(True, "y\n")
+    assert first.exit_code == 0, (first.output, first.exception)
+    assert marker.read_text() == "v1\n"
+    assert len(launches) == 1
+    record = config_workflow.HOST_WORKFLOW_TRUST_FILE
+    assert record.exists()
+    host_hook = home / ".claude/security_reminder_hook.py"
+    manifest = home / ".claude" / RUNTIME_MANIFEST_NAME
+    before = (host_hook.read_bytes(), manifest.read_bytes(), record.read_bytes())
+    hook_version("v2")
+    for tty, answer in [(False, ""), (True, "n\n"), (True, "\n")]:
+        launches.clear()
+        declined = invoke(tty, answer)
+        assert declined.exit_code == 1, (declined.output, declined.exception)
+        assert "~ security_reminder_hook.py (executable)" in declined.stderr
+        assert (
+            "Host workflow for claude was not confirmed; nothing was published." in declined.stderr
+        )
+        assert "Run `djinn session --agent claude` in a terminal" in declined.stderr
+        assert (host_hook.read_bytes(), manifest.read_bytes(), record.read_bytes()) == before
+        assert launches == []
+        assert marker.read_text() == "v1\n"
+    accepted = invoke(True, "y\n")
+    assert accepted.exit_code == 0, (accepted.output, accepted.exception)
+    assert marker.read_text() == "v1\nv2\n"
+    assert len(launches) == 1
+    unchanged = invoke(False)
+    assert unchanged.exit_code == 0, (unchanged.output, unchanged.exception)
+    assert "Publish this workflow" not in unchanged.output
+    assert marker.read_text() == "v1\nv2\nv2\n"
+    assert len(launches) == 2
+
+    # Publication may succeed while recording fails; the agent still must not start.
+    prior_record = record.read_bytes()
+    hook_version("v3")
+    original_replace = os.replace
+
+    def refuse_record(src, dst):
+        if Path(dst) == record:
+            raise PermissionError("trust directory is read-only")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", refuse_record)
+    launches.clear()
+    failed_record = invoke(True, "y\n")
+    assert failed_record.exit_code == 1, (failed_record.output, failed_record.exception)
+    assert "Failed to record host workflow trust" in failed_record.stderr
+    assert "trust directory is read-only" in " ".join(failed_record.stderr.split())
+    assert launches == []
+    assert record.read_bytes() == prior_record
+    assert marker.read_text() == "v1\nv2\nv2\n"
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("headless", [False, True], ids=["interactive", "prompt"])
+def test_host_session_passes_exact_confirmation_callback(tmp_path, monkeypatch, agent, headless):
+    from types import SimpleNamespace
+
+    from djinn_in_a_box.commands import session as command_module
+
+    (tmp_path / ".djinn/sessions/testproj").mkdir(parents=True)
+    monkeypatch.setattr(
+        command_module, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    )
+    with (
+        patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+        patch("djinn_in_a_box.commands.session.SessionManager") as manager,
+        patch("djinn_in_a_box.commands.session.prepare_config_workflow") as prepare,
+    ):
+        instance = manager.return_value
+        instance.resolve_target.return_value = SessionTarget()
+        instance.preflight_check.return_value = None
+        instance.run_headless.return_value = SessionResult(0)
+        instance.run_interactive.return_value = SessionResult(0)
+        prepare.return_value = WorkflowPreparationResult(True)
+        arguments = ["session", "--project", "testproj", "--agent", agent]
+        if headless:
+            arguments += ["--prompt", "hello"]
+        result = runner.invoke(app, arguments)
+    assert result.exit_code == 0, (result.output, result.exception)
+    prepare.assert_called_once()
+    assert (
+        prepare.call_args.kwargs["confirm_host_workflow"] is command_module._confirm_host_workflow
+    )
+
+
+def test_container_session_passes_no_confirmation_callback(tmp_path):
+    workspace = tmp_path / ".djinn/sessions/testproj"
+    workspace.mkdir(parents=True)
+    with (
+        patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
+        patch("djinn_in_a_box.commands.session.SessionManager") as manager,
+        patch("djinn_in_a_box.commands.session.prepare_config_workflow") as prepare,
+    ):
+        manager.return_value.resolve_target.return_value = SessionTarget("container-123")
+        manager.return_value.workflow_image_compatible.return_value = (
+            WorkflowImageCompatibility.COMPATIBLE
+        )
+        manager.return_value.run_headless.return_value = SessionResult(0)
+        prepare.return_value = WorkflowPreparationResult(True)
+        result = runner.invoke(app, ["session", "--project", "testproj", "--prompt", "hello"])
+    assert result.exit_code == 0, result.output
+    assert prepare.call_args.kwargs["confirm_host_workflow"] is None

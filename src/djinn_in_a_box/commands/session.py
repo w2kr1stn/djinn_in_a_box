@@ -11,6 +11,7 @@ import typer
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.config_workflow import (
+    HostWorkflowReview,
     WorkflowDeliveryTarget,
     prepare_config_workflow,
 )
@@ -19,6 +20,49 @@ from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility, get_config_root
 from djinn_in_a_box.core.paths import get_project_root
 from djinn_in_a_box.core.session import SessionManager
+
+
+def _review_text(value: str) -> str:
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in value
+    )
+
+
+def _confirm_host_workflow(review: HostWorkflowReview) -> bool:
+    # soft_wrap keeps long paths copyable instead of breaking them mid-path; markup and
+    # emoji codes stay off so container-chosen names are shown literally.
+    err_console.print(
+        f"Host workflow for {review.tool} differs from your last confirmation.",
+        markup=False,
+        emoji=False,
+        soft_wrap=True,
+    )
+    err_console.print("Sources:")
+    for source in review.sources:
+        err_console.print(
+            _review_text(f"  {source}"), markup=False, emoji=False, soft_wrap=True
+        )
+    symbols = {"new": "+", "changed": "~", "removed": "-"}
+    for change in review.changes:
+        err_console.print(
+            _review_text(f"{symbols[change.status]} {change.label}"),
+            markup=False,
+            emoji=False,
+            soft_wrap=True,
+        )
+    if sys.stdin.isatty():
+        try:
+            return typer.confirm(
+                _review_text(
+                    f"Publish this workflow to {review.destination_root} "
+                    f"and run {review.tool} on the host?"
+                ),
+                default=False,
+                err=True,
+            )
+        except typer.Abort:
+            return False
+    return False
 
 
 @handle_config_errors
@@ -123,6 +167,7 @@ def session(
         config_snapshot=config,
         require_compose_host_env=target.container_mode,
         container_image_compatibility=container_image_compatibility,
+        confirm_host_workflow=None if target.container_mode else _confirm_host_workflow,
     )
     if not workflow.success:
         problem = workflow.problems[0]

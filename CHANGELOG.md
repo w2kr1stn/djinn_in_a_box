@@ -15,6 +15,18 @@ Versioning before and after the first stable release.
   Host-only overlay edits survive clean stop; runtime wins when both changed.
   Missing checkpoint references can let final sync overwrite host-only edits.
 
+### Security
+
+- Require host-side confirmation before `djinn session` publishes a new or
+  changed managed workflow to a native host agent root. Confirmation defaults
+  to No at a terminal; non-TTY callers refuse with exit 1 and review instructions.
+  Approved item sets are stored separately in
+  `~/.config/djinn_in_a_box/host-workflow-trust.json` and revalidated before
+  publication. Existing roots require one first confirmation after updating;
+  container changes to published content require another, while personal
+  `settings.local.json` write-back does not. Container workflow editing and
+  delivery remain unchanged.
+
 ### Removed
 
 - Docker socket proxy service, Compose file and `djinn logs proxy` command.
