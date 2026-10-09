@@ -144,11 +144,11 @@ _capture_session_runtime() {
     cat -- "$1" > "$2" 2>/dev/null
 }
 
-# Validate, commit and acknowledge one capture; never re-read the live file.
+# Compare, validate, commit and acknowledge one capture; never re-read the live file.
 _sync_session_carrier() {
     local runtime_file=$1 target_file=$2 acknowledged_file=$3 mode=$4 filter_kind=$5
     local seed_dir_path=${target_file:h} state_dir=${acknowledged_file:h}
-    local capture='' filtered='' payload message
+    local capture='' filtered='' payload message compare_result=1
     message="could not persist ${runtime_file} → ${target_file}"
     [[ -f "$runtime_file" && -d "$seed_dir_path" ]] || return 0
 
@@ -158,33 +158,54 @@ _sync_session_carrier() {
     fi
     if ! _capture_session_runtime "$runtime_file" "$capture" 2>/dev/null; then
         _session_sync_warn "$runtime_file" "$mode" "$message"
-    elif ! jq -s -e 'length == 1' "$capture" >/dev/null 2>&1; then
+        rm -f -- "$capture" 2>/dev/null || :
+        return 0
+    fi
+    if [[ -f "$acknowledged_file" ]]; then
+        compare_result=0
+        cmp -s "$capture" "$acknowledged_file" || compare_result=$?
+    fi
+    if (( compare_result == 0 )); then
+        rm -f -- "$capture" 2>/dev/null || :
+        return 0
+    elif (( compare_result > 1 )); then
+        _session_sync_warn "$runtime_file" "$mode" "$message"
+        rm -f -- "$capture" 2>/dev/null || :
+        return 0
+    fi
+    if ! jq -s -e 'length == 1' "$capture" >/dev/null 2>&1; then
         [[ "$mode" == final ]] && ui_warn "$message (settings are not valid JSON)"
     else
         payload=$capture
         if [[ "$filter_kind" == claude ]]; then
+            if ! jq -e 'type == "object"' "$capture" >/dev/null 2>&1 ||
+                ! _claude_filter_managed_hooks "$capture" /dev/null 2>/dev/null; then
+                [[ "$mode" == final ]] && ui_warn "$message (settings are not valid JSON)"
+                rm -f -- "$capture" 2>/dev/null || :
+                return 0
+            fi
             if ! filtered=$(mktemp "$state_dir/filter.XXXXXXXX" 2>/dev/null); then
                 _session_sync_warn "$runtime_file" "$mode" "$message"
                 rm -f -- "$capture" 2>/dev/null || :
                 return 0
             fi
             if ! _claude_filter_managed_hooks "$capture" "$filtered" 2>/dev/null; then
-                [[ "$mode" == final ]] && ui_warn "$message (settings are not valid JSON)"
+                _session_sync_warn "$runtime_file" "$mode" "$message"
                 rm -f -- "$capture" "$filtered" 2>/dev/null || :
                 return 0
             fi
             payload=$filtered
         fi
 
-        if [[ -f "$acknowledged_file" ]] && cmp -s "$capture" "$acknowledged_file"; then
-            :
-        elif [[ ! -w "$seed_dir_path" ]]; then
+        if [[ ! -w "$seed_dir_path" ]]; then
             _session_sync_warn "$runtime_file" "$mode" "$message (target directory not writable)"
         elif { [[ "$mode" == checkpoint ]] &&
             python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null 2>&1; } ||
             { [[ "$mode" == final ]] &&
             python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null; }; then
-            if ! mv -f -- "$capture" "$acknowledged_file" 2>/dev/null; then
+            # mv -T replaces a symlink to a directory, so reject that shape explicitly.
+            if [[ -L "$acknowledged_file" && -d "$acknowledged_file" ]] ||
+                ! mv -fT -- "$capture" "$acknowledged_file" 2>/dev/null; then
                 _session_sync_warn "$runtime_file" "$mode" "$message"
             fi
         else

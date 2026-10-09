@@ -623,10 +623,12 @@ publication.
   repair hint and skips the merge rather than writing incomplete state. The
   baseline wins for the owned `SessionStart`, `PreToolUse`, and `Stop` hook
   fragments; neighboring settings remain overlay-controlled.
-- `reverse_sync_file(runtime_file, target_file)`: best-effort copy from container
-  state back to writable seed mounts at shutdown (shell exit or SIGTERM).
-- `reverse_sync_claude_settings(runtime_file, target_file)`: persists the personal
-  Claude overlay after removing only those three managed hook fragments.
+- `reverse_sync_file(runtime_file, target_file, acknowledged_file, mode)`:
+  checkpoints changed container state to writable seed mounts and performs the
+  same sync at clean stop; `mode` is `checkpoint` or `final`.
+- `reverse_sync_claude_settings(runtime_file, target_file, acknowledged_file, mode)`:
+  uses the same checkpoint/final change-only rule for the personal Claude overlay,
+  removing only those three managed hook fragments from the destination.
 
 `entrypoint.sh` applies those helpers as follows:
 
@@ -721,17 +723,21 @@ The entrypoint captures initial runtime references in a private mode-0700
 directory, then checkpoints Claude state, filtered Claude personal settings and
 OpenCode personal settings every fixed 30 s. Changes older than about 30 s
 survive a crash, qualified by checkpoint duration, scheduling, valid JSON and
-writable healthy storage. Each carrier is captured once, validated as exactly
-one JSON document, compared with its last acknowledged runtime bytes, copied
+writable healthy storage. Each carrier is captured once and compared with its
+last acknowledged runtime bytes first; unchanged content skips validation and
+writing. Changed content is validated as exactly one JSON document, copied
 atomically through `settings-copy.py`, and acknowledged only after file fsync,
 replacement and directory fsync succeed. Destination files have mode 0600.
 Claude acknowledgement retains raw captured bytes; only the destination has the
 three managed hook keys removed. Unchanged runtime content leaves host edits
 alone, including a host-only `settings.local.json` edit at clean stop; when both
 changed, runtime wins. Checkpoint failures warn once per carrier per session and
-retry; invalid JSON is silent until final sync. Clean stop joins any in-flight
-write, runs that same sync, and keeps shell/TERM/INT exit codes. Failed initial
-capture or state creation disables checkpointing with one warning. Final sync
+retry; changed invalid input is silent until final sync. Claude settings must
+be an object accepted by the managed-hook filter; filtered-output failures warn
+as storage failures. Comparison read errors preserve destinations and references
+and retry. Clean stop joins any in-flight write, runs the same sync, and keeps
+shell/TERM/INT exit codes. Failed initial capture or state creation disables
+checkpointing with one warning. Final sync
 recreates missing private state once; failure warns per existing carrier and
 writes nothing. Without references, every valid carrier is written, so a
 host-only overlay edit can be overwritten in that degraded path.

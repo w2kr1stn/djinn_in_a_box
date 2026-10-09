@@ -587,9 +587,10 @@ def test_final_warning_does_not_consult_checkpoint_throttle(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("mode", ("checkpoint", "final"))
-@pytest.mark.parametrize("content", (b'[]', b'false'))
-def test_unchanged_claude_filter_failure_still_has_final_warning(
-    tmp_path: Path, mode: str, content: bytes
+@pytest.mark.parametrize("kind", ("raw", "claude"))
+@pytest.mark.parametrize("content", (b'{"valid":true}', b'{"partial":', b'[]', b'null'))
+def test_unchanged_runtime_skips_validation_and_filtering(
+    tmp_path: Path, mode: str, kind: str, content: bytes
 ) -> None:
     runtime = tmp_path / "runtime.json"
     target = tmp_path / "target.json"
@@ -597,18 +598,181 @@ def test_unchanged_claude_filter_failure_still_has_final_warning(
     runtime.write_bytes(content)
     ack.write_bytes(content)
     target.write_bytes(b'{"previous":true}')
+    before = target.stat().st_mtime_ns
+    function = "reverse_sync_file" if kind == "raw" else "reverse_sync_claude_settings"
+    validation_log = tmp_path / "validation.log"
     result = run_seed_lib(
         tmp_path,
-        f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" {mode} || :',
+        f'jq() {{ print -r -- "$@" >> "{validation_log}"; command jq "$@"; }}; '
+        f'{function} "{runtime}" "{target}" "{ack}" {mode} || :',
     )
     assert result.returncode == 0
-    assert result.stdout == ""
-    message = f'  [warn] could not persist {runtime} → {target} (settings are not valid JSON)\n'
-    assert result.stderr == (message if mode == "final" else "")
+    assert result.stdout == result.stderr == ""
+    assert not validation_log.exists()
     assert target.read_bytes() == b'{"previous":true}'
+    assert target.stat().st_mtime_ns == before
     assert ack.read_bytes() == content
     assert not list(tmp_path.glob("capture.*"))
     assert not list(tmp_path.glob("filter.*"))
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+@pytest.mark.parametrize("kind", ("raw", "claude"))
+@pytest.mark.parametrize("changed", (False, True))
+def test_unreadable_reference_warns_preserves_and_retries(
+    tmp_path: Path, mode: str, kind: str, changed: bool
+) -> None:
+    assert os.geteuid() != 0, "permission tests require non-root execution"
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    previous = b'{"runtime":1}\n'
+    runtime.write_bytes(b'{"runtime":2}\n' if changed else previous)
+    target.write_bytes(b'{"host":3}\n')
+    ack.write_bytes(previous)
+    before = target.stat().st_mtime_ns
+    ack_before = ack.stat().st_mtime_ns
+    function = "reverse_sync_file" if kind == "raw" else "reverse_sync_claude_settings"
+    call = f'{function} "{runtime}" "{target}" "{ack}" {mode} || :'
+    ack.chmod(0)
+    try:
+        result = run_seed_lib(tmp_path, f"{call}; {call}")
+        assert result.returncode == 0
+        assert result.stdout == ""
+        warning = f"  [warn] could not persist {runtime} → {target}\n"
+        assert result.stderr == warning * (1 if mode == "checkpoint" else 2)
+        assert target.read_bytes() == b'{"host":3}\n'
+        assert target.stat().st_mtime_ns == before
+        assert ack.stat().st_mtime_ns == ack_before
+    finally:
+        ack.chmod(0o600)
+    assert ack.read_bytes() == previous
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+
+    result = run_seed_lib(tmp_path, call)
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert ack.read_bytes() == runtime.read_bytes()
+    if changed:
+        assert json.loads(target.read_bytes()) == json.loads(runtime.read_bytes())
+    else:
+        assert target.read_bytes() == b'{"host":3}\n'
+        assert target.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+@pytest.mark.parametrize("content", (b'null', b'[]', b'false', b'{"hooks":[]}'))
+def test_changed_claude_input_must_be_object_accepted_by_filter(
+    tmp_path: Path, mode: str, content: bytes
+) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    previous = b'{"previous":true}\n'
+    runtime.write_bytes(content)
+    target.write_bytes(previous)
+    ack.write_bytes(previous)
+    call = f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" {mode} || :'
+    result = run_seed_lib(tmp_path, f"{call}; {call}")
+    assert result.returncode == 0
+    assert result.stdout == ""
+    warning = f"  [warn] could not persist {runtime} → {target} (settings are not valid JSON)\n"
+    assert result.stderr == (warning * 2 if mode == "final" else "")
+    assert target.read_bytes() == ack.read_bytes() == previous
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+def test_claude_filtered_output_write_limit_warns_and_retries(tmp_path: Path, mode: str) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    previous = b'{"previous":true}\n'
+    content = json.dumps({"items": [0] * 180}, separators=(",", ":")).encode()
+    assert len(content) < 512
+    runtime.write_bytes(content)
+    target.write_bytes(previous)
+    ack.write_bytes(previous)
+
+    # zsh's file-size limit is in 512-byte blocks; capture fits, jq's output does not.
+    limit = "ulimit -c 0; ulimit -f 1; "
+    probe = tmp_path / "probe.filtered"
+    result = run_seed_lib(
+        tmp_path,
+        limit + f'if _claude_filter_managed_hooks "{runtime}" "{probe}" 2>/dev/null; '
+        'then echo unexpected; else print -r -- "$?"; fi',
+    )
+    assert result.returncode == 0
+    assert result.stdout == "153\n"
+    assert result.stderr == ""
+    assert probe.stat().st_size == 512
+    probe.unlink()
+
+    call = f'reverse_sync_claude_settings "{runtime}" "{target}" "{ack}" {mode} || :'
+    result = run_seed_lib(tmp_path, limit + f"{call}; {call}")
+    assert result.returncode == 0
+    assert result.stdout == ""
+    warning = f"  [warn] could not persist {runtime} → {target}\n"
+    assert result.stderr == warning * (1 if mode == "checkpoint" else 2)
+    assert target.read_bytes() == ack.read_bytes() == previous
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+    assert not list(tmp_path.glob(".djinn-settings-*"))
+
+    result = run_seed_lib(tmp_path, call)
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert ack.read_bytes() == content
+    assert json.loads(target.read_bytes()) == json.loads(content)
+    target.write_bytes(b'{"host":true}\n')
+    result = run_seed_lib(tmp_path, call)
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert target.read_bytes() == b'{"host":true}\n'
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+@pytest.mark.parametrize("kind", ("raw", "claude"))
+@pytest.mark.parametrize("symlink", (False, True))
+def test_acknowledgement_directory_warns_and_retries(
+    tmp_path: Path, mode: str, kind: str, symlink: bool
+) -> None:
+    runtime = tmp_path / "runtime.json"
+    target = tmp_path / "target.json"
+    ack = tmp_path / "runtime.ack"
+    directory = tmp_path / "ack-directory" if symlink else ack
+    directory.mkdir()
+    if symlink:
+        ack.symlink_to(directory, target_is_directory=True)
+    content = b'{"next":true}\n'
+    runtime.write_bytes(content)
+    target.write_bytes(b'{"previous":true}\n')
+    function = "reverse_sync_file" if kind == "raw" else "reverse_sync_claude_settings"
+    call = f'{function} "{runtime}" "{target}" "{ack}" {mode} || :'
+    result = run_seed_lib(tmp_path, f"{call}; {call}")
+    assert result.returncode == 0
+    assert result.stdout == ""
+    warning = f"  [warn] could not persist {runtime} → {target}\n"
+    assert result.stderr == warning * (1 if mode == "checkpoint" else 2)
+    assert ack.is_dir()
+    assert ack.is_symlink() == symlink
+    assert list(directory.iterdir()) == []
+    assert json.loads(target.read_bytes()) == json.loads(content)
+    assert not list(tmp_path.glob("capture.*"))
+    assert not list(tmp_path.glob("filter.*"))
+
+    ack.unlink() if symlink else ack.rmdir()
+    result = run_seed_lib(tmp_path, call)
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert ack.read_bytes() == content
+    target.write_bytes(b'{"host":true}\n')
+    result = run_seed_lib(tmp_path, call)
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert target.read_bytes() == b'{"host":true}\n'
 
 
 

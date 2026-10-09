@@ -38,22 +38,6 @@ Djinn gives you one repeatable container image and several ways to use it:
 - Back up and restore the managed volumes and config-root directories with
   `djinn backup` and `djinn restore`.
 
-Claude state, Claude personal settings and OpenCode personal settings are
-checkpointed every 30 s: changes older than about 30 s survive a crash, plus the
-time a checkpoint takes and scheduling delay, provided the runtime JSON is valid
-and storage is writable and healthy. Only runtime content that changed since the
-last successful checkpoint is written, using atomic replacement. A host-only edit
-of `settings.local.json` now survives a clean stop; when both sides changed, the
-runtime wins. Failed checkpoints warn once per carrier per session and retry;
-clean stop joins the checkpointer and performs the same sync with final warnings.
-
-If checkpoint setup failed or its private state was lost, clean stop has no
-references and writes every valid carrier, which can overwrite a host-only edit.
-A crash during replacement can leave an inert `.djinn-settings-*` temporary file:
-`djinn doctor` reports it as zone drift in config-root `claude/` or `opencode/`;
-beside the seed overlay in `config/claude/` it is unreported. These files are
-neither restored as settings nor projected into workflow delivery.
-
 Credentials are separated by CLI. By default, Claude Code, Codex CLI, OpenCode,
 and the GitHub CLI each get their own host directory under the configured Djinn
 config root. The container sees those directories at the paths each CLI
@@ -396,6 +380,18 @@ that Claude and Codex registrations remain paired with those scripts. See
 for the per-tool tables, container paths, and validation behavior.
 
 ### Tool-Owned Runtime State
+
+Claude state, Claude personal settings and OpenCode personal settings are
+checkpointed every 30 s with atomic writes. Changes older than about 30 s survive
+a crash, plus checkpoint duration and scheduling delay, when JSON is valid and
+storage is writable and healthy. Unchanged runtime content leaves host edits
+alone, including `settings.local.json` at clean stop; when both changed, runtime
+wins. Without checkpoint references (failed setup or lost private state), final
+sync writes every valid carrier and can overwrite a host-only edit.
+
+Crash residue (`.djinn-settings-*`) is never restored or projected into workflow
+delivery. `djinn doctor` reports it as zone drift in config-root `claude/` and
+`opencode/`; beside the seed overlay in `config/claude/` it is unreported.
 
 The agent CLIs write into their own config root while they run, and those writes
 land in the workflow source because `config/claude/skills` and
