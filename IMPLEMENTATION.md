@@ -1541,7 +1541,8 @@ round-trip of `os.fsencode`; NUL, surrogates, and lossy host encoding are reject
 `None` and `{}` preserve defaults. Allowed values override inheritance literally,
 including empty strings, without changing the input map, `os.environ`, later
 sessions, or persistent files. Host agent starts merge a fresh inherited
-environment, additions, and fixed terminal values; discovery, host Git setup,
+environment, additions, and fixed terminal values, and for OpenCode a final
+`OPENCODE_DISABLE_PROJECT_CONFIG=1` that overrides both; discovery, host Git setup,
 and image/workflow preparation receive no additions. Container starts use
 name-only `docker exec -e NAME` forwarding with values in the subprocess
 environment. The Docker connection, target, prompt transport, and TTY behavior
@@ -1582,6 +1583,48 @@ workflow view. Host-mode interactive and headless commands then run directly in
 the host workspace. Container-mode OpenCode sessions refresh the live runtime
 through the shared publisher before the agent starts. Its image compatibility
 check inspects the running container image, not the current image tag.
+
+In host mode, `run_interactive()` and `run_headless()` call
+`_guard_host_workspace()` after target resolution selects the no-container
+branch and before building or launching the agent command. The guard checks, in
+order:
+
+1. The agent must be Claude, Codex or OpenCode, and the workspace top level
+   must hold none of the entries the selected agent would load.
+2. It resolves the workspace and `~/.djinn/sessions`. The workspace root must
+   not hold `HEAD` (Git could take it as a bare repository); for a workspace
+   below the sessions root, every physical ancestor from its parent through
+   that root must contain neither `.git`, `HEAD` nor selected-agent project
+   entries.
+3. Only after those checks, it runs `git init` if `.git` is missing, then
+   checks the repository shape, config, hooks and legacy destination carriers.
+   `.git` must be a real directory with regular `HEAD` and real `objects` and
+   `refs` directories, no `commondir` or `modules`, allowlisted config keys,
+   network-only remote destinations (every remote has a `url`; no remote name
+   starts with `/`), only `*.sample` hooks, and absent or real
+   empty `remotes` and `branches` directories.
+4. It refuses any `.git` entry below the workspace root, including files and
+   symlinks. This conservative walk refuses nested repositories and
+   submodules, so workspaces containing a nested clone cannot start in host mode.
+
+Repository inspection reads files and invokes
+`git config --file <workspace>/.git/config --null --list` with cwd outside the
+workspace; it does not run workspace-configured commands. The only separate
+Git command is `git init` when `.git` is absent, after the earlier checks pass.
+Host Claude appends `--setting-sources user`
+after configured flags and the model flag, immediately before the prompt. Host
+OpenCode sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` after inherited and caller
+environment values, and still refuses `.opencode`, `opencode.json`,
+`opencode.jsonc`, `tui.json` and `tui.jsonc`. Host Codex refuses `.codex`; other
+configured agents are refused on the host and run unchanged in the container.
+
+An unsupported agent, offending entry, invalid repository state or inspection
+failure refuses before launch. Both run methods return
+`SessionResult(returncode=1, stdout="", stderr=<message>,
+workspace_dir=<workspace>)`; the CLI prints the message on stderr and exits 1.
+It identifies the offending entry, key or destination and advises running in
+the container or reviewing and removing the entry on the host. Container-mode
+starts do not run this guard and retain their existing behavior.
 
 ## Backup and Restore
 

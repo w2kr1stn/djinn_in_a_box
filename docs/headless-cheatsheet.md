@@ -184,7 +184,8 @@ When a running `djinn` container exists, session commands run through
 `docker exec` inside that container. If no container is running, session
 preflight checks the selected agent's configured binary on host `PATH`. Claude,
 Codex, and OpenCode host fallback also receives that selected agent's canonical
-workflow.
+workflow. Before launch, the host guard disables or refuses project
+configuration and refuses unsafe workspace Git state; a refusal exits 1.
 For a running-container OpenCode session, Djinn refreshes the live OpenCode
 runtime through the shared publisher before invocation.
 
@@ -220,4 +221,4 @@ must start with a letter or number.
 Docker authority and write-mode implications are documented in the
 [security model](../SECURITY-MODEL.md#host-authority-and-docker-access).
 Session host fallback has a separate
-[open workflow path](../SECURITY-MODEL.md#direct-routes-and-target-authority).
+[session host-start boundary and residual risks](../SECURITY-MODEL.md#direct-routes-and-target-authority).

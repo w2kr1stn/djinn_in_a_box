@@ -24,6 +24,12 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Protect host-mode `djinn session` from automatic loading of container-writable
+  agent and Git configuration. Claude starts with user-only settings; OpenCode
+  disables project config and refuses its remaining entry points; Codex
+  workspaces with `.codex` and unsupported agents are refused. Unsafe Git
+  repositories, including workspaces containing nested clones, are refused
+  before launch with exit 1 and review guidance. Container mode is unchanged.
 - Host-side provisioning, doctor repair, Claude baseline seeding, session
   creation and sync-path clearing refuse symlinked or non-directory components.
   Derived roots that are symlinks are refused.
