@@ -183,6 +183,20 @@ def test_replay_failures_are_warnings(tmp_path, stage, status):
     assert replay.list.read_text() == "jq\n"
 
 
+def test_replay_skips_nul_line_instead_of_joining(tmp_path):
+    # Bash drops NUL bytes in substitutions; "j\0q" must not become "jq".
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_bytes(b"j\x00q\ncurl\n")
+    replay.tools.configure(states={"curl": ["installed", 0]})
+    result = replay.run()
+    assert result.returncode == 0
+    assert result.stderr.count("Invalid package name") == 1
+    assert "1 recorded, all installed" in result.stderr
+    assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == ["curl"]
+    assert replay.tools.sudo_calls() == [] and replay.tools.events("cache") == []
+    assert "null byte" not in result.stderr
+
+
 FETCH_WARNINGS = (
     "W: Failed to fetch http://deb.debian.org/debian/dists/bookworm/InRelease  "
     "Temporary failure resolving 'deb.debian.org'\n"

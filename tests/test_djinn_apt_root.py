@@ -420,3 +420,17 @@ def test_helper_lock_open_failure(tmp_path):
     result = helper.run(["update"])
     assert result.returncode == 100 and str(helper.lock) in result.stderr
     assert helper.tools.events() == []
+
+
+@pytest.mark.parametrize(
+    "args", [["A" * 32769], ["install", "A" * 32769], ["install", "\x01" * 65]]
+)
+def test_helper_long_token_refused_promptly(tmp_path, args):
+    # Reachable directly through sudo: a slow refusal would pin a root shell.
+    helper = HelperHarness(tmp_path)
+    started = time.monotonic()
+    result = helper.run(args)
+    assert time.monotonic() - started < 2
+    assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
+    assert f"({len(args[-1])}-byte argument)" in result.stderr
+    assert not helper.lock.exists() and helper.tools.events() == []

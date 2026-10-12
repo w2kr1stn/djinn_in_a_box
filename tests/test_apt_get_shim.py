@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 
 import pytest
 from test_djinn_apt_root import (
@@ -306,3 +307,28 @@ def test_record_failure_preserves_apt_status(tmp_path, failure):
     assert str(shim.list) in result.stderr
     if failure == "missing-directory":
         assert not shim.list.parent.exists()
+
+
+LONG = "A" * 32769
+
+
+@pytest.mark.parametrize(
+    "args", [[LONG], ["install", LONG], ["install", "jq", "-" + LONG[1:]], ["install", "\x01" * 65]]
+)
+def test_long_token_refused_promptly(tmp_path, args):
+    # Per-byte escaping of a 32 KiB token took seconds; long tokens are sized instead.
+    shim = ShimHarness(tmp_path)
+    started = time.monotonic()
+    result = shim.run(args)
+    assert time.monotonic() - started < 2
+    assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
+    assert f"({len(args[-1])}-byte argument)" in result.stderr
+    assert shim.tools.sudo_calls() == [] and not shim.list.exists()
+
+
+def test_record_dedupe_does_not_join_around_nul(tmp_path):
+    # "j\0q" is not "jq": a substitution that drops the NUL must not hide jq.
+    shim = ShimHarness(tmp_path)
+    shim.list.write_bytes(b"# retained\nj\x00q\n")
+    assert shim.run(["install", "jq"]).returncode == 0
+    assert shim.list.read_bytes() == b"# retained\nj\x00q\njq\n"

@@ -31,9 +31,14 @@ escape_token() {
 refuse() {
     printf 'djinn-apt-root: %s' "$1" >&2
     if [ "$#" -gt 1 ]; then
-        printf ' (' >&2
-        escape_token "$2" >&2
-        printf ')' >&2
+        # Escaping is per byte; a long token is reported by its size only.
+        if [ "${#2}" -gt 64 ]; then
+            printf ' (%s-byte argument)' "${#2}" >&2
+        else
+            printf ' (' >&2
+            escape_token "$2" >&2
+            printf ')' >&2
+        fi
     fi
     printf '; see apt-get --help and README section "Runtime Packages".\n' >&2
     exit 2

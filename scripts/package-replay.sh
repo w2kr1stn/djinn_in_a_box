@@ -27,7 +27,9 @@ if [[ ! -e "$list_path" ]]; then
     ui_info 'none recorded'
     exit 0
 fi
-if ! snapshot=$(cat -- "$list_path" 2>/dev/null && printf '.'); then
+# A NUL byte would vanish in the substitution and join its neighbours into another
+# name; as \001 it fails validation and the line is skipped.
+if ! snapshot=$(tr '\000' '\001' 2>/dev/null < "$list_path" && printf '.'); then
     ui_warn "Cannot read package list $list_path."
     ui_info 'none recorded (list unreadable)'
     exit 0

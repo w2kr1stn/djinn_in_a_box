@@ -50,9 +50,14 @@ escape_token() {
 refuse() {
     printf 'apt-get: %s' "$1" >&2
     if [ "$#" -gt 1 ]; then
-        printf ' (' >&2
-        escape_token "$2" >&2
-        printf ')' >&2
+        # Escaping is per byte; a long token is reported by its size only.
+        if [ "${#2}" -gt 64 ]; then
+            printf ' (%s-byte argument)' "${#2}" >&2
+        else
+            printf ' (' >&2
+            escape_token "$2" >&2
+            printf ')' >&2
+        fi
     fi
     printf '; see apt-get --help and README section "Runtime Packages".\n' >&2
     exit 2
@@ -104,7 +109,8 @@ record_packages() {
     if [ ! -s "$list_path" ]; then
         printf '# Djinn runtime packages: one name per line; deleting a line stops replay.\n' >>"$list_path" || return 1
     fi
-    existing=$(sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' "$list_path") || return 1
+    # NUL bytes would vanish in the substitution and join their neighbours.
+    existing=$(tr '\000' '\001' < "$list_path" | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//') || return 1
     newline='
 '
     for name do
