@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import time
@@ -332,3 +333,30 @@ def test_record_dedupe_does_not_join_around_nul(tmp_path):
     shim.list.write_bytes(b"# retained\nj\x00q\n")
     assert shim.run(["install", "jq"]).returncode == 0
     assert shim.list.read_bytes() == b"# retained\nj\x00q\njq\n"
+
+
+@pytest.mark.parametrize("partial", ["", "hello\n"])
+def test_record_conversion_failure_warns(tmp_path, partial):
+    # A failing tr must not hand partial output to the duplicate check: "hello"
+    # in a truncated read would hide that hello was never recorded.
+    shim = ShimHarness(tmp_path)
+    shim.list.write_text("# retained\nhello-extra\n")
+    executable(tmp_path / "tr", f"#!/bin/sh\nprintf '{partial}'\nexit 42\n")
+    result = shim.run(["install", "hello"])
+    assert result.returncode == 0
+    assert "install succeeded but was not recorded" in result.stderr
+    assert shim.list.read_text() == "# retained\nhello-extra\n"
+
+
+def test_record_into_fifo_warns_promptly(tmp_path):
+    # Appending to a FIFO without a reader would block after a successful install.
+    shim = ShimHarness(tmp_path)
+    os.mkfifo(shim.list)
+    try:
+        result = shim.run(["install", "jq"])
+    finally:
+        # A regressed shim blocks opening the FIFO; a reader end releases it.
+        with contextlib.suppress(OSError):
+            os.close(os.open(shim.list, os.O_RDONLY | os.O_NONBLOCK))
+    assert result.returncode == 0
+    assert "install succeeded but was not recorded" in result.stderr

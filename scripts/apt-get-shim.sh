@@ -106,11 +106,17 @@ result=$?
 [ "$result" -eq 0 ] && [ "$operation" = install ] || exit "$result"
 
 record_packages() {
+    # Opening a FIFO or another special file here would block or misbehave.
+    if [ -e "$list_path" ] && [ ! -f "$list_path" ]; then
+        return 1
+    fi
     if [ ! -s "$list_path" ]; then
         printf '# Djinn runtime packages: one name per line; deleting a line stops replay.\n' >>"$list_path" || return 1
     fi
-    # NUL bytes would vanish in the substitution and join their neighbours.
-    existing=$(tr '\000' '\001' < "$list_path" | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//') || return 1
+    # NUL bytes would vanish in the substitution and join their neighbours. A
+    # pipeline would report only sed's status, so tr's failure is checked alone.
+    existing=$(tr '\000' '\001' < "$list_path") || return 1
+    existing=$(printf '%s\n' "$existing" | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//') || return 1
     newline='
 '
     for name do

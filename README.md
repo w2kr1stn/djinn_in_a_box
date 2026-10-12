@@ -578,7 +578,8 @@ At startup, the Packages step runs after MCP and before Tools. It checks the
 recorded names against installed packages. If none are missing, it makes no
 network calls. Otherwise it updates apt, warns and skips names not present in the
 apt cache, then installs the remaining missing packages. Replay problems are
-warnings and do not stop startup. Prefer build-time `packages.txt` for packages
+warnings and do not stop startup; a list that is not a regular file or exceeds
+1 MiB is skipped with a warning. Prefer build-time `packages.txt` for packages
 every new image needs from its first start; runtime installs are for packages
 agents choose while using a container. See the [runtime package install
 security model](SECURITY-MODEL.md#runtime-package-installs) for the boundary and

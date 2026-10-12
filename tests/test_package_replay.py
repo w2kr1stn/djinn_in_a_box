@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 
@@ -195,6 +196,39 @@ def test_replay_skips_nul_line_instead_of_joining(tmp_path):
     assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == ["curl"]
     assert replay.tools.sudo_calls() == [] and replay.tools.events("cache") == []
     assert "null byte" not in result.stderr
+
+
+def release_fifo(path, mode):
+    # A regressed script blocks opening the FIFO; opening the other end lets it
+    # finish instead of leaving a stuck child behind after the timeout.
+    with contextlib.suppress(OSError):
+        os.close(os.open(path, mode | os.O_NONBLOCK))
+
+
+@pytest.mark.parametrize("kind", ["fifo", "oversize"])
+def test_replay_skips_untrusted_list_shapes(tmp_path, kind):
+    # A FIFO blocked the start forever; a huge file would stall it.
+    replay = ReplayHarness(tmp_path)
+    if kind == "fifo":
+        os.mkfifo(replay.list)
+    else:
+        replay.list.write_bytes(b"jq\n" + b"#" * (1048576 - 2))
+    try:
+        result = replay.run()
+    finally:
+        if kind == "fifo":
+            release_fifo(replay.list, os.O_WRONLY)
+    assert result.returncode == 0 and "[warn]" in result.stderr
+    assert str(replay.list) in result.stderr
+    assert replay.tools.sudo_calls() == [] and replay.tools.events() == []
+
+
+def test_replay_accepts_list_at_size_limit(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_bytes(b"jq\n" + b"#" * (1048576 - 3))
+    replay.tools.configure(states={"jq": ["installed", 0]})
+    result = replay.run()
+    assert result.returncode == 0 and "1 recorded, all installed" in result.stderr
 
 
 FETCH_WARNINGS = (

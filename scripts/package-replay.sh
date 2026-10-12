@@ -27,6 +27,16 @@ if [[ ! -e "$list_path" ]]; then
     ui_info 'none recorded'
     exit 0
 fi
+# The list is dev-controlled input: a FIFO would block the start, a huge file stall it.
+if [[ ! -f "$list_path" ]]; then
+    ui_warn "Cannot read package list $list_path: not a regular file."
+    ui_info 'none recorded (list unreadable)'
+    exit 0
+fi
+if ! size=$(stat -c %s -- "$list_path" 2>/dev/null) || (( size > 1048576 )); then
+    ui_warn "Package list $list_path is larger than 1 MiB or unreadable; replay skipped."
+    exit 0
+fi
 # A NUL byte would vanish in the substitution and join its neighbours into another
 # name; as \001 it fails validation and the line is skipped.
 if ! snapshot=$(tr '\000' '\001' 2>/dev/null < "$list_path" && printf '.'); then

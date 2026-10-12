@@ -38,6 +38,7 @@ BAD_NAMES = [
     "jq[ab]",
     "Jq",
     "JQ",
+    "jQ",
     "jq=1.6-2.1",
     "jq/bookworm",
     "jq:amd64",
