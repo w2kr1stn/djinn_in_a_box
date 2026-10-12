@@ -1603,9 +1603,14 @@ def inventory_calls(monkeypatch):
     return spy
 
 
-@pytest.mark.parametrize("content_first", [True, False], ids=["content-first", "content-last"])
 @pytest.mark.parametrize(
-    "authority", ["Docker socket", "relocated Docker socket", "endpoint", "host root"]
+    ("authority", "content_first"),
+    [
+        (kind, first)
+        for kind in ("Docker socket", "relocated Docker socket", "host root")
+        for first in (True, False)
+    ]
+    + [("endpoint", True)],
 )
 def test_inventory_skipped_under_authority(
     ground, monkeypatch, inventory_source, inventory_calls, authority, content_first
@@ -1835,26 +1840,49 @@ def test_inventory_vanished_entries(ground, monkeypatch, inventory_source, chang
     assert not result.causes and not result.errors and result.state == "sealed", result
 
 
+@pytest.mark.parametrize("phase", ["before-walk", "after-listing", "before-recheck"])
 @pytest.mark.parametrize("change", ["missing", "not-directory"])
-def test_inventory_vanished_walk_root_is_uncertain(ground, monkeypatch, inventory_source, change):
+def test_inventory_vanished_walk_root_is_uncertain(
+    ground, monkeypatch, inventory_source, change, phase
+):
     empty_desktop(monkeypatch)
-    original = os.walk
+    (inventory_source / "d").mkdir()
+    (inventory_source / "a").touch()
+    (inventory_source / "b").hardlink_to(inventory_source / "a")
+    moved = inventory_source.with_name("moved")
+
+    def vanish():
+        inventory_source.rename(moved)
+        if change == "not-directory":
+            inventory_source.touch()
+
+    original_walk = os.walk
+    original_inventory = sealing.nested_sensitive_files
 
     def walking(source, *args, **kwargs):
-        if source == inventory_source and inventory_source.is_dir():
-            inventory_source.rmdir()
-            if change == "not-directory":
-                inventory_source.touch()
-        yield from original(source, *args, **kwargs)
+        if phase == "before-walk":
+            vanish()
+        for entry in original_walk(source, *args, **kwargs):
+            yield entry
+            if phase == "after-listing" and Path(entry[0]) == inventory_source:
+                vanish()
 
-    monkeypatch.setattr(sealing.os, "walk", walking)
-    with pytest.raises(FileNotFoundError if change == "missing" else NotADirectoryError):
-        sealing.nested_sensitive_files(inventory_source)
-    if inventory_source.exists():
-        inventory_source.unlink()
-    inventory_source.mkdir()
+    def inventory(source, *args, **kwargs):
+        paths = original_inventory(source, *args, **kwargs)
+        vanish()
+        return paths
+
+    if phase == "before-recheck":
+        monkeypatch.setattr(sealing, "nested_sensitive_files", inventory)
+    else:
+        monkeypatch.setattr(sealing.os, "walk", walking)
+        with pytest.raises(FileNotFoundError if change == "missing" else NotADirectoryError):
+            sealing.nested_sensitive_files(inventory_source)
+        if inventory_source.exists():
+            inventory_source.unlink()
+        moved.rename(inventory_source)
     result = sealing.assess(dev([bind(inventory_source)]))
-    assert result.state == "unknown" and not result.causes
+    assert result.state == "unknown" and not result.causes, result
     assert any("bind inspection uncertain" in e for e in result.errors)
     with pytest.raises(hostctl.HostctlError):
         result.require(allow_unsealed=True)

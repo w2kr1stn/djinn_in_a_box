@@ -242,6 +242,12 @@ def _lstat_or_none(path: Path) -> os.stat_result | None:
         return None
 
 
+def _require_root(path: Path) -> None:
+    # Skipped entries count as vanished only while their bind root still exists.
+    if not stat.S_ISDIR(path.lstat().st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path))
+
+
 def nested_sensitive_files(source: Path) -> list[Path]:
     """Inventory sockets and hard links; incomplete provenance cannot certify a bind."""
     output: list[Path] = []
@@ -265,6 +271,7 @@ def nested_sensitive_files(source: Path) -> list[Path]:
                 continue
             if stat.S_ISSOCK(info.st_mode) or info.st_nlink > 1:
                 output.append(path)
+    _require_root(walk_root)
     return output
 
 
@@ -538,6 +545,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                                     str(candidate),
                                 )
                             )
+                    _require_root(host_file(source))
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     errors.append(Finding(f"bind inspection uncertain: {exc}"))
         # A socket-bearing/proxy container on an attached network grants Docker
