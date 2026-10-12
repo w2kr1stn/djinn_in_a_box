@@ -120,14 +120,23 @@ class Assessment:
             )
 
 
-def canonical(path: str | Path) -> Path:
+def _present(path: Path) -> bool:
+    """Distinguish proven absence from a host path that cannot be inspected."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
+def canonical(path: str | Path, *, strict: bool = False) -> Path:
     """Resolve existing host ancestors as well as not-yet-created protected paths."""
     value = Path(path)
     if not value.is_absolute():
         raise ValueError(f"non-absolute host path: {value}")
     parent = value
     suffix: list[str] = []
-    while not parent.exists():
+    while not (_present(parent) if strict else parent.exists()):
         if parent.is_symlink():
             raise ValueError(f"dangling host alias: {parent}")
         suffix.insert(0, parent.name)
@@ -144,13 +153,14 @@ def host_file(path: Path) -> Path:
     return path
 
 
-def protected_overlap(source: Path, protected: Path) -> bool:
+def protected_overlap(source: Path, protected: Path, *, strict: bool = False) -> bool:
     if overlap(source, protected):
         return True
 
     def same(a: Path, b: Path) -> bool:
+        present = _present if strict else Path.exists
         return (
-            host_file(a).exists() and host_file(b).exists() and host_file(a).samefile(host_file(b))
+            present(host_file(a)) and present(host_file(b)) and host_file(a).samefile(host_file(b))
         )
 
     return any(same(source, ancestor) for ancestor in (protected, *protected.parents)) or any(
@@ -162,9 +172,9 @@ def execution_overlap(
     source: str | Path, inputs: dict[str, tuple[Path, str, str]]
 ) -> tuple[str, Path] | None:
     """Return the first host execution input overlapping a canonical source."""
-    source = canonical(source)
+    source = canonical(source, strict=True)
     for name, (path, _kind, _item) in inputs.items():
-        if protected_overlap(source, path):
+        if protected_overlap(source, path, strict=True):
             return name, path
     return None
 
@@ -209,14 +219,21 @@ def execution_paths() -> dict[str, tuple[Path, str, str]]:
         "/usr/libexec/docker/cli-plugins",
     ]
     config_file = config / "config.json"
-    if config_file.exists():
-        client_config = json.loads(config_file.read_text())
+    try:
+        config_text = config_file.read_text()
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    else:
+        client_config = json.loads(config_text)
         if not isinstance(client_config, dict):
             raise ValueError(f"Docker client configuration '{config_file}' must be a JSON object")
         plugin_dirs += cast(dict[str, Any], client_config).get("cliPluginsExtraDirs", [])
     for entry in plugin_dirs:
         paths[f"Docker plugin directory {entry}"] = (Path(entry), docker_kind, entry)
-    return {name: (canonical(path), kind, item) for name, (path, kind, item) in paths.items()}
+    return {
+        name: (canonical(path, strict=True), kind, item)
+        for name, (path, kind, item) in paths.items()
+    }
 
 
 def _socket_is_docker(path: Path) -> bool:

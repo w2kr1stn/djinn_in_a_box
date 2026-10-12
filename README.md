@@ -248,10 +248,15 @@ host execution input. Read-only binds (`read_only = true`) and declared volumes
 are not affected. Host execution inputs are the paths in the invoking CLI's
 sealing inventory ([security model](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)).
 The inventory uses that CLI process's `PATH`, Python environment and Docker client
-configuration at creation time. A relative `PATH` entry or unreadable or malformed
-Docker client config makes the inputs undeterminable, so all affected writable
-binds are refused. Set `read_only = true` or remove an affected bind.
+configuration at creation time. A relative `PATH` entry, unreadable or malformed
+Docker client config, or an execution input that cannot be inspected (for example
+a PATH entry below a directory the user cannot traverse) makes the inputs
+undeterminable, so all affected writable binds are refused. Set `read_only = true`
+or remove an affected bind.
 `djinn doctor` reports affected `[mounts.*]` entries as FAIL rows.
+This point-in-time check pins no inode: source pathnames and their ancestors must
+stay stable and outside any agent's rename authority (including through another
+writable bind of a parent directory) until Docker has bound them.
 
 Environment keys must match `[A-Za-z_][A-Za-z0-9_]*`; values must be strings and
 are literal, so `${HOST_VALUE}` above stays exactly that text. Host values do not

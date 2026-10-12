@@ -1,6 +1,7 @@
 """Writable declared binds must not expose the creating CLI's execution inputs."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -686,3 +687,214 @@ def test_real_inventory_empty_path_and_check_time(real_inventory, monkeypatch):
         validate(
             (docker.ContainerMount(real_inventory, Path("/home/dev/workspace")),), real_inventory
         )
+
+
+@pytest.fixture
+def inspection_inventory(real_inventory, monkeypatch):
+    source = real_inventory / "source"
+    source.mkdir()
+    config_dir = real_inventory / "docker-config"
+    config_dir.mkdir()
+    monkeypatch.setenv("DOCKER_CONFIG", str(config_dir))
+    return source, config_dir
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+@pytest.mark.parametrize("input_kind", ["docker-config", "path-alias"])
+@pytest.mark.parametrize("channel", ["declaration", "invocation", "here", "doctor"])
+@pytest.mark.parametrize("mode", ["rw", "ro", "empty"])
+def test_inaccessible_execution_input(inspection_inventory, monkeypatch, input_kind, channel, mode):
+    source, config_dir = inspection_inventory
+    if input_kind == "docker-config":
+        input_path = config_dir / "config.json"
+        input_path.write_text(json.dumps({"cliPluginsExtraDirs": [str(source)]}))
+        hidden = config_dir
+        name = f"Docker plugin directory {source}"
+    else:
+        hidden = source.parent / "hidden"
+        hidden.mkdir()
+        input_path = hidden / "bin"
+        input_path.symlink_to(source, target_is_directory=True)
+        monkeypatch.setenv("PATH", str(input_path))
+        name = f"host PATH directory {input_path}"
+    assert host_sealing.execution_overlap(source, host_sealing.execution_paths()) == (name, source)
+    original_mode = hidden.stat().st_mode
+    hidden.chmod(0)
+    try:
+        with pytest.raises(PermissionError) as failure:
+            if input_kind == "docker-config":
+                input_path.read_text()
+            else:
+                input_path.stat()
+        # Inventory failure must be observable before any overlap comparison.
+        with pytest.raises(PermissionError) as inventory_failure:
+            host_sealing.execution_paths()
+        assert str(inventory_failure.value) == str(failure.value)
+        cause = f"cannot be checked against host execution inputs ({failure.value})"
+        read_only = mode == "ro"
+        if channel in ("declaration", "doctor"):
+            mounts = {} if mode == "empty" else {
+                "review": {"source": str(source), "target": "/review", "read_only": read_only}
+            }
+            config = AppConfig(code_dir=source, mounts=mounts)
+            if channel == "doctor":
+                rows = doctor.declaration_checks(config)
+                if mode == "empty":
+                    assert not rows
+                else:
+                    (row,) = rows
+                    assert row.name == "mounts.review"
+                    expected_status = doctor.Status.FAIL if mode == "rw" else doctor.Status.PASS
+                    assert row.status is expected_status
+                    if mode == "rw":
+                        assert cause in row.detail
+            else:
+                result = docker.resolve_declared_entries(
+                    config, docker.ContainerOptions(), runtime_targets=[], caller_env=None
+                )
+                if mode == "rw":
+                    assert result.diagnostics[0].error == (
+                        f"Declared mount 'review': writable source '{source}' {cause}; "
+                        "set read_only = true or remove the mount."
+                    )
+                    with pytest.raises(DeclarationSpecificationError):
+                        result.require_valid()
+                else:
+                    result.require_valid()
+        else:
+            monkeypatch.chdir(source)
+            if mode == "empty":
+                mounts = ()
+            elif channel == "here" and mode == "rw":
+                mounts = docker.resolve_container_mounts((), here=True)
+            else:
+                mounts = docker.resolve_container_mounts((f"{source}:/review:{mode}",))
+            if mode == "rw":
+                with pytest.raises(MountSpecificationError) as error:
+                    validate(mounts, source)
+                assert cause in str(error.value)
+                identity = "--here mounts" if channel == "here" else f"Mount {source} -> /review"
+                assert identity in str(error.value)
+            else:
+                validate(mounts, source)
+    finally:
+        hidden.chmod(original_mode)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_execution_source_is_strict_and_sealing_defaults_are_lenient(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    hidden = tmp_path / "hidden"
+    hidden.mkdir()
+    alias = hidden / "bin"
+    alias.symlink_to(source, target_is_directory=True)
+    original_mode = hidden.stat().st_mode
+    hidden.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            alias.stat()
+        assert host_sealing.canonical(alias) == alias
+        assert not host_sealing.protected_overlap(alias, source)
+        with pytest.raises(PermissionError):
+            host_sealing.canonical(alias, strict=True)
+        with pytest.raises(PermissionError):
+            host_sealing.protected_overlap(alias, source, strict=True)
+        with pytest.raises(PermissionError):
+            host_sealing.execution_overlap(alias, {})
+    finally:
+        hidden.chmod(original_mode)
+
+
+@pytest.mark.parametrize("channel", ["declaration", "invocation", "here"])
+@pytest.mark.parametrize("failure_type", [PermissionError, OSError])
+def test_strict_inode_presence_failure(execution_ground, monkeypatch, channel, failure_type):
+    inputs, _inventory, source = execution_ground
+    protected = next(iter(inputs.values()))[0]
+    original_stat = Path.stat
+    original_samefile = Path.samefile
+    samefile_calls = []
+    failure = failure_type("comparison stat unavailable")
+
+    def stat(path, *args, **kwargs):
+        if path == protected:
+            raise failure
+        return original_stat(path, *args, **kwargs)
+
+    def samefile(a, b):
+        samefile_calls.append((a, b))
+        return (a == source and b == protected) or original_samefile(a, b)
+
+    monkeypatch.setattr(Path, "samefile", samefile)
+    assert host_sealing.execution_overlap(source, inputs) is not None
+    samefile_calls.clear()
+    monkeypatch.setattr(Path, "stat", stat)
+    if channel == "declaration":
+        result = resolve(source)
+        cause = result.diagnostics[0].error
+        with pytest.raises(DeclarationSpecificationError):
+            result.require_valid()
+    else:
+        target = Path("/home/dev/workspace" if channel == "here" else "/review")
+        with pytest.raises(MountSpecificationError) as error:
+            validate((docker.ContainerMount(source, target),), source)
+        cause = str(error.value)
+    assert f"cannot be checked against host execution inputs ({failure})" in cause
+    assert not samefile_calls
+
+
+@pytest.mark.parametrize("side", ["source", "protected"])
+def test_strict_inode_presence_checks_both_sides(tmp_path, monkeypatch, side):
+    source, protected = tmp_path / "source", tmp_path / "protected"
+    source.mkdir()
+    protected.mkdir()
+    original_stat = Path.stat
+    failing_path = source if side == "source" else protected
+
+    def stat(path, *args, **kwargs):
+        if path == failing_path:
+            raise PermissionError("comparison stat unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    samefile = Mock(return_value=False)
+    monkeypatch.setattr(Path, "samefile", samefile)
+    monkeypatch.setattr(Path, "stat", stat)
+    with pytest.raises(PermissionError, match="comparison stat unavailable"):
+        host_sealing.protected_overlap(source, protected, strict=True)
+    samefile.assert_not_called()
+
+
+@pytest.mark.parametrize("absence", ["missing", "not-directory"])
+def test_strict_presence_accepts_proven_absence(tmp_path, absence):
+    assert host_sealing._present(tmp_path)
+    parent = tmp_path / absence
+    if absence == "not-directory":
+        parent.touch()
+    path = parent / "child"
+    assert not host_sealing._present(path)
+    assert host_sealing.canonical(path, strict=True) == path
+    assert not host_sealing.protected_overlap(path, tmp_path / "other", strict=True)
+
+
+@pytest.mark.parametrize(
+    "helper,args",
+    [
+        (host_sealing.canonical, (Path("/opt/tools"),)),
+        (host_sealing.protected_overlap, (Path("/opt/tools"), Path("/opt/tools"))),
+    ],
+)
+def test_strict_option_is_keyword_only(helper, args):
+    with pytest.raises(TypeError):
+        helper(*args, True)
+
+
+@pytest.mark.parametrize("absence", ["missing", "not-directory"])
+def test_missing_docker_config_is_accepted(inspection_inventory, monkeypatch, absence):
+    source, config_dir = inspection_inventory
+    if absence == "not-directory":
+        config_dir.rmdir()
+        config_dir.touch()
+    inputs = host_sealing.execution_paths()
+    assert host_sealing.execution_overlap(source, inputs) is None
+    resolve(source).require_valid()
+    validate((docker.ContainerMount(source, Path("/review")),), source)

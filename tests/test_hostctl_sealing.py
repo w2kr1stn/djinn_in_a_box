@@ -256,6 +256,47 @@ def test_non_object_docker_config_is_inspection_uncertain(tmp_path, monkeypatch,
     )
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+@pytest.mark.parametrize("input_kind", ["docker-config", "path-alias"])
+def test_inaccessible_execution_input_is_inspection_uncertain(tmp_path, monkeypatch, input_kind):
+    config_dir = tmp_path / "docker-config"
+    config_dir.mkdir()
+    monkeypatch.setenv("DOCKER_CONFIG", str(config_dir))
+    monkeypatch.setenv("PATH", "/opt/tools")
+    if input_kind == "docker-config":
+        (config_dir / "config.json").write_text('{"cliPluginsExtraDirs": ["/opt/tools"]}')
+        hidden = config_dir
+        input_path = config_dir / "config.json"
+    else:
+        hidden = tmp_path / "hidden"
+        hidden.mkdir()
+        input_path = hidden / "bin"
+        input_path.symlink_to(tmp_path, target_is_directory=True)
+        monkeypatch.setenv("PATH", str(input_path))
+    monkeypatch.setattr(sealing.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(tmp_path)))
+    monkeypatch.setattr(hostctl, "command", lambda *a, **kw: json.dumps({"DockerRootDir": "/data"}))
+    monkeypatch.setattr(hostctl, "state_root", lambda **kw: tmp_path / "control")
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kw: tmp_path / "runtime")
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        docker, "inspect_agent_endpoint", lambda *a, **kw: SimpleNamespace(errors=(), evidence=None)
+    )
+    original_mode = hidden.stat().st_mode
+    hidden.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            input_path.stat()
+        result = sealing.assess(dev())
+        assert result.state == "unknown"
+        assert any(
+            "inspection uncertain:" in error and "Permission denied" in error
+            and str(input_path) in error
+            for error in result.error_details
+        )
+    finally:
+        hidden.chmod(original_mode)
+
+
 def test_alias_and_relocated_socket(ground, monkeypatch):
     alias = ground.paths["home"].with_name("home-alias")
     alias.symlink_to(ground.paths["home"], target_is_directory=True)

@@ -31,7 +31,8 @@ Versioning before and after the first stable release.
   `djinn run`'s implicit `--here`. Read-only binds, `--mount ...:ro`, and
   declared volumes are not affected. Existing setups: switch a refused writable
   bind to read-only (or remove it) before the next start; `djinn doctor` lists
-  affected `[mounts.*]` entries.
+  affected `[mounts.*]` entries. Sealing treats an execution input that cannot be
+  inspected as uncertain.
 - Protect host-mode `djinn session` from automatic loading of container-writable
   agent and Git configuration. Claude starts with user-only settings; OpenCode
   disables project config and refuses its remaining entry points; Codex

@@ -1050,6 +1050,8 @@ The same module owns the repeatable user-mount contract:
   call. `host_sealing.execution_overlap()` applies the sealing canonicalizer and
   overlap predicate, returning the first match. Inventory or comparison failures
   fail closed with `cannot be checked against host execution inputs (<cause>)`.
+  The execution inventory and guard comparison use strict presence checks that
+  propagate inspection errors; other sealing paths retain lenient checks.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
   `MountCollisionError` reports the two involved mounts and the conflict path;
   managed-root conflicts identify the Djinn-managed root.

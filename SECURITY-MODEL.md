@@ -188,9 +188,14 @@ For a running dev container it requires complete inspection and no named causes:
   loaded modules, Docker CLI/configuration/plugin directories, and host `PATH`
   directories, all determined at check time.
   At creation, Djinn refuses a writable `[mounts.*]`, `--mount` or `--here` bind
-  overlapping this same execution-input inventory. Sealing continues to report
-  managed-bind and running-state findings. The workspace root is outside this
-  creation-time rule.
+  overlapping this same execution-input inventory. Inaccessible execution inputs
+  make the inputs undeterminable: creation refuses writable covered binds and
+  sealing reports inspection uncertain. The creation check applies to pathnames
+  at that point in time and pins no inode: sources and their ancestors must stay
+  stable and outside any agent's rename authority (for example through another
+  writable bind of a parent directory) until Docker has bound them.
+  Sealing continues to report managed-bind and running-state findings. The
+  workspace root is outside this creation-time rule.
 - Desktop channels are absent or verified filtered/locked, with no raw endpoints.
 
 Inspection resolves canonical ancestors, inode aliases and local named-volume
