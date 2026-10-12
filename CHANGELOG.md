@@ -24,6 +24,9 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Host-side provisioning, doctor repair, Claude baseline seeding, session
+  creation and sync-path clearing refuse symlinked or non-directory components.
+  Derived roots that are symlinks are refused.
 - Require host-side confirmation before `djinn session` publishes a new or
   changed managed workflow to a native host agent root. Confirmation defaults
   to No at a terminal; non-TTY callers refuse with exit 1 and review instructions.
@@ -42,6 +45,9 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Restore refuses unknown sync-path names. Backup and restore block dev container
+  creation while they run. Clearing fails when an entry other than an empty mount
+  placeholder cannot be removed.
 - Desktop helpers and the agent Docker companion run their healthcheck every 2 s
   only while starting and every 30 s afterwards, instead of every 2 s for their
   whole lifetime; each probe is an exec and filled the Docker event stream.
