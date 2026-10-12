@@ -1592,7 +1592,7 @@ order:
 1. The agent must be Claude, Codex or OpenCode, and the workspace top level
    must hold none of the entries the selected agent would load.
 2. It resolves the workspace and `~/.djinn/sessions`; a path below the
-   sessions root that resolves outside it is refused, as in the CLI. The
+   sessions root must resolve strictly below it, as in the CLI. The
    workspace root must not hold `HEAD` (Git could take it as a bare
    repository); for a workspace below the sessions root, every physical
    ancestor from its parent through that root must contain neither `.git`,

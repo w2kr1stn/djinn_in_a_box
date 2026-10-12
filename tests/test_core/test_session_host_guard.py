@@ -156,8 +156,32 @@ def test_workspace_redirected_outside_sessions(launch, tmp_path, relative):
     target = Path("../projects/x/ws") if relative else outside
     workspace.symlink_to(target, target_is_directory=True)
     result = launch(workspace)
-    assert_refused(launch, workspace, result, "resolves outside")
+    assert_refused(launch, workspace, result, "does not resolve below")
     assert not any(cmd[:2] == ["git", "config"] for cmd, _ in launch.calls)
+
+
+@pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)
+@pytest.mark.parametrize("through", ["link", "real"])
+def test_workspace_redirected_with_linked_sessions_base(launch, tmp_path, through):
+    # The configured base is a host-owned link; both spellings of the entry must be caught.
+    real = tmp_path / "sessions-real"
+    real.mkdir()
+    (tmp_path / "sessions").symlink_to(real, target_is_directory=True)
+    init_repo(tmp_path / "projects/x/ws")
+    (real / "proj").symlink_to(Path("../projects/x/ws"), target_is_directory=True)
+    workspace = tmp_path / ("sessions" if through == "link" else "sessions-real") / "proj"
+    assert_refused(launch, workspace, launch(workspace), "does not resolve below")
+    assert not any(cmd[:2] == ["git", "config"] for cmd, _ in launch.calls)
+
+
+@pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)
+def test_workspace_redirected_to_sessions_root(launch, tmp_path):
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    workspace = sessions / "proj"
+    workspace.symlink_to(Path("."), target_is_directory=True)
+    assert_refused(launch, workspace, launch(workspace), "does not resolve below")
+    assert not (sessions / ".git").exists()
 
 
 @pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)

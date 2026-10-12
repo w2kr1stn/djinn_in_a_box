@@ -517,13 +517,14 @@ class SessionManager:
             _refuse_entries(workspace_dir, entries)
             workspace = workspace_dir.resolve(strict=True)
             sessions = Path(os.path.realpath(_HOST_SESSIONS_BASE, strict=os.path.ALLOW_MISSING))
-            # As in the CLI: a path below the sessions root must not resolve outside it.
+            # As in the CLI: a path below the sessions root, given through the configured base or
+            # the resolved root, must resolve strictly below the resolved root.
             lexical = Path(os.path.abspath(workspace_dir))
-            if not workspace.is_relative_to(sessions) and (
-                lexical.is_relative_to(os.path.abspath(_HOST_SESSIONS_BASE))
-                or lexical.is_relative_to(sessions)
-            ):
-                raise ValueError(f"{workspace_dir} resolves outside {sessions}")
+            if any(
+                lexical != root and lexical.is_relative_to(root)
+                for root in (Path(os.path.abspath(_HOST_SESSIONS_BASE)), sessions)
+            ) and (workspace == sessions or not workspace.is_relative_to(sessions)):
+                raise ValueError(f"{workspace_dir} does not resolve below {sessions}")
             # A directory holding HEAD can be taken as a bare repository by Git's discovery.
             _refuse_entries(workspace, ("HEAD",))
             if workspace != sessions and workspace.is_relative_to(sessions):

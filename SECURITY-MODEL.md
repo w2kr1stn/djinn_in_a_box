@@ -381,8 +381,8 @@ can still write to the workspace.
 Host-owned inputs—`agents.toml` flags, the caller's `env` and inherited
 environment—are trusted and must not be writable by a container. Remote
 endpoints in an accepted repository remain container-chosen network
-destinations. As in the CLI, a workspace path below `~/.djinn/sessions` that
-resolves outside it is refused. For direct API callers with workspaces chosen
+destinations. As in the CLI, a workspace path below `~/.djinn/sessions` must
+resolve strictly below it. For direct API callers with workspaces chosen
 outside `~/.djinn/sessions`, only the workspace itself is checked. Measurements
 used Claude Code 2.1.296, Codex 0.162.1, OpenCode 1.19.0 and Git 2.39.5; a host
 Claude without `--setting-sources` fails to start.
