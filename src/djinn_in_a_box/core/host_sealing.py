@@ -227,7 +227,12 @@ def execution_paths() -> dict[str, tuple[Path, str, str]]:
         client_config = json.loads(config_text)
         if not isinstance(client_config, dict):
             raise ValueError(f"Docker client configuration '{config_file}' must be a JSON object")
-        plugin_dirs += cast(dict[str, Any], client_config).get("cliPluginsExtraDirs", [])
+        extra_dirs = cast(dict[str, Any], client_config).get("cliPluginsExtraDirs", [])
+        if not isinstance(extra_dirs, list):
+            raise ValueError(
+                f"Docker client configuration '{config_file}': cliPluginsExtraDirs must be a list"
+            )
+        plugin_dirs += cast(list[str], extra_dirs)
     for entry in plugin_dirs:
         paths[f"Docker plugin directory {entry}"] = (Path(entry), docker_kind, entry)
     return {

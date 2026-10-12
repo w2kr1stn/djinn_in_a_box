@@ -647,7 +647,11 @@ def real_inventory(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "problem", ["relative-path", "non-object", "plugin-null", "plugin-relative"]
+    "problem",
+    [
+        "relative-path", "non-object", "plugin-null", "plugin-relative", "plugin-string",
+        "plugin-object", "plugin-object-keys", "plugin-number",
+    ],
 )
 @pytest.mark.parametrize("channel", ["declaration", "invocation"])
 def test_real_inventory_fail_closed(real_inventory, monkeypatch, problem, channel):
@@ -660,6 +664,10 @@ def test_real_inventory_fail_closed(real_inventory, monkeypatch, problem, channe
             "non-object": "[]",
             "plugin-null": '{"cliPluginsExtraDirs": null}',
             "plugin-relative": '{"cliPluginsExtraDirs": ["relative"]}',
+            "plugin-string": '{"cliPluginsExtraDirs": ""}',
+            "plugin-object": '{"cliPluginsExtraDirs": {}}',
+            "plugin-object-keys": '{"cliPluginsExtraDirs": {"/opt/plugins": 1}}',
+            "plugin-number": '{"cliPluginsExtraDirs": [1]}',
         }[problem]
         (real_inventory / "config.json").write_text(contents)
     if channel == "declaration":
