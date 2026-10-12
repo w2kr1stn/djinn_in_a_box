@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,7 +38,7 @@ from djinn_in_a_box.config.defaults import (
     volume_categories,
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, desktop, host_runtime
+from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.contained_paths import (
     PathContainmentError,
@@ -808,6 +808,32 @@ def _reserved_mount_targets(
     return [*targets, *accepted_runtime_targets]
 
 
+def _execution_input_check() -> Callable[[str | Path], str | None]:
+    """Share a lazy inventory and contain inventory/source comparison failures."""
+    inputs: dict[str, tuple[Path, str, str]] | None = None
+    inventory_error: str | None = None
+
+    def check(source: str | Path) -> str | None:
+        nonlocal inputs, inventory_error
+        if inventory_error is not None:
+            return inventory_error
+        try:
+            if inputs is None:
+                inputs = host_sealing.execution_paths()
+            match = host_sealing.execution_overlap(source, inputs)
+            if match is not None:
+                name, path = match
+                return f"overlaps host execution input {name} ({path})"
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            cause = f"cannot be checked against host execution inputs ({exc})"
+            if inputs is None:
+                inventory_error = cause
+            return cause
+        return None
+
+    return check
+
+
 def validate_container_mounts(
     mounts: tuple[ContainerMount, ...],
     config: AppConfig,
@@ -854,6 +880,24 @@ def validate_container_mounts(
                 )
                 raise MountCollisionError(msg)
         occupied.append((mount_target, f"mount {mount.source} -> {mount_target}", mount_target))
+
+    check_execution_input = _execution_input_check()
+    for mount in normalized_mounts:
+        if mount.read_only:
+            continue
+        cause = check_execution_input(mount.source)
+        if cause is None:
+            continue
+        if mount.target == _WORKSPACE_PATH:
+            identity = f"--here mounts {mount.source} writable, which {cause}"
+            remedy = (
+                "start from a directory outside it or mount it read-only with "
+                f"--mount {mount.source}:ro"
+            )
+        else:
+            identity = f"Mount {mount.source} -> {mount.target} is writable and {cause}"
+            remedy = "append :ro or remove the mount"
+        raise MountSpecificationError(f"{identity}; {remedy}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1079,6 +1123,17 @@ def resolve_declared_entries(
                         "mounts", name, f"target '{target}' conflicts with {owner} at '{other}'"
                     )
                 break
+    check_execution_input = _execution_input_check()
+    for mount in resolved:
+        if mount.kind != "bind" or mount.read_only or errors.get(f"mounts.{mount.name}"):
+            continue
+        cause = check_execution_input(mount.source)
+        if cause is not None:
+            errors[f"mounts.{mount.name}"] = declaration_error(
+                "mounts", mount.name,
+                f"writable source '{mount.source}' {cause}; "
+                "set read_only = true or remove the mount",
+            )
     for key in entries.environment:
         if caller_env and key in caller_env:
             errors[f"environment.{key}"] = declaration_error(
@@ -2352,7 +2407,9 @@ def compose_up_detached(
     if options.docker_mode is not DockerMode.AGENT or service != "dev":
         for mount in mounts:
             target = _resolve_image_aliases(mount.target)
-            volume_specs.append(f"{mount.source}:{target}" + (":ro" if mount.read_only else ""))
+            source = str(mount.source).replace("$", "$$")
+            escaped_target = str(target).replace("$", "$$")
+            volume_specs.append(f"{source}:{escaped_target}" + (":ro" if mount.read_only else ""))
     # Detached startup mounts every assigned overlay so writes reach its host zone.
     volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
     runtime_args = [*shell_args, *sops_args]
@@ -2366,7 +2423,7 @@ def compose_up_detached(
     if volume_specs:
         service_override["volumes"] = list(volume_specs)
     if mounts:
-        service_override["working_dir"] = str(mounts[0].target)
+        service_override["working_dir"] = str(mounts[0].target).replace("$", "$$")
     if environment:
         service_override["environment"] = dict(environment)
 

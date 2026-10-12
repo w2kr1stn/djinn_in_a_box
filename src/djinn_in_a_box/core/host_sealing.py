@@ -158,6 +158,17 @@ def protected_overlap(source: Path, protected: Path) -> bool:
     )
 
 
+def execution_overlap(
+    source: str | Path, inputs: dict[str, tuple[Path, str, str]]
+) -> tuple[str, Path] | None:
+    """Return the first host execution input overlapping a canonical source."""
+    source = canonical(source)
+    for name, (path, _kind, _item) in inputs.items():
+        if protected_overlap(source, path):
+            return name, path
+    return None
+
+
 def execution_paths() -> dict[str, tuple[Path, str, str]]:
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     config = Path(os.environ.get("DOCKER_CONFIG", str(home / ".docker")))
@@ -199,7 +210,10 @@ def execution_paths() -> dict[str, tuple[Path, str, str]]:
     ]
     config_file = config / "config.json"
     if config_file.exists():
-        plugin_dirs += json.loads(config_file.read_text()).get("cliPluginsExtraDirs", [])
+        client_config = json.loads(config_file.read_text())
+        if not isinstance(client_config, dict):
+            raise ValueError(f"Docker client configuration '{config_file}' must be a JSON object")
+        plugin_dirs += cast(dict[str, Any], client_config).get("cliPluginsExtraDirs", [])
     for entry in plugin_dirs:
         paths[f"Docker plugin directory {entry}"] = (Path(entry), docker_kind, entry)
     return {name: (canonical(path), kind, item) for name, (path, kind, item) in paths.items()}

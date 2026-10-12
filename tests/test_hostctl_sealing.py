@@ -16,6 +16,7 @@ from djinn_in_a_box.commands.doctor import Status, hostctl_boundary_checks
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import agent_docker, desktop, docker, host_runtime, hostctl
 from djinn_in_a_box.core import host_sealing as sealing
+from djinn_in_a_box.core.exceptions import DeclarationSpecificationError
 
 
 def dev(mounts=(), *, identity="dev-a", env=()):
@@ -215,11 +216,17 @@ def test_clean_and_readonly_execution_binds_pass(ground, read_only):
     declarations = docker.resolve_declared_entries(
         config, docker.ContainerOptions(), runtime_targets=[], caller_env=None,
     )
-    declarations.require_valid()
-    delivery = declarations.compose_fragment()
-    delivery["services"]["dev"]["image"] = "dev:1"
-    planned = docker.planned_dev_inspection(delivery)
-    assert planned["Mounts"][0]["RW"] is (read_only is not True)
+    if read_only is True:
+        declarations.require_valid()
+        delivery = declarations.compose_fragment()
+        delivery["services"]["dev"]["image"] = "dev:1"
+        planned = docker.planned_dev_inspection(delivery)
+        assert planned["Mounts"][0]["RW"] is False
+    else:
+        with pytest.raises(DeclarationSpecificationError, match="overlaps host execution input"):
+            declarations.require_valid()
+        # Existing writable deliveries still receive the sealing assessment.
+        planned = dev([bind(ground.paths["install"], rw=True)])
     result = sealing.assess(planned)
     writable = [cause for cause in result.causes if "writable" in cause]
     if read_only is True:
@@ -227,6 +234,26 @@ def test_clean_and_readonly_execution_binds_pass(ground, read_only):
     else:
         assert result.state == "unsealed" and writable
         assert any("Djinn installation/build context" in cause for cause in writable)
+
+
+@pytest.mark.parametrize("contents", ["[]", "null"])
+def test_non_object_docker_config_is_inspection_uncertain(tmp_path, monkeypatch, contents):
+    (tmp_path / "config.json").write_text(contents)
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    monkeypatch.setattr(sealing.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(tmp_path)))
+    monkeypatch.setattr(hostctl, "command", lambda *a, **kw: json.dumps({"DockerRootDir": "/data"}))
+    monkeypatch.setattr(hostctl, "state_root", lambda **kw: tmp_path / "control")
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kw: tmp_path / "runtime")
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        docker, "inspect_agent_endpoint", lambda *a, **kw: SimpleNamespace(errors=(), evidence=None)
+    )
+    result = sealing.assess(dev())
+    assert result.state == "unknown"
+    assert any(
+        "inspection uncertain:" in error and "must be a JSON object" in error
+        for error in result.error_details
+    )
 
 
 def test_alias_and_relocated_socket(ground, monkeypatch):
