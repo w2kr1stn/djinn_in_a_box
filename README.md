@@ -549,7 +549,7 @@ As `dev`, `apt-get update && apt-get install -y <package>` works without a
 `sudo` prefix. The shim accepts `-y`, `--yes`, `--assume-yes`, `-q`, `--quiet`,
 `-qq`, and `--no-install-recommends` anywhere in the command; `-h` or `--help`
 also works anywhere. Names must match `[a-z0-9][a-z0-9+.-]*` and contain at
-least two characters. `apt-get --help` prints the accepted syntax.
+least two characters and at most 128 bytes. `apt-get --help` prints the accepted syntax.
 Installs always use `-y` and `--no-install-recommends`.
 
 Other subcommands, unsupported flags, paths, `.deb` files, and malformed names
@@ -579,7 +579,12 @@ recorded names against installed packages. If none are missing, it makes no
 network calls. Otherwise it updates apt, warns and skips names not present in the
 apt cache, then installs the remaining missing packages. Replay problems are
 warnings and do not stop startup; a list that is not a regular file or exceeds
-1 MiB is skipped with a warning. Prefer build-time `packages.txt` for packages
+1 MiB is skipped with a warning. The replay considers at most 256 distinct names
+and warns how many more it did not replay, treats entries over 128 bytes as
+invalid, reports at most five invalid lines one by one, and stops its package
+checks with a warning after 60 seconds. The package list update has a 300-second
+limit; the install step has none, because interrupting dpkg can leave packages
+half-configured. Prefer build-time `packages.txt` for packages
 every new image needs from its first start; runtime installs are for packages
 agents choose while using a container. See the [runtime package install
 security model](SECURITY-MODEL.md#runtime-package-installs) for the boundary and

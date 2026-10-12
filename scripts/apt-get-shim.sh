@@ -22,7 +22,7 @@ Usage: apt-get [FLAG...] update
        apt-get [FLAG...] install [FLAG...] NAME [NAME...]
 Flags may appear anywhere: -y, --yes, --assume-yes, -q, --quiet, -qq,
 --no-install-recommends. -h or --help anywhere prints this help.
-Names: ASCII [a-z0-9][a-z0-9+.-]*, at least two characters; no .deb files.
+Names: ASCII [a-z0-9][a-z0-9+.-]*, at least two characters, at most 128 bytes; no .deb files.
 -y and --no-install-recommends are always in force; installs never remove packages.
 This shim elevates through sudo to /usr/local/libexec/djinn-apt-root as root.
 Successful dev installs are recorded in /home/dev/.local/share/djinn-packages/packages.txt.
@@ -81,6 +81,7 @@ for token do
                     *) refuse 'expected update or install' "$token" ;;
                 esac
             else
+                [ "${#token}" -le 128 ] || refuse 'package name longer than 128 bytes' "$token"
                 case "$token" in
                     ''|?|[!a-z0-9]*|*[!a-z0-9+.-]*|*.deb) refuse 'invalid package name' "$token" ;;
                 esac

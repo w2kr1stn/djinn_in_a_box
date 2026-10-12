@@ -5,7 +5,14 @@ helper_path='/usr/local/libexec/djinn-apt-root'
 sudo_target='root'
 dpkg_bin='/usr/bin/dpkg-query'
 cache_bin='/usr/bin/apt-cache'
+max_name='128'
+max_names='256'
+max_warnings='5'
+check_budget='60'
+update_timeout='300'
 readonly list_path helper_path sudo_target dpkg_bin cache_bin
+readonly max_name max_names max_warnings check_budget update_timeout
+checks_started=$SECONDS
 LC_ALL=C
 export LC_ALL
 OUTPUT_LIB="${OUTPUT_LIB:-/home/dev/output-lib.sh}"
@@ -45,36 +52,66 @@ if ! snapshot=$(tr '\000' '\001' 2>/dev/null < "$list_path" && printf '.'); then
     exit 0
 fi
 
-declare -A seen=()
+# Parse once in C locale: bounds apply to bytes, and diagnostics stay printable.
+if ! records=$(printf '%s' "${snapshot%.}" | awk -v max_name="$max_name" -v max_names="$max_names" -v max_warnings="$max_warnings" '
+    {
+        name = $0
+        sub(/#.*/, "", name)
+        sub(/^[ \t\r\f\v]+/, "", name)
+        sub(/[ \t\r\f\v]+$/, "", name)
+        if (name == "") next
+        if (length(name) > max_name || name !~ /^[a-z0-9][a-z0-9+.-]+$/ || name ~ /\.deb$/) {
+            invalid++
+            if (invalid <= max_warnings) {
+                shown = substr(name, 1, 32)
+                gsub(/[^ -~]/, "?", shown)
+                if (length(name) > 32) shown = shown "..."
+                printf "I\t%d\t%s\t%d\n", NR, shown, length(name)
+            }
+            next
+        }
+        if (seen[name]++) next
+        count++
+        if (count <= max_names) printf "V\t%s\n", name
+    }
+    END {
+        if (invalid > max_warnings) printf "S\t%d\n", invalid - max_warnings
+        if (count > max_names) printf "O\t%d\n", count - max_names
+    }
+'); then
+    ui_warn "Cannot parse package list $list_path; replay skipped."
+    exit 0
+fi
 names=()
-while IFS= read -r line || [[ -n "$line" ]]; do
-    name=${line%%#*}
-    name=${name#"${name%%[![:space:]]*}"}
-    name=${name%"${name##*[![:space:]]}"}
-    [[ -n "$name" ]] || continue
-    case "$name" in
-        ''|?|[!a-z0-9]*|*[!a-z0-9+.-]*|*.deb)
-            printf -v escaped '%q' "$name"
-            ui_warn "Invalid package name $escaped in $list_path; skipped."
-            continue
-            ;;
+while IFS=$'\t' read -r tag value shown bytes; do
+    case "$tag" in
+        V) names+=("$value") ;;
+        I) ui_warn "Invalid package name \"$shown\" ($bytes bytes) in $list_path (line $value); skipped." ;;
+        S) ui_warn "$value more invalid lines in $list_path skipped." ;;
+        O) ui_warn "More than $max_names package names in $list_path; $value not replayed." ;;
     esac
-    [[ -z "${seen[$name]:-}" ]] || continue
-    seen[$name]=1
-    names+=("$name")
-done < <(printf '%s' "${snapshot%.}")
+done <<< "$records"
 
 if [[ ${#names[@]} -eq 0 ]]; then
     ui_info 'none recorded'
     exit 0
 fi
+within_budget() {
+    if (( SECONDS - checks_started > check_budget )); then
+        ui_warn "Package checks exceeded $check_budget s; replay skipped."
+        return 1
+    fi
+    return 0
+}
 missing=()
 for name in "${names[@]}"; do
     # The format belongs to dpkg-query; a sentinel preserves its exact output.
     # shellcheck disable=SC2016
-    if state=$(LANG=C "$dpkg_bin" -W -f='${db:Status-Status}' -- "$name" 2>/dev/null; result=$?; printf '.'; exit "$result") && [[ "$state" == installed. ]]; then
-        continue
+    if ! state=$(LANG=C "$dpkg_bin" -W -f='${db:Status-Status}' -- "$name" 2>/dev/null; result=$?; printf '.'; exit "$result"); then
+        state=''
     fi
+    within_budget || exit 0
+    [[ "$state" == installed. ]] && continue
     missing+=("$name")
 done
 if [[ ${#missing[@]} -eq 0 ]]; then
@@ -90,7 +127,7 @@ warn_failure() {
 
 # Keep announcements outside captured helper output so each elevation is visible.
 printf 'Packages: using sudo to run %s as root.\n' "$helper_path" >&2
-if output=$(sudo -n -u "$sudo_target" -- "$helper_path" -qq update 2>&1); then
+if output=$(timeout "$update_timeout" sudo -n -u "$sudo_target" -- "$helper_path" -qq update 2>&1); then
     # apt-get update exits 0 when indexes cannot be fetched; surface its W:/E: lines.
     if problems=$(printf '%s\n' "$output" | grep -E '^[WE]: '); then
         ui_warn 'Package list update reported problems; listed packages may be skipped. Last lines:'
@@ -98,15 +135,22 @@ if output=$(sudo -n -u "$sudo_target" -- "$helper_path" -qq update 2>&1); then
     fi
 else
     result=$?
+    if [[ "$result" -eq 124 ]]; then
+        ui_warn "Package list update timed out after $update_timeout s; replay skipped."
+        exit 0
+    fi
     warn_failure update "$result" "$output"
     exit 0
 fi
+# The update has its own limit; the check budget restarts for the cache checks.
+checks_started=$SECONDS
 known=()
 for name in "${missing[@]}"; do
     if ! available=$("$cache_bin" pkgnames -- "$name" 2>/dev/null); then
         ui_warn "apt-cache failed for $name; package replay skipped."
         exit 0
     fi
+    within_budget || exit 0
     if printf '%s\n' "$available" | grep -qxF -- "$name"; then
         known+=("$name")
     else
@@ -115,6 +159,7 @@ for name in "${missing[@]}"; do
 done
 [[ ${#known[@]} -gt 0 ]] || exit 0
 printf 'Packages: using sudo to run %s as root.\n' "$helper_path" >&2
+# No install timeout: killing apt/dpkg can leave half-configured packages dev cannot repair without sudo.
 if output=$(sudo -n -u "$sudo_target" -- "$helper_path" -qq install "${known[@]}" 2>&1); then
     :
 else

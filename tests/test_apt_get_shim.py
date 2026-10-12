@@ -89,6 +89,7 @@ def test_dev_help_anywhere(tmp_path, args):
         "update",
         "install",
         "NAME",
+        "at most 128 bytes",
         "-y",
         "--yes",
         "--assume-yes",
@@ -360,3 +361,19 @@ def test_record_into_fifo_warns_promptly(tmp_path):
             os.close(os.open(shim.list, os.O_RDONLY | os.O_NONBLOCK))
     assert result.returncode == 0
     assert "install succeeded but was not recorded" in result.stderr
+
+
+@pytest.mark.parametrize("length", [128, 129])
+def test_dev_name_byte_limit(tmp_path, length):
+    shim = ShimHarness(tmp_path)
+    name = "a" * length
+    result = shim.run(["install", name])
+    if length == 128:
+        assert result.returncode == 0
+        assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, "install", name]]
+        assert shim.list.read_text().splitlines()[1:] == [name]
+    else:
+        assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
+        assert "package name longer than 128 bytes (129-byte argument)" in result.stderr
+        assert shim.tools.events() == [] and shim.tools.sudo_calls() == []
+        assert not shim.list.exists()

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import subprocess
+import time
+from pathlib import Path
 
 import pytest
 from test_djinn_apt_root import BAD_NAMES, HELPER, LIST, ROOT, FakeTools, executable, substitute
@@ -322,3 +325,237 @@ def test_replay_fixed_targets(tmp_path):
         "install",
         "jq",
     ]
+
+
+def fast_package_checks(replay):
+    # Shell fakes keep the timing bound about replay work, not Python startup.
+    log = shlex.quote(str(replay.tools.log))
+    for role in ("dpkg", "cache"):
+        executable(
+            replay.tools.directory / role,
+            "#!/bin/sh\n"
+            f"printf '{{\"kind\":\"{role}\",\"argv\":["
+            + ",".join(['\"%s\"'] * (4 if role == "dpkg" else 3))
+            + f"]}}\\n' \"$@\" >> {log}\n"
+            + (
+                "exit 1\n" if role == "dpkg" else "printf '%s\\n' \"$3\"\n"
+            ),
+        )
+
+
+def test_replay_space_list_at_cap_is_prompt(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_bytes(b" " * 1048576)
+    started = time.monotonic()
+    result = replay.run()
+    elapsed = time.monotonic() - started
+    print(f"1 MiB spaces: {elapsed:.3f} s")
+    assert elapsed < 3
+    assert result.returncode == 0 and "none recorded" in result.stderr
+    assert "[warn]" not in result.stderr
+    assert replay.tools.events() == [] and replay.tools.sudo_calls() == []
+
+
+@pytest.mark.parametrize("count", [256, 257, 1048576 // 11])
+def test_replay_distinct_name_cap(tmp_path, count):
+    replay = ReplayHarness(tmp_path)
+    fast_package_checks(replay)
+    names = [f"pkg{index:07d}" for index in range(count)]
+    # Repeating the first overflow name must not count it twice.
+    entries = names + [names[0], names[-1]] if count == 257 else names
+    replay.list.write_text("\n".join(entries) + "\n")
+    started = time.monotonic()
+    result = replay.run()
+    elapsed = time.monotonic() - started
+    print(f"{replay.list.stat().st_size} bytes / {count} distinct names: {elapsed:.3f} s")
+    assert elapsed < 3
+    assert result.returncode == 0
+    expected = names[:256]
+    assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == expected
+    assert [event["argv"][-1] for event in replay.tools.events("cache")] == expected
+    assert len(replay.tools.sudo_calls()) == 2
+    assert replay.tools.sudo_calls()[-1][6:] == ["install", *expected]
+    assert "installing 256 of 256" in result.stderr
+    if count > 256:
+        assert (
+            f"More than 256 package names in {replay.list}; {count - 256} not replayed."
+            in result.stderr
+        )
+        assert result.stderr.count("not replayed") == 1
+    else:
+        assert "not replayed" not in result.stderr
+
+
+def test_replay_name_byte_limit(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    accepted = "a" * 128
+    replay.list.write_text(f"{accepted}\n{'a' * 129}\n")
+    result = replay.run()
+    assert result.returncode == 0
+    assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == [accepted]
+    assert replay.tools.sudo_calls()[-1][-2:] == ["install", accepted]
+    assert result.stderr.count("Invalid package name") == 1
+    assert f'"{"a" * 32}..." (129 bytes) in {replay.list} (line 2)' in result.stderr
+
+
+def test_replay_invalid_diagnostics_are_bounded(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    invalid = [b"j\x00q", b"\x1b" + b"A" * 31, b"A" * 33, b"\xff\x7f\x01", b"bad name"]
+    replay.list.write_bytes(
+        b"# heading\n\n" + b"\n".join(invalid + [b"JQ", b"JQ", b"foo.deb"]) + b"\njq\n"
+    )
+    replay.tools.configure(states={"jq": ["installed", 0]})
+    result = replay.run()
+    assert result.returncode == 0
+    warnings = [line for line in result.stderr.splitlines() if "Invalid package name" in line]
+    assert len(warnings) == 5
+    shown = ["j?q", "?" + "A" * 31, "A" * 32 + "...", "???", "bad name"]
+    for number, (line, display, entry) in enumerate(
+        zip(warnings, shown, invalid, strict=True), start=3
+    ):
+        assert (
+            f'Invalid package name "{display}" ({len(entry)} bytes) in '
+            f"{replay.list} (line {number}); skipped."
+        ) in line
+    assert result.stderr.count("[warn]") == 6
+    assert f"3 more invalid lines in {replay.list} skipped." in result.stderr
+    assert all(32 <= ord(char) <= 126 for char in result.stderr.replace("\n", ""))
+    assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == ["jq"]
+
+
+@pytest.mark.parametrize("count", [5, 6])
+def test_replay_warning_cap_boundary(tmp_path, count):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("\n".join([f"Bad{index}" for index in range(count)] + ["jq"]))
+    replay.tools.configure(states={"jq": ["installed", 0]})
+    result = replay.run()
+    assert result.returncode == 0 and result.stderr.count("Invalid package name") == 5
+    assert result.stderr.count("[warn]") == (1 if count > 5 else 0) + 5
+    if count == 6:
+        assert f"1 more invalid lines in {replay.list} skipped." in result.stderr
+    else:
+        assert "more invalid lines" not in result.stderr
+
+
+@pytest.mark.parametrize("tool", ["tr", "awk"])
+@pytest.mark.parametrize("partial", [False, True])
+def test_replay_conversion_failures_skip_partial_input(tmp_path, tool, partial):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    output = ("jq\\n" if tool == "tr" else "V\\tjq\\n") if partial else ""
+    executable(tmp_path / tool, f"#!/bin/sh\nprintf '{output}'\nexit 42\n")
+    result = replay.run()
+    assert result.returncode == 0 and "[warn]" in result.stderr
+    assert str(replay.list) in result.stderr
+    assert replay.tools.events() == [] and replay.tools.sudo_calls() == []
+
+
+@pytest.mark.parametrize("budget", ["0", "1"])
+@pytest.mark.parametrize("stage", ["dpkg", "cache"])
+def test_replay_check_budget(tmp_path, budget, stage):
+    replay = ReplayHarness(tmp_path)
+    names = [f"pkg{index}" for index in range(12)]
+    replay.list.write_text("\n".join(names) + "\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", budget))
+    replay.tools.configure(**{stage + "_delay": 0.2})
+    if stage == "dpkg":
+        # An installed result must still be subject to the budget before continue.
+        replay.tools.configure(states={name: ["installed", 0] for name in names})
+    started = time.monotonic()
+    result = replay.run()
+    assert time.monotonic() - started < 3
+    assert result.returncode == 0
+    assert result.stderr.count(f"Package checks exceeded {budget} s; replay skipped.") == 1
+    assert 0 < len(replay.tools.events(stage)) < len(names)
+    assert replay.tools.sudo_calls() == (
+        [] if stage == "dpkg" else [["-n", "-u", "root", "--", HELPER, "-qq", "update"]]
+    )
+
+
+@pytest.mark.parametrize("stage", ["dpkg", "cache"])
+def test_replay_budget_covers_final_check(tmp_path, stage):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "0"))
+    replay.tools.configure(**{stage + "_delay": 1.1})
+    result = replay.run()
+    assert result.returncode == 0
+    assert "Package checks exceeded 0 s; replay skipped." in result.stderr
+    assert len(replay.tools.events(stage)) == 1
+    assert len(replay.tools.sudo_calls()) == (0 if stage == "dpkg" else 1)
+
+
+def test_replay_zero_budget_allows_zero_elapsed(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    fast_package_checks(replay)
+    replay.list.write_text("jq\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "0"))
+    # Freeze the elapsed clock at its boundary while preserving the comparison.
+    source = replay.script.read_text().replace("checks_started=$SECONDS", "checks_started=0")
+    source = source.replace(
+        "if (( SECONDS - checks_started ", "SECONDS=0\n    if (( SECONDS - checks_started "
+    )
+    replay.script.write_text(source)
+    result = replay.run()
+    assert result.returncode == 0 and "Package checks exceeded" not in result.stderr
+    assert replay.tools.sudo_calls()[-1][-2:] == ["install", "jq"]
+
+
+def test_replay_slow_update_does_not_spend_check_budget(tmp_path):
+    # After a recreation the update can take minutes; the cache checks still run.
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "1"))
+    replay.tools.configure(update_delay=2.2)
+    result = replay.run()
+    assert result.returncode == 0 and "Package checks exceeded" not in result.stderr
+    assert replay.tools.sudo_calls()[-1][-2:] == ["install", "jq"]
+
+
+def test_replay_update_timeout_kills_fake(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "update_timeout", "300", "1"))
+    # Python sleeps in the fake itself: timeout can kill it without orphan children.
+    replay.tools.configure(update_delay=3)
+    started = time.monotonic()
+    result = replay.run()
+    assert time.monotonic() - started < 2.5
+    assert result.returncode == 0
+    assert "Package list update timed out after 1 s; replay skipped." in result.stderr
+    assert len(replay.tools.sudo_calls()) == 1
+    assert replay.tools.events("cache") == []
+    pid = replay.tools.events("helper")[0]["pid"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_replay_update_status_124(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    replay.tools.configure(update_status=124)
+    result = replay.run()
+    assert result.returncode == 0
+    assert "Package list update timed out after 300 s; replay skipped." in result.stderr
+    assert "Package update failed" not in result.stderr
+    assert len(replay.tools.sudo_calls()) == 1 and replay.tools.events("cache") == []
+
+
+def test_replay_install_has_no_timeout():
+    source = (ROOT / "scripts/package-replay.sh").read_text()
+    install = [line for line in source.splitlines() if '"$helper_path" -qq install' in line]
+    assert len(install) == 1
+    assert install[0].startswith('if output=$(sudo ') and "timeout" not in install[0]
+
+
+@pytest.mark.skipif(not Path("/usr/bin/mawk").exists(), reason="mawk unavailable")
+def test_replay_explicit_mawk(tmp_path):
+    replay = ReplayHarness(tmp_path)
+    executable(tmp_path / "awk", '#!/bin/sh\nexec /usr/bin/mawk "$@"\n')
+    replay.list.write_bytes(b" \t\r\f\vjq\v\f\r\t # comment\njq\nfoo.deb\nj\x00q\n")
+    replay.tools.configure(states={"jq": ["installed", 0]})
+    result = replay.run()
+    assert result.returncode == 0 and "1 recorded, all installed" in result.stderr
+    assert result.stderr.count("Invalid package name") == 2
+    assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == ["jq"]
+    assert replay.tools.sudo_calls() == [] and replay.tools.events("cache") == []

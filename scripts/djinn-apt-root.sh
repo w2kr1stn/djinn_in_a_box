@@ -56,6 +56,7 @@ case "$operation" in
     *) refuse 'expected update or install' "$operation" ;;
 esac
 for name do
+    [ "${#name}" -le 128 ] || refuse 'package name longer than 128 bytes' "$name"
     case "$name" in
         ''|?|[!a-z0-9]*|*[!a-z0-9+.-]*|*.deb) refuse 'invalid package name' "$name" ;;
     esac

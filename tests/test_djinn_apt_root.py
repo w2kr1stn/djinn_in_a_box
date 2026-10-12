@@ -137,7 +137,7 @@ config = json.loads(Path(config_path).read_text())
 args = sys.argv[1:]
 def event(kind, **extra):
     with open(log_path, "a") as handle:
-        handle.write(json.dumps(dict(kind=kind, argv=args, **extra)) + "\n")
+        handle.write(json.dumps(dict(kind=kind, argv=args, pid=os.getpid(), **extra)) + "\n")
 if role == "sudo":
     with open(nul_path, "ab") as handle:
         handle.write(b"\0".join(os.fsencode(arg) for arg in args) + b"\0\0")
@@ -161,10 +161,12 @@ if role in ("apt", "cache"):
 else:
     event(role)
 if role == "cache":
+    time.sleep(config.get("cache_delay", 0))
     output = config.get("cache", {}).get(args[-1], args[-1] + "\n")
     sys.stdout.write(output)
     sys.exit(config.get("cache_status", 0))
 if role == "dpkg":
+    time.sleep(config.get("dpkg_delay", 0))
     state, status = config.get("states", {}).get(args[-1], ["", 1])
     sys.stdout.write(state)
     if status:
@@ -176,6 +178,7 @@ if role == "apt" and config.get("barrier"):
         time.sleep(0.01)
     event("apt_end")
 stage = "install" if "install" in args else "update"
+time.sleep(config.get(stage + "_delay", 0))
 sys.stdout.write(config.get(stage + "_stdout", config.get("stdout", "")))
 sys.stderr.write(config.get(stage + "_stderr", config.get("stderr", "")))
 sys.exit(config.get(stage + "_status", config.get("status", 0)))
@@ -435,3 +438,18 @@ def test_helper_long_token_refused_promptly(tmp_path, args):
     assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
     assert f"({len(args[-1])}-byte argument)" in result.stderr
     assert not helper.lock.exists() and helper.tools.events() == []
+
+
+@pytest.mark.parametrize("length", [128, 129])
+def test_helper_name_byte_limit(tmp_path, length):
+    helper = HelperHarness(tmp_path)
+    name = "a" * length
+    result = helper.run(["install", name])
+    if length == 128:
+        assert result.returncode == 0
+        assert helper.tools.events("cache")[0]["argv"] == ["pkgnames", "--", name]
+        assert helper.tools.events("apt")[0]["argv"] == [*INSTALL, name]
+    else:
+        assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
+        assert "package name longer than 128 bytes (129-byte argument)" in result.stderr
+        assert not helper.lock.exists() and helper.tools.events() == []
