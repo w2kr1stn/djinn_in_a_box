@@ -144,6 +144,19 @@ bind options, and inventories nested sockets/hardlinks with bounds. Missing,
 malformed, unsupported or incomplete provenance is **unknown**, not sealed.
 The exception removes only a Docker cause. A sensitive workspace, such as host
 `/`, remains a dev cause even when delivered identically to the companion.
+
+The nested inventory is skipped when a cause is treated as Docker authority:
+a Docker socket or relocated socket bind, a host-root bind, or an unverified
+`DOCKER_HOST`. These are conservative classifications, not verified access.
+Such a dev cannot become sealed, so the inventory cannot change the result. The
+cause still requires `--allow-unsealed`, and every other inspection error still
+refuses. The inventory is a point-in-time scan: symlinks are not followed and
+entries that vanish during the scan are skipped; a vanished bind root,
+unreadable directories and other errors remain unknown. It is no boundary
+against a hostile dev that can write to the bind, because dev can rename
+entries while the scan runs. Protected inodes stay protected only in binds dev
+cannot write, or when they are kept out of the delivered trees.
+
 Sealed means verified provenance and absence of these named causes. It does not
 promise kernel-exploit resistance, isolation from every host/LAN TCP service, or
 absence of intentionally delivered credentials. The accepted rootless relaxations
@@ -158,7 +171,9 @@ Docker; no init service is required.
 lost boundary. The journal groups bind-related causes; `djinn doctor` lists the
 individual findings. With host authority, the window is only an operating aid.
 The flag cannot override uncertain inspection, direct-route results, deadline,
-trust or journal failures. It applies to that opening only. Before any new
+trust or journal failures. The one exception is the nested inventory above: a
+Docker-authority cause skips it instead of overriding its uncertainty, because
+it cannot make such a dev sealed. The flag applies to that opening only. Before any new
 interactive, headless or detached dev starts, unsealed/unknown planned delivery
 closes and verifies the helper; sealed delivery pauses admission until actual
 delivery and the probes in both dev and companion namespaces pass. Companion

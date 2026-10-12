@@ -9,6 +9,13 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `djinn hostctl on --allow-unsealed` opens again for a dev with a Docker socket
+  or relocated socket bind, a host-root bind or an unverified `DOCKER_HOST`:
+  sealing skips the nested socket/hard-link inventory for such a dev instead of
+  refusing on its uncertainty. The cause still requires `--allow-unsealed`, and
+  other inspection errors still refuse. The inventory no longer follows symlinks
+  and skips entries that vanish during the scan; a missing bind root and
+  unreadable entries still refuse.
 - Checkpoint Claude state and Claude/OpenCode personal settings every 30 s with
   atomic writes: changes older than about 30 s survive a crash, plus checkpoint
   duration and scheduling delay, given valid JSON and healthy writable storage.

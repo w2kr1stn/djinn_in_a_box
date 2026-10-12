@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import pwd
@@ -23,6 +24,8 @@ PROBE_IMAGE = (
     "python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a"
 )
 PREREQUISITE = "Host prerequisite: no forwarding from the Docker network into the tailnet"
+# These causes prevent sealing, so the nested inventory cannot change the outcome.
+DOCKER_AUTHORITY_KINDS = frozenset({"host root", "Docker socket", "relocated Docker socket"})
 PROBE_CODE = """import concurrent.futures, errno, json, socket, sys
 def probe(row):
     host, address = row
@@ -232,22 +235,34 @@ def docker_sockets() -> tuple[Path, ...]:
     return tuple(dict.fromkeys(canonical(p) for p in paths))
 
 
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
 def nested_sensitive_files(source: Path) -> list[Path]:
     """Inventory sockets and hard links; incomplete provenance cannot certify a bind."""
     output: list[Path] = []
     deadline = time.monotonic() + 5
     count = 0
+    walk_root = host_file(source)
 
     def failed(exc: OSError) -> None:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR) and exc.filename != str(walk_root):
+            return
         raise exc
 
-    for root, _dirs, files in os.walk(host_file(source), onerror=failed, followlinks=False):
+    for root, _dirs, files in os.walk(walk_root, onerror=failed, followlinks=False):
         for name in files:
             count += 1
             if count > 250000 or time.monotonic() > deadline:
                 raise ValueError(f"socket inventory incomplete for {source}")
             path = Path(root) / name
-            info = path.stat()
+            info = _lstat_or_none(path)
+            if info is None or stat.S_ISLNK(info.st_mode):
+                continue
             if stat.S_ISSOCK(info.st_mode) or info.st_nlink > 1:
                 output.append(path)
     return output
@@ -353,6 +368,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         mounts = effective
         actual = {**actual, "Mounts": effective}
         inspection = _desktop(actual)
+        inventory_binds: list[tuple[bool, Path, str, tuple[str, str]]] = []
         for mount in mounts:
             try:
                 before = len(causes)
@@ -447,10 +463,35 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                     len(causes) == before
                     and host_file(source).is_dir()
                     and source != canonical(host_runtime.runtime_root() / "export")
-                    and not inspection.raw_sources
                 ):
+                    inventory_binds.append((mount["RW"], source, label, pair))
+                if (
+                    len(causes) == before
+                    and host_file(source).is_file()
+                    and host_file(source).stat().st_nlink > 1
+                ):
+                    errors.append(
+                        Finding(
+                            f"hard-link provenance unknown: {label}",
+                            pair,
+                            "hard-link provenance unknown",
+                            str(source),
+                        )
+                    )
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                errors.append(Finding(f"bind inspection uncertain: {exc}"))
+        endpoint = environment.get("DOCKER_HOST", "")
+        unverified_endpoint = bool(endpoint) and verified.kind != "agent"
+        if unverified_endpoint:
+            causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
+        authority = any(f.kind in DOCKER_AUTHORITY_KINDS for f in causes) or unverified_endpoint
+        if not inspection.raw_sources and not authority:
+            for writable, source, label, pair in inventory_binds:
+                try:
                     for candidate in nested_sensitive_files(source):
-                        info = candidate.stat()
+                        info = _lstat_or_none(candidate)
+                        if info is None or stat.S_ISLNK(info.st_mode):
+                            continue
                         if not stat.S_ISSOCK(info.st_mode):
                             known = len(causes)
                             candidate_source = canonical(candidate)
@@ -464,7 +505,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                                             f"{name} inode alias {candidate}",
                                         )
                                     )
-                            if mount["RW"]:
+                            if writable:
                                 for name, (path, kind, item) in execution.items():
                                     if protected_overlap(candidate_source, path):
                                         causes.append(
@@ -497,24 +538,8 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                                     str(candidate),
                                 )
                             )
-                if (
-                    len(causes) == before
-                    and host_file(source).is_file()
-                    and host_file(source).stat().st_nlink > 1
-                ):
-                    errors.append(
-                        Finding(
-                            f"hard-link provenance unknown: {label}",
-                            pair,
-                            "hard-link provenance unknown",
-                            str(source),
-                        )
-                    )
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                errors.append(Finding(f"bind inspection uncertain: {exc}"))
-        endpoint = environment.get("DOCKER_HOST", "")
-        if endpoint and verified.kind != "agent":
-            causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    errors.append(Finding(f"bind inspection uncertain: {exc}"))
         # A socket-bearing/proxy container on an attached network grants Docker
         # authority regardless of how this dev was originally started.
         for other_id in hostctl.command("ps", "-q").split():
