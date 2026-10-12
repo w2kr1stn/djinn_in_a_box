@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, cast
 
 import typer
@@ -16,6 +17,7 @@ from djinn_in_a_box.core.config_workflow import (
     prepare_config_workflow,
 )
 from djinn_in_a_box.core.console import err_console, error, print_captured, warning
+from djinn_in_a_box.core.contained_paths import PathContainmentError, ensure_directory
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility, get_config_root
 from djinn_in_a_box.core.paths import get_project_root
@@ -180,20 +182,34 @@ def session(
             error(refreshed.stderr or "OpenCode workflow refresh failed")
             raise typer.Exit(1)
 
-    sessions_root = sessions_base.resolve()
-    resolved_workspace = workspace.resolve()
-    try:
-        resolved_workspace.relative_to(sessions_root)
-    except ValueError:
-        error(f"Session workspace escapes sessions root: {workspace}")
-        raise typer.Exit(1) from None
-
-    if create and not workspace.exists():
+    if create:
         try:
-            workspace.mkdir(parents=True, exist_ok=True)
+            try:
+                os.lstat(sessions_base)
+            except FileNotFoundError:
+                sessions_base.mkdir(parents=True, exist_ok=True)
+            ensure_directory(sessions_base, PurePosixPath(project), mode=0o777, secure=False)
+        except PathContainmentError as e:
+            if e.path == workspace and e.reason == "not a directory":
+                error(f"Session workspace exists but is not a directory: {workspace}")
+                err_console.print("Remove or rename it, then retry.")
+            else:
+                kind = "Sessions root" if e.path == sessions_base else "Session workspace"
+                reason = "must not be a symlink" if e.reason == "symlink" else "is not a directory"
+                error(f"{kind} {reason}: {e.path}")
+                err_console.print(f"Replace {e.path} with a real directory, then retry.")
+            raise typer.Exit(1) from e
         except OSError as e:
             error(f"Failed to create session workspace: {e}")
             raise typer.Exit(1) from e
+    else:
+        sessions_root = sessions_base.resolve()
+        resolved_workspace = workspace.resolve()
+        try:
+            resolved_workspace.relative_to(sessions_root)
+        except ValueError:
+            error(f"Session workspace escapes sessions root: {workspace}")
+            raise typer.Exit(1) from None
 
     if workspace.exists() and not workspace.is_dir():
         error(f"Session workspace exists but is not a directory: {workspace}")

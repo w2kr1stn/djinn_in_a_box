@@ -1,6 +1,7 @@
 """Tests for container lifecycle commands."""
 
 import io
+import os
 import re
 import subprocess
 from collections.abc import Generator
@@ -38,6 +39,118 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.theme import DJINN_THEME
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("command", ["volumes", "all"])
+@pytest.mark.parametrize("name", ["claude", "repo-dotfiles"])
+@pytest.mark.parametrize("kind", ["dangling", "file"])
+def test_clean_reports_refused_sync_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, name: str, kind: str
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    root.mkdir()
+    target = root / name
+    if kind == "dangling":
+        target.symlink_to(tmp_path / "missing")
+    else:
+        target.write_bytes(b"wrong type")
+    config = AppConfig(code_dir=code, config_root=root)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    args = ["clean", command, "--force"]
+    if command == "volumes":
+        args.append("--credentials" if name == "claude" else "--repo-dotfiles")
+    with (
+        patch.object(container, "load_config", return_value=config),
+        patch.object(container, "compose_down", return_value=RunResult(0)),
+        patch.object(container, "delete_volumes", return_value={}),
+        patch.object(container, "network_exists", return_value=False),
+        patch.object(container, "clear_sync_path", wraps=container.clear_sync_path) as clear,
+    ):
+        result = runner.invoke(app, args)
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert "Cleanup complete." not in result.output
+    assert f"Failed: {target}" in result.output.replace("\n", ""), result.output
+    assert f"Cleared: {target}" not in result.output.replace("\n", "")
+    clear.assert_called_once_with(target)
+    assert target.is_symlink() if kind == "dangling" else target.read_bytes() == b"wrong type"
+
+
+@pytest.mark.parametrize("command", ["volumes", "all"])
+def test_clean_sync_failure_continues_all_paths_and_remaining_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "claude").symlink_to(tmp_path / "missing")
+    for name in ("codex", "repo-dotfiles"):
+        (root / name).mkdir()
+        (root / name / "delete").write_bytes(b"delete")
+    config = AppConfig(code_dir=code, config_root=root)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    calls: list[str] = []
+    real_clear = container.clear_sync_path
+
+    def clear(path: Path) -> bool:
+        calls.append(path.name)
+        return real_clear(path)
+
+    def network(_name: str) -> bool:
+        calls.append("network")
+        return True
+
+    args = ["clean", command, "--force"]
+    if command == "volumes":
+        args.extend(["--credentials", "--repo-dotfiles"])
+    with (
+        patch.object(container, "load_config", return_value=config),
+        patch.object(container, "compose_down", return_value=RunResult(0)),
+        patch.object(container, "delete_volumes", return_value={}),
+        patch.object(container, "network_exists", side_effect=network),
+        patch.object(container, "delete_network", return_value=True) as delete_network,
+        patch.object(container, "clear_sync_path", side_effect=clear),
+        patch.object(container, "error", wraps=container.error) as error,
+    ):
+        result = runner.invoke(app, args)
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert calls == ["claude", "codex", "repo-dotfiles"] + (["network"] if command == "all" else [])
+    assert f"Failed: {root / 'claude'}" in result.output.replace("\n", "")
+    assert "Cleanup complete." not in result.output
+    error.assert_called_once_with(f"  Failed: {root / 'claude'}")
+    if command == "all":
+        delete_network.assert_called_once()
+    assert list((root / "codex").iterdir()) == []
+    assert list((root / "repo-dotfiles").iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses filesystem EACCES")
+def test_clean_volumes_discovery_permission_failure_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    (root / "claude").mkdir(parents=True)
+    sentinel = root / "claude/keep"
+    sentinel.write_bytes(b"preserved")
+    config = AppConfig(code_dir=code, config_root=root)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    root.chmod(0)
+    try:
+        with patch.object(container, "load_config", return_value=config):
+            result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit)
+        assert f"Failed: {root / 'claude'}" in result.output.replace("\n", "")
+        assert "Cleanup complete." not in result.output
+    finally:
+        root.chmod(0o700)
+    assert sentinel.read_bytes() == b"preserved"
 
 
 @pytest.mark.parametrize("command", ["status", "listing"])
@@ -1055,7 +1168,7 @@ class TestCleanVolumesCommand:
         with (
             patch("djinn_in_a_box.commands.container.load_config", return_value=mock_app_config),
             patch(
-                "djinn_in_a_box.commands.container.get_existing_sync_paths_by_category",
+                "djinn_in_a_box.commands.container.get_sync_paths_to_clear_by_category",
                 return_value=[fake_path],
             ) as mock_get,
             patch(
@@ -1184,7 +1297,7 @@ class TestCleanVolumesCommand:
         with (
             patch("djinn_in_a_box.commands.container.load_config", return_value=mock_app_config),
             patch(
-                "djinn_in_a_box.commands.container.get_existing_sync_paths_by_category",
+                "djinn_in_a_box.commands.container.get_sync_paths_to_clear_by_category",
                 return_value=[fake_path],
             ),
             patch(

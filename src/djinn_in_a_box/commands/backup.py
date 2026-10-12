@@ -10,10 +10,12 @@ import stat
 import subprocess
 import tarfile
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 
@@ -26,6 +28,7 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
+from djinn_in_a_box.core import host_runtime, hostctl
 from djinn_in_a_box.core.console import blank, error, info, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
@@ -42,6 +45,7 @@ from djinn_in_a_box.core.docker import (
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.paths import BACKUPS_DIR
+from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
 DEFAULT_CATEGORIES: list[str] = ["credentials", "repo-dotfiles", "data"]
@@ -49,19 +53,26 @@ _VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]+$")
 _AGE_HEADER = b"age-encryption.org/v1"
 _BACKUP_GLOBS = ("djinn-backup-*.tar.gz", "djinn-backup-*.tar.gz.age")
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
 
 def _harden_restored_sync_directories(path: Path) -> None:
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode):
         msg = f"Restored sync path is not a directory: {path}"
         raise ZoneConfigurationError(msg)
-    os.chmod(path, 0o700, follow_symlinks=False)
-    with os.scandir(path) as entries:
-        for entry in entries:
-            if entry.is_symlink():
-                continue
-            if entry.is_dir(follow_symlinks=False):
-                _harden_restored_sync_directories(Path(entry.path))
+
+    stack = [path]
+    while stack:
+        directory = stack.pop()
+        os.chmod(directory, 0o700, follow_symlinks=False)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
 
 
 def _guard_no_containers_running() -> None:
@@ -74,6 +85,27 @@ def _guard_no_containers_running() -> None:
         error(f"Containers are running: {', '.join(running)}")
         error("Stop all containers before backup/restore (djinn clean)")
         raise typer.Exit(1)
+
+
+@contextmanager
+def _lifecycle_guard() -> Iterator[None]:
+    with ExitStack() as guards:
+        try:
+            guards.enter_context(hostctl.control_guard())
+            guards.enter_context(host_runtime.creation_guard())
+        except (hostctl.HostctlError, GitSSHError, OSError) as exc:
+            error(str(exc))
+            raise typer.Exit(1) from exc
+        yield
+
+
+def _with_lifecycle_guard(func: Callable[P, R]) -> Callable[P, R]:
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        with _lifecycle_guard():
+            return func(*args, **kwargs)
+
+    return wrapper
 
 
 def _known_categories() -> set[str]:
@@ -171,6 +203,7 @@ def _require_age(*, restore: bool = False) -> None:
 
 
 @handle_config_errors
+@_with_lifecycle_guard
 def backup(
     categories: Annotated[
         list[str] | None,
@@ -307,6 +340,7 @@ def backup(
 
 
 @handle_config_errors
+@_with_lifecycle_guard
 def restore() -> None:
     """Restore Docker volumes and sync paths from a backup archive.
 
@@ -406,7 +440,7 @@ def restore() -> None:
             if archive.name.removesuffix(".tar.gz") in DESKTOP_RUNTIME_VOLUMES:
                 warning(f"Skipping desktop runtime archive: {archive.name}")
                 continue
-            hardening_error: OSError | None = None
+            hardening_error: ZoneConfigurationError | OSError | None = None
             if archive.parent == declared_dir:
                 vol_name = archive.name.removesuffix(".tar.gz")
                 if vol_name not in declared_restorable:
@@ -422,13 +456,18 @@ def restore() -> None:
                 path_name = extract_sync_path_name(archive.name)
                 label = f"sync/{path_name}"
                 info(f"  {label}")
+                if path_name not in {name for names in SYNC_PATHS.values() for name in names}:
+                    error(f"  {label}: unknown sync path name")
+                    failed = True
+                    continue
                 result = restore_sync_path(path_name, staging_dir, config)
-                try:
-                    _harden_restored_sync_directories(
-                        resolve_zone_roots(config).config_root / path_name
-                    )
-                except OSError as exc:
-                    hardening_error = exc
+                if result.extraction_admitted:
+                    try:
+                        _harden_restored_sync_directories(
+                            resolve_zone_roots(config).config_root / path_name
+                        )
+                    except (ZoneConfigurationError, OSError) as exc:
+                        hardening_error = exc
             else:
                 vol_name = archive.name.removesuffix(".tar.gz")
                 if not _VOLUME_NAME_RE.fullmatch(vol_name):

@@ -47,6 +47,28 @@ _REAL_OPEN = os.open
 _SECRET = b"outside secret\n"
 
 
+def test_directory_walker_default_creation_mode(tmp_path: Path) -> None:
+    root = os.open(tmp_path, workflow_publisher._DIRECTORY_FLAGS)
+    old_umask = os.umask(0o022)
+    try:
+        parent = workflow_publisher._open_parent(root, _p("one/two/file"), create=True)
+        assert parent is not None
+        os.close(parent)
+        assert stat.S_IMODE((tmp_path / "one").stat().st_mode) == 0o755
+        assert stat.S_IMODE((tmp_path / "one/two").stat().st_mode) == 0o755
+        child = workflow_publisher._open_child_directory(root, "default", create=True)
+        assert child is not None
+        os.close(child)
+        assert stat.S_IMODE((tmp_path / "default").stat().st_mode) == 0o755
+        child = workflow_publisher._open_child_directory(root, "custom", create=True, mode=0o700)
+        assert child is not None
+        os.close(child)
+        assert stat.S_IMODE((tmp_path / "custom").stat().st_mode) == 0o700
+    finally:
+        os.umask(old_umask)
+        os.close(root)
+
+
 def _view(*paths: str, marker: bytes = b"one\n") -> WorkflowView:
     files = tuple(PublishedFile(_p(path), f"{path}\n".encode()) for path in paths)
     return WorkflowView(

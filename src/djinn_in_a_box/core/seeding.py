@@ -5,11 +5,19 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from djinn_in_a_box.config.models import ConfigSyncSource
+from djinn_in_a_box.core.contained_paths import (
+    PathContainmentError,
+    install_file,
+    install_tree,
+    open_root,
+    remove_entry,
+)
 
 SeedKind = Literal["file", "directory"]
 
@@ -68,8 +76,9 @@ def seed_config(
     seed_claude_baseline = source == "claude" and workflow_root_is_uninitialized(claude_root)
 
     created = _ensure_workflow_roots(project_root)
-    entries = (*CLAUDE_BASELINE_SEEDS, *SHARED_SEEDS) if seed_claude_baseline else SHARED_SEEDS
-    for entry in entries:
+    if seed_claude_baseline:
+        created.extend(_seed_claude_baseline(seed_root, claude_root))
+    for entry in SHARED_SEEDS:
         seed_source = seed_root / entry.source
         target = project_root / entry.target
         if not _source_exists(seed_source, entry.kind):
@@ -90,6 +99,101 @@ def seed_config(
         created.append(target)
 
     return created
+
+
+def _seed_claude_baseline(seed_root: Path, claude_root: Path) -> list[Path]:
+    prepared_files: dict[SeedEntry, tuple[bytes, bool]] = {}
+    for entry in CLAUDE_BASELINE_SEEDS:
+        source = seed_root / entry.source
+        if not _source_exists(source, entry.kind):
+            msg = (
+                f"Installation is missing seed source {source}. "
+                "Reinstall djinn_in_a_box or clone the repository again, then rerun."
+            )
+            raise SeedingError(msg)
+        try:
+            if entry.kind == "file":
+                prepared_files[entry] = (
+                    source.read_bytes(), bool(source.stat().st_mode & stat.S_IXUSR)
+                )
+            else:
+                _preflight_seed_tree(source)
+        except OSError as exc:
+            cause = exc.strerror or str(exc)
+            filename = os.fsdecode(exc.filename) if exc.filename is not None else None
+            detail = f" Failing path: {filename}." if filename and Path(filename) != source else ""
+            msg = (
+                f"Cannot read baseline seed source {source}: {cause}.{detail} "
+                "Reinstall djinn_in_a_box or clone the repository again, then rerun."
+            )
+            raise SeedingError(msg) from exc
+
+    target = claude_root
+    wrong_type_target: Path | None = None
+    try:
+        descriptor = open_root(claude_root)
+        try:
+            created: list[Path] = []
+            for entry in CLAUDE_BASELINE_SEEDS:
+                target = claude_root / entry.target.name
+                try:
+                    info = os.stat(target.name, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    expected_type = stat.S_ISREG if entry.kind == "file" else stat.S_ISDIR
+                    if expected_type(info.st_mode):
+                        continue
+                    wrong_type_target = target
+                    remove_entry(descriptor, target.name)
+                    wrong_type_target = None
+                if entry.kind == "file":
+                    content, executable = prepared_files[entry]
+                    install_file(descriptor, target.name, content, executable)
+                else:
+                    install_tree(descriptor, target.name, seed_root / entry.source)
+                created.append(target)
+            return created
+        finally:
+            os.close(descriptor)
+    except (PathContainmentError, OSError) as exc:
+        if isinstance(exc, PathContainmentError):
+            cause = exc.reason
+            detail = ""
+            remedy = "Move or remove the conflicting path, then rerun."
+        else:
+            cause = exc.strerror or str(exc)
+            filename = os.fsdecode(exc.filename) if exc.filename is not None else None
+            if filename:
+                filename_path = Path(filename)
+                same_target = filename_path == target or (
+                    not filename_path.is_absolute() and filename_path == Path(target.name)
+                )
+                detail = f" Failing path: {filename}." if not same_target else ""
+            else:
+                detail = ""
+            if wrong_type_target is not None:
+                remedy = f"Remove it with `sudo rm -rf {wrong_type_target}`, then rerun."
+            elif isinstance(exc, PermissionError):
+                remedy = (
+                    f'Fix ownership with `sudo chown -R "$(id -u):$(id -g)" '
+                    f"{claude_root}`, then rerun."
+                )
+            else:
+                remedy = f"Check that {claude_root} is writable, then rerun."
+        msg = f"Cannot install baseline seed target {target}: {cause}.{detail} {remedy}"
+        raise SeedingError(msg) from exc
+
+
+def _preflight_seed_tree(source: Path) -> None:
+    for entry in sorted(source.iterdir()):
+        if entry.name == ".gitkeep":
+            continue
+        if entry.is_dir():
+            _preflight_seed_tree(entry)
+        else:
+            entry.read_bytes()
+            entry.stat()
 
 
 def pristine_workflow_seed_digest(project_root: Path, relative_path: Path) -> str | None:

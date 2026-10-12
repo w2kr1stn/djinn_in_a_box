@@ -17,7 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Final
 
 import typer
@@ -35,6 +35,7 @@ from djinn_in_a_box.config.zones import (
 from djinn_in_a_box.core import docker as docker_core
 from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
+from djinn_in_a_box.core.contained_paths import PathContainmentError, tighten_directory
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     SOPS_AGE_KEY_TARGET,
@@ -47,7 +48,11 @@ from djinn_in_a_box.core.docker import (
     sops_age_key_file_problem,
 )
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
-from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.exceptions import (
+    ConfigNotFoundError,
+    ConfigValidationError,
+    ZoneConfigurationError,
+)
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
 
@@ -982,6 +987,9 @@ def _doctor_fix(config: AppConfig) -> bool:
     try:
         ensure_host_env(config)
         console.print("Fixed: host environment")
+    except ZoneConfigurationError as e:
+        failed = True
+        console.print(f"Could not fix: host environment ({e})")
     except OSError as e:
         failed = True
         console.print(f"Could not fix: host environment (check host paths are writable: {e})")
@@ -995,14 +1003,27 @@ def _doctor_fix(config: AppConfig) -> bool:
         failed = True
         console.print(f"Could not fix: zone directory modes ({exc})")
         assignments = None
-    for path in loose_credential_dirs(config, assignments):
-        try:
-            path.chmod(CREDENTIAL_DIR_MODE)
-        except OSError as e:
-            failed = True
-            console.print(f"Could not fix: {path} ({e})")
-        else:
-            console.print(f"Fixed: tightened {path} to 0700")
+    try:
+        roots = resolve_zone_roots(config)
+    except ZoneConfigurationError as exc:
+        failed = True
+        console.print(f"Could not fix: zone directory modes ({exc})")
+    else:
+        for path in loose_credential_dirs(config, assignments):
+            root = next(
+                root
+                for root in (roots.config_root, roots.shared_root, roots.local_root)
+                if path.is_relative_to(root)
+            )
+            try:
+                tighten_directory(
+                    root, PurePosixPath(path.relative_to(root)), mode=CREDENTIAL_DIR_MODE
+                )
+            except (PathContainmentError, OSError) as e:
+                failed = True
+                console.print(f"Could not fix: {path} ({e})")
+            else:
+                console.print(f"Fixed: tightened {path} to 0700")
 
     try:
         network_ok = ensure_network()
