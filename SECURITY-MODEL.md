@@ -182,10 +182,15 @@ For a running dev container it requires complete inspection and no named causes:
 - No bind of host `/`, the controller user's home or its ancestors; no exposure
   of `djinn-hostctl-state`, its backing storage or the Docker data root.
 - No bind exposing private controller/journal, agent or runtime control state.
-- No writable bind overlapping host execution inputs: Djinn's installation and
-  build context, configuration/agent/zone files, Python environments/executable,
-  effective import directories and loaded modules, Docker CLI/configuration/
-  plugin directories, and host `PATH` directories, all determined at check time.
+- Nothing the host executes may be mounted writable into dev. The sealing
+  inventory covers Djinn's installation and build context, configuration/agent/
+  zone files, Python environments/executable, effective import directories and
+  loaded modules, Docker CLI/configuration/plugin directories, and host `PATH`
+  directories, all determined at check time.
+  At creation, Djinn refuses a writable `[mounts.*]`, `--mount` or `--here` bind
+  overlapping this same execution-input inventory. Sealing continues to report
+  managed-bind and running-state findings. The workspace root is outside this
+  creation-time rule.
 - Desktop channels are absent or verified filtered/locked, with no raw endpoints.
 
 Inspection resolves canonical ancestors, inode aliases and local named-volume

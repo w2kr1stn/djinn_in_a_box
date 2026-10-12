@@ -9,6 +9,8 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `djinn start --detach` now delivers `--mount` and `--here` paths containing
+  `$` literally instead of letting Compose interpolate them.
 - `djinn hostctl on --allow-unsealed` opens again for a dev with a Docker socket
   or relocated socket bind, a host-root bind or an unverified `DOCKER_HOST`:
   sealing skips the nested socket/hard-link inventory for such a dev instead of
@@ -24,6 +26,12 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- At container creation, refuse writable declared binds and writable invocation
+  `--mount`/`--here` sources that overlap host execution inputs, including
+  `djinn run`'s implicit `--here`. Read-only binds, `--mount ...:ro`, and
+  declared volumes are not affected. Existing setups: switch a refused writable
+  bind to read-only (or remove it) before the next start; `djinn doctor` lists
+  affected `[mounts.*]` entries.
 - Protect host-mode `djinn session` from automatic loading of container-writable
   agent and Git configuration. Claude starts with user-only settings; OpenCode
   disables project config and refuses its remaining entry points; Codex
