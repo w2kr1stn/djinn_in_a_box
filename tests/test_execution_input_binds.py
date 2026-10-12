@@ -960,12 +960,39 @@ def test_link_locations_follow_nested_relative_and_missing_paths(tmp_path):
         host_sealing._link_locations(root / "loop1" / "bin")
 
 
-@pytest.mark.parametrize("here", [False, True])
-def test_invocation_source_with_colon_is_refused(tmp_path, monkeypatch, here):
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("target", ["/review", "/home/dev/workspace"])
+def test_invocation_source_with_colon_is_refused(tmp_path, read_only, target):
     source = tmp_path / "input:x"
     source.mkdir()
-    alias = tmp_path / "alias"
-    alias.symlink_to(source, target_is_directory=True)
-    monkeypatch.chdir(source if here else tmp_path)
     with pytest.raises(MountSpecificationError, match="must not contain ':'"):
-        docker.resolve_container_mounts(() if here else (f"{alias}:/review",), here=here)
+        validate((docker.ContainerMount(source, Path(target), read_only),), tmp_path)
+
+
+@pytest.mark.parametrize("channel", ["declaration", "invocation"])
+@pytest.mark.parametrize("bind", ["project-in-link-target", "link-directory", "path-entry-parent"])
+def test_link_entry_protects_its_location_not_its_target(
+    real_inventory, monkeypatch, channel, bind
+):
+    disk_home = real_inventory / "disk" / "u"
+    (disk_home / ".local" / "bin").mkdir(parents=True)
+    (disk_home / "projects" / "foo").mkdir(parents=True)
+    (real_inventory / "home").mkdir()
+    link = real_inventory / "home" / "u"
+    link.symlink_to(disk_home, target_is_directory=True)
+    monkeypatch.setenv("PATH", f"{link}/.local/bin")
+    monkeypatch.setenv("DOCKER_CONFIG", str(real_inventory / "docker-config"))
+    source = {
+        "project-in-link-target": disk_home / "projects" / "foo",
+        "link-directory": real_inventory / "home",
+        "path-entry-parent": disk_home / ".local",
+    }[bind]
+    refused = bind != "project-in-link-target"
+    if channel == "declaration":
+        error = resolve(source).diagnostics[0].error
+        assert (error is not None and "overlaps host execution input" in error) is refused
+    elif refused:
+        with pytest.raises(MountSpecificationError, match="overlaps host execution input"):
+            validate((docker.ContainerMount(source, Path("/review")),), source)
+    else:
+        validate((docker.ContainerMount(source, Path("/review")),), source)

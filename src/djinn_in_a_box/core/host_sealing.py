@@ -163,8 +163,11 @@ def protected_overlap(source: Path, protected: Path, *, strict: bool = False) ->
             present(host_file(a)) and present(host_file(b)) and host_file(a).samefile(host_file(b))
         )
 
-    return any(same(source, ancestor) for ancestor in (protected, *protected.parents)) or any(
-        same(protected, ancestor) for ancestor in (source, *source.parents)
+    # A symlink location is protected as a directory entry: a source inside its target is not
+    # an overlap (the resolved input covers what the link leads to).
+    link = host_file(protected).is_symlink()
+    return any(same(source, ancestor) for ancestor in (protected, *protected.parents)) or (
+        not link and any(same(protected, ancestor) for ancestor in (source, *source.parents))
     )
 
 
