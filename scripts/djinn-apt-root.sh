@@ -31,11 +31,10 @@ timeout_bin='/usr/bin/timeout'
 date_bin='/usr/bin/date'
 rm_bin='/usr/bin/rm'
 tail_bin='/usr/bin/tail'
-ln_bin='/usr/bin/ln'
 readonly id_bin env_bin apt_bin cache_bin flock_bin grep_bin lock_path lock_wait
 readonly list_dir list_path root_uid work_template max_name max_names max_warnings max_bytes
 readonly check_budget update_timeout stat_bin mktemp_bin mv_bin chmod_bin sync_bin head_bin
-readonly tr_bin awk_bin dpkg_bin timeout_bin date_bin rm_bin tail_bin ln_bin
+readonly tr_bin awk_bin dpkg_bin timeout_bin date_bin rm_bin tail_bin
 LC_ALL=C
 export LC_ALL
 
@@ -101,7 +100,6 @@ warn() { printf 'W\t%s\n' "$1"; }
 # shellcheck disable=SC2317
 cleanup() {
     [ -z "$record_tmp" ] || run_clean "$rm_bin" -f -- "$record_tmp"
-    [ -z "$rollback_tmp" ] || run_clean "$rm_bin" -f -- "$rollback_tmp"
     [ -z "$work_dir" ] || run_clean "$rm_bin" -rf -- "$work_dir"
 }
 
@@ -247,26 +245,10 @@ record_packages() {
     reason='cannot set list mode'
     run_clean "$chmod_bin" 0644 "$record_tmp" || return 1
     reason='cannot sync temporary list'
-    run_clean "$sync_bin" -f "$record_tmp" || return 1
-    # Retain the old inode until directory sync succeeds, so a reported sync
-    # failure can roll back the rename without rewriting the old file.
-    if [ "$list_exists" = true ]; then
-        reason='cannot stage rollback'
-        rollback_tmp=$(run_clean "$mktemp_bin" "$list_dir/.packages.txt.XXXXXX") || { rollback_tmp=''; return 1; }
-        run_clean "$ln_bin" -f -- "$list_path" "$rollback_tmp" || return 1
-    fi
+    run_clean "$sync_bin" -- "$record_tmp" || return 1
     reason='cannot replace list'
     run_clean "$mv_bin" -f -- "$record_tmp" "$list_path" || return 1
     record_tmp=''
-    reason='cannot sync list directory'
-    if ! run_clean "$sync_bin" -f "$list_dir"; then
-        if [ "$list_exists" = true ]; then
-            run_clean "$mv_bin" -f -- "$rollback_tmp" "$list_path" || reason="$reason; rollback failed"
-        else
-            run_clean "$rm_bin" -f -- "$list_path" || reason="$reason; rollback failed"
-        fi
-        return 1
-    fi
     reason='cannot read recording count'
     IFS= read -r skipped < "$work_dir/counts" || return 1
     reason="$skipped names not recorded (256-name or 1 MiB limit)"
@@ -363,6 +345,7 @@ locked_apt() {
         printf 'djinn-apt-root: cannot acquire %s within %s seconds.\n' "$lock_path" "$lock_wait" >&2
         return 100
     fi
+    umask 022
     if [ "$operation" = replay ]; then replay_packages; return 0; fi
     if [ "$operation" = install ]; then
         for name do
@@ -391,7 +374,6 @@ locked_apt() {
 umask 077
 work_dir=''
 record_tmp=''
-rollback_tmp=''
 trap cleanup EXIT
 trap 'exit 100' HUP INT TERM
 lock_opened=false

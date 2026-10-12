@@ -35,6 +35,8 @@ and recording. The helper alone writes the root-owned list at
 atomically after successful installs. Agents cannot edit it; human housekeeping
 requires sudo. Root never touches a dev-writable path: the list lives outside
 `/home/dev`, whose ancestors dev could rename or replace with symlinks.
+Apt's history log attributes these installs to root because the fixed environment
+drops sudo's caller variables; the list and stderr announcement record agent installs.
 
 The helper fails closed when directory or opened-file descriptor checks fail:
 the directory must be root-owned and not group- or world-writable; the list must

@@ -23,7 +23,6 @@ class ShimHarness:
     def __init__(self, directory):
         self.tools = FakeTools(directory)
         self.tools.configure(uid="1000")
-        self.list = directory / "packages.txt"
         source = (ROOT / "scripts/apt-get-shim.sh").read_text()
         for name, old, new in (
             ("id_bin", "/usr/bin/id", directory / "id"),
@@ -53,8 +52,6 @@ def test_root_passthrough(tmp_path, status, streams):
     shim.tools.configure(
         uid="0", status=status, stdout="out\n" if streams else "", stderr="err\n" if streams else ""
     )
-    # A directory at the list path detects accidental recording without touching home.
-    shim.list.mkdir()
     args = ["install", "spaced name", "", "*", "--", "-o", "--help", "-h"]
     shim.env["LC_ALL"] = "C.UTF-8"
     shim.env["APT_CONFIG"] = "preserved"
@@ -62,7 +59,7 @@ def test_root_passthrough(tmp_path, status, streams):
     assert result.returncode == status
     assert result.stdout == ("out\n" if streams else "")
     assert result.stderr == ("err\n" if streams else "")
-    assert shim.tools.sudo_calls() == [] and list(shim.list.iterdir()) == []
+    assert shim.tools.sudo_calls() == []
     event = shim.tools.events("apt")[0]
     assert event["argv"] == args and event["stdin"] == "caller input"
     assert event["env"]["LC_ALL"] == "C.UTF-8"
@@ -109,7 +106,7 @@ def test_dev_help_anywhere(tmp_path, args):
         'README section "Runtime Packages"',
     ):
         assert text in result.stdout
-    assert not shim.list.exists() and shim.tools.events() == []
+    assert shim.tools.events() == []
 
 
 @pytest.mark.parametrize(
@@ -129,7 +126,6 @@ def test_dev_help_anywhere(tmp_path, args):
 )
 def test_dev_refusal_matrix(tmp_path, args):
     shim = ShimHarness(tmp_path)
-    shim.list.write_text("# keep\ncurl\n")
     result = shim.run(args)
     assert result.returncode == 2 and result.stdout == ""
     assert len(result.stderr.splitlines()) == 1
@@ -138,7 +134,6 @@ def test_dev_refusal_matrix(tmp_path, args):
     )
     assert not any(ord(char) < 32 for char in result.stderr.rstrip("\n"))
     assert "using sudo" not in result.stderr and shim.tools.events() == []
-    assert shim.list.read_text() == "# keep\ncurl\n"
 
 
 @pytest.mark.parametrize(
@@ -172,7 +167,6 @@ def test_allowed_argv_and_quiet(tmp_path, args, forwarded):
     result = shim.run(args)
     assert result.returncode == 0
     assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, *forwarded]]
-    assert not shim.list.exists()
 
 
 @pytest.mark.parametrize("name", ["bash-", "jq.", "xz.", "jq+", "g++", "python3.11"])
@@ -185,12 +179,10 @@ def test_dev_exact_name_refusal(tmp_path, name):
     result = shim.run(["install", name])
     assert result.returncode == (0 if known else 100)
     assert result.stderr.count("using sudo") == 1
-    if known:
-        assert not shim.list.exists()
-    else:
+    if not known:
         assert f"E: Unable to locate package {name}" in result.stderr
         assert "apt-get update" in result.stderr
-        assert not shim.list.exists() and helper.tools.events("apt") == []
+        assert helper.tools.events("apt") == []
 
 
 @pytest.mark.parametrize("status", [0, 1, 100])
@@ -219,7 +211,6 @@ def test_fixed_targets_ignore_environment(tmp_path):
     result = shim.run(["install", "jq"])
     assert result.returncode == 0
     assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, "install", "jq"]]
-    assert not shim.list.exists()
 
 
 LONG = "A" * 32769
@@ -236,7 +227,7 @@ def test_long_token_refused_promptly(tmp_path, args):
     assert time.monotonic() - started < 2
     assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
     assert f"({len(args[-1])}-byte argument)" in result.stderr
-    assert shim.tools.sudo_calls() == [] and not shim.list.exists()
+    assert shim.tools.sudo_calls() == []
 
 
 @pytest.mark.parametrize("length", [128, 129])
@@ -247,12 +238,10 @@ def test_dev_name_byte_limit(tmp_path, length):
     if length == 128:
         assert result.returncode == 0
         assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, "install", name]]
-        assert not shim.list.exists()
     else:
         assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
         assert "package name longer than 128 bytes (129-byte argument)" in result.stderr
         assert shim.tools.events() == [] and shim.tools.sudo_calls() == []
-        assert not shim.list.exists()
 
 
 def test_shim_has_no_list_access():

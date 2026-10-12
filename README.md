@@ -592,7 +592,8 @@ accepted. Symlinks and group- or world-writable files or directories are refused
 with a warning. Replay uses one linear parse and considers at most 256 distinct names
 and warns how many more it did not replay, treats entries over 128 bytes as
 invalid, reports at most five invalid lines one by one, and stops its package
-checks with a warning after 60 seconds. The package list update has a 300-second
+checks with a warning after 60 seconds in each check phase, before and after the
+update. The package list update has a 300-second
 limit; the install step has none, because interrupting dpkg can leave packages
 half-configured. Prefer build-time `packages.txt` for packages
 every new image needs from its first start; runtime installs are for packages

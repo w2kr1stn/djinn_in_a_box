@@ -658,7 +658,7 @@ publication.
 ```text
 container start
   |
-  +-- volume ownership repair for cache and workspace paths
+  +-- volume ownership repair for cache/workspace paths
   +-- source seed-lib.sh
   +-- restore ~/.claude.json from the persistent config root when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
@@ -1084,7 +1084,7 @@ declared ancestors of built-in/reserved/zone/active-workspace/invocation targets
 are refused; declared pairs cannot nest. Children otherwise remain allowed,
 except at or below `MANAGED_TARGET_ROOTS`, the same set used by invocation mounts.
 Its five recursively repaired roots come from `MANAGED_VOLUME_REPAIR_TARGETS`,
-checked against the entrypoint repair list; the remaining roots are
+checked against the unchanged entrypoint repair list; the remaining roots are
 the reserved `/var/lib/djinn-packages` (no dev ownership repair), managed SSH targets, desktop directories and the agent-Docker endpoint. The
 declared diagnostic retains its `Djinn-managed volume root` wording. Actual volume
 names are `djinn-<name>` and cannot collide with the built-in volume registry.
@@ -1113,8 +1113,7 @@ identical dev and companion delivery.
 creation, with no running-mount comparison or attach-time update.
 
 The fragment also carries `DJINN_DECLARED_VOLUME_TARGETS`, an escaped JSON array
-of canonical volume targets (`[]` when empty). After the fixed repair of five
-built-in volume roots,
+of canonical volume targets (`[]` when empty). After its unchanged fixed repair,
 the entrypoint invokes `scripts/ownership-repair.py` directly as dev with one
 quoted JSON argument. The helper checks writability with dev credentials and
 enumerates only direct root entries (dotfiles count). If enumeration is denied,

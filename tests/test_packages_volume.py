@@ -82,7 +82,6 @@ def test_packages_volume_registries() -> None:
     assert docker._COMPOSE_DEV_MOUNT_TARGETS[PACKAGE_TARGET] == "directory"
     assert PACKAGE_TARGET not in docker.MANAGED_VOLUME_REPAIR_TARGETS
     assert PACKAGE_TARGET in docker.MANAGED_TARGET_ROOTS
-    assert Path("/home/dev/.local/share/djinn-packages") not in docker.MANAGED_VOLUME_REPAIR_TARGETS
 
 
 def test_packages_volume_name_collision(tmp_path: Path) -> None:

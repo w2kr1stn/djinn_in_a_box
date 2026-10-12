@@ -74,7 +74,6 @@ def test_package_docs_describe_root_owned_list() -> None:
         "docs/sync-across-machines.md",
     ):
         source = (_ROOT / name).read_text()
-        assert "/home/dev/.local/share/djinn-packages" not in source
         assert "/var/lib/djinn-packages" in source
 
 

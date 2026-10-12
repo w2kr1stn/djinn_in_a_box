@@ -15,17 +15,15 @@ else
     define_plain_ui_fallbacks
 fi
 
-
-printf 'Packages: using sudo to run /usr/local/libexec/djinn-apt-root replay as root.\n' >&2
-output=$(sudo -n -u root -- /usr/local/libexec/djinn-apt-root replay 2>&1)
-result=$?
-while IFS= read -r line; do
+ui_info 'Packages: using sudo to run /usr/local/libexec/djinn-apt-root replay as root.'
+sudo -n -u root -- /usr/local/libexec/djinn-apt-root replay 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
         I$'\t'*) ui_info "${line:2}" ;;
         W$'\t'*) ui_warn "${line:2}" ;;
         *) ui_info "$line" ;;
     esac
-done < <(printf '%s' "$output"; [[ -z "$output" ]] || printf '\n')
+done
+result=${PIPESTATUS[0]}
 if [[ "$result" -ne 0 ]]; then
     ui_warn "Package replay failed (status $result); continuing startup."
 fi

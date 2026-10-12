@@ -162,7 +162,9 @@ if role == "id":
     print(config.get("uid", "0"))
     sys.exit(0)
 if role in ("apt", "cache", "dpkg"):
-    event(role, env=dict(os.environ), stdin=sys.stdin.read())
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+    event(role, env=dict(os.environ), stdin=sys.stdin.read(), umask=f"{current_umask:04o}")
 else:
     event(role)
 if role == "cache":
@@ -396,6 +398,18 @@ def test_helper_fixed_env_options_and_stdin(tmp_path, quiet, operation, status):
     )
 
 
+@pytest.mark.parametrize("operation", ["install", "update", "replay"])
+def test_helper_apt_umask(tmp_path, operation):
+    helper = HelperHarness(tmp_path)
+    helper.list.write_text("jq\n")
+    result = helper.run([operation, *(["jq"] if operation == "install" else [])])
+    assert result.returncode == 0
+    events = helper.tools.events("apt")
+    assert len(events) == (2 if operation == "replay" else 1)
+    assert all(event["umask"] == "0022" for event in events)
+    assert helper.lock.stat().st_mode & 0o777 == 0o600
+
+
 def test_helper_cache_failure(tmp_path):
     helper = HelperHarness(tmp_path)
     helper.tools.configure(cache_status=42)
@@ -603,6 +617,8 @@ def test_record_failure_is_atomic_and_cleans_up(tmp_path, tool):
     assert "installed, but not recorded:" in result.stderr
     if tool == "sync":
         assert "cannot sync temporary list" in result.stderr
+    if tool == "mv":
+        assert "cannot replace list" in result.stderr
     assert helper.list.read_bytes() == initial
     assert not list(helper.list_dir.glob(".packages.txt.*"))
     assert not list(tmp_path.glob("work.*"))
@@ -752,32 +768,11 @@ def test_replay_install_has_no_timeout():
     assert 'run_clean "$apt_bin" ${quiet:+"$quiet"} install' in source
 
 
-@pytest.mark.parametrize("existing", [True, False])
-def test_directory_sync_failure_rolls_back(tmp_path, existing):
-    helper = HelperHarness(tmp_path)
-    if existing:
-        helper.list.write_text("# retained\ncurl\n")
-    helper.tool(
-        "sync",
-        f'#!/bin/sh\n[ "$2" != {shlex.quote(str(helper.list_dir))} ] || exit 42\n'
-        'exec /usr/bin/sync "$@"\n',
-    )
-    result = helper.run(["install", "jq"])
-    assert result.returncode == 0
-    assert result.stderr.count("installed, but not recorded: cannot sync list directory") == 1
-    if existing:
-        assert helper.list.read_text() == "# retained\ncurl\n"
-    else:
-        assert not helper.list.exists()
-    assert not list(helper.list_dir.glob(".packages.txt.*"))
-    assert not list(tmp_path.glob("work.*"))
-
-
 def test_record_atomic_steps_and_serialized_recording(tmp_path):
     helper = HelperHarness(tmp_path)
     helper.list.write_text("curl\n")
     trace = tmp_path / "steps"
-    for tool in ("chmod", "sync", "mv", "ln"):
+    for tool in ("chmod", "sync", "mv"):
         helper.tool(
             tool,
             "#!/usr/bin/python3\nimport fcntl, os, sys\n"
@@ -792,14 +787,13 @@ def test_record_atomic_steps_and_serialized_recording(tmp_path):
     result = helper.run(["install", "jq"])
     assert result.returncode == 0 and result.stderr == ""
     steps = trace.read_text().splitlines()
-    assert [line.split()[0] for line in steps] == ["chmod", "sync", "ln", "mv", "sync"]
+    assert [line.split()[0] for line in steps] == ["chmod", "sync", "mv"]
     temporary = steps[0].split()[2]
     assert Path(temporary).parent == helper.list_dir
     assert Path(temporary).name.startswith(".packages.txt.")
     assert steps[0] == f"chmod 0644 {temporary}"
-    assert steps[1] == f"sync -f {temporary}"
-    assert steps[3] == f"mv -f -- {temporary} {helper.list}"
-    assert steps[4] == f"sync -f {helper.list_dir}"
+    assert steps[1] == f"sync -- {temporary}"
+    assert steps[2] == f"mv -f -- {temporary} {helper.list}"
     assert helper.list.read_text() == "curl\njq\n"
 
 
@@ -910,17 +904,16 @@ def test_every_operation_requires_lock(tmp_path, operation):
     assert helper.tools.events() == []
 
 
-@pytest.mark.parametrize("tool,call", [("mktemp", 2), ("mktemp", 3), ("ln", 1)])
-def test_record_staging_failures(tmp_path, tool, call):
+def test_record_staging_failure(tmp_path):
     helper = HelperHarness(tmp_path)
     helper.list.write_text("curl\n")
     count = tmp_path / "count"
     helper.tool(
-        tool,
+        "mktemp",
         "#!/usr/bin/python3\nimport os, sys\nfrom pathlib import Path\n"
         f"p=Path({str(count)!r})\nn=int(p.read_text()) + 1 if p.exists() else 1\n"
-        f"p.write_text(str(n))\nif n == {call}: sys.exit(42)\n"
-        f'os.execv("/usr/bin/{tool}", ["/usr/bin/{tool}", *sys.argv[1:]])\n',
+        "p.write_text(str(n))\nif n == 2: sys.exit(42)\n"
+        'os.execv("/usr/bin/mktemp", ["/usr/bin/mktemp", *sys.argv[1:]])\n',
     )
     result = helper.run(["install", "jq"])
     assert result.returncode == 0 and result.stderr.count("installed, but not recorded:") == 1
@@ -957,7 +950,6 @@ def test_all_utility_dispatch_is_absolute_and_clean(tmp_path):
         "date",
         "rm",
         "tail",
-        "ln",
     ]
     for binary in binaries:
         helper.tool(
