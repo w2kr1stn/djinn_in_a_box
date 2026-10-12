@@ -179,6 +179,40 @@ def execution_overlap(
     return None
 
 
+def _link_locations(path: Path) -> list[Path]:
+    """Every symlink traversed while resolving ``path``, at its resolved location.
+
+    Whoever can replace such a link chooses what the host executes through it.
+    """
+    links: list[Path] = []
+    current = Path(path.anchor)
+    pending = list(path.parts[1:])
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        try:
+            target = Path(os.readlink(candidate))
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
+            current = candidate
+            continue
+        links.append(candidate)
+        if len(links) > 40:
+            raise ValueError(f"too many host aliases: {path}")
+        if target.is_absolute():
+            current = Path(target.anchor)
+            pending = [*target.parts[1:], *pending]
+        else:
+            pending = [*target.parts, *pending]
+    return links
+
+
 def execution_paths() -> dict[str, tuple[Path, str, str]]:
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     config = Path(os.environ.get("DOCKER_CONFIG", str(home / ".docker")))
@@ -235,10 +269,14 @@ def execution_paths() -> dict[str, tuple[Path, str, str]]:
         plugin_dirs += cast(list[str], extra_dirs)
     for entry in plugin_dirs:
         paths[f"Docker plugin directory {entry}"] = (Path(entry), docker_kind, entry)
-    return {
+    inventory = {
         name: (canonical(path, strict=True), kind, item)
         for name, (path, kind, item) in paths.items()
     }
+    for name, (path, kind, item) in paths.items():
+        for link in _link_locations(Path(path)):
+            inventory[f"{name} via link {link}"] = (link, kind, item)
+    return inventory
 
 
 def _socket_is_docker(path: Path) -> bool:

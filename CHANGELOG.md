@@ -10,7 +10,9 @@ Versioning before and after the first stable release.
 ### Fixed
 
 - `djinn start --detach` now delivers `--mount` and `--here` paths containing
-  `$` literally instead of letting Compose interpolate them.
+  `$` literally instead of letting Compose interpolate them. A `--mount` or
+  `--here` source whose resolved path contains `:` is refused instead of being
+  split by Compose.
 - `djinn hostctl on --allow-unsealed` opens again for a dev with a Docker socket
   or relocated socket bind, a host-root bind or an unverified `DOCKER_HOST`:
   sealing skips the nested socket/hard-link inventory for such a dev instead of
@@ -32,7 +34,8 @@ Versioning before and after the first stable release.
   declared volumes are not affected. Existing setups: switch a refused writable
   bind to read-only (or remove it) before the next start; `djinn doctor` lists
   affected `[mounts.*]` entries. Sealing treats an execution input that cannot be
-  inspected as uncertain.
+  inspected as uncertain, and both checks cover the location of every symlink on
+  an execution input's path.
 - Protect host-mode `djinn session` from automatic loading of container-writable
   agent and Git configuration. Claude starts with user-only settings; OpenCode
   disables project config and refuses its remaining entry points; Codex

@@ -246,7 +246,8 @@ The no-create bind setting prevents accidental host directory creation.
 At creation, a writable `[mounts.*]` bind is refused if its host source overlaps a
 host execution input. Read-only binds (`read_only = true`) and declared volumes
 are not affected. Host execution inputs are the paths in the invoking CLI's
-sealing inventory ([security model](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)).
+sealing inventory ([security model](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)),
+including the location of every symlink on their paths.
 The inventory uses that CLI process's `PATH`, Python environment and Docker client
 configuration at creation time. A relative `PATH` entry, unreadable or malformed
 Docker client config, or an execution input that cannot be inspected (for example

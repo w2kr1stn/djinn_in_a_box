@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -906,3 +907,65 @@ def test_missing_docker_config_is_accepted(inspection_inventory, monkeypatch, ab
     assert host_sealing.execution_overlap(source, inputs) is None
     resolve(source).require_valid()
     validate((docker.ContainerMount(source, Path("/review")),), source)
+
+
+def _path_through_link(tmp_path, monkeypatch):
+    tools = tmp_path / "tools"
+    (tools / "bin").mkdir(parents=True)
+    state = tmp_path / "state"
+    (state / "multishells").mkdir(parents=True)
+    hop = state / "multishells" / "123"
+    hop.symlink_to(tools, target_is_directory=True)
+    monkeypatch.setenv("PATH", f"{hop}/bin")
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "docker-config"))
+    return state, hop, tools
+
+
+@pytest.mark.parametrize("channel", ["declaration", "invocation"])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_link_location_on_execution_path_is_protected(
+    real_inventory, monkeypatch, channel, read_only
+):
+    state, hop, tools = _path_through_link(real_inventory, monkeypatch)
+    inventory = host_sealing.execution_paths()
+    name = f"host PATH directory {hop}/bin via link {hop}"
+    assert inventory[name] == (hop, "writable PATH directory", f"{hop}/bin")
+    assert inventory[f"host PATH directory {hop}/bin"][0] == tools / "bin"
+    cause = f"overlaps host execution input {name} ({hop})"
+    if channel == "declaration":
+        error = resolve(state, read_only=read_only).diagnostics[0].error
+        assert error is None if read_only else cause in error
+    elif read_only:
+        validate((docker.ContainerMount(state, Path("/review"), True),), state)
+    else:
+        with pytest.raises(MountSpecificationError, match=re.escape(cause)):
+            validate((docker.ContainerMount(state, Path("/review")),), state)
+
+
+def test_link_locations_follow_nested_relative_and_missing_paths(tmp_path):
+    root = tmp_path.resolve()
+    (root / "real" / "x").mkdir(parents=True)
+    (root / "a").mkdir()
+    (root / "b").mkdir()
+    (root / "b" / "link2").symlink_to(root / "real", target_is_directory=True)
+    (root / "a" / "link1").symlink_to("../b/link2", target_is_directory=True)
+    assert host_sealing._link_locations(root / "a" / "link1" / "x") == [
+        root / "a" / "link1",
+        root / "b" / "link2",
+    ]
+    assert host_sealing._link_locations(root / "a" / "missing" / "x") == []
+    (root / "loop1").symlink_to(root / "loop2")
+    (root / "loop2").symlink_to(root / "loop1")
+    with pytest.raises(ValueError, match="too many host aliases"):
+        host_sealing._link_locations(root / "loop1" / "bin")
+
+
+@pytest.mark.parametrize("here", [False, True])
+def test_invocation_source_with_colon_is_refused(tmp_path, monkeypatch, here):
+    source = tmp_path / "input:x"
+    source.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(source, target_is_directory=True)
+    monkeypatch.chdir(source if here else tmp_path)
+    with pytest.raises(MountSpecificationError, match="must not contain ':'"):
+        docker.resolve_container_mounts(() if here else (f"{alias}:/review",), here=here)

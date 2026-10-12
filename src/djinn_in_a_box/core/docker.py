@@ -284,6 +284,15 @@ def _derived_mount_target(source: Path, assigned_targets: set[Path]) -> Path:
     return candidate
 
 
+def _invocation_source(path: str | Path) -> Path:
+    """Resolve an invocation source that Compose's short syntax cannot split."""
+    source = resolve_mount_path(path)
+    if ":" in str(source):
+        msg = f"Mount source {source} must not contain ':'"
+        raise MountSpecificationError(msg)
+    return source
+
+
 def resolve_container_mounts(
     specifications: tuple[str, ...], *, here: bool = False
 ) -> tuple[ContainerMount, ...]:
@@ -293,7 +302,7 @@ def resolve_container_mounts(
         msg = f"Mount target {_WORKSPACE_PATH} is reserved for --here"
         raise MountSpecificationError(msg)
     source_mounts = [
-        (resolve_mount_path(source), target, read_only)
+        (_invocation_source(source), target, read_only)
         for source, target, read_only in parsed
     ]
 
@@ -301,7 +310,7 @@ def resolve_container_mounts(
     if here:
         mounts.append(
             ContainerMount(
-                source=resolve_mount_path(Path.cwd()),
+                source=_invocation_source(Path.cwd()),
                 target=_WORKSPACE_PATH,
             )
         )

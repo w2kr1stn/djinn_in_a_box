@@ -1050,6 +1050,9 @@ The same module owns the repeatable user-mount contract:
   call. `host_sealing.execution_overlap()` applies the sealing canonicalizer and
   overlap predicate, returning the first match. Inventory or comparison failures
   fail closed with `cannot be checked against host execution inputs (<cause>)`.
+  The inventory also records the resolved location of every symlink traversed
+  on an execution input's path. Resolved invocation sources containing `:` are
+  refused, as for declared binds.
   The execution inventory and guard comparison use strict presence checks that
   propagate inspection errors; other sealing paths retain lenient checks.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
