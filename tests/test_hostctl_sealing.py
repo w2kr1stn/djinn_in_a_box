@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,7 +14,7 @@ import pytest
 
 from djinn_in_a_box.commands.doctor import Status, hostctl_boundary_checks
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core import desktop, docker, host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, desktop, docker, host_runtime, hostctl
 from djinn_in_a_box.core import host_sealing as sealing
 
 
@@ -1578,3 +1581,550 @@ def test_execution_inode_alias_uses_short_item(ground, monkeypatch, kind, key, i
     )
     assert result.causes == (f"{source} -> /delivery: {kind} {item} inode alias {candidate}",)
     assert result.state == "unsealed" and not result.errors
+
+
+@pytest.fixture
+def inventory_source(tmp_path):
+    source = tmp_path / "content"
+    if len(str(source / "s")) >= 100:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source = Path(temporary) / "content"
+            source.mkdir()
+            yield source
+    else:
+        source.mkdir()
+        yield source
+
+
+@pytest.fixture
+def inventory_calls(monkeypatch):
+    spy = MagicMock(wraps=sealing.nested_sensitive_files)
+    monkeypatch.setattr(sealing, "nested_sensitive_files", spy)
+    return spy
+
+
+@pytest.mark.parametrize(
+    ("authority", "content_first"),
+    [
+        (kind, first)
+        for kind in ("Docker socket", "relocated Docker socket", "host root")
+        for first in (True, False)
+    ]
+    + [("endpoint", True)],
+)
+def test_inventory_skipped_under_authority(
+    ground, monkeypatch, inventory_source, inventory_calls, authority, content_first
+):
+    empty_desktop(monkeypatch)
+    file = inventory_source / "a"
+    file.touch()
+    (inventory_source / "b").hardlink_to(file)
+    (inventory_source / "dangling").symlink_to(inventory_source / "missing")
+    journal = hostctl.state_root() / "journal.jsonl"
+    journal.touch()
+    (inventory_source / "journal").hardlink_to(journal)
+    denied = inventory_source / "denied"
+    denied.mkdir()
+    stale = inventory_source / "s"
+    assert len(str(stale)) < 100
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(stale))
+    mounts = [bind(inventory_source, rw=True)]
+    env = ()
+    if authority == "Docker socket":
+        mounts.append(bind(ground.socket))
+    elif authority == "relocated Docker socket":
+        path = inventory_source.parent / "s"
+        assert len(str(path)) < 100
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path))
+        monkeypatch.setattr(sealing, "_socket_is_docker", lambda p: p == path)
+        mounts.append(bind(path))
+    elif authority == "endpoint":
+        env = ("DOCKER_HOST=unix:///var/run/docker.sock",)
+    else:
+        monkeypatch.setattr(sealing, "docker_sockets", lambda: ())
+        mounts.append(bind(Path("/")))
+    if not content_first:
+        mounts.reverse()
+    denied.chmod(0o000)
+    try:
+        result = sealing.assess(dev(mounts, env=env))
+    finally:
+        denied.chmod(0o755)
+    witnesses = {f.kind for f in result.cause_findings if f.kind in sealing.DOCKER_AUTHORITY_KINDS}
+    assert witnesses == (set() if authority == "endpoint" else {authority})
+    if authority == "endpoint":
+        assert result.cause_details == ("Unverified Docker endpoint exposed in dev environment",)
+    assert inventory_calls.call_count == 0
+    assert not result.errors and result.state == "unsealed", result
+    assert not any("inode alias" in c for c in result.cause_details)
+    with pytest.raises(hostctl.HostctlError):
+        result.require()
+    result.require(allow_unsealed=True)
+
+
+def test_inventory_skip_preserves_unverified_endpoint_error(
+    ground, monkeypatch, inventory_source, inventory_calls
+):
+    empty_desktop(monkeypatch)
+    result = sealing.assess(dev([bind(inventory_source)], env=("DOCKER_HOST=tcp://example:2375",)))
+    assert inventory_calls.call_count == 0
+    assert result.cause_details == ("Unverified Docker endpoint exposed in dev environment",)
+    assert result.error_details == ("unverified Docker endpoint",)
+    assert result.state == "unknown"
+    for override in (False, True):
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=override)
+
+
+@pytest.mark.parametrize("failure", ["hardlink", "walk-eacces", "lstat-eacces", "stale-socket"])
+def test_inventory_uncertainty_without_authority(
+    ground, monkeypatch, inventory_source, inventory_calls, failure
+):
+    empty_desktop(monkeypatch)
+    path = inventory_source / "a"
+    if failure == "stale-socket":
+        assert len(str(path)) < 100
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path))
+    else:
+        path.touch()
+    if failure == "hardlink":
+        (inventory_source / "b").hardlink_to(path)
+    elif failure == "walk-eacces":
+        original = os.walk
+
+        def denied(source, *args, **kwargs):
+            if source == inventory_source:
+                kwargs["onerror"](PermissionError(errno.EACCES, "Permission denied", str(source)))
+            yield from original(source, *args, **kwargs)
+
+        monkeypatch.setattr(sealing.os, "walk", denied)
+    elif failure == "lstat-eacces":
+        original = Path.lstat
+
+        def denied(file, *args, **kwargs):
+            if file == path:
+                raise PermissionError(errno.EACCES, "Permission denied", str(file))
+            return original(file, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", denied)
+    if failure in ("walk-eacces", "lstat-eacces"):
+        with pytest.raises(PermissionError):
+            inventory_calls(inventory_source)
+        inventory_calls.reset_mock()
+    result = sealing.assess(dev([bind(inventory_source)]))
+    assert inventory_calls.call_count == 1
+    assert not result.causes and result.state == "unknown", result
+    expected = (
+        "hard-link provenance unknown" if failure == "hardlink" else "bind inspection uncertain"
+    )
+    assert result.errors and all(expected in e for e in result.error_details)
+    if failure == "stale-socket":
+        assert os.strerror(errno.ECONNREFUSED) in result.errors[0]
+    for override in (False, True):
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=override)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_inventory_unreadable_directory(ground, monkeypatch, inventory_source):
+    empty_desktop(monkeypatch)
+    denied = inventory_source / "denied"
+    denied.mkdir(mode=0o000)
+    try:
+        with pytest.raises(PermissionError):
+            sealing.nested_sensitive_files(inventory_source)
+        result = sealing.assess(dev([bind(inventory_source)]))
+    finally:
+        denied.chmod(0o755)
+    assert result.state == "unknown" and not result.causes
+    assert any("bind inspection uncertain" in e for e in result.errors)
+    with pytest.raises(hostctl.HostctlError):
+        result.require(allow_unsealed=True)
+
+
+@pytest.mark.parametrize("witness", ["agent", "home", "execution"])
+def test_inventory_non_authority_witness(
+    ground, monkeypatch, inventory_source, inventory_calls, witness
+):
+    empty_desktop(monkeypatch)
+    path = inventory_source / "a"
+    path.touch()
+    (inventory_source / "b").hardlink_to(path)
+    mounts = [bind(inventory_source)]
+    env = ()
+    if witness == "agent":
+        env = (f"DOCKER_HOST={agent_docker.DOCKER_HOST}",)
+        monkeypatch.setattr(
+            docker,
+            "inspect_agent_endpoint",
+            lambda *args, **kwargs: agent_docker.EndpointVerification(
+                "agent", agent_docker.DOCKER_HOST
+            ),
+        )
+    else:
+        mounts.append(bind(ground.paths["home" if witness == "home" else "install"], rw=True))
+    result = sealing.assess(dev(mounts, env=env))
+    assert inventory_calls.call_count == 1
+    assert not any(f.kind in sealing.DOCKER_AUTHORITY_KINDS for f in result.cause_findings)
+    if witness == "agent":
+        assert not result.causes
+    else:
+        assert result.causes
+    assert result.state == "unknown"
+    assert result.errors and all("hard-link provenance unknown" in e for e in result.errors)
+    with pytest.raises(hostctl.HostctlError):
+        result.require(allow_unsealed=True)
+
+
+@pytest.mark.parametrize(
+    "kind", ["dangling", "socket", "hardlink", "linked-dangling", "linked-live"]
+)
+def test_inventory_symlinks_are_not_candidates(ground, monkeypatch, inventory_source, kind):
+    empty_desktop(monkeypatch)
+    target = inventory_source.parent / "s"
+    if kind == "socket":
+        assert len(str(target)) < 100
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(target))
+    elif kind in ("hardlink", "linked-live"):
+        target.touch()
+        if kind == "hardlink":
+            target.with_name("b").hardlink_to(target)
+    link = inventory_source / "link"
+    link.symlink_to(target)
+    if kind.startswith("linked-"):
+        os.link(link, inventory_source / "alias", follow_symlinks=False)
+        assert link.lstat().st_nlink == 2
+    assert sealing.nested_sensitive_files(inventory_source) == []
+    result = sealing.assess(dev([bind(inventory_source)]))
+    assert not result.causes and not result.errors and result.state == "sealed", result
+    result.require()
+
+
+@pytest.mark.parametrize("change", ["file-enoent", "file-enotdir", "dir-enoent", "dir-enotdir"])
+def test_inventory_vanished_entries(ground, monkeypatch, inventory_source, change):
+    empty_desktop(monkeypatch)
+    child = inventory_source / "d"
+    child.mkdir()
+    file = child / "a"
+    file.touch()
+    (child / "b").hardlink_to(file)
+    original = os.walk
+    changed = []
+
+    def walking(source, *args, **kwargs):
+        for root, dirs, files in original(source, *args, **kwargs):
+            if not changed and (
+                (change.startswith("dir") and Path(root) == inventory_source)
+                or (change.startswith("file") and Path(root) == child)
+            ):
+                if change == "file-enoent":
+                    file.unlink()
+                    (child / "b").unlink()
+                else:
+                    file.unlink()
+                    (child / "b").unlink()
+                    child.rmdir()
+                    if change.endswith("enotdir"):
+                        child.touch()
+                changed.append(True)
+            yield root, dirs, files
+
+    monkeypatch.setattr(sealing.os, "walk", walking)
+    assert sealing.nested_sensitive_files(inventory_source) == []
+    assert changed == [True]
+    result = sealing.assess(dev([bind(inventory_source)]))
+    assert not result.causes and not result.errors and result.state == "sealed", result
+
+
+@pytest.mark.parametrize("phase", ["before-walk", "after-listing", "before-recheck"])
+@pytest.mark.parametrize("change", ["missing", "not-directory"])
+def test_inventory_vanished_walk_root_is_uncertain(
+    ground, monkeypatch, inventory_source, change, phase
+):
+    empty_desktop(monkeypatch)
+    (inventory_source / "d").mkdir()
+    (inventory_source / "a").touch()
+    (inventory_source / "b").hardlink_to(inventory_source / "a")
+    moved = inventory_source.with_name("moved")
+
+    def vanish():
+        inventory_source.rename(moved)
+        if change == "not-directory":
+            inventory_source.touch()
+
+    original_walk = os.walk
+    original_inventory = sealing.nested_sensitive_files
+
+    def walking(source, *args, **kwargs):
+        if phase == "before-walk":
+            vanish()
+        for entry in original_walk(source, *args, **kwargs):
+            yield entry
+            if phase == "after-listing" and Path(entry[0]) == inventory_source:
+                vanish()
+
+    def inventory(source, *args, **kwargs):
+        paths = original_inventory(source, *args, **kwargs)
+        vanish()
+        return paths
+
+    if phase == "before-recheck":
+        monkeypatch.setattr(sealing, "nested_sensitive_files", inventory)
+    else:
+        monkeypatch.setattr(sealing.os, "walk", walking)
+        with pytest.raises(FileNotFoundError if change == "missing" else NotADirectoryError):
+            sealing.nested_sensitive_files(inventory_source)
+        if inventory_source.exists():
+            inventory_source.unlink()
+        moved.rename(inventory_source)
+    result = sealing.assess(dev([bind(inventory_source)]))
+    assert result.state == "unknown" and not result.causes, result
+    assert any("bind inspection uncertain" in e for e in result.errors)
+    with pytest.raises(hostctl.HostctlError):
+        result.require(allow_unsealed=True)
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_inventory_raw_source_gate(ground, monkeypatch, inventory_source, inventory_calls, raw):
+    monkeypatch.setattr(
+        sealing,
+        "_desktop",
+        lambda actual: desktop.DesktopInspection(
+            channels=(), raw_sources=("raw endpoint",) if raw else (), raw_verified=True
+        ),
+    )
+    result = sealing.assess(dev([bind(inventory_source)]))
+    assert inventory_calls.call_count == (0 if raw else 1)
+    assert not result.errors
+    assert result.state == ("unsealed" if raw else "sealed")
+
+
+@pytest.mark.parametrize(
+    "change", ["missing", "not-directory", "symlink", "linked-symlink", "eacces"]
+)
+def test_inventory_candidate_recheck(ground, monkeypatch, inventory_source, change):
+    empty_desktop(monkeypatch)
+    child = inventory_source / "d"
+    child.mkdir()
+    candidate = child / "a"
+    candidate.touch()
+    outside = inventory_source.parent / "outside"
+    outside.touch()
+    original = sealing.nested_sensitive_files
+
+    def inventory(source, *args, **kwargs):
+        candidate.with_name("b").hardlink_to(candidate)
+        paths = original(source, *args, **kwargs)
+        assert set(paths) == {candidate, candidate.with_name("b")}
+        candidate.unlink()
+        candidate.with_name("b").unlink()
+        if change == "not-directory":
+            child.rmdir()
+            child.touch()
+        elif change in ("symlink", "linked-symlink"):
+            candidate.symlink_to(outside)
+            if change == "linked-symlink":
+                os.link(candidate, candidate.with_name("b"), follow_symlinks=False)
+        elif change == "eacces":
+            original_lstat = Path.lstat
+
+            def denied(path, *args, **kwargs):
+                if path == candidate:
+                    raise PermissionError(errno.EACCES, "Permission denied", str(path))
+                return original_lstat(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "lstat", denied)
+        return paths
+
+    monkeypatch.setattr(sealing, "nested_sensitive_files", inventory)
+    result = sealing.assess(dev([bind(inventory_source)]))
+    assert not result.causes
+    if change == "eacces":
+        assert result.state == "unknown"
+        assert any("bind inspection uncertain" in e for e in result.errors)
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=True)
+    else:
+        assert not result.errors and result.state == "sealed", result
+        result.require()
+
+
+@pytest.mark.parametrize("case", ["override", "creator", "no-authority"])
+def test_inventory_observer_admission(ground, monkeypatch, inventory_source, inventory_calls, case):
+    empty_desktop(monkeypatch)
+    file = inventory_source / "a"
+    file.touch()
+    (inventory_source / "b").hardlink_to(file)
+    mounts = [bind(inventory_source)]
+    if case != "no-authority":
+        mounts.append(bind(ground.socket))
+    actual = dev(mounts)
+    ground.objects["djinn-dev"] = actual
+    monkeypatch.setattr(docker, "service_container_name", lambda *args, **kwargs: "djinn-dev")
+    monkeypatch.setattr(hostctl, "host_runtime_dev", lambda: ("dev-a", True, "creator-a"))
+    opening = {
+        "generation": "gen-a",
+        "dev_id": "dev-a",
+        "agent": None,
+        "allow_unsealed": True,
+        "creator": "creator-a" if case == "creator" else None,
+    }
+    hostctl.save_private("opening.json", opening)
+    probes = MagicMock(
+        return_value=[
+            {"host": "host-a", "address": ip, "state": "blocked"}
+            for ip in trust()["peers"]["host-a"]["ips"]
+        ]
+    )
+    monkeypatch.setattr(sealing, "run_probe", probes)
+    if case == "override":
+        result = hostctl.admission_assessment(trust())
+        assert result is not None and result["sealing"] == "unsealed"
+        assert result["dev_id"] == "dev-a" and result["causes"]
+        probes.assert_called_once_with("dev-a", trust())
+    else:
+        with pytest.raises(hostctl.HostctlError):
+            hostctl.admission_assessment(trust())
+        probes.assert_not_called()
+    assert inventory_calls.call_count == (1 if case == "no-authority" else 0)
+
+
+@pytest.mark.parametrize("content_first", [True, False])
+def test_inventory_preserves_each_bind_delivery(
+    ground, monkeypatch, inventory_source, inventory_calls, content_first
+):
+    empty_desktop(monkeypatch)
+    protected = ground.paths["install"] / "input"
+    protected.touch()
+    paths = sealing.execution_paths()
+    paths["Djinn input"] = (protected, "writable Djinn installation and configuration", "input")
+    monkeypatch.setattr(sealing, "execution_paths", lambda: paths)
+    writable = inventory_source
+    readonly = inventory_source.parent / "readonly"
+    readonly.mkdir()
+    (writable / "a").hardlink_to(protected)
+    (readonly / "a").hardlink_to(protected)
+    mounts = [bind(writable, rw=True), bind(readonly)]
+    if not content_first:
+        mounts.reverse()
+    result = sealing.assess(dev(mounts))
+    assert inventory_calls.call_count == 2
+    assert result.state == "unknown"
+    assert len(result.cause_findings) == 1 and len(result.error_findings) == 1
+    cause = result.cause_findings[0]
+    error = result.error_findings[0]
+    assert cause.bind == (str(writable), "/delivery")
+    assert cause.kind == "writable Djinn installation and configuration"
+    assert cause.item == f"input inode alias {writable / 'a'}"
+    assert cause.detail.endswith(f": {writable} -> /delivery")
+    assert error.bind == (str(readonly), "/delivery")
+    assert error.kind == "hard-link provenance unknown" and error.item == str(readonly / "a")
+    assert error.detail.endswith(f": {readonly} -> /delivery")
+
+
+def test_inventory_authority_decided_once(ground, monkeypatch, inventory_source, inventory_calls):
+    empty_desktop(monkeypatch)
+    path = inventory_source / "s"
+    assert len(str(path)) < 100
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(path))
+    monkeypatch.setattr(sealing, "_socket_is_docker", lambda p: p == path)
+    other = inventory_source.parent / "other"
+    other.mkdir()
+    (other / "a").touch()
+    (other / "b").hardlink_to(other / "a")
+    result = sealing.assess(dev([bind(inventory_source), bind(other)]))
+    assert inventory_calls.call_count == 2
+    assert {f.kind for f in result.cause_findings} == {"relocated Docker socket"}
+    assert result.errors and all("hard-link provenance unknown" in e for e in result.errors)
+    assert result.state == "unknown"
+    with pytest.raises(hostctl.HostctlError):
+        result.require(allow_unsealed=True)
+
+
+def test_inventory_export_exclusion(ground, monkeypatch, inventory_calls):
+    empty_desktop(monkeypatch)
+    source = ground.paths["runtime"] / "export"
+    source.mkdir()
+    (source / "a").touch()
+    (source / "b").hardlink_to(source / "a")
+    result = sealing.assess(dev([bind(source)]))
+    assert inventory_calls.call_count == 0
+    assert not result.causes and not result.errors and result.state == "sealed"
+
+
+@pytest.mark.parametrize(
+    "failure", ["mount", "volume", "direct-hardlink", "socket-source", "desktop"]
+)
+def test_inventory_authority_keeps_other_errors(
+    ground, monkeypatch, inventory_source, inventory_calls, failure
+):
+    empty_desktop(monkeypatch)
+    mounts = [bind(inventory_source), bind(ground.socket)]
+    if failure == "mount":
+        mounts.append({"Type": "bind"})
+        expected = "bind inspection uncertain"
+    elif failure == "volume":
+        mounts.append({"Type": "volume", "Name": "missing", "Destination": "/v"})
+        expected = "volume inspection uncertain"
+    elif failure == "direct-hardlink":
+        path = inventory_source.parent / "a"
+        path.touch()
+        path.with_name("b").hardlink_to(path)
+        mounts.append(bind(path))
+        expected = "hard-link provenance unknown"
+    elif failure == "socket-source":
+        path = inventory_source.parent / "s"
+        assert len(str(path)) < 100
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(path))
+        mounts.append(bind(path))
+        expected = "socket provenance unknown"
+    else:
+        monkeypatch.setattr(
+            sealing,
+            "_desktop",
+            lambda actual: desktop.DesktopInspection(
+                channels=(), raw_sources=(), raw_verified=False
+            ),
+        )
+        expected = "raw desktop endpoint inspection unknown"
+    result = sealing.assess(dev(mounts))
+    assert inventory_calls.call_count == 0
+    assert {f.kind for f in result.cause_findings} == {"Docker socket"}
+    assert result.state == "unknown" and any(expected in e for e in result.errors)
+    for override in (False, True):
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=override)
+
+
+@pytest.mark.parametrize("error_type", [OSError, ValueError, KeyError, TypeError])
+def test_inventory_errors_are_caught_per_bind(
+    ground, monkeypatch, inventory_source, inventory_calls, error_type
+):
+    empty_desktop(monkeypatch)
+    other = inventory_source.parent / "other"
+    other.mkdir()
+    (other / "a").touch()
+    (other / "b").hardlink_to(other / "a")
+    original = os.walk
+
+    def walking(source, *args, **kwargs):
+        if source == inventory_source:
+            raise error_type("inventory failure")
+        yield from original(source, *args, **kwargs)
+
+    monkeypatch.setattr(sealing.os, "walk", walking)
+    result = sealing.assess(dev([bind(inventory_source), bind(other)]))
+    assert inventory_calls.call_count == 2
+    assert result.state == "unknown" and not result.causes
+    assert result.errors[0].startswith("bind inspection uncertain:")
+    assert "inventory failure" in result.errors[0]
+    assert len(result.error_findings) == 3
+    assert all(f.kind == "hard-link provenance unknown" for f in result.error_findings[1:])
+    with pytest.raises(hostctl.HostctlError):
+        result.require(allow_unsealed=True)
