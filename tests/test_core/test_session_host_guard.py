@@ -146,6 +146,38 @@ def test_workspace_root_head(launch, tmp_path, kind):
 
 
 @pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)
+@pytest.mark.parametrize("relative", [False, True])
+def test_workspace_redirected_outside_sessions(launch, tmp_path, relative):
+    # A sessions entry replaced by a link into another writable tree skips no ancestor check.
+    outside = tmp_path / "projects/x/ws"
+    init_repo(outside)
+    workspace = tmp_path / "sessions/proj"
+    workspace.parent.mkdir(parents=True)
+    target = Path("../projects/x/ws") if relative else outside
+    workspace.symlink_to(target, target_is_directory=True)
+    result = launch(workspace)
+    assert_refused(launch, workspace, result, "resolves outside")
+    assert not any(cmd[:2] == ["git", "config"] for cmd, _ in launch.calls)
+
+
+@pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)
+def test_workspace_link_inside_sessions(launch, tmp_path):
+    real = tmp_path / "sessions/inner/real"
+    init_repo(real)
+    workspace = tmp_path / "sessions/link"
+    workspace.symlink_to(real, target_is_directory=True)
+    assert launch(workspace).success
+
+
+@pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)
+@pytest.mark.parametrize("name", [".GIT", ".Git"])
+def test_nested_repository_other_spelling(launch, tmp_path, name):
+    init_repo(tmp_path)
+    (tmp_path / "sub" / name).mkdir(parents=True)
+    assert_refused(launch, tmp_path, launch(tmp_path), f"sub/{name}")
+
+
+@pytest.mark.parametrize("launch", ["interactive", "headless"], indirect=True)
 def test_remote_name_with_leading_slash(launch, tmp_path):
     # Git ignores such remote sections and treats branch.*.remote as a path instead.
     init_repo(tmp_path)

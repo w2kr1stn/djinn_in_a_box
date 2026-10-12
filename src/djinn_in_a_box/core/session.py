@@ -517,6 +517,13 @@ class SessionManager:
             _refuse_entries(workspace_dir, entries)
             workspace = workspace_dir.resolve(strict=True)
             sessions = Path(os.path.realpath(_HOST_SESSIONS_BASE, strict=os.path.ALLOW_MISSING))
+            # As in the CLI: a path below the sessions root must not resolve outside it.
+            lexical = Path(os.path.abspath(workspace_dir))
+            if not workspace.is_relative_to(sessions) and (
+                lexical.is_relative_to(os.path.abspath(_HOST_SESSIONS_BASE))
+                or lexical.is_relative_to(sessions)
+            ):
+                raise ValueError(f"{workspace_dir} resolves outside {sessions}")
             # A directory holding HEAD can be taken as a bare repository by Git's discovery.
             _refuse_entries(workspace, ("HEAD",))
             if workspace != sessions and workspace.is_relative_to(sessions):
@@ -692,7 +699,8 @@ def _refuse_nested_repositories(workspace: Path) -> None:
                 raise ValueError(f"repository walk time limit exceeded at {root}/{name}")
             if count > _HOST_WALK_MAX_ENTRIES:
                 raise ValueError(f"repository walk entry limit exceeded at {root}/{name}")
-            if name == ".git":
+            # Case-folding directories let Git find `.git` under another spelling.
+            if name.casefold() == ".git":
                 raise ValueError(f"refused nested repository {root}/{name}")
     _require_host_type(workspace, directory=True)
 

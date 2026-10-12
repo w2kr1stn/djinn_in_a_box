@@ -1591,11 +1591,12 @@ order:
 
 1. The agent must be Claude, Codex or OpenCode, and the workspace top level
    must hold none of the entries the selected agent would load.
-2. It resolves the workspace and `~/.djinn/sessions`. The workspace root must
-   not hold `HEAD` (Git could take it as a bare repository); for a workspace
-   below the sessions root, every physical ancestor from its parent through
-   that root must contain neither `.git`, `HEAD` nor selected-agent project
-   entries.
+2. It resolves the workspace and `~/.djinn/sessions`; a path below the
+   sessions root that resolves outside it is refused, as in the CLI. The
+   workspace root must not hold `HEAD` (Git could take it as a bare
+   repository); for a workspace below the sessions root, every physical
+   ancestor from its parent through that root must contain neither `.git`,
+   `HEAD` nor selected-agent project entries.
 3. Only after those checks, it runs `git init` if `.git` is missing, then
    checks the repository shape, config, hooks and legacy destination carriers.
    `.git` must be a real directory with regular `HEAD` and real `objects` and
