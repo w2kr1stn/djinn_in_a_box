@@ -50,7 +50,7 @@ if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
 fi
 
 # Fix ownership of volume-mounted directories (Docker creates them as root)
-for dir in ~/.cache/uv ~/.cache/djinn-tools ~/.local/share/fnm ~/.vscode-server ~/workspaces; do
+for dir in ~/.cache/uv ~/.cache/djinn-tools ~/.local/share/fnm ~/.vscode-server ~/workspaces ~/.local/share/djinn-packages; do
     if [[ -d "$dir" ]] && [[ ! -w "$dir" ]]; then
         sudo chown -R $(id -u):$(id -g) "$dir"
     fi
@@ -123,6 +123,17 @@ ui_section "MCP"
 MCP_REGISTER="${MCP_REGISTER:-/home/dev/mcp-register.sh}"
 source "$MCP_REGISTER"
 register_mcp_servers >&2
+
+# =============================================================================
+# Runtime Packages
+# =============================================================================
+ui_section "Packages"
+PACKAGE_REPLAY="${PACKAGE_REPLAY:-/home/dev/package-replay.sh}"
+if [[ -f "$PACKAGE_REPLAY" ]]; then
+    if ! "$PACKAGE_REPLAY" >&2; then
+        ui_warn "Package replay exited unexpectedly; continuing startup."
+    fi
+fi
 
 # =============================================================================
 # Optional Tools Installation (with caching)

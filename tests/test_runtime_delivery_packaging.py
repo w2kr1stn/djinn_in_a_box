@@ -1,11 +1,60 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from djinn_in_a_box.config.defaults import KNOWN_CONFIG_ROOT_ENTRIES
 from djinn_in_a_box.core.docker import repo_owned_submount_targets
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+
+def _docker_instructions():
+    source = (_ROOT / "Dockerfile").read_text()
+    return [
+        line.strip()
+        for line in re.sub(r"\\\n\s*", " ", source).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def test_package_image_delivery():
+    instructions = _docker_instructions()
+    copies = {
+        "scripts/apt-get-shim.sh": ("--chmod=755", "/usr/local/bin/apt-get", "#!/bin/sh"),
+        "scripts/djinn-apt-root.sh": (
+            "--chmod=755",
+            "/usr/local/libexec/djinn-apt-root",
+            "#!/bin/sh",
+        ),
+        "scripts/package-replay.sh": (
+            "--chown=dev:dev --chmod=755",
+            "/home/dev/package-replay.sh",
+            "#!/bin/bash",
+        ),
+    }
+    for path, (flags, destination, shebang) in copies.items():
+        matching = [line for line in instructions if line.startswith("COPY ") and path in line]
+        assert matching == [f"COPY {flags} {path} {destination}"]
+        assert (_ROOT / path).read_text().splitlines()[0] == shebang
+    shim = instructions.index("COPY --chmod=755 scripts/apt-get-shim.sh /usr/local/bin/apt-get")
+    apt_runs = [
+        i for i, line in enumerate(instructions) if line.startswith("RUN ") and "apt-get" in line
+    ]
+    assert len(apt_runs) == 2 and all(index < shim for index in apt_runs)
+
+
+def test_package_sudoers_delivery():
+    instructions = _docker_instructions()
+    user_run = next(line for line in instructions if line.startswith("RUN groupadd "))
+    assert 'echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$USERNAME' in user_run
+    assert (
+        'echo "$USERNAME ALL=(root) NOPASSWD: /usr/local/libexec/djinn-apt-root" '
+        "> /etc/sudoers.d/djinn-apt"
+    ) in user_run
+    assert "chmod 0440 /etc/sudoers.d/djinn-apt" in user_run
+    assert "visudo -cf /etc/sudoers.d/djinn-apt" in user_run
+    assert instructions.index(user_run) < instructions.index("USER $USERNAME")
 
 
 def test_declared_ownership_helper_is_packaged():

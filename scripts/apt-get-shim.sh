@@ -1,0 +1,125 @@
+#!/bin/sh
+id_bin='/usr/bin/id'
+real_apt='/usr/bin/apt-get'
+
+# Root callers retain the original argv, environment, streams and exit status.
+if [ "$("$id_bin" -u)" = 0 ]; then
+    exec "$real_apt" "$@"
+fi
+
+helper_path='/usr/local/libexec/djinn-apt-root'
+sudo_target='root'
+list_path='/home/dev/.local/share/djinn-packages/packages.txt'
+readonly id_bin real_apt helper_path sudo_target list_path
+LC_ALL=C
+export LC_ALL
+
+for token do
+    case "$token" in
+        -h|--help)
+            cat <<'HELP'
+Usage: apt-get [FLAG...] update
+       apt-get [FLAG...] install [FLAG...] NAME [NAME...]
+Flags may appear anywhere: -y, --yes, --assume-yes, -q, --quiet, -qq,
+--no-install-recommends. -h or --help anywhere prints this help.
+Names: ASCII [a-z0-9][a-z0-9+.-]*, at least two characters; no .deb files.
+-y and --no-install-recommends are always in force; installs never remove packages.
+This shim elevates through sudo to /usr/local/libexec/djinn-apt-root as root.
+Successful dev installs are recorded in /home/dev/.local/share/djinn-packages/packages.txt.
+Deleting a line stops its replay at container start.
+/usr/bin/apt-get is the unshimmed tool (unprivileged when run as dev).
+See the README section "Runtime Packages".
+HELP
+            exit 0
+            ;;
+    esac
+done
+
+escape_token() {
+    rest=$1
+    while [ -n "$rest" ]; do
+        char=${rest%"${rest#?}"}
+        rest=${rest#?}
+        case "$char" in
+            [!\ -~]) printf '\\%03o' "'$char" ;;
+            *) printf '%s' "$char" ;;
+        esac
+    done
+}
+
+refuse() {
+    printf 'apt-get: %s' "$1" >&2
+    if [ "$#" -gt 1 ]; then
+        printf ' (' >&2
+        escape_token "$2" >&2
+        printf ')' >&2
+    fi
+    printf '; see apt-get --help and README section "Runtime Packages".\n' >&2
+    exit 2
+}
+
+quiet=0
+operation=''
+# The for-loop snapshots the original argv. Shift each original token, appending
+# validated names to the remaining argv; only names remain when the loop ends.
+for token do
+    shift
+    case "$token" in
+        -y|--yes|--assume-yes|--no-install-recommends) ;;
+        -q|--quiet) quiet=$((quiet + 1)) ;;
+        -qq) quiet=$((quiet + 2)) ;;
+        -*) refuse 'unsupported flag' "$token" ;;
+        *)
+            if [ -z "$operation" ]; then
+                case "$token" in
+                    update|install) operation=$token ;;
+                    *) refuse 'expected update or install' "$token" ;;
+                esac
+            else
+                case "$token" in
+                    ''|?|[!a-z0-9]*|*[!a-z0-9+.-]*|*.deb) refuse 'invalid package name' "$token" ;;
+                esac
+                set -- "$@" "$token"
+            fi
+            ;;
+    esac
+    [ "$quiet" -le 2 ] || quiet=2
+done
+[ -n "$operation" ] || refuse 'expected update or install'
+[ "$operation" != update ] || [ "$#" -eq 0 ] || refuse 'update takes no package names'
+[ "$operation" != install ] || [ "$#" -gt 0 ] || refuse 'install needs package names'
+
+elevate() {
+    set -- "$operation" "$@"
+    case "$quiet" in 1) set -- -q "$@" ;; 2) set -- -qq "$@" ;; esac
+    printf 'apt-get: using sudo to run %s as root.\n' "$helper_path" >&2
+    sudo -n -u "$sudo_target" -- "$helper_path" "$@"
+}
+
+elevate "$@"
+result=$?
+[ "$result" -eq 0 ] && [ "$operation" = install ] || exit "$result"
+
+record_packages() {
+    if [ ! -s "$list_path" ]; then
+        printf '# Djinn runtime packages: one name per line; deleting a line stops replay.\n' >>"$list_path" || return 1
+    fi
+    existing=$(sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' "$list_path") || return 1
+    newline='
+'
+    for name do
+        case "$newline$existing$newline" in *"$newline$name$newline"*) continue ;; esac
+        # A sentinel preserves a final newline through command substitution.
+        last=$(tail -c 1 -- "$list_path" && printf '.') || return 1
+        if [ "$last" != "$newline." ]; then
+            printf '\n' >>"$list_path" || return 1
+        fi
+        printf '%s\n' "$name" >>"$list_path" || return 1
+        existing="$existing$newline$name"
+    done
+}
+
+if ! record_packages "$@" 2>/dev/null; then
+    printf 'apt-get: install succeeded but was not recorded in %s; check the list directory and permissions.\n' "$list_path" >&2
+fi
+exit "$result"

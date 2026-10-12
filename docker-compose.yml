@@ -24,6 +24,8 @@ x-common-volumes: &common-volumes
   - ${DJINN_CONFIG_ROOT}/opencode:/home/dev/.opencode
   - opencode-data:/home/dev/.local/share/opencode
   - ${DJINN_CONFIG_ROOT}/gh:/home/dev/.config/gh
+  # Agent-installed Debian package list, replayed at start
+  - packages:/home/dev/.local/share/djinn-packages
   # age encryption identities (e.g. age -i ~/.config/age/keys.txt)
   - ${DJINN_CONFIG_ROOT}/age:/home/dev/.config/age
   # Cache (host-local named volumes, rebuildable)
@@ -113,6 +115,8 @@ networks:
 volumes:
   opencode-data:
     name: djinn-opencode-data
+  packages:
+    name: djinn-packages
   uv-cache:
     name: djinn-uv-cache
   tools-cache:

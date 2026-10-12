@@ -81,7 +81,10 @@ ARG USER_GID=$USER_UID
 RUN groupadd --gid $USER_GID $USERNAME \
     && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/zsh $USERNAME \
     && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$USERNAME \
-    && chmod 0440 /etc/sudoers.d/$USERNAME
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && echo "$USERNAME ALL=(root) NOPASSWD: /usr/local/libexec/djinn-apt-root" > /etc/sudoers.d/djinn-apt \
+    && chmod 0440 /etc/sudoers.d/djinn-apt \
+    && visudo -cf /etc/sudoers.d/djinn-apt
 
 COPY scripts/init-firewall.sh /usr/local/bin/init-firewall.sh
 RUN chmod +x /usr/local/bin/init-firewall.sh
@@ -179,12 +182,15 @@ COPY --chown=dev:dev src/djinn_in_a_box/core/workflow_publisher.py /home/dev/wor
 COPY --chown=dev:dev scripts/git-config.py /home/dev/git-config.py
 # Root-owned and executable; the build already runs as dev here, so set the mode at copy time.
 COPY --chmod=755 scripts/hostctl-connect.py /usr/local/bin/djinn-hostctl-connect
+COPY --chmod=755 scripts/apt-get-shim.sh /usr/local/bin/apt-get
+COPY --chmod=755 scripts/djinn-apt-root.sh /usr/local/libexec/djinn-apt-root
 COPY --chown=dev:dev scripts/settings-copy.py /home/dev/settings-copy.py
 COPY --chown=dev:dev scripts/ownership-repair.py /home/dev/ownership-repair.py
 COPY --chown=dev:dev scripts/opencode-credentials.sh /home/dev/opencode-credentials.sh
 COPY --chown=dev:dev scripts/output-lib.sh /home/dev/output-lib.sh
 COPY --chown=dev:dev scripts/seed-lib.sh /home/dev/seed-lib.sh
 COPY --chown=dev:dev scripts/mcp-register.sh /home/dev/mcp-register.sh
+COPY --chown=dev:dev --chmod=755 scripts/package-replay.sh /home/dev/package-replay.sh
 RUN chmod +x ~/entrypoint.sh ~/mcp-register.sh
 
 LABEL djinn.workflow.publisher="1"

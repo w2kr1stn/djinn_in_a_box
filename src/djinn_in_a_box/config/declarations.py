@@ -67,6 +67,7 @@ DJINN_ENV_KEYS = frozenset(
         "CANONICAL_CONFIG_ROOT",
         "OPENCODE_WORKFLOW_VIEW",
         "MCP_REGISTER",
+        "PACKAGE_REPLAY",
         "TOOLS_DIR",
         "TOOLS_BIN",
         "TOOLS_LIB",

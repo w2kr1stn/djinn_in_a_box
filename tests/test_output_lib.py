@@ -287,6 +287,7 @@ def test_entrypoint_continues_with_plain_startup_messages_when_output_lib_absent
         "HOME": str(tmp_path),
         "OUTPUT_LIB": str(missing_output_lib),
         "SEED_LIB": str(missing_seed_lib),
+        "PACKAGE_REPLAY": str(tmp_path / "no-package-replay.sh"),
         "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
         "ENABLE_FIREWALL": "false",
         "DJINN_DECLARED_VOLUME_TARGETS": "[]",
@@ -360,6 +361,7 @@ def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
         "OUTPUT_LIB": str(ROOT / "scripts" / "output-lib.sh"),
         "SEED_LIB": str(ROOT / "scripts" / "seed-lib.sh"),
         "MCP_REGISTER": str(ROOT / "scripts" / "mcp-register.sh"),
+        "PACKAGE_REPLAY": str(tmp_path / "no-package-replay.sh"),
         "SETTINGS_COPY_HELPER": str(ROOT / "scripts" / "settings-copy.py"),
         "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
         "OPENCODE_CREDENTIALS_HELPER": str(ROOT / "scripts" / "opencode-credentials.sh"),
@@ -407,6 +409,7 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert not list(tmp_path.glob("djinn-session-state.*"))
     assert_plain_startup_output(result.stderr)
     assert "\n- Security" in result.stderr
+    assert "\n- Packages" in result.stderr
     assert "[warn] Firewall:     Disabled" in result.stderr
     assert "[warn] Docker Access: Disabled" in result.stderr
     assert "[info] Enable with: djinn start --docker" in result.stderr
