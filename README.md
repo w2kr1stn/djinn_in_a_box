@@ -579,7 +579,7 @@ recorded names against installed packages. If none are missing, it makes no
 network calls. Otherwise it updates apt, warns and skips names not present in the
 apt cache, then installs the remaining missing packages. Replay problems are
 warnings and do not stop startup; a list that is not a regular file or exceeds
-1 MiB is skipped with a warning. The replay considers at most 256 distinct names
+1 MiB, or cannot be read within 10 seconds, is skipped with a warning. The replay considers at most 256 distinct names
 and warns how many more it did not replay, treats entries over 128 bytes as
 invalid, reports at most five invalid lines one by one, and stops its package
 checks with a warning after 60 seconds. The package list update has a 300-second

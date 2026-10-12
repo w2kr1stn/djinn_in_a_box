@@ -10,8 +10,10 @@ max_names='256'
 max_warnings='5'
 check_budget='60'
 update_timeout='300'
+read_timeout='10'
+max_bytes='1048576'
 readonly list_path helper_path sudo_target dpkg_bin cache_bin
-readonly max_name max_names max_warnings check_budget update_timeout
+readonly max_name max_names max_warnings check_budget update_timeout read_timeout max_bytes
 checks_started=$SECONDS
 LC_ALL=C
 export LC_ALL
@@ -40,20 +42,24 @@ if [[ ! -f "$list_path" ]]; then
     ui_info 'none recorded (list unreadable)'
     exit 0
 fi
-if ! size=$(stat -c %s -- "$list_path" 2>/dev/null) || (( size > 1048576 )); then
-    ui_warn "Package list $list_path is larger than 1 MiB or unreadable; replay skipped."
+# The check above sees the path, not the object read: the list can be replaced in
+# between. So the open and the read happen in a child with a time limit, capped one
+# byte over the size limit. A NUL byte would vanish in the substitution and join its
+# neighbours into another name; as \001 it fails validation and the line is skipped.
+if ! snapshot=$(timeout "$read_timeout" head -c "$((max_bytes + 1))" -- "$list_path" 2>/dev/null \
+        | tr '\000' '\001'; status=("${PIPESTATUS[@]}"); printf '.'; [[ "${status[*]}" == "0 0" ]]); then
+    ui_warn "Cannot read package list $list_path within $read_timeout s."
+    ui_info 'none recorded (list unreadable)'
     exit 0
 fi
-# A NUL byte would vanish in the substitution and join its neighbours into another
-# name; as \001 it fails validation and the line is skipped.
-if ! snapshot=$(tr '\000' '\001' 2>/dev/null < "$list_path" && printf '.'); then
-    ui_warn "Cannot read package list $list_path."
-    ui_info 'none recorded (list unreadable)'
+snapshot=${snapshot%.}
+if (( ${#snapshot} > max_bytes )); then
+    ui_warn "Package list $list_path is larger than 1 MiB; replay skipped."
     exit 0
 fi
 
 # Parse once in C locale: bounds apply to bytes, and diagnostics stay printable.
-if ! records=$(printf '%s' "${snapshot%.}" | awk -v max_name="$max_name" -v max_names="$max_names" -v max_warnings="$max_warnings" '
+if ! records=$(printf '%s' "$snapshot" | awk -v max_name="$max_name" -v max_names="$max_names" -v max_warnings="$max_warnings" '
     {
         name = $0
         sub(/#.*/, "", name)

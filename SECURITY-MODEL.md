@@ -31,8 +31,9 @@ helper. The helper uses a fixed environment, non-interactive apt,
 `--no-install-recommends`, and `--no-remove` (it never removes a package), with
 `/dev/null` stdin and a lock that serializes package operations. Root never reads
 the dev-writable package list. The start replay treats that list as untrusted input:
-it reads only a regular file of at most 1 MiB, parses it in one linear pass, and
-bounds names, warnings and check time, so a hostile list cannot hold the start.
+it reads only a regular file of at most 1 MiB, within a time limit and in one
+linear pass, and bounds names, warnings and check time, so a hostile list cannot
+hold the start.
 
 Exact-name validation does not enforce package origin. An agent can install as
 root any package from signed apt sources configured in the container: the Debian

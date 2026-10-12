@@ -226,6 +226,27 @@ def test_replay_skips_untrusted_list_shapes(tmp_path, kind):
     assert replay.tools.sudo_calls() == [] and replay.tools.events() == []
 
 
+def test_replay_bounds_the_read_when_the_list_is_swapped(tmp_path):
+    # The regular-file check sees the path; a FIFO swapped in before the open must
+    # not hold the start: the bounded child gives up and the replay warns.
+    replay = ReplayHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "read_timeout", "10", "1"))
+    executable(
+        tmp_path / "head",
+        f"#!/bin/sh\nrm -f {replay.list}\nmkfifo {replay.list}\nexec /usr/bin/head \"$@\"\n",
+    )
+    started = time.monotonic()
+    try:
+        result = replay.run()
+    finally:
+        release_fifo(replay.list, os.O_WRONLY)
+    assert time.monotonic() - started < 3
+    assert result.returncode == 0
+    assert f"Cannot read package list {replay.list} within 1 s." in result.stderr
+    assert replay.tools.events() == [] and replay.tools.sudo_calls() == []
+
+
 def test_replay_accepts_list_at_size_limit(tmp_path):
     replay = ReplayHarness(tmp_path)
     replay.list.write_bytes(b"jq\n" + b"#" * (1048576 - 3))
