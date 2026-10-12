@@ -87,6 +87,9 @@ entry, before discovery, Git initialization, or launch. Allowed entries override
 inherited values for that session and its descendants. An empty string is a
 literal value, not a deletion request. Values are never interpolated, converted,
 normalized, or replaced; newlines, quotes, `$`, `=`, and Unicode remain literal.
+The one exception is host-mode OpenCode: its child always receives
+`OPENCODE_DISABLE_PROJECT_CONFIG=1`, whatever the map or inherited environment
+holds.
 Neither the caller's map nor `os.environ` changes, and entries do not carry over
 to later calls or persist to configuration files.
 
@@ -119,7 +122,8 @@ selected target.
 
 Host discovery, Git setup, and image/workflow preparation receive no additions.
 Host agent starts use a fresh inherited environment plus the validated entries
-and fixed terminal values. Container starts forward only the additional names
+and fixed terminal values; host OpenCode starts add
+`OPENCODE_DISABLE_PROJECT_CONFIG=1` last. Container starts forward only the additional names
 with `docker exec -e NAME`; their values travel in the Docker subprocess
 environment, outside argv and Djinn-authored logs or diagnostics. The existing
 prompt transport is unchanged. Container session shells and their Git/agent
@@ -162,12 +166,13 @@ workflow runs headlessly as before. Confirmation is stored
 in `~/.config/djinn_in_a_box/host-workflow-trust.json`; personal
 `settings.local.json` write-back is excluded from the host payload.
 Direct `SessionManager` callers never publish workflow and continue to run
-whatever the CLI last published. The host agent also loads project-scope agent
-configuration from the session workspace, which the container can write; this
-is not covered by the confirmation
-([#140](https://github.com/w2kr1stn/djinn_in_a_box/issues/140)). See the
-[security model](../SECURITY-MODEL.md#direct-routes-and-target-authority) for the
-host workflow protection and target authority limits.
+whatever the CLI last published. Before a host start, Djinn disables or refuses
+agent project configuration and rejects unsafe workspace Git state.
+Unsupported agents are refused on the host. The CLI exits 1 with
+the offending entry and remedy; direct `SessionManager` callers receive a
+`SessionResult(returncode=1, …)`. See the
+[security model](../SECURITY-MODEL.md#direct-routes-and-target-authority) for
+the boundary and residual risks.
 
 ## Suite mode (optional)
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -17,6 +20,7 @@ from djinn_in_a_box.config.declarations import validate_environment
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig
 from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY, LOCK_REMEDY
+from djinn_in_a_box.core.console import escape_nonprintable
 from djinn_in_a_box.core.docker import (
     WorkflowImageCompatibility,
     _decode_timeout_output,  # pyright: ignore[reportPrivateUsage]
@@ -77,6 +81,19 @@ _CONTAINER_SESSIONS_BASE = "/home/dev/sessions"
 _HOST_SESSIONS_BASE = Path.home() / ".djinn" / "sessions"
 _DJINN_CONTAINER_NAME = "djinn"
 _EXEC_TIMEOUT = 10.0
+_HOST_AGENT_ENTRIES: dict[str, tuple[str, ...]] = {
+    # Project configuration each agent loads at start without a way to disable it.
+    "claude": (),
+    "codex": (".codex",),
+    "opencode": (".opencode", "opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"),
+}
+_HOST_WALK_MAX_ENTRIES = 250_000
+_HOST_WALK_TIMEOUT = 5.0
+_HOST_GIT_KEYS = re.compile(
+    r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|"
+    r"precomposeunicode|symlinks)|extensions\.(objectformat|refstorage)|"
+    r"remote\.[^/].*\.(url|pushurl|fetch)|branch\..+\.(remote|merge)|user\.(name|email)"
+)
 _PUBLISHER_REMEDIES: dict[DriftClass, str] = {
     DriftClass.SOURCE_CHANGED: "Run `djinn config sync`, then retry.",
     DriftClass.TARGET_DRIFT: "Restore or move the modified managed workflow item, then retry.",
@@ -295,7 +312,9 @@ class SessionManager:
             return SessionResult(returncode=result.returncode, workspace_dir=workspace_dir)
 
         # Host mode fallback
-        self._git_init_workspace(workspace_dir)
+        refusal = self._guard_host_workspace(workspace_dir, agent)
+        if refusal is not None:
+            return refusal
         cmd = self._build_host_interactive_command(agent_config, model, initial_prompt)
 
         log.debug("Running interactive host command: %s", cmd)
@@ -303,7 +322,12 @@ class SessionManager:
             result = subprocess.run(
                 cmd,
                 cwd=workspace_dir,
-                env={**os.environ, **session_env, **_SESSION_ENV},
+                env={
+                    **os.environ,
+                    **session_env,
+                    **_SESSION_ENV,
+                    **({"OPENCODE_DISABLE_PROJECT_CONFIG": "1"} if agent == "opencode" else {}),
+                },
                 check=False,
             )
         except FileNotFoundError:
@@ -388,7 +412,9 @@ class SessionManager:
                 )
 
         # Host mode fallback
-        self._git_init_workspace(workspace_dir)
+        refusal = self._guard_host_workspace(workspace_dir, agent)
+        if refusal is not None:
+            return refusal
         cmd = self._build_host_headless_command(agent_config, model, prompt)
 
         log.debug("Running headless host command: %s", cmd)
@@ -396,7 +422,12 @@ class SessionManager:
             result = subprocess.run(
                 cmd,
                 cwd=workspace_dir,
-                env={**os.environ, **session_env, **_SESSION_ENV},
+                env={
+                    **os.environ,
+                    **session_env,
+                    **_SESSION_ENV,
+                    **({"OPENCODE_DISABLE_PROJECT_CONFIG": "1"} if agent == "opencode" else {}),
+                },
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -477,9 +508,51 @@ class SessionManager:
                 return container_id
         return None
 
-    def _git_init_workspace(self, workspace_dir: Path) -> None:
-        if (workspace_dir / ".git").exists():
-            return
+    def _guard_host_workspace(self, workspace_dir: Path, agent: str) -> SessionResult | None:
+        """Refuse project configuration that can execute during a host agent start."""
+        try:
+            entries = _HOST_AGENT_ENTRIES.get(agent)
+            if entries is None:
+                raise ValueError(f"unsupported host agent {agent!r}")
+            _refuse_entries(workspace_dir, entries)
+            workspace = workspace_dir.resolve(strict=True)
+            sessions = Path(os.path.realpath(_HOST_SESSIONS_BASE, strict=os.path.ALLOW_MISSING))
+            # As in the CLI: a path below the sessions root, given through the configured base or
+            # the resolved root, must resolve strictly below the resolved root.
+            lexical = Path(os.path.abspath(workspace_dir))
+            if any(
+                lexical != root and lexical.is_relative_to(root)
+                for root in (Path(os.path.abspath(_HOST_SESSIONS_BASE)), sessions)
+            ) and (workspace == sessions or not workspace.is_relative_to(sessions)):
+                raise ValueError(f"{workspace_dir} does not resolve below {sessions}")
+            # A directory holding HEAD can be taken as a bare repository by Git's discovery.
+            _refuse_entries(workspace, ("HEAD",))
+            if workspace != sessions and workspace.is_relative_to(sessions):
+                parent = workspace.parent
+                while True:
+                    _refuse_entries(parent, (".git", "HEAD", *entries))
+                    if parent == sessions:
+                        break
+                    parent = parent.parent
+
+            git_dir = workspace / ".git"
+            if _host_lstat(git_dir) is None and not self._git_init_workspace(workspace):
+                raise ValueError(f"git init failed for {git_dir}")
+            _check_host_repository(git_dir)
+            _refuse_nested_repositories(workspace)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            message = escape_nonprintable(f"Host session refused for {workspace_dir}: {exc}.")
+            return SessionResult(
+                returncode=1,
+                stderr=message + " Run the session in the container (djinn start, then retry), "
+                "or review and remove the entry on the host, then retry.\n",
+                workspace_dir=workspace_dir,
+            )
+        return None
+
+    def _git_init_workspace(self, workspace_dir: Path) -> bool:
+        if _host_lstat(workspace_dir / ".git") is not None:
+            return True
         result = subprocess.run(
             ["git", "init", "-q"],
             cwd=workspace_dir,
@@ -487,7 +560,8 @@ class SessionManager:
             check=False,
         )
         if result.returncode != 0:
-            log.warning("Failed to initialize git in %s", workspace_dir)
+            log.warning("Failed to initialize git in %s", escape_nonprintable(str(workspace_dir)))
+        return result.returncode == 0
 
     def _resolve_agent(self, agent: str) -> AgentConfig:
         if agent not in self._agents:
@@ -522,6 +596,8 @@ class SessionManager:
         if effective_model:
             cmd.extend([agent_config.model_flag, effective_model])
         cmd.extend(agent_config.write_flags)
+        if agent_config is self._agents.get("claude"):
+            cmd.extend(["--setting-sources", "user"])
         if initial_prompt is not None:
             cmd.append(initial_prompt)
         return cmd
@@ -536,8 +612,129 @@ class SessionManager:
         effective_model = model if model is not None else agent_config.default_model
         if effective_model:
             cmd.extend([agent_config.model_flag, effective_model])
+        if agent_config is self._agents.get("claude"):
+            cmd.extend(["--setting-sources", "user"])
         cmd.append(prompt)
         return cmd
+
+
+def _check_host_repository(git_dir: Path) -> None:
+    """Require an inert repository: Git shape, allowlisted config, network destinations."""
+    _require_host_type(git_dir, directory=True)
+    _require_host_type(git_dir / "HEAD", directory=False)
+    for name in ("objects", "refs"):
+        _require_host_type(git_dir / name, directory=True)
+    _refuse_entries(git_dir, ("commondir", "modules"))
+    config = git_dir / "config"
+    _require_host_type(config, directory=False)
+    result = subprocess.run(
+        ["git", "config", "--file", str(config), "--null", "--list"],
+        cwd="/",
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=_EXEC_TIMEOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"cannot inspect {config}: git exited {result.returncode}")
+    try:
+        decoded = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"cannot decode {config}: {exc}") from exc
+    records = [record.partition("\n") for record in decoded.split("\0") if record]
+    remotes = {
+        key[7:].rsplit(".", 1)[0] for key, _, _ in records if key.startswith("remote.")
+    }
+    for key, _, value in records:
+        if _HOST_GIT_KEYS.fullmatch(key) is None:
+            raise ValueError(f"refused Git key {key!r} in {config}")
+        if (
+            key.startswith("remote.")
+            and key.endswith((".url", ".pushurl"))
+            and not _host_network_destination(value)
+        ):
+            raise ValueError(f"refused Git destination {key}={value!r} in {config}")
+        if (
+            key.startswith("branch.")
+            and key.endswith(".remote")
+            and value != "."
+            and value not in remotes
+        ):
+            raise ValueError(f"refused Git destination {key}={value!r} in {config}")
+    # Without a url, Git uses the remote's name itself as its destination.
+    for name in sorted(remotes - {key[7:-4] for key, _, _ in records if key.endswith(".url")}):
+        raise ValueError(f"refused Git remote {name!r} without url in {config}")
+    hooks = git_dir / "hooks"
+    if _host_lstat(hooks) is not None:
+        _require_host_type(hooks, directory=True)
+        for hook in hooks.iterdir():
+            if not hook.name.endswith(".sample"):
+                raise ValueError(f"refused hook {hook}")
+    for name in ("remotes", "branches"):
+        carrier = git_dir / name
+        if _host_lstat(carrier) is not None:
+            _require_host_type(carrier, directory=True)
+            for entry in carrier.iterdir():
+                raise ValueError(f"refused legacy Git destination {entry}")
+
+
+def _refuse_nested_repositories(workspace: Path) -> None:
+    """Refuse any `.git` below the workspace root within a fixed entry and time budget."""
+    deadline = time.monotonic() + _HOST_WALK_TIMEOUT
+    count = 0
+
+    def failed(exc: OSError) -> None:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR) and exc.filename != str(workspace):
+            return
+        raise exc
+
+    for root, dirs, files in os.walk(workspace, onerror=failed, followlinks=False):
+        if Path(root) == workspace:
+            dirs[:] = [name for name in dirs if name != ".git"]
+            files = [name for name in files if name != ".git"]
+        if time.monotonic() > deadline:
+            raise ValueError(f"repository walk time limit exceeded at {root}")
+        for name in (*dirs, *files):
+            count += 1
+            if time.monotonic() > deadline:
+                raise ValueError(f"repository walk time limit exceeded at {root}/{name}")
+            if count > _HOST_WALK_MAX_ENTRIES:
+                raise ValueError(f"repository walk entry limit exceeded at {root}/{name}")
+            # Case-folding directories let Git find `.git` under another spelling.
+            if name.casefold() == ".git":
+                raise ValueError(f"refused nested repository {root}/{name}")
+    _require_host_type(workspace, directory=True)
+
+
+def _host_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _refuse_entries(root: Path, names: tuple[str, ...]) -> None:
+    for name in names:
+        entry = root / name
+        if _host_lstat(entry) is not None:
+            raise ValueError(f"refused entry {entry}")
+
+
+def _require_host_type(path: Path, *, directory: bool) -> None:
+    info = path.lstat()
+    valid = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if not valid:
+        raise ValueError(f"{path} must be a real {'directory' if directory else 'regular file'}")
+
+
+def _host_network_destination(value: str) -> bool:
+    if "::" in value:
+        return False
+    if value.startswith(("https://", "http://", "ssh://", "git://")):
+        return True
+    if "://" in value:
+        return False
+    return re.fullmatch(r"(?:[^/@:\s]+@)?[^/@:\s]+:[^\s]+", value) is not None
 
 
 def _publisher_refresh_error(stderr: str) -> str:

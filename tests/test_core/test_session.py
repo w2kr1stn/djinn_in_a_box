@@ -10,6 +10,7 @@ import subprocess
 import sys
 import traceback
 from collections import UserDict
+from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
@@ -29,9 +30,36 @@ from djinn_in_a_box.core.workflow_publisher import (
 _SESSION_MODULE = "djinn_in_a_box.core.session"
 _SUBPROCESS_RUN = f"{_SESSION_MODULE}.subprocess.run"
 _AGENT_LOAD = "djinn_in_a_box.commands.agent.load_agents"
+_REAL_RUN = subprocess.run
+
+
+def _init_inert_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    _REAL_RUN(["git", "init", "-q", "--template=", str(path)], check=True)
+
+
+@contextmanager
+def _agent_run(*, return_value=None, side_effect=None):
+    agent = MagicMock(return_value=return_value, side_effect=side_effect)
+
+    def run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return _REAL_RUN(cmd, **kwargs)
+        return agent(cmd, **kwargs)
+
+    with patch(_SUBPROCESS_RUN, side_effect=run):
+        yield agent
 
 
 # ── Fixtures ──
+
+
+@pytest.fixture(autouse=True)
+def _isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Host starts run real Git; the developer's global config or template must not decide outcomes.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_TEMPLATE_DIR", raising=False)
 
 
 @pytest.fixture
@@ -49,8 +77,9 @@ def mock_agents() -> dict[str, AgentConfig]:
 
 
 @pytest.fixture
-def session_mgr(mock_agents: dict[str, AgentConfig]) -> SessionManager:
+def session_mgr(mock_agents: dict[str, AgentConfig], tmp_path: Path) -> SessionManager:
     """Create a SessionManager with mocked agents."""
+    _init_inert_repo(tmp_path)
     with patch(f"{_SESSION_MODULE}.load_agents", return_value=mock_agents):
         return SessionManager("testproject")
 
@@ -587,18 +616,20 @@ class TestRunInteractiveContainer:
 
 
 class TestRunInteractiveHost:
-    def test_calls_subprocess_in_host_mode(self, session_mgr: SessionManager) -> None:
+    def test_calls_subprocess_in_host_mode(
+        self, session_mgr: SessionManager, tmp_path: Path
+    ) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
-        ws = Path("/tmp/ws")
+        ws = tmp_path
         with (
             patch.object(session_mgr, "_find_container", return_value=None),
             patch.object(session_mgr, "_git_init_workspace") as mock_git,
-            patch(_SUBPROCESS_RUN, return_value=mock_result) as mock_run,
+            _agent_run(return_value=mock_result) as mock_run,
         ):
             result = session_mgr.run_interactive(workspace_dir=ws)
 
-            mock_git.assert_called_once_with(ws)
+            mock_git.assert_not_called()
             assert mock_run.call_args.kwargs.get("cwd") == ws
             assert result.returncode == 0
 
@@ -657,7 +688,9 @@ class TestRunHeadlessContainer:
 
 
 class TestRunHeadlessHost:
-    def test_captures_output_in_host_mode(self, session_mgr: SessionManager) -> None:
+    def test_captures_output_in_host_mode(
+        self, session_mgr: SessionManager, tmp_path: Path
+    ) -> None:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "host output"
@@ -665,24 +698,25 @@ class TestRunHeadlessHost:
         with (
             patch.object(session_mgr, "_find_container", return_value=None),
             patch.object(session_mgr, "_git_init_workspace"),
-            patch(_SUBPROCESS_RUN, return_value=mock_result),
+            _agent_run(return_value=mock_result),
         ):
-            result = session_mgr.run_headless(workspace_dir=Path("/tmp/ws"), prompt="test")
+            result = session_mgr.run_headless(workspace_dir=tmp_path, prompt="test")
             assert result.stdout == "host output"
 
-    def test_timeout_returns_124_host(self, session_mgr: SessionManager) -> None:
+    def test_timeout_returns_124_host(self, session_mgr: SessionManager, tmp_path: Path) -> None:
         with (
             patch.object(session_mgr, "_find_container", return_value=None),
             patch.object(session_mgr, "_git_init_workspace"),
-            patch(
-                _SUBPROCESS_RUN,
+            _agent_run(
                 side_effect=subprocess.TimeoutExpired(cmd=[], timeout=10),
             ),
         ):
-            result = session_mgr.run_headless(workspace_dir=Path("/tmp/ws"), prompt="test")
+            result = session_mgr.run_headless(workspace_dir=tmp_path, prompt="test")
             assert result.returncode == 124
 
-    def test_reuses_caller_resolved_host_target(self, session_mgr: SessionManager) -> None:
+    def test_reuses_caller_resolved_host_target(
+        self, session_mgr: SessionManager, tmp_path: Path
+    ) -> None:
         mock_result = MagicMock(returncode=0, stdout="host", stderr="")
         with (
             patch.object(
@@ -691,10 +725,10 @@ class TestRunHeadlessHost:
                 side_effect=AssertionError("target was resolved again"),
             ),
             patch.object(session_mgr, "_git_init_workspace"),
-            patch(_SUBPROCESS_RUN, return_value=mock_result),
+            _agent_run(return_value=mock_result),
         ):
             result = session_mgr.run_headless(
-                workspace_dir=Path("/tmp/ws"),
+                workspace_dir=tmp_path,
                 prompt="test",
                 target=SessionTarget(),
             )
@@ -707,12 +741,14 @@ class TestRunHeadlessHost:
 
 class TestGitInitWorkspace:
     def test_skips_if_git_dir_exists(self, session_mgr: SessionManager, tmp_path: Path) -> None:
-        (tmp_path / ".git").mkdir()
+        assert (tmp_path / ".git").is_dir()
         with patch(_SUBPROCESS_RUN) as mock_run:
             session_mgr._git_init_workspace(tmp_path)
             mock_run.assert_not_called()
 
     def test_runs_git_init_if_no_git_dir(self, session_mgr: SessionManager, tmp_path: Path) -> None:
+        tmp_path = tmp_path / "new-workspace"
+        tmp_path.mkdir()
         with patch(_SUBPROCESS_RUN) as mock_run:
             session_mgr._git_init_workspace(tmp_path)
             mock_run.assert_called_once()
@@ -790,13 +826,14 @@ def test_declarations_inherit_without_creation(tmp_path, monkeypatch, session_mg
     monkeypatch.setattr(docker, "resolve_declared_entries", forbidden)
     monkeypatch.setattr(docker, "compose_run", forbidden)
     monkeypatch.setattr(docker, "compose_up_detached", forbidden)
-    monkeypatch.setattr(session_mgr, "_git_init_workspace", lambda workspace: None)
     monkeypatch.setattr(
         session_mgr, "_resolve_container_workdir", lambda workspace: "/home/dev/projects"
     )
     calls = []
 
     def capture(cmd, **kwargs):
+        if cmd[0] == "git":
+            return _REAL_RUN(cmd, **kwargs)
         calls.append((cmd, kwargs))
         return MagicMock(returncode=0)
 
@@ -841,18 +878,19 @@ def test_session_environment_is_literal_and_isolated(
     monkeypatch.setenv("DOCKER_CONTEXT", "synthetic-context")
     before = dict(os.environ)
     workspace = tmp_path / "sessions" / "testproject" / "task with space"
+    _init_inert_repo(workspace)
     target = SessionTarget(container_id="stable-container" if mode == "container" else None)
     completed = MagicMock(returncode=0, stdout=secret + "\n", stderr="child diagnostic\n")
-    kwargs = {"prompt": "test prompt"} if method == "run_headless" else {
-        "initial_prompt": "test prompt"
-    }
+    kwargs = (
+        {"prompt": "test prompt"} if method == "run_headless" else {"initial_prompt": "test prompt"}
+    )
     caplog.set_level(logging.DEBUG, logger=_SESSION_MODULE)
 
     with (
         patch(f"{_SESSION_MODULE}._HOST_SESSIONS_BASE", tmp_path / "sessions"),
         patch.object(session_mgr, "resolve_target") as resolve,
         patch.object(session_mgr, "_git_init_workspace") as git_init,
-        patch(_SUBPROCESS_RUN, return_value=completed) as run,
+        _agent_run(return_value=completed) as run,
     ):
         result = getattr(session_mgr, method)(
             workspace_dir=workspace, target=target, model="selected-model", env=additions, **kwargs
@@ -895,7 +933,7 @@ def test_session_environment_is_literal_and_isolated(
         else:
             assert "'test prompt'" in cmd[-1]
     else:
-        git_init.assert_called_once_with(workspace)
+        git_init.assert_not_called()
         assert cmd[0] == "claude"
         assert cmd[cmd.index("--model") + 1] == "selected-model"
         assert ("-p" in cmd) == (method == "run_headless")
@@ -913,7 +951,7 @@ def test_session_environment_defaults_and_no_carryover(session_mgr, tmp_path, me
     completed = MagicMock(returncode=0, stdout="", stderr="")
     with (
         patch.object(session_mgr, "_git_init_workspace"),
-        patch(_SUBPROCESS_RUN, return_value=completed) as run,
+        _agent_run(return_value=completed) as run,
     ):
         launch = getattr(session_mgr, method)
         launch(workspace_dir=tmp_path, target=target, **kwargs)
@@ -947,7 +985,7 @@ def test_session_environment_snapshots_before_agent_resolution(
     with (
         patch.object(session_mgr, "_resolve_agent", side_effect=mutate_input),
         patch.object(session_mgr, "_git_init_workspace"),
-        patch(_SUBPROCESS_RUN, return_value=MagicMock(returncode=0, stdout="", stderr="")) as run,
+        _agent_run(return_value=MagicMock(returncode=0, stdout="", stderr="")) as run,
     ):
         getattr(session_mgr, method)(workspace_dir=tmp_path, target=target, env=additions, **kwargs)
 
@@ -1066,19 +1104,24 @@ def test_session_environment_is_only_applied_to_host_agent_start(session_mgr, tm
     workspace.mkdir()
     completed = MagicMock(returncode=0, stdout="", stderr="")
     kwargs = {"prompt": "test"} if method == "run_headless" else {}
-    with patch(_SUBPROCESS_RUN, return_value=completed) as run:
+
+    def execute(cmd, **options):
+        return _REAL_RUN(cmd, **options) if cmd[0] == "git" else completed
+
+    with patch(_SUBPROCESS_RUN, side_effect=execute) as run:
         result = getattr(session_mgr, method)(
             workspace_dir=workspace, env={"SESSION_VALUE": secret}, **kwargs
         )
     assert result.success
-    assert run.call_count == 3
-    discovery, git_init, agent = run.call_args_list
+    assert run.call_count == 4
+    discovery, git_init, git_config, agent = run.call_args_list
     assert discovery.args[0][:2] == [DOCKER_EXECUTABLE, "ps"]
     assert git_init.args[0] == ["git", "init", "-q"]
-    assert discovery.kwargs.get("env") is None
-    assert git_init.kwargs.get("env") is None
+    assert git_config.args[0][:2] == ["git", "config"]
+    for call in (discovery, git_init, git_config):
+        assert call.kwargs.get("env") is None
     assert agent.kwargs["env"]["SESSION_VALUE"] == secret
-    assert not list(workspace.iterdir())
+    assert (workspace / ".git").is_dir()
 
 
 @pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
@@ -1093,7 +1136,7 @@ def test_session_environment_is_not_in_spawn_diagnostics(
     caplog.set_level(logging.DEBUG, logger=_SESSION_MODULE)
     with (
         patch.object(session_mgr, "_git_init_workspace"),
-        patch(_SUBPROCESS_RUN, side_effect=error_type("synthetic spawn failure")) as run,
+        _agent_run(side_effect=error_type("synthetic spawn failure")) as run,
     ):
         result = getattr(session_mgr, method)(
             workspace_dir=tmp_path, target=target, env={"SESSION_VALUE": secret}, **kwargs
@@ -1120,10 +1163,13 @@ def test_session_environment_timeout_preserves_child_output(
     caplog.set_level(logging.DEBUG, logger=_SESSION_MODULE)
     with (
         patch.object(session_mgr, "_git_init_workspace"),
-        patch(_SUBPROCESS_RUN, side_effect=timeout) as run,
+        _agent_run(side_effect=timeout) as run,
     ):
         result = session_mgr.run_headless(
-            workspace_dir=tmp_path, prompt="test", timeout=9, target=target,
+            workspace_dir=tmp_path,
+            prompt="test",
+            timeout=9,
+            target=target,
             env={"SESSION_VALUE": secret},
         )
     assert result.returncode == 124 and result.workspace_dir == tmp_path
@@ -1151,25 +1197,27 @@ def test_headless_host_child_receives_literal_session_environment(
     monkeypatch.setenv("SESSION_CHILD_INHERITED", "synthetic-inherited-value")
     before = dict(os.environ)
     keys = [*additions, "SESSION_CHILD_INHERITED", "TERM", "COLORTERM"]
-    script = (
-        "import json, os; "
-        f"print(json.dumps({{key: os.environ[key] for key in {keys!r}}}))"
-    )
-    session_mgr._agents["python"] = AgentConfig(binary=sys.executable, headless_flags=["-c"])
+    script = f"import json, os; print(json.dumps({{key: os.environ[key] for key in {keys!r}}}))"
+    session_mgr._agents["codex"] = AgentConfig(binary=sys.executable, headless_flags=["-c"])
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / ".git").mkdir()
+    _init_inert_repo(workspace)
 
     result = session_mgr.run_headless(
-        workspace_dir=workspace, prompt=script, agent="python", target=SessionTarget(),
+        workspace_dir=workspace,
+        prompt=script,
+        agent="codex",
+        target=SessionTarget(),
         env=additions,
     )
 
     assert result.returncode == 0 and result.stderr == ""
     observed = json.loads(result.stdout)
     assert observed == {
-        **additions, "SESSION_CHILD_INHERITED": "synthetic-inherited-value",
-        "TERM": "xterm-256color", "COLORTERM": "truecolor",
+        **additions,
+        "SESSION_CHILD_INHERITED": "synthetic-inherited-value",
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
     }
     environment_unchanged = dict(os.environ) == before
     assert environment_unchanged

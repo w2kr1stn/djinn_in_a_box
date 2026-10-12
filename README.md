@@ -652,7 +652,7 @@ value overrides `default_model` for that invocation.
 | `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
-| `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback preflight checks the selected agent binary on `PATH`. Claude, Codex, and OpenCode host fallback receives that agent's confirmed canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
+| `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback checks the selected agent binary on `PATH` and applies workspace checks before launch. Claude, Codex, and OpenCode host fallback receives that agent's confirmed canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
 
 Without a running container, `djinn session` asks before publishing an
 unconfirmed or changed workflow to `~/.claude`, `~/.codex`, or
@@ -672,8 +672,10 @@ to published files or managed hooks in `settings.json` require another review
 on the next host fallback. Personal settings written back into
 `config/claude/settings.local.json` are not delivered to the host and do not
 cause another prompt. Container sessions and in-place editing stay unchanged.
-See the [security model](SECURITY-MODEL.md#direct-routes-and-target-authority)
-for the managed-payload boundary and host-authority limits.
+Host starts also refuse unsafe agent and Git configuration in the session
+workspace. See the [security model](SECURITY-MODEL.md#direct-routes-and-target-authority)
+for the managed-payload boundary, host-authority limits, the host-start boundary
+and its residual risks.
 
 Common `start` options:
 

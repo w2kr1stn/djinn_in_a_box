@@ -17,17 +17,14 @@ from djinn_in_a_box.core.config_workflow import (
     prepare_config_workflow,
 )
 from djinn_in_a_box.core.console import err_console, error, print_captured, warning
+from djinn_in_a_box.core.console import (
+    escape_nonprintable as _review_text,
+)
 from djinn_in_a_box.core.contained_paths import PathContainmentError, ensure_directory
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility, get_config_root
 from djinn_in_a_box.core.paths import get_project_root
 from djinn_in_a_box.core.session import SessionManager
-
-
-def _review_text(value: str) -> str:
-    return "".join(
-        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in value
-    )
 
 
 def _confirm_host_workflow(review: HostWorkflowReview) -> bool:

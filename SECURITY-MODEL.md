@@ -337,14 +337,55 @@ Symlink-following host-side publisher writes into container-writable trees remai
 a separate issue, [#133](https://github.com/w2kr1stn/djinn_in_a_box/issues/133).
 The sealed check is unchanged. See [session integration](docs/suite-integration.md).
 
-Another container-to-host path remains open: the host agent runs in the session
-workspace `~/.djinn/sessions/<project>`, which every container mounts read-write.
-Host agent CLIs load project-scope configuration from that directory, such as
-Claude Code `.claude/settings.json` hooks or OpenCode project plugins, and
-interactive host sessions start Claude Code and Codex with their permission
-prompts disabled. Host workflow confirmation does not cover that configuration. Avoid host fallback in session
-workspaces a container has written to; the fix is tracked in
-[#140](https://github.com/w2kr1stn/djinn_in_a_box/issues/140).
+Without a running container, `djinn session` must not automatically load
+executable configuration from its container-writable session workspace. The
+boundary covers the host agent start, Git's automatic inspection of the
+workspace repository (including submodules and ancestor discovery through
+`~/.djinn/sessions`), and destinations configured in that repository. Claude
+starts with `--setting-sources user`, so project/local settings, `.mcp.json`,
+and project `CLAUDE.md`, skills, agents and commands are not loaded. OpenCode
+starts with `OPENCODE_DISABLE_PROJECT_CONFIG=1` and refuses `.opencode`,
+`opencode.json`, `opencode.jsonc`, `tui.json` and `tui.jsonc`; Codex refuses
+`.codex`. Other configured agents are refused on the host and run unchanged in
+the container.
+
+Before a host start, Djinn requires an inert workspace repository for Git's
+automatic inspection. Its `.git` must be a real directory with a regular
+`HEAD` and real `objects` and `refs` directories, with no `commondir` or
+`modules`. The config may contain only allowlisted keys; every remote needs a `url`, and
+remote destinations must use network URLs or scp-style addresses, not local
+paths, `file://` or remote helpers. `hooks` must be absent or a real directory containing only
+`*.sample` entries; legacy `remotes` and `branches` must be absent or real,
+empty directories. Any `.git` entry below the workspace root refuses the host
+start, including nested repositories and submodules. The workspace root must
+not hold `HEAD`, and physical ancestors from the workspace's parent through
+`~/.djinn/sessions` must contain neither `.git`, `HEAD` nor selected-agent
+project configuration, so Git cannot discover another repository there. Repository inspection reads files
+and uses `git config --file` to parse config without running commands the
+workspace configures. A workspace containing a nested clone is refused in host mode.
+
+A refusal starts no host agent and returns `SessionResult(returncode=1, …)`;
+the CLI exits 1. Its message identifies the offending entry, key or destination
+and advises running in the container or reviewing and removing the entry on
+the host. See [session integration](docs/suite-integration.md).
+
+This boundary covers automatic loading only. Workspace content can still
+prompt-inject the model, which may explicitly run workspace programs or issue
+Git commands against other repositories—for example through a directory
+symlink, a bare repository, or a repository under `~/.djinn/sessions` addressed
+by path. Interactive host starts retain their permission-bypass flags. These
+checks are a pre-launch snapshot, not writer isolation: a `djinn run` container,
+a later container start, failed container discovery, or another host process
+can still write to the workspace.
+
+Host-owned inputs—`agents.toml` flags, the caller's `env` and inherited
+environment—are trusted and must not be writable by a container. Remote
+endpoints in an accepted repository remain container-chosen network
+destinations. As in the CLI, a workspace path below `~/.djinn/sessions` must
+resolve strictly below it. For direct API callers with workspaces chosen
+outside `~/.djinn/sessions`, only the workspace itself is checked. Measurements
+used Claude Code 2.1.296, Codex 0.162.1, OpenCode 1.19.0 and Git 2.39.5; a host
+Claude without `--setting-sources` fails to start.
 
 ## Git keys and browser identity
 

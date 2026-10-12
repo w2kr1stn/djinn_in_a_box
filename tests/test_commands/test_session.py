@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +23,7 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _mock_agents() -> Generator[None]:
+def _mock_agents(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Mock load_agents for all tests to avoid file system access."""
     from djinn_in_a_box.config.models import AgentConfig as _AgentConfig
 
@@ -33,23 +34,27 @@ def _mock_agents() -> Generator[None]:
             write_flags=["--dangerously-skip-permissions"],
         ),
     }
-    with (
-        patch("djinn_in_a_box.core.session.load_agents", return_value=agents),
-        patch("djinn_in_a_box.commands.session.load_config", return_value=object()),
-        patch(
-            "djinn_in_a_box.commands.session.prepare_config_workflow",
-            return_value=WorkflowPreparationResult(True),
-        ),
-        patch(
-            "djinn_in_a_box.commands.session.get_project_root",
-            return_value=Path("/project"),
-        ),
-        patch(
-            "djinn_in_a_box.commands.session.get_config_root",
-            return_value=Path("/runtime"),
-        ),
-    ):
-        yield
+    # Host starts run real Git; the developer's global config or template must not decide outcomes.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_TEMPLATE_DIR", raising=False)
+    # The shared monkeypatch undoes in LIFO order with tests that override the same names.
+    monkeypatch.setattr("djinn_in_a_box.core.session.load_agents", lambda: agents)
+    monkeypatch.setattr(
+        "djinn_in_a_box.core.session.SessionManager._find_container", lambda self: None
+    )
+    monkeypatch.setattr("djinn_in_a_box.commands.session.load_config", lambda: object())
+    monkeypatch.setattr(
+        "djinn_in_a_box.commands.session.prepare_config_workflow",
+        lambda *args, **kwargs: WorkflowPreparationResult(True),
+    )
+    monkeypatch.setattr(
+        "djinn_in_a_box.commands.session.get_project_root", lambda: Path("/project")
+    )
+    monkeypatch.setattr(
+        "djinn_in_a_box.commands.session.get_config_root", lambda *args: Path("/runtime")
+    )
+    yield
 
 
 class TestSessionCommand:
@@ -853,3 +858,37 @@ def test_container_session_passes_no_confirmation_callback(tmp_path):
         result = runner.invoke(app, ["session", "--project", "testproj", "--prompt", "hello"])
     assert result.exit_code == 0, result.output
     assert prepare.call_args.kwargs["confirm_host_workflow"] is None
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_host_guard_refusal_is_rendered_literally(tmp_path, monkeypatch, headless):
+    from types import SimpleNamespace
+
+    from djinn_in_a_box.commands import session as command
+    from djinn_in_a_box.config.models import AgentConfig
+    from djinn_in_a_box.core import session as core
+
+    workspace = tmp_path / ".djinn/sessions/guard"
+    # An ancestor entry supplies container-chosen printable and control characters.
+    parent = tmp_path / ".djinn/sessions/[red]:smile:\x01"
+    (parent / "child").mkdir(parents=True)
+    (parent / ".git").touch()
+    workspace.symlink_to(parent / "child", target_is_directory=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(core, "_HOST_SESSIONS_BASE", tmp_path / ".djinn/sessions")
+    monkeypatch.setattr(core, "load_agents", lambda: {"opencode": AgentConfig(binary="fake")})
+    monkeypatch.setattr(core.SessionManager, "_find_container", lambda self: None)
+    monkeypatch.setattr(core.shutil, "which", lambda _: "/fake")
+    monkeypatch.setattr(command, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True)))
+    with patch.object(core.subprocess, "run") as run:
+        args = ["session", "--project", "guard", "--agent", "opencode"]
+        if headless:
+            args += ["--prompt", "test"]
+        result = runner.invoke(app, args)
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert result.stdout == ""
+    assert "[red]:smile:\\x01/.git" in result.stderr
+    assert "Host session refused" in result.stderr
+    assert "djinn start" in result.stderr
+    assert "\x01" not in result.stderr
+    run.assert_not_called()
