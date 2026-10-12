@@ -154,8 +154,9 @@ refuses. The inventory is a point-in-time scan: symlinks are not followed and
 entries that vanish during the scan are skipped; a vanished bind root,
 unreadable directories and other errors remain unknown. It is no boundary
 against a hostile dev that can write to the bind, because dev can rename
-entries while the scan runs. Protected inodes stay protected only in binds dev
-cannot write, or when they are kept out of the delivered trees.
+entries while the scan runs. Protected inodes stay protected only in host trees
+dev cannot write through any bind, or when they are kept out of the delivered
+trees.
 
 Sealed means verified provenance and absence of these named causes. It does not
 promise kernel-exploit resistance, isolation from every host/LAN TCP service, or

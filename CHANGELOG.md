@@ -15,7 +15,7 @@ Versioning before and after the first stable release.
   refusing on its uncertainty. The cause still requires `--allow-unsealed`, and
   other inspection errors still refuse. The inventory no longer follows symlinks
   and skips entries that vanish during the scan; a missing bind root and
-  unreadable entries still refuse.
+  unreadable directories still refuse.
 - Checkpoint Claude state and Claude/OpenCode personal settings every 30 s with
   atomic writes: changes older than about 30 s survive a crash, plus checkpoint
   duration and scheduling delay, given valid JSON and healthy writable storage.
