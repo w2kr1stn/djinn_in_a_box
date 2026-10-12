@@ -22,6 +22,7 @@ VOLUME_CATEGORIES: Final[dict[str, list[str]]] = {
     "data": [
         "djinn-opencode-data",
         "djinn-vscode-workspaces",
+        "djinn-packages",
     ],
 }
 """Named-volume categories (host-local, not synced across machines)."""

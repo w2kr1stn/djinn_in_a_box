@@ -459,17 +459,17 @@ def test_backup_restore_held_lock_precedes_every_host_path_step(
 @pytest.mark.parametrize(
     ("selection", "expected_volumes", "expected_sync"),
     [
-        ("default", {"djinn-opencode-data", "djinn-journal"},
+        ("default", {"djinn-opencode-data", "djinn-packages", "djinn-journal"},
          {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
-        ("data", {"djinn-opencode-data", "djinn-journal"}, set()),
+        ("data", {"djinn-opencode-data", "djinn-packages", "djinn-journal"}, set()),
         ("cache", {"djinn-agent-docker", "djinn-uv-cache",
                    "djinn-tools-cache", "djinn-scratch"}, set()),
-        ("combined", {"djinn-opencode-data", "djinn-journal", "djinn-uv-cache",
+        ("combined", {"djinn-opencode-data", "djinn-packages", "djinn-journal", "djinn-uv-cache",
                       "djinn-tools-cache", "djinn-scratch", "djinn-agent-docker"},
          {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
         ("credentials", set(), {"claude", "codex", "opencode", "gh", "age"}),
         ("repo-dotfiles", set(), {"repo-dotfiles"}),
-        ("unplugged-bind", {"djinn-opencode-data", "djinn-journal"},
+        ("unplugged-bind", {"djinn-opencode-data", "djinn-packages", "djinn-journal"},
          {"claude", "codex", "opencode", "gh", "age", "repo-dotfiles"}),
         ("none", set(), set()),
     ],
@@ -491,13 +491,14 @@ def test_declared_backup_categories(
     assert snapshot == {
         "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
                   "djinn-vscode-server", "djinn-scratch"],
-        "data": ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-journal"],
+        "data": ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-packages",
+                 "djinn-journal"],
         "none": ["djinn-desktop-dbus", "djinn-desktop-audio", "djinn-worker"],
     }
     snapshot["data"].clear()
     assert original == VOLUME_CATEGORIES
     assert volume_categories(config)["data"] == [
-        "djinn-opencode-data", "djinn-vscode-workspaces", "djinn-journal",
+        "djinn-opencode-data", "djinn-vscode-workspaces", "djinn-packages", "djinn-journal",
     ]
     assert volume_categories() == original
 
@@ -568,8 +569,9 @@ def test_declared_backup_categories(
          {"journal": "cache"}, {"djinn-journal"}, set(), set()),
         ("none", ["declared-volumes/djinn-worker.tar.gz"], {}, set(), set(), {"djinn-worker"}),
         ("removed", ["declared-volumes/djinn-removed.tar.gz"], {}, set(), set(), {"djinn-removed"}),
-        ("built-in", ["djinn-opencode-data.tar.gz", "djinn-sync-codex.tar.gz"], {},
-         {"djinn-opencode-data"}, {"codex"}, set()),
+        ("built-in", ["djinn-opencode-data.tar.gz", "djinn-packages.tar.gz",
+                       "djinn-sync-codex.tar.gz"], {},
+         {"djinn-opencode-data", "djinn-packages"}, {"codex"}, set()),
         ("sync-claude-pair", ["djinn-sync-claude.tar.gz",
                              "declared-volumes/djinn-sync-claude.tar.gz"],
          {"sync-claude": "none"}, set(), {"claude"}, {"djinn-sync-claude"}),
@@ -1772,7 +1774,7 @@ class TestRestoreCommand:
 
         backup_file = backups_dir / "djinn-backup-2026-03-13.tar.gz"
         with tarfile.open(backup_file, "w:gz") as outer:
-            for name in ["djinn-opencode-data", "djinn-vscode-workspaces"]:
+            for name in ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-packages"]:
                 archive = inner_staging / f"{name}.tar.gz"
                 with tarfile.open(archive, "w:gz") as _tar:
                     pass
@@ -1790,7 +1792,7 @@ class TestRestoreCommand:
 
             backup_module.restore()
 
-            assert mock_restore.call_count == 2
+            assert mock_restore.call_count == 3
 
     def test_restore_sync_path_uses_config_file_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

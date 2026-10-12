@@ -163,7 +163,7 @@ def test_status_declared_volume_categories(
     expected = {
         "cache": ["djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
                   "djinn-vscode-server"],
-        "data": ["djinn-opencode-data", "djinn-vscode-workspaces"],
+        "data": ["djinn-opencode-data", "djinn-vscode-workspaces", "djinn-packages"],
         "none": ["djinn-desktop-dbus", "djinn-desktop-audio"],
         "protected (only clean all)": ["djinn-hostctl-state"],
     }
@@ -210,10 +210,10 @@ def test_declared_cleanup_sets(
     config = declared_app_config
     builtins_cache = {"djinn-agent-docker", "djinn-uv-cache", "djinn-tools-cache",
                       "djinn-vscode-server"}
-    builtins_data = {"djinn-opencode-data", "djinn-vscode-workspaces"}
+    builtins_data = {"djinn-opencode-data", "djinn-vscode-workspaces", "djinn-packages"}
     expected_volumes = {
         "cache": {"djinn-uv-cache", "djinn-tools-cache", "djinn-scratch", "djinn-agent-docker"},
-        "data": {"djinn-opencode-data", "djinn-journal"},
+        "data": {"djinn-opencode-data", "djinn-packages", "djinn-journal"},
         "all": builtins_cache | builtins_data | {"djinn-journal", "djinn-scratch", "djinn-worker"},
         "name": {"djinn-worker"},
     }.get(operation, set())

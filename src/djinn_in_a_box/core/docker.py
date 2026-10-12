@@ -94,6 +94,7 @@ MANAGED_VOLUME_REPAIR_TARGETS = (
 )
 MANAGED_TARGET_ROOTS = (
     *MANAGED_VOLUME_REPAIR_TARGETS,
+    Path("/var/lib/djinn-packages"),
     *MANAGED_SSH_TARGETS,
     *desktop.MANAGED_TARGETS,
     Path(agent_docker.DEV_ENDPOINT),
@@ -105,6 +106,7 @@ _COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
     Path("/home/dev/.opencode"): "directory",
     Path("/home/dev/.local/share/opencode"): "directory",
     Path("/home/dev/.config/gh"): "directory",
+    Path("/var/lib/djinn-packages"): "directory",
     Path("/home/dev/.config/age"): "directory",
     Path("/home/dev/.cache/uv"): "directory",
     Path("/home/dev/.cache/djinn-tools"): "directory",

@@ -54,6 +54,7 @@ fi
 # -----------------------------------------------------------------------------
 ALLOWED_DOMAINS=(
     # Package registries
+    "deb.debian.org"
     "registry.npmjs.org"
     "pypi.org"
     "files.pythonhosted.org"

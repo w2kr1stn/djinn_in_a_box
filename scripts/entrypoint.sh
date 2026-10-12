@@ -125,6 +125,17 @@ source "$MCP_REGISTER"
 register_mcp_servers >&2
 
 # =============================================================================
+# Runtime Packages
+# =============================================================================
+ui_section "Packages"
+PACKAGE_REPLAY="${PACKAGE_REPLAY:-/home/dev/package-replay.sh}"
+if [[ -f "$PACKAGE_REPLAY" ]]; then
+    if ! "$PACKAGE_REPLAY" >&2; then
+        ui_warn "Package replay exited unexpectedly; continuing startup."
+    fi
+fi
+
+# =============================================================================
 # Optional Tools Installation (with caching)
 # =============================================================================
 ui_section "Tools"

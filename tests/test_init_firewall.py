@@ -4,6 +4,14 @@ import re
 from pathlib import Path
 
 
+def test_debian_registry_allowed():
+    source = (Path(__file__).resolve().parents[1] / "scripts/init-firewall.sh").read_text()
+    array = re.search(r"(?ms)^ALLOWED_DOMAINS=\((.*?)^\)", source)
+    assert array is not None
+    registries = array.group(1).split("# Package registries", 1)[1].split("#", 1)[0]
+    assert '"deb.debian.org"' in registries
+
+
 def test_allowlist_excludes_google_and_keeps_supported_api_hosts() -> None:
     script = (
         Path(__file__).resolve().parents[1] / "scripts" / "init-firewall.sh"
