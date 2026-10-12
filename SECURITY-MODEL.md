@@ -6,13 +6,42 @@ Djinn's host control window protects against unwanted use of remote machines,
 including mistakes and prompt injection. It is not a hardened sandbox against
 deliberate host escape. Agents run as `dev` with passwordless `sudo` inside the
 container; write mode can also bypass the agent CLI's approval prompts. An
-approval setting is not an isolation boundary.
+approval setting is not an isolation boundary. For package-install elevation
+and its limits, see [Runtime package installs](#runtime-package-installs).
 
 The window relies on a trusted host controller, a sealed deployment, no direct
 Docker-to-tailnet forwarding, and owner-controlled target permissions. It gates
 new SSH access and cuts relay connections; it cannot undo remote changes or stop
 detached jobs already launched on a target. See [usage](README.md#host-control-windows)
 and [implementation](IMPLEMENTATION.md#hostctl-helper).
+
+## Runtime package installs
+
+As `dev`, `/usr/local/bin/apt-get` is a shim that elevates `update` and supported
+`install` calls through `sudo` to the root-owned
+`/usr/local/libexec/djinn-apt-root`, allowed by its own
+`dev ALL=(root) NOPASSWD: /usr/local/libexec/djinn-apt-root` sudoers line. Each
+elevation is announced on stderr. Root callers, including `sudo apt-get`, pass
+through to `/usr/bin/apt-get` unchanged.
+
+Only `update` and `install` of exact package names present in the apt cache are
+accepted. The shim allows only its documented flags; it does not pass arbitrary
+apt options, configuration, source entries, paths, or `.deb` files to the
+helper. The helper uses a fixed environment, non-interactive apt,
+`--no-install-recommends`, and `--no-remove` (it never removes a package), with
+`/dev/null` stdin and a lock that serializes package operations. Root never reads
+the dev-writable package list.
+
+Exact-name validation does not enforce package origin. An agent can install as
+root any package from signed apt sources configured in the container: the Debian
+archive by default, and any source a root tool installer adds (for example,
+PostgreSQL's) is trusted the same way. Package maintainer scripts run as root
+and can change services and configuration inside the container. Services do not
+start during install because the base image's `policy-rc.d` forbids it. The
+existing `dev ALL=(ALL) NOPASSWD:ALL` rule is unchanged, so this adds no authority
+that `dev` did not already have; it does mean a permission layer that denies
+`sudo …` no longer blocks package installs. With `--firewall`, `deb.debian.org`
+is reachable through its shared CDN addresses.
 
 ## Host authority and Docker access
 

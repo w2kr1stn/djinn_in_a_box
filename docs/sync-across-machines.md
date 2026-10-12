@@ -93,9 +93,14 @@ djinn restore
 
 By default, `djinn backup` archives the config-zone credential/config-root paths
 (`claude`, `codex`, `opencode`, `gh`, `age`), `repo-dotfiles`, and data
-volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`). It does not archive
-the shared transcript zone or the local cache/scratch zone. Cache volumes are not
-included by default because they are rebuildable.
+volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`, `djinn-packages`). It
+does not archive the shared transcript zone or the local cache/scratch zone.
+Cache volumes are not included by default because they are rebuildable.
+
+The `djinn-packages` archive stores the runtime package list, which is the
+install intent rather than installed package files. Restoring the volume restores
+that intent; the next container start checks the list and installs packages that
+are missing.
 
 Backups are age-encrypted with a passphrase by default and use the filename
 `djinn-backup-YYYY-MM-DD.tar.gz.age`. `age` asks for that passphrase directly at

@@ -27,6 +27,10 @@ Versioning before and after the first stable release.
 - Host-side provisioning, doctor repair, Claude baseline seeding, session
   creation and sync-path clearing refuse symlinked or non-directory components.
   Derived roots that are symlinks are refused.
+- Route agent package installs through a narrow root-owned helper with its own
+  sudoers line, exact apt-cache package-name validation, fixed environment and
+  options, and an announcement for every elevation. The broad existing sudo
+  rule (`dev ALL=(ALL) NOPASSWD:ALL`) is unchanged.
 - Require host-side confirmation before `djinn session` publishes a new or
   changed managed workflow to a native host agent root. Confirmation defaults
   to No at a terminal; non-TTY callers refuse with exit 1 and review instructions.
@@ -63,6 +67,9 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- Runtime package installs for agents, with a persistent package list and
+  missing-only start replay in the `djinn-packages` data volume. The firewall
+  allowlist includes `deb.debian.org` for the Debian archive.
 - Optional bind-only `read_only` declarations, delivered to dev and the agent
   Docker workspace with matching modes and shown by `config show` and `doctor`.
 - Rootless agent Docker runtime for `--docker`, with generation-owned Unix endpoint,

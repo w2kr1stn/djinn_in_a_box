@@ -543,6 +543,47 @@ needed; MCP entries remain separate.
 one per line. `tools/tools.txt` is read at container start and may list installer
 names that correspond to scripts under `tools/installers/`.
 
+### Runtime Packages
+
+As `dev`, `apt-get update && apt-get install -y <package>` works without a
+`sudo` prefix. The shim accepts `-y`, `--yes`, `--assume-yes`, `-q`, `--quiet`,
+`-qq`, and `--no-install-recommends` anywhere in the command; `-h` or `--help`
+also works anywhere. Names must match `[a-z0-9][a-z0-9+.-]*` and contain at
+least two characters. `apt-get --help` prints the accepted syntax.
+Installs always use `-y` and `--no-install-recommends`.
+
+Other subcommands, unsupported flags, paths, `.deb` files, and malformed names
+are refused with exit 2. A name not found exactly in the current apt cache exits
+100 with `E: Unable to locate package <name>` and `Run apt-get update and try
+again.` Refusal messages point to `apt-get --help` and this README section.
+Every elevation is announced on stderr; direct calls print
+`apt-get: using sudo to run /usr/local/libexec/djinn-apt-root as root.` The
+startup replay announces its helper call with `Packages: using sudo to run
+/usr/local/libexec/djinn-apt-root as root.` `/usr/bin/apt-get` remains available
+unprivileged for other subcommands. When `apt-get` runs as root, including
+through `sudo apt-get`, it passes the original arguments and streams to
+`/usr/bin/apt-get` unchanged and does not record the invocation.
+
+Successful installs made as `dev` append package names to
+`/home/dev/.local/share/djinn-packages/packages.txt`, one name per line. Blank
+lines and `#` comments are ignored. Read the list with `cat`; delete a line to
+stop replaying that package. Removing a line does not uninstall the package in
+the current container; it stays installed until that container is recreated.
+If the list cannot be written, the install still succeeds and the shim warns
+that the package was not recorded.
+The file is stored in the `djinn-packages` named volume at
+`/home/dev/.local/share/djinn-packages`, category `data`.
+
+At startup, the Packages step runs after MCP and before Tools. It checks the
+recorded names against installed packages. If none are missing, it makes no
+network calls. Otherwise it updates apt, warns and skips names not present in the
+apt cache, then installs the remaining missing packages. Replay problems are
+warnings and do not stop startup. Prefer build-time `packages.txt` for packages
+every new image needs from its first start; runtime installs are for packages
+agents choose while using a container. See the [runtime package install
+security model](SECURITY-MODEL.md#runtime-package-installs) for the boundary and
+residual risk.
+
 ## Agents
 
 Djinn has three built-in agent definitions:
@@ -632,9 +673,9 @@ Common `start` options:
 ### What `--firewall` allows
 
 The firewall denies outbound traffic by default and permits a fixed domain list
-in `scripts/init-firewall.sh`: package registries, the three bundled CLIs' API and
-sign-in endpoints, GitHub, and the Docker networks. Every address a domain
-resolves to is permitted.
+in `scripts/init-firewall.sh`: package registries including the Debian archive
+`deb.debian.org`, the three bundled CLIs' API and sign-in endpoints, GitHub, and
+the Docker networks. Every address a domain resolves to is permitted.
 
 A blocked connection is refused immediately rather than dropped, so a tool that
 hits the allowlist fails in about 0.2 seconds with "connection refused" instead
@@ -807,14 +848,15 @@ Named volumes are Docker-managed and host-local:
 | Volume name | Container path | Category |
 | --- | --- | --- |
 | `djinn-opencode-data` | `/home/dev/.local/share/opencode` | data |
+| `djinn-packages` | `/home/dev/.local/share/djinn-packages` | data |
 | `djinn-uv-cache` | `/home/dev/.cache/uv` | cache |
 | `djinn-tools-cache` | `/home/dev/.cache/djinn-tools` | cache |
 | `djinn-vscode-server` | `/home/dev/.vscode-server` | cache |
 | `djinn-vscode-workspaces` | `/home/dev/workspaces` | data |
 
-The backup command includes credentials, repo-dotfiles, and data by default. It
-does not include cache volumes unless you explicitly request the `cache`
-category.
+The backup command includes credentials, repo-dotfiles, and data by default,
+including the `djinn-packages` package list. It does not include cache volumes
+unless you explicitly request the `cache` category.
 
 Declared targets must be absolute. They cannot equal or contain a built-in,
 reserved, assigned zone, active workspace or `--mount`/`--here` target; nested
@@ -822,7 +864,8 @@ declared targets are refused too. Target reservations cover all Docker modes,
 even inactive ones. Children of built-in, reserved, zone or invocation targets
 are allowed, with one exception shared with invocation `--mount`: neither may sit
 at or below the Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
-`/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
+`/home/dev/.local/share/fnm`, `/home/dev/.local/share/djinn-packages`,
+`/home/dev/.vscode-server` or `/home/dev/workspaces`.
 Their existing recursive ownership repair remains in place. Generated SSH delivery
 (`/home/dev/.ssh`), the Git socket directory (`/run/djinn-git-agent`) and
 `/home/dev/.gitconfig_local`, desktop directories (`/run/djinn/dbus`, `/run/djinn/audio`)
@@ -846,6 +889,9 @@ including `none`, and show absent declared volumes as `not created`.
 | `data` | Default backup, or explicit `--categories data`; restore while currently declared as data/cache | `clean volumes --data`, `clean all`, or by actual name |
 | `cache` | Only with `--categories cache`; restore while currently declared as data/cache | `clean volumes --cache`, `clean all`, or by actual name |
 | `none` | Never backed up or restored; no backup selector | Only `clean all` or by actual name; no `--none` selector |
+
+The built-in `djinn-packages` data volume is included in default backup and
+restore. `clean volumes --data` and `clean all` delete it; `djinn clean` keeps it.
 
 Backup includes only existing selected volumes. Declared archives use
 `declared-volumes/<actual-name>.tar.gz`; built-in archive names and layout stay
@@ -957,7 +1003,7 @@ By default, this backs up:
 - `credentials`: config-root directories for Claude Code, Codex CLI, OpenCode,
   the GitHub CLI, and the `age` encryption identity store
 - `repo-dotfiles`: the optional config-root `repo-dotfiles` directory if present
-- `data`: the OpenCode data and VS Code workspace named volumes
+- `data`: the OpenCode data, VS Code workspace, and `djinn-packages` named volumes
 
 The archive is written to:
 
@@ -1006,8 +1052,9 @@ djinn clean
 ```
 
 This keeps every declared volume and bind. Category cleanup includes declared
-volumes of that category. `backup = "none"` excludes backup and restore; it offers
-no protection from `clean all`. Declared bind sources and markers, arbitrary host
+volumes of that category. It also keeps built-in named volumes such as
+`djinn-packages`. `backup = "none"` excludes backup and restore; it offers no
+protection from `clean all`. Declared bind sources and markers, arbitrary host
 binds, the workspace, SSH and shared/local zone data are outside the cleanup sets.
 
 List managed volumes and config-root paths:
@@ -1027,6 +1074,8 @@ Delete data volumes:
 ```sh
 djinn clean volumes --data
 ```
+
+This deletes `djinn-packages` along with the other data volumes.
 
 Clear credential directories under the config root:
 
@@ -1048,8 +1097,9 @@ djinn clean volumes djinn-uv-cache
 
 `djinn clean volumes NAME` refuses names that do not start with `djinn-`.
 
-Remove containers, managed named volumes, config-root sync-path contents, and the
-Docker network. This does not remove zone data in `<config-root>.shared` or
+Remove containers, managed named volumes (including `djinn-packages`),
+config-root sync-path contents, and the Docker network. This does not remove
+zone data in `<config-root>.shared` or
 `<config-root>.local`:
 
 ```sh
