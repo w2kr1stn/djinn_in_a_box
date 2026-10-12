@@ -68,7 +68,10 @@ def test_packages_section_order_and_failure_continue(tmp_path, case):
 
 
 def test_packages_ownership_target():
-    target = Path("/home/dev/.local/share/djinn-packages")
-    assert MANAGED_VOLUME_REPAIR_TARGETS[-1] == target
+    for target in (Path("/var/lib/djinn-packages"), Path("/home/dev/.local/share/djinn-packages")):
+        assert target not in MANAGED_VOLUME_REPAIR_TARGETS
+    assert len(MANAGED_VOLUME_REPAIR_TARGETS) == 5
     source = (ROOT / "scripts/entrypoint.sh").read_text()
-    assert "~/workspaces ~/.local/share/djinn-packages; do" in source
+    loop = source[source.index("for dir in "):source.index("OWNERSHIP_REPAIR_HELPER=")]
+    assert "djinn-packages" not in loop
+    assert "~/workspaces; do" in loop

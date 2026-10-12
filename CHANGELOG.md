@@ -29,7 +29,9 @@ Versioning before and after the first stable release.
   Derived roots that are symlinks are refused.
 - Route agent package installs through a narrow root-owned helper with its own
   sudoers line, exact apt-cache package-name validation, fixed environment and
-  options, and an announcement for every elevation. The broad existing sudo
+  options, and an announcement for every elevation. The helper alone records
+  installs in the root-owned `/var/lib/djinn-packages/packages.txt`, checks trust
+  on the opened descriptor, and performs bounded startup replay. The broad existing sudo
   rule (`dev ALL=(ALL) NOPASSWD:ALL`) is unchanged.
 - Require host-side confirmation before `djinn session` publishes a new or
   changed managed workflow to a native host agent root. Confirmation defaults
@@ -67,7 +69,7 @@ Versioning before and after the first stable release.
 
 ### Added
 
-- Runtime package installs for agents, with a persistent package list and
+- Runtime package installs for agents, with a root-owned persistent package list and
   missing-only start replay in the `djinn-packages` data volume. The firewall
   allowlist includes `deb.debian.org` for the Debian archive.
 - Optional bind-only `read_only` declarations, delivered to dev and the agent

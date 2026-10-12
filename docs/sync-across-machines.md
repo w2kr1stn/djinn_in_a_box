@@ -97,7 +97,8 @@ volumes (`djinn-opencode-data`, `djinn-vscode-workspaces`, `djinn-packages`). It
 does not archive the shared transcript zone or the local cache/scratch zone.
 Cache volumes are not included by default because they are rebuildable.
 
-The `djinn-packages` archive stores the runtime package list, which is the
+The `djinn-packages` archive stores the root-owned runtime package list at
+`/var/lib/djinn-packages/packages.txt`, which is the
 install intent rather than installed package files. Restoring the volume restores
 that intent; the next container start checks the list and installs packages that
 are missing.

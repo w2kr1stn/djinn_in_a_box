@@ -559,27 +559,37 @@ again.` Refusal messages point to `apt-get --help` and this README section.
 Every elevation is announced on stderr; direct calls print
 `apt-get: using sudo to run /usr/local/libexec/djinn-apt-root as root.` The
 startup replay announces its helper call with `Packages: using sudo to run
-/usr/local/libexec/djinn-apt-root as root.` `/usr/bin/apt-get` remains available
+/usr/local/libexec/djinn-apt-root replay as root.` `/usr/bin/apt-get` remains available
 unprivileged for other subcommands. When `apt-get` runs as root, including
 through `sudo apt-get`, it passes the original arguments and streams to
 `/usr/bin/apt-get` unchanged and does not record the invocation.
 
-Successful installs made as `dev` append package names to
-`/home/dev/.local/share/djinn-packages/packages.txt`, one name per line. Blank
-lines and `#` comments are ignored. Read the list with `cat`; delete a line to
-stop replaying that package. Removing a line does not uninstall the package in
-the current container; it stays installed until that container is recreated.
-If the list cannot be written, the install still succeeds and the shim warns
-that the package was not recorded.
-The file is stored in the `djinn-packages` named volume at
-`/home/dev/.local/share/djinn-packages`, category `data`.
+The root helper records successful installs made as `dev` in
+`/var/lib/djinn-packages/packages.txt`, one name per line, using an atomic,
+deduplicated write under its package lock. The file is root:root 0644 in a
+root:root 0755 directory. Agents cannot change it. Blank lines and `#` comments
+are ignored. Read the list with `cat`; a human removes an entry with:
 
-At startup, the Packages step runs after MCP and before Tools. It checks the
-recorded names against installed packages. If none are missing, it makes no
+```sh
+sudo sed -i '/^NAME$/d' /var/lib/djinn-packages/packages.txt
+```
+
+Removing a line stops replaying that package; it stays installed in the current
+container until recreation. Recording keeps existing lines and refuses additions
+beyond 256 distinct names or 1 MiB. If recording fails, the helper warns and
+the install keeps its successful exit status.
+The file is stored in the `djinn-packages` named volume at
+`/var/lib/djinn-packages`, category `data`.
+
+At startup, the Packages step runs after MCP and before Tools. Its dev wrapper
+announces and calls the root helper's `replay` mode, which checks the recorded
+names against installed packages. If none are missing, it makes no
 network calls. Otherwise it updates apt, warns and skips names not present in the
 apt cache, then installs the remaining missing packages. Replay problems are
-warnings and do not stop startup; a list that is not a regular file or exceeds
-1 MiB, or cannot be read within 10 seconds, is skipped with a warning. The replay considers at most 256 distinct names
+warnings and do not stop startup. The helper checks the opened file descriptor:
+only a regular root-owned file of at most 1 MiB, in a root-owned directory, is
+accepted. Symlinks and group- or world-writable files or directories are refused
+with a warning. Replay uses one linear parse and considers at most 256 distinct names
 and warns how many more it did not replay, treats entries over 128 bytes as
 invalid, reports at most five invalid lines one by one, and stops its package
 checks with a warning after 60 seconds. The package list update has a 300-second
@@ -854,14 +864,14 @@ Named volumes are Docker-managed and host-local:
 | Volume name | Container path | Category |
 | --- | --- | --- |
 | `djinn-opencode-data` | `/home/dev/.local/share/opencode` | data |
-| `djinn-packages` | `/home/dev/.local/share/djinn-packages` | data |
+| `djinn-packages` | `/var/lib/djinn-packages` | data |
 | `djinn-uv-cache` | `/home/dev/.cache/uv` | cache |
 | `djinn-tools-cache` | `/home/dev/.cache/djinn-tools` | cache |
 | `djinn-vscode-server` | `/home/dev/.vscode-server` | cache |
 | `djinn-vscode-workspaces` | `/home/dev/workspaces` | data |
 
 The backup command includes credentials, repo-dotfiles, and data by default,
-including the `djinn-packages` package list. It does not include cache volumes
+including the root-owned `djinn-packages` list at `/var/lib/djinn-packages`. It does not include cache volumes
 unless you explicitly request the `cache` category.
 
 Declared targets must be absolute. They cannot equal or contain a built-in,
@@ -870,9 +880,9 @@ declared targets are refused too. Target reservations cover all Docker modes,
 even inactive ones. Children of built-in, reserved, zone or invocation targets
 are allowed, with one exception shared with invocation `--mount`: neither may sit
 at or below the Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
-`/home/dev/.local/share/fnm`, `/home/dev/.local/share/djinn-packages`,
-`/home/dev/.vscode-server` or `/home/dev/workspaces`.
-Their existing recursive ownership repair remains in place. Generated SSH delivery
+`/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
+Their existing recursive ownership repair remains in place. The root-owned
+`/var/lib/djinn-packages` is also reserved, with no dev ownership repair. Generated SSH delivery
 (`/home/dev/.ssh`), the Git socket directory (`/run/djinn-git-agent`) and
 `/home/dev/.gitconfig_local`, desktop directories (`/run/djinn/dbus`, `/run/djinn/audio`)
 and the agent-Docker endpoint (`/run/djinn/agent-docker`) follow the same managed-root
@@ -1081,7 +1091,8 @@ Delete data volumes:
 djinn clean volumes --data
 ```
 
-This deletes `djinn-packages` along with the other data volumes.
+This deletes the root-owned list at `/var/lib/djinn-packages` in `djinn-packages`
+along with the other data volumes.
 
 Clear credential directories under the config root:
 

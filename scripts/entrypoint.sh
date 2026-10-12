@@ -50,7 +50,7 @@ if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
 fi
 
 # Fix ownership of volume-mounted directories (Docker creates them as root)
-for dir in ~/.cache/uv ~/.cache/djinn-tools ~/.local/share/fnm ~/.vscode-server ~/workspaces ~/.local/share/djinn-packages; do
+for dir in ~/.cache/uv ~/.cache/djinn-tools ~/.local/share/fnm ~/.vscode-server ~/workspaces; do
     if [[ -d "$dir" ]] && [[ ! -w "$dir" ]]; then
         sudo chown -R $(id -u):$(id -g) "$dir"
     fi

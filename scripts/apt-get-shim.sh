@@ -9,8 +9,7 @@ fi
 
 helper_path='/usr/local/libexec/djinn-apt-root'
 sudo_target='root'
-list_path='/home/dev/.local/share/djinn-packages/packages.txt'
-readonly id_bin real_apt helper_path sudo_target list_path
+readonly id_bin real_apt helper_path sudo_target
 LC_ALL=C
 export LC_ALL
 
@@ -25,8 +24,9 @@ Flags may appear anywhere: -y, --yes, --assume-yes, -q, --quiet, -qq,
 Names: ASCII [a-z0-9][a-z0-9+.-]*, at least two characters, at most 128 bytes; no .deb files.
 -y and --no-install-recommends are always in force; installs never remove packages.
 This shim elevates through sudo to /usr/local/libexec/djinn-apt-root as root.
-Successful dev installs are recorded in /home/dev/.local/share/djinn-packages/packages.txt.
-Deleting a line stops its replay at container start.
+The root helper records successful installs in /var/lib/djinn-packages/packages.txt.
+Agents cannot edit it. A human stops an entry replaying with:
+sudo sed -i '/^NAME$/d' /var/lib/djinn-packages/packages.txt
 /usr/bin/apt-get is the unshimmed tool (unprivileged when run as dev).
 See the README section "Runtime Packages".
 HELP
@@ -103,36 +103,4 @@ elevate() {
 }
 
 elevate "$@"
-result=$?
-[ "$result" -eq 0 ] && [ "$operation" = install ] || exit "$result"
-
-record_packages() {
-    # Opening a FIFO or another special file here would block or misbehave.
-    if [ -e "$list_path" ] && [ ! -f "$list_path" ]; then
-        return 1
-    fi
-    if [ ! -s "$list_path" ]; then
-        printf '# Djinn runtime packages: one name per line; deleting a line stops replay.\n' >>"$list_path" || return 1
-    fi
-    # NUL bytes would vanish in the substitution and join their neighbours. A
-    # pipeline would report only sed's status, so tr's failure is checked alone.
-    existing=$(tr '\000' '\001' < "$list_path") || return 1
-    existing=$(printf '%s\n' "$existing" | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//') || return 1
-    newline='
-'
-    for name do
-        case "$newline$existing$newline" in *"$newline$name$newline"*) continue ;; esac
-        # A sentinel preserves a final newline through command substitution.
-        last=$(tail -c 1 -- "$list_path" && printf '.') || return 1
-        if [ "$last" != "$newline." ]; then
-            printf '\n' >>"$list_path" || return 1
-        fi
-        printf '%s\n' "$name" >>"$list_path" || return 1
-        existing="$existing$newline$name"
-    done
-}
-
-if ! record_packages "$@" 2>/dev/null; then
-    printf 'apt-get: install succeeded but was not recorded in %s; check the list directory and permissions.\n' "$list_path" >&2
-fi
-exit "$result"
+exit $?

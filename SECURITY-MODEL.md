@@ -24,16 +24,28 @@ As `dev`, `/usr/local/bin/apt-get` is a shim that elevates `update` and supporte
 elevation is announced on stderr. Root callers, including `sudo apt-get`, pass
 through to `/usr/bin/apt-get` unchanged.
 
-Only `update` and `install` of exact package names present in the apt cache are
-accepted. The shim allows only its documented flags; it does not pass arbitrary
+For direct installs, only `update` and `install` of exact package names present
+in the apt cache are accepted; the helper also accepts argument-free `replay` at startup. The shim allows only its documented flags; it does not pass arbitrary
 apt options, configuration, source entries, paths, or `.deb` files to the
 helper. The helper uses a fixed environment, non-interactive apt,
 `--no-install-recommends`, and `--no-remove` (it never removes a package), with
-`/dev/null` stdin and a lock that serializes package operations. Root never reads
-the dev-writable package list. The start replay treats that list as untrusted input:
-it reads only a regular file of at most 1 MiB, within a time limit and in one
-linear pass, and bounds names, warnings and check time, so a hostile list cannot
-hold the start.
+`/dev/null` stdin and a lock that serializes package operations, including replay
+and recording. The helper alone writes the root-owned list at
+`/var/lib/djinn-packages/packages.txt` (root:root 0644, directory root:root 0755),
+atomically after successful installs. Agents cannot edit it; human housekeeping
+requires sudo. Root never touches a dev-writable path: the list lives outside
+`/home/dev`, whose ancestors dev could rename or replace with symlinks.
+
+The helper fails closed when directory or opened-file descriptor checks fail:
+the directory must be root-owned and not group- or world-writable; the list must
+also be a regular root-owned file with those permission restrictions and at most
+1 MiB. Symlinked files and directories are refused. The opened descriptor is
+checked and read, so a path swap cannot substitute the object being validated.
+Replay maps NUL bytes before one linear parse, bounds names and warnings, uses a
+60-second budget for each phase of per-name checks and a 300-second update timeout.
+Installs have no kill timeout because interrupting dpkg can leave packages
+half-configured. The dev startup wrapper only announces elevation and formats
+the helper’s tagged output; replay failures warn and let startup continue.
 
 Exact-name validation does not enforce package origin. An agent can install as
 root any package from signed apt sources configured in the container: the Debian

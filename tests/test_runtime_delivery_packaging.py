@@ -47,6 +47,11 @@ def test_package_image_delivery():
 def test_package_sudoers_delivery():
     instructions = _docker_instructions()
     user_run = next(line for line in instructions if line.startswith("RUN groupadd "))
+    assert user_run.count("RUN ") == 1
+    users_before_run = [
+        line for line in instructions[: instructions.index(user_run)] if line.startswith("USER ")
+    ]
+    assert not users_before_run or users_before_run[-1] in ("USER root", "USER 0")
     assert 'echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$USERNAME' in user_run
     assert (
         'echo "$USERNAME ALL=(root) NOPASSWD: /usr/local/libexec/djinn-apt-root" '
@@ -55,6 +60,7 @@ def test_package_sudoers_delivery():
     assert "chmod 0440 /etc/sudoers.d/djinn-apt" in user_run
     assert "visudo -cf /etc/sudoers.d/djinn-apt" in user_run
     assert instructions.index(user_run) < instructions.index("USER $USERNAME")
+    assert "install -d -o root -g root -m 0755 /var/lib/djinn-packages" in user_run
 
 
 def test_declared_ownership_helper_is_packaged():

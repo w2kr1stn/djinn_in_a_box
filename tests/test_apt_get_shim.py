@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import os
 import subprocess
 import time
@@ -29,7 +28,6 @@ class ShimHarness:
         for name, old, new in (
             ("id_bin", "/usr/bin/id", directory / "id"),
             ("real_apt", "/usr/bin/apt-get", directory / "apt"),
-            ("list_path", LIST, self.list),
         ):
             source = substitute(source, name, old, new)
         self.script = executable(directory / "shim.sh", source)
@@ -103,7 +101,9 @@ def test_dev_help_anywhere(tmp_path, args):
         "root",
         HELPER,
         LIST,
-        "Deleting a line",
+        "Agents cannot edit it",
+        "root helper records",
+        "sudo sed -i '/^NAME$/d'",
         "/usr/bin/apt-get",
         "unprivileged",
         'README section "Runtime Packages"',
@@ -172,11 +172,7 @@ def test_allowed_argv_and_quiet(tmp_path, args, forwarded):
     result = shim.run(args)
     assert result.returncode == 0
     assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, *forwarded]]
-    if "install" in forwarded:
-        names = forwarded[forwarded.index("install") + 1 :]
-        assert shim.list.read_text().splitlines()[1:] == names
-    else:
-        assert not shim.list.exists()
+    assert not shim.list.exists()
 
 
 @pytest.mark.parametrize("name", ["bash-", "jq.", "xz.", "jq+", "g++", "python3.11"])
@@ -190,7 +186,7 @@ def test_dev_exact_name_refusal(tmp_path, name):
     assert result.returncode == (0 if known else 100)
     assert result.stderr.count("using sudo") == 1
     if known:
-        assert shim.list.read_text().splitlines()[1:] == [name]
+        assert not shim.list.exists()
     else:
         assert f"E: Unable to locate package {name}" in result.stderr
         assert "apt-get update" in result.stderr
@@ -223,92 +219,7 @@ def test_fixed_targets_ignore_environment(tmp_path):
     result = shim.run(["install", "jq"])
     assert result.returncode == 0
     assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, "install", "jq"]]
-    assert shim.list.read_text().endswith("\njq\n")
-
-
-@pytest.mark.parametrize("status", [0, 17, 100])
-@pytest.mark.parametrize("operation", ["update", "install"])
-def test_success_only_recording(tmp_path, status, operation):
-    shim = ShimHarness(tmp_path)
-    shim.tools.configure(status=status)
-    # The fake inspects the list at dispatch time to catch premature recording.
-    sudo = tmp_path / "sudo"
-    source = sudo.read_text().replace(
-        'if role == "sudo":',
-        f'if role == "sudo":\n    assert not Path({str(shim.list)!r}).exists()',
-    )
-    sudo.write_text(source)
-    args = [operation, *(["jq"] if operation == "install" else [])]
-    assert shim.run(args).returncode == status
-    assert shim.list.exists() == (status == 0 and operation == "install")
-    if status:
-        shim.list.write_text("# unchanged\ncurl\n")
-        sudo.write_text(
-            source.replace(
-                f"assert not Path({str(shim.list)!r}).exists()",
-                "pass",
-            )
-        )
-        assert shim.run(args).returncode == status
-        assert shim.list.read_text() == "# unchanged\ncurl\n"
-
-
-@pytest.mark.parametrize(
-    "initial,existing_names",
-    [
-        (None, []),
-        ("", []),
-        ("# retained\n\n  jq # inline\n\tcurl\t\n", ["jq", "curl"]),
-        ("# retained\ncurl", ["curl"]),
-        ("# retained\njqp\n", ["jqp"]),
-    ],
-)
-def test_record_header_and_dedupe(tmp_path, initial, existing_names):
-    shim = ShimHarness(tmp_path)
-    if initial is not None:
-        shim.list.write_text(initial)
-    assert shim.run(["install", "jq", "jq", "g++"]).returncode == 0
-    first = shim.list.read_text()
-    assert shim.run(["install", "jq", "python3.11", "g++"]).returncode == 0
-    result = shim.list.read_text()
-    assert result.startswith(first) and result.endswith("python3.11\n")
-    if initial:
-        assert result.startswith(initial)
-    assert sum(line.startswith("#") for line in result.splitlines()) == 1
-    names = [line.split("#", 1)[0].strip() for line in result.splitlines()]
-    names = [name for name in names if name]
-    assert names == list(dict.fromkeys([*existing_names, "jq", "g++", "python3.11"]))
-
-
-@pytest.mark.parametrize("failure", ["missing-directory", "directory", "read", "tail", "append"])
-def test_record_failure_preserves_apt_status(tmp_path, failure):
-    shim = ShimHarness(tmp_path)
-    if failure == "missing-directory":
-        new_list = tmp_path / "missing" / "packages.txt"
-        shim.script.write_text(shim.script.read_text().replace(str(shim.list), str(new_list)))
-        shim.list = new_list
-    elif failure == "directory":
-        shim.list.mkdir()
-    else:
-        shim.list.write_text("# retained\ncurl\n")
-        if failure in ("read", "tail"):
-            executable(tmp_path / ("sed" if failure == "read" else "tail"), "#!/bin/sh\nexit 1\n")
-        else:
-            # Turn the test file into a directory after the read, even under root.
-            executable(
-                tmp_path / "sed",
-                "#!/usr/bin/python3\nfrom pathlib import Path\n"
-                f"p = Path({str(shim.list)!r})\nprint(p.read_text())\n"
-                "p.unlink()\np.mkdir()\n",
-            )
-            executable(tmp_path / "tail", "#!/bin/sh\nprintf '\\n'\n")
-    result = shim.run(["install", "jq"])
-    assert result.returncode == 0
-    assert len(result.stderr.splitlines()) == 2
-    assert "install succeeded but was not recorded" in result.stderr
-    assert str(shim.list) in result.stderr
-    if failure == "missing-directory":
-        assert not shim.list.parent.exists()
+    assert not shim.list.exists()
 
 
 LONG = "A" * 32769
@@ -328,41 +239,6 @@ def test_long_token_refused_promptly(tmp_path, args):
     assert shim.tools.sudo_calls() == [] and not shim.list.exists()
 
 
-def test_record_dedupe_does_not_join_around_nul(tmp_path):
-    # "j\0q" is not "jq": a substitution that drops the NUL must not hide jq.
-    shim = ShimHarness(tmp_path)
-    shim.list.write_bytes(b"# retained\nj\x00q\n")
-    assert shim.run(["install", "jq"]).returncode == 0
-    assert shim.list.read_bytes() == b"# retained\nj\x00q\njq\n"
-
-
-@pytest.mark.parametrize("partial", ["", "hello\n"])
-def test_record_conversion_failure_warns(tmp_path, partial):
-    # A failing tr must not hand partial output to the duplicate check: "hello"
-    # in a truncated read would hide that hello was never recorded.
-    shim = ShimHarness(tmp_path)
-    shim.list.write_text("# retained\nhello-extra\n")
-    executable(tmp_path / "tr", f"#!/bin/sh\nprintf '{partial}'\nexit 42\n")
-    result = shim.run(["install", "hello"])
-    assert result.returncode == 0
-    assert "install succeeded but was not recorded" in result.stderr
-    assert shim.list.read_text() == "# retained\nhello-extra\n"
-
-
-def test_record_into_fifo_warns_promptly(tmp_path):
-    # Appending to a FIFO without a reader would block after a successful install.
-    shim = ShimHarness(tmp_path)
-    os.mkfifo(shim.list)
-    try:
-        result = shim.run(["install", "jq"])
-    finally:
-        # A regressed shim blocks opening the FIFO; a reader end releases it.
-        with contextlib.suppress(OSError):
-            os.close(os.open(shim.list, os.O_RDONLY | os.O_NONBLOCK))
-    assert result.returncode == 0
-    assert "install succeeded but was not recorded" in result.stderr
-
-
 @pytest.mark.parametrize("length", [128, 129])
 def test_dev_name_byte_limit(tmp_path, length):
     shim = ShimHarness(tmp_path)
@@ -371,9 +247,34 @@ def test_dev_name_byte_limit(tmp_path, length):
     if length == 128:
         assert result.returncode == 0
         assert shim.tools.sudo_calls() == [["-n", "-u", "root", "--", HELPER, "install", name]]
-        assert shim.list.read_text().splitlines()[1:] == [name]
+        assert not shim.list.exists()
     else:
         assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
         assert "package name longer than 128 bytes (129-byte argument)" in result.stderr
         assert shim.tools.events() == [] and shim.tools.sudo_calls() == []
         assert not shim.list.exists()
+
+
+def test_shim_has_no_list_access():
+    source = (ROOT / "scripts/apt-get-shim.sh").read_text()
+    # The public help names the list; executable code has no list path or recorder.
+    before, help_and_after = source.split("cat <<'HELP'", 1)
+    _, after = help_and_after.split("\nHELP\n", 1)
+    code = before + after
+    for removed in (
+        "list_path",
+        "record_packages",
+        "packages.txt",
+        "djinn-packages",
+        "tail ",
+        "tr ",
+    ):
+        assert removed not in code
+
+
+@pytest.mark.parametrize("size", [64, 65])
+def test_shim_refusal_display_boundary(tmp_path, size):
+    result = ShimHarness(tmp_path).run(["install", "A" * size])
+    assert result.returncode == 2
+    assert (f"{size}-byte argument" in result.stderr) == (size > 64)
+    assert ("A" * size in result.stderr) == (size <= 64)

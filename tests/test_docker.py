@@ -1147,15 +1147,30 @@ class TestMountTargetCollisions:
                 DockerMode.DIRECT,
             )
 
+    @pytest.mark.parametrize("include_packages", [True, False])
     def test_rejects_ancestor_of_direct_socket_alias(
         self,
+        include_packages: bool,
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
 
-        with pytest.raises(MountCollisionError, match=r"conflict path: /run/djinn-git-agent"):
+        # /var now covers the package mount before the socket aliases. Removing
+        # that unrelated reservation still exercises the alias collision below.
+        if not include_packages:
+            monkeypatch.setattr(
+                docker_mod,
+                "_COMPOSE_DEV_MOUNT_TARGETS",
+                {
+                    target: kind
+                    for target, kind in docker_mod._COMPOSE_DEV_MOUNT_TARGETS.items()
+                    if target != Path("/var/lib/djinn-packages")
+                },
+            )
+        conflict = "/var/lib/djinn-packages" if include_packages else "/run/djinn-git-agent"
+        with pytest.raises(MountCollisionError, match=f"conflict path: {conflict}"):
             validate_container_mounts(
                 (ContainerMount(tmp_path, Path("/var")),),
                 mock_app_config,
@@ -3456,9 +3471,11 @@ def test_startup_environment_class_guard():
     ]
     assigned = set()
     pattern = (
-        r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*=|\bexport\s+([A-Z_][A-Z0-9_]*)|"
+        r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*=(?!=)|\bexport\s+([A-Z_][A-Z0-9_]*)|"
         r"\$\{([A-Z_][A-Z0-9_]*):-|^(?:ENV|ARG)\s+([A-Z_][A-Z0-9_]*)"
     )
+    assert re.findall(pattern, "FILENAME == ARGV[1]") == []
+    assert re.findall(pattern, "ASSIGNED=value")[0][0] == "ASSIGNED"
     for path in paths:
         if path.is_file() and "__pycache__" not in path.parts:
             # Comments are not executable assignments; heredoc content is included.

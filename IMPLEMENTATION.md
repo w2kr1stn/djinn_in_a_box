@@ -658,7 +658,7 @@ publication.
 ```text
 container start
   |
-  +-- volume ownership repair for cache, workspace, and package-list paths
+  +-- volume ownership repair for cache and workspace paths
   +-- source seed-lib.sh
   +-- restore ~/.claude.json from the persistent config root when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
@@ -668,7 +668,7 @@ container start
   +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
       using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
-  +-- replay missing runtime packages (no network if none missing; warn and continue)
+  +-- root helper replays missing runtime packages (no network if none missing; warn and continue)
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
   +-- start checkpointing changed settings every 30 s
@@ -881,7 +881,7 @@ Common mounts include:
 - `${DJINN_CONFIG_ROOT}/opencode` to `/home/dev/.opencode`
 - `${DJINN_CONFIG_ROOT}/gh` to `/home/dev/.config/gh`
 - `${DJINN_CONFIG_ROOT}/age` to `/home/dev/.config/age`
-- the `djinn-packages` data volume at `/home/dev/.local/share/djinn-packages`
+- the `djinn-packages` data volume at `/var/lib/djinn-packages`
 - named volumes for caches, OpenCode data, VS Code server state, and workspace
   metadata
 - read-only host `~/.gitconfig`
@@ -1032,7 +1032,8 @@ The same module owns the repeatable user-mount contract:
   ancestors of an occupied target raise `MountCollisionError`; child targets
   remain valid except at or below the shared `MANAGED_TARGET_ROOTS`. Assigned
   zone targets are reserved like other occupied targets. The managed-root set
-  includes the six recursively repaired roots, managed SSH targets, desktop
+  includes the five recursively repaired roots, the reserved root-owned package root
+  `/var/lib/djinn-packages`, managed SSH targets, desktop
   directories and the agent-Docker endpoint.
   Equality and descendants (including `/var/run` aliases) are refused for both
   read-only and read-write mounts before occupied-target checks, with the
@@ -1082,9 +1083,9 @@ union of all Docker modes for declarations in start/run/doctor. Equality and
 declared ancestors of built-in/reserved/zone/active-workspace/invocation targets
 are refused; declared pairs cannot nest. Children otherwise remain allowed,
 except at or below `MANAGED_TARGET_ROOTS`, the same set used by invocation mounts.
-Its six recursively repaired roots come from `MANAGED_VOLUME_REPAIR_TARGETS`,
+Its five recursively repaired roots come from `MANAGED_VOLUME_REPAIR_TARGETS`,
 checked against the entrypoint repair list; the remaining roots are
-managed SSH targets, desktop directories and the agent-Docker endpoint. The
+the reserved `/var/lib/djinn-packages` (no dev ownership repair), managed SSH targets, desktop directories and the agent-Docker endpoint. The
 declared diagnostic retains its `Djinn-managed volume root` wording. Actual volume
 names are `djinn-<name>` and cannot collide with the built-in volume registry.
 
@@ -1112,8 +1113,8 @@ identical dev and companion delivery.
 creation, with no running-mount comparison or attach-time update.
 
 The fragment also carries `DJINN_DECLARED_VOLUME_TARGETS`, an escaped JSON array
-of canonical volume targets (`[]` when empty). After the fixed repair of six
-built-in volume roots, including `/home/dev/.local/share/djinn-packages`,
+of canonical volume targets (`[]` when empty). After the fixed repair of five
+built-in volume roots,
 the entrypoint invokes `scripts/ownership-repair.py` directly as dev with one
 quoted JSON argument. The helper checks writability with dev credentials and
 enumerates only direct root entries (dotfiles count). If enumeration is denied,
@@ -1262,12 +1263,19 @@ Runtime package delivery is added after the build-time `RUN apt-get` steps.
 The user-creation `RUN` adds
 `dev ALL=(root) NOPASSWD: /usr/local/libexec/djinn-apt-root` to
 `/etc/sudoers.d/djinn-apt` (mode `0440`) and checks it with `visudo -cf`.
+That root RUN also creates `/var/lib/djinn-packages` as root:root 0755; the
+`djinn-packages` volume inherits this ownership. The helper checks ownership and
+permissions on the directory and opened file descriptor before using the list,
+and atomically records successful installs as root:root 0644 under its lock.
 Later root-owned `COPY --chmod=755` steps install `scripts/apt-get-shim.sh` at
 `/usr/local/bin/apt-get` and `scripts/djinn-apt-root.sh` at
 `/usr/local/libexec/djinn-apt-root`, leaving build-time apt calls unchanged.
 `scripts/package-replay.sh` is copied as dev-owned executable
 `/home/dev/package-replay.sh`; the entrypoint runs it in Packages after MCP and
-before Tools. See the [runtime package install security model](SECURITY-MODEL.md#runtime-package-installs)
+before Tools. It announces and calls `sudo -n -u root --
+/usr/local/libexec/djinn-apt-root replay`, formats tagged info/warnings, and always
+exits 0. Parsing, limits, package checks, update and install all live in the root
+helper. See the [runtime package install security model](SECURITY-MODEL.md#runtime-package-installs)
 for the boundary and residual risk.
 
 `docker-compose.desktop.yml` defines two independent profiled helper services.
@@ -1712,7 +1720,7 @@ entrypoint.sh
   +-- Seed & Config: merge Claude settings and publish the OpenCode workflow
       from the read-only canonical mount
   +-- MCP: register MCP servers and box third-party CLI output
-  +-- Packages: replay missing packages from the persistent list
+  +-- Packages: dev wrapper calls root helper replay for the root-owned persistent list
   +-- Tools: install optional tools
   +-- Security: summarize firewall and Docker access
   +-- run interactive shell as a background job
