@@ -996,3 +996,19 @@ def test_link_entry_protects_its_location_not_its_target(
             validate((docker.ContainerMount(source, Path("/review")),), source)
     else:
         validate((docker.ContainerMount(source, Path("/review")),), source)
+
+
+def test_link_entry_detects_an_alias_of_its_directory(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    (root / "target").mkdir()
+    (root / "state").mkdir()
+    link = root / "state" / "link"
+    link.symlink_to(root / "target", target_is_directory=True)
+    alias = root / "alias"
+    alias.mkdir()
+    samefile = Path.samefile
+    monkeypatch.setattr(
+        Path, "samefile", lambda a, b: (a == alias and b == root / "state") or samefile(a, b)
+    )
+    inputs = {"host PATH directory via link": (link, "writable PATH directory", "item")}
+    assert host_sealing.execution_overlap(alias, inputs) == ("host PATH directory via link", link)

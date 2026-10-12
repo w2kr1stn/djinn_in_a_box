@@ -188,8 +188,9 @@ For a running dev container it requires complete inspection and no named causes:
   plugin directories, host `PATH` directories, and the location of every symlink
   on one of these paths, all determined at check time.
   Other configuration the host interprets, such as shell startup files, Git, SSH
-  or user service configuration, is not in this inventory; do not mount it
-  writable.
+  or user service configuration, is not in this inventory, nor are the targets of
+  symlinked commands inside `PATH` directories (for example a tool's own install
+  tree); do not mount them writable.
   At creation, Djinn refuses a writable `[mounts.*]`, `--mount` or `--here` bind
   overlapping this same execution-input inventory. Inaccessible execution inputs
   make the inputs undeterminable: creation refuses writable covered binds and
