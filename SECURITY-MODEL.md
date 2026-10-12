@@ -75,9 +75,12 @@ is refused as a collision, and links, FIFOs, sockets and devices are never opene
 for I/O. Ancestors of these roots are trusted; placing the project or config root
 inside a writable mount such as the workspace is outside this guarantee. The
 publisher contains its own I/O; it does not protect a dev-writable tree from dev.
-Other host operations on these trees (provisioning, seeding, doctor repair,
-session workspaces, backup and restore) are tracked in
-[#138](https://github.com/w2kr1stn/djinn_in_a_box/issues/138).
+Host creates, chmods and deletes below the config, shared and local zone roots,
+sessions root and Claude seed root use the same opened-root anchoring. They never
+follow a symlink below it. Backup and restore keep pathname tar and the post-restore
+chmod walk under the lifecycle guard with no Djinn container running, so no dev
+container can start meanwhile. Pathname operations remain for missing roots under
+trusted ancestors, the installation's own files and the chosen code directory.
 
 ## Desktop boundaries
 

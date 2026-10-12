@@ -44,7 +44,11 @@ from djinn_in_a_box.core.docker import (
     resolve_zone_roots,
     sops_age_key_file_problem,
 )
-from djinn_in_a_box.core.exceptions import ConfigNotFoundError, ConfigValidationError
+from djinn_in_a_box.core.exceptions import (
+    ConfigNotFoundError,
+    ConfigValidationError,
+    ZoneConfigurationError,
+)
 from djinn_in_a_box.core.hostinfo import detect_timezone, suggest_resources
 from djinn_in_a_box.core.paths import CONFIG_DIR, CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SeedingError, seed_config
@@ -258,6 +262,9 @@ def init_config(
 
     try:
         ensure_host_env(config)
+    except ZoneConfigurationError as e:
+        error(str(e))
+        raise typer.Exit(1) from e
     except OSError as e:
         error(f"Failed to provision host directories: {e}")
         warning("Check that your home and config-root paths are writable, then retry.")

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import tarfile
 from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -19,9 +22,438 @@ from djinn_in_a_box.commands import backup as backup_module
 from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES, volume_categories
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core.docker import RunResult
+from djinn_in_a_box.core import host_runtime, hostctl
+from djinn_in_a_box.core.docker import RunResult, SyncRestoreResult
+from djinn_in_a_box.core.exceptions import ZoneConfigurationError
+from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolate_backup_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backup_module.tempfile, "tempdir", str(tmp_path))
+
+
+def _sync_backup_fixture(tmp_path: Path, names: tuple[str, ...]) -> Path:
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    content = tmp_path / "restored.txt"
+    content.write_bytes(b"restored bytes")
+    outer_path = backups / "djinn-backup-2026-10-12.tar.gz"
+    with tarfile.open(outer_path, "w:gz") as outer:
+        for name in names:
+            inner_path = tmp_path / f"djinn-sync-{name}.tar.gz"
+            with tarfile.open(inner_path, "w:gz") as inner:
+                inner.add(content, arcname="restored.txt")
+            outer.add(inner_path, arcname=inner_path.name)
+    return backups
+
+
+@pytest.mark.parametrize("refusal", ["unknown", "parent", "link", "dangling", "file", "clear"])
+def test_restore_refused_items_skip_extraction_and_hardening_and_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    from djinn_in_a_box.core import docker
+
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    root.mkdir()
+    config = AppConfig(code_dir=code, config_root=root)
+    refused_name = {"unknown": "unknown", "parent": ".."}.get(refusal, "claude")
+    target = root / refused_name
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "keep").write_bytes(b"outside bytes")
+    before = (outside.stat().st_mode, (outside / "keep").stat().st_mode)
+    if refusal in {"link", "dangling"}:
+        target.symlink_to(outside if refusal == "link" else outside / "missing")
+    elif refusal == "file":
+        target.write_bytes(b"wrong type")
+    elif refusal == "clear":
+        target.mkdir()
+    backups = _sync_backup_fixture(tmp_path, (refused_name, "codex"))
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    real_clear = docker.clear_directory
+
+    def clear(path: Path) -> None:
+        if refusal == "clear" and path == target:
+            raise PermissionError("clear denied")
+        real_clear(path)
+
+    with (
+        patch.object(backup_module, "load_config", return_value=config),
+        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(backup_module, "BACKUPS_DIR", backups),
+        patch.object(docker, "clear_directory", side_effect=clear),
+        patch.object(docker, "_run_captured", wraps=docker._run_captured) as extract,
+        patch.object(backup_module, "_harden_restored_sync_directories",
+                     wraps=backup_module._harden_restored_sync_directories) as harden,
+    ):
+        result = runner.invoke(app, ["restore"], input="y\n")
+    assert result.exit_code == 1, result.output
+    assert f"sync/{refused_name}:" in result.output
+    assert "Restore completed with errors" in result.output
+    extract.assert_called_once()
+    assert extract.call_args.args[0][-1] == str(root / "codex")
+    harden.assert_called_once_with(root / "codex")
+    assert (root / "codex/restored.txt").read_bytes() == b"restored bytes"
+    assert (root / "codex").stat().st_mode & 0o777 == 0o700
+    assert (outside / "keep").read_bytes() == b"outside bytes"
+    assert before == (outside.stat().st_mode, (outside / "keep").stat().st_mode)
+    if refusal == "unknown":
+        assert not target.exists()
+
+
+def test_backup_restore_lifecycle_guard_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    @contextmanager
+    def control() -> Iterator[None]:
+        calls.append("control-enter")
+        yield
+        calls.append("control-exit")
+
+    @contextmanager
+    def creation() -> Iterator[None]:
+        calls.append("creation-enter")
+        yield
+        calls.append("creation-exit")
+
+    monkeypatch.setattr(hostctl, "control_guard", control)
+    monkeypatch.setattr(host_runtime, "creation_guard", creation)
+    with backup_module._lifecycle_guard():
+        calls.append("body")
+    assert calls == ["control-enter", "creation-enter", "body", "creation-exit", "control-exit"]
+
+
+@pytest.mark.parametrize("command", ["backup", "restore"])
+@pytest.mark.parametrize("failure", ["state-parent", "control-lock", "creator-lock"])
+def test_backup_restore_guard_filesystem_failure_exits_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, failure: str
+) -> None:
+    state = tmp_path / "state"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kwargs: runtime)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    outside = tmp_path / "keep"
+    outside.write_bytes(b"outside bytes")
+    outside.chmod(0o640)
+    before = outside.stat().st_mode
+    if failure == "state-parent":
+        state.write_bytes(b"state file")
+        refused = state
+    else:
+        refused = (hostctl.state_root() / "control.lock" if failure == "control-lock"
+                   else runtime / "creator.lock")
+        refused.symlink_to(outside)
+    fds = len(os.listdir("/proc/self/fd"))
+    with (
+        patch.object(backup_module, "load_config") as load,
+        patch.object(backup_module, "get_running_containers") as running,
+    ):
+        result = runner.invoke(app, [command])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert str(refused) in result.output.replace("\n", "")
+    load.assert_not_called()
+    running.assert_not_called()
+    assert len(os.listdir("/proc/self/fd")) == fds
+    assert not hostctl._held.active
+    assert outside.read_bytes() == b"outside bytes"
+    assert outside.stat().st_mode == before
+
+
+@pytest.mark.parametrize(
+    "failure", [hostctl.HostctlError("body"), GitSSHError("body"), OSError("body")]
+)
+def test_lifecycle_guard_body_exceptions_pass_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kwargs: runtime)
+    fds = len(os.listdir("/proc/self/fd"))
+    with (
+        patch.object(backup_module, "error") as error,
+        pytest.raises(type(failure)) as raised,
+        backup_module._lifecycle_guard(),
+    ):
+        raise failure
+    assert raised.value is failure
+    error.assert_not_called()
+    assert len(os.listdir("/proc/self/fd")) == fds
+    assert not hostctl._held.active
+
+
+@pytest.mark.parametrize("failure", [ZoneConfigurationError("wrong type"), OSError("denied")])
+def test_restore_hardening_failure_is_failed_item_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    config = AppConfig(code_dir=code, config_root=root)
+    backups = _sync_backup_fixture(tmp_path, ("claude", "codex"))
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    real_harden = backup_module._harden_restored_sync_directories
+
+    def harden(path: Path) -> None:
+        if path.name == "claude":
+            raise failure
+        real_harden(path)
+
+    with (
+        patch.object(backup_module, "load_config", return_value=config),
+        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(backup_module, "BACKUPS_DIR", backups),
+        patch.object(backup_module, "_harden_restored_sync_directories",
+                     side_effect=harden) as secure,
+    ):
+        result = runner.invoke(app, ["restore"], input="y\n")
+    assert result.exit_code == 1, result.output
+    assert "failed to secure restored sync directory" in result.output
+    assert "Restore completed with errors" in result.output
+    assert [call.args[0] for call in secure.call_args_list] == [root / "claude", root / "codex"]
+    assert (root / "codex").stat().st_mode & 0o777 == 0o700
+
+
+def test_restore_deep_sync_tree_hardens_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    config = AppConfig(code_dir=code, config_root=root)
+    backups = _sync_backup_fixture(tmp_path, ("claude", "codex"))
+    depth = sys.getrecursionlimit() + 11
+    directories = [root / "claude"]
+    for _ in range(depth):
+        directories.append(directories[-1] / "d")
+    content = tmp_path / "restored.txt"
+    inner_path = tmp_path / "djinn-sync-claude.tar.gz"
+    with tarfile.open(inner_path, "w:gz") as inner:
+        for level in range(1, depth + 1):
+            directory = tarfile.TarInfo("/".join(["d"] * level))
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            inner.addfile(directory)
+        inner.add(content, arcname="/".join(["d"] * depth + ["deep-file"]))
+    with tarfile.open(backups / "djinn-backup-2026-10-12.tar.gz", "w:gz") as outer:
+        for name in ("claude", "codex"):
+            inner_path = tmp_path / f"djinn-sync-{name}.tar.gz"
+            outer.add(inner_path, arcname=inner_path.name)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    fds = len(os.listdir("/proc/self/fd"))
+    try:
+        with (
+            patch.object(backup_module, "load_config", return_value=config),
+            patch.object(backup_module, "get_running_containers", return_value=[]),
+            patch.object(backup_module, "BACKUPS_DIR", backups),
+            patch.object(backup_module.typer, "confirm", return_value=True),
+        ):
+            backup_module.restore()
+        assert (directories[-1] / "deep-file").read_bytes() == b"restored bytes"
+        assert all(directory.stat().st_mode & 0o777 == 0o700 for directory in directories)
+        assert (root / "codex/restored.txt").read_bytes() == b"restored bytes"
+        assert (root / "codex").stat().st_mode & 0o777 == 0o700
+        assert len(os.listdir("/proc/self/fd")) == fds
+    finally:
+        leaf = directories[-1] / "deep-file"
+        if leaf.exists():
+            leaf.unlink()
+        for directory in reversed(directories):
+            if directory.is_dir():
+                directory.rmdir()
+
+
+def test_restore_walk_error_fails_item_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    config = AppConfig(code_dir=code, config_root=root)
+    backups = _sync_backup_fixture(tmp_path, ("claude", "codex"))
+    inner_path = tmp_path / "djinn-sync-claude.tar.gz"
+    with tarfile.open(inner_path, "w:gz") as inner:
+        directory = tarfile.TarInfo("denied-child")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        inner.addfile(directory)
+        inner.add(tmp_path / "restored.txt", arcname="denied-child/restored.txt")
+    with tarfile.open(backups / "djinn-backup-2026-10-12.tar.gz", "w:gz") as outer:
+        for name in ("claude", "codex"):
+            inner_path = tmp_path / f"djinn-sync-{name}.tar.gz"
+            outer.add(inner_path, arcname=inner_path.name)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    real_scandir = os.scandir
+    probed = False
+
+    def denied(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal probed
+        if Path(path) == root / "claude/denied-child":
+            probed = True
+            raise PermissionError("walk denied")
+        return real_scandir(path, *args, **kwargs)
+
+    fds = len(os.listdir("/proc/self/fd"))
+    with (
+        patch.object(backup_module, "load_config", return_value=config),
+        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(backup_module, "BACKUPS_DIR", backups),
+        patch.object(backup_module.os, "scandir", side_effect=denied),
+    ):
+        result = runner.invoke(app, ["restore"], input="y\n")
+    assert probed
+    assert result.exit_code == 1, result.output
+    assert "failed to secure restored sync directory: walk denied" in result.output
+    assert "Restore completed with errors" in result.output
+    assert (root / "claude/denied-child/restored.txt").read_bytes() == b"restored bytes"
+    assert (root / "codex/restored.txt").read_bytes() == b"restored bytes"
+    assert (root / "codex").stat().st_mode & 0o777 == 0o700
+    assert len(os.listdir("/proc/self/fd")) == fds
+
+
+def test_hardening_chmods_before_scan_without_following_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "restored"
+    outside = tmp_path / "outside"
+    child = root / "child"
+    for directory in (root, outside, child):
+        directory.mkdir()
+        directory.chmod(0o755)
+    (root / "outside-link").symlink_to(outside, target_is_directory=True)
+    (root / "dangling").symlink_to(outside / "missing")
+    (child / "file").write_bytes(b"restored")
+    real_chmod = os.chmod
+    real_scandir = os.scandir
+    chmodded: list[Path] = []
+    scanned: list[Path] = []
+
+    class Entry:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self.entry = entry
+            self.path = entry.path
+
+        def is_symlink(self) -> bool:
+            return self.entry.is_symlink()
+
+        def is_dir(self, *args: Any, **kwargs: Any) -> bool:
+            assert not self.entry.is_symlink(), "links must be skipped before checking directories"
+            assert kwargs.get("follow_symlinks") is False
+            return self.entry.is_dir(*args, **kwargs)
+
+    def chmod(path: Any, *args: Any, **kwargs: Any) -> None:
+        assert kwargs.get("follow_symlinks") is False
+        chmodded.append(Path(path))
+        real_chmod(path, *args, **kwargs)
+
+    @contextmanager
+    def scandir(path: Any, *args: Any, **kwargs: Any) -> Iterator[Iterator[Entry]]:
+        assert Path(path) in chmodded
+        assert Path(path).stat().st_mode & 0o777 == 0o700
+        scanned.append(Path(path))
+        with real_scandir(path, *args, **kwargs) as entries:
+            yield (Entry(entry) for entry in entries)
+
+    monkeypatch.setattr(backup_module.os, "chmod", chmod)
+    monkeypatch.setattr(backup_module.os, "scandir", scandir)
+    fds = len(os.listdir("/proc/self/fd"))
+    backup_module._harden_restored_sync_directories(root)
+    assert chmodded == scanned == [root, child]
+    assert (child / "file").read_bytes() == b"restored"
+    assert outside.stat().st_mode & 0o777 == 0o755
+    assert len(os.listdir("/proc/self/fd")) == fds
+
+
+@pytest.mark.parametrize("command", ["backup", "restore"])
+def test_backup_restore_hold_lifecycle_guards_through_last_host_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kwargs: runtime)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    (root / "claude").mkdir(parents=True)
+    config = AppConfig(code_dir=code, config_root=root)
+    backups = _sync_backup_fixture(tmp_path, ("claude",))
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    probes: list[str] = []
+    real_rmtree = backup_module.shutil.rmtree
+
+    def probe(label: str) -> None:
+        with pytest.raises(GitSSHError, match="creation is pending"):
+            descriptor = host_runtime.acquire_creation_lock(runtime)
+            os.close(descriptor)
+        assert hostctl._held.active
+        probes.append(label)
+
+    def running() -> list[str]:
+        probe("running-check")
+        return []
+
+    def cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
+        probe("last-host-step")
+        real_rmtree(path, *args, **kwargs)
+
+    with (
+        patch.object(backup_module, "load_config", return_value=config),
+        patch.object(backup_module, "get_running_containers", side_effect=running),
+        patch.object(backup_module, "get_existing_volumes_by_category", return_value=[]),
+        patch.object(backup_module, "BACKUPS_DIR", backups),
+        patch.object(backup_module.shutil, "rmtree", side_effect=cleanup),
+    ):
+        result = runner.invoke(app, ["backup", "--no-encrypt"] if command == "backup"
+                               else ["restore"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert probes == ["running-check", "last-host-step"]
+    descriptor = host_runtime.acquire_creation_lock(runtime)
+    os.close(descriptor)
+    assert not hostctl._held.active
+
+
+@pytest.mark.parametrize("command", ["backup", "restore"])
+@pytest.mark.parametrize("held", ["creator", "control"])
+def test_backup_restore_held_lock_precedes_every_host_path_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, held: str
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(host_runtime, "runtime_root", lambda **kwargs: runtime)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    backups = tmp_path / "backups"
+    descriptor = host_runtime.acquire_creation_lock(runtime) if held == "creator" else None
+    try:
+        with (
+            patch.object(backup_module, "load_config") as load,
+            patch.object(backup_module, "get_running_containers") as running,
+            patch.object(backup_module, "_collect_items") as collect,
+            patch.object(backup_module, "_list_backups") as listing,
+            patch.object(backup_module.tempfile, "mkdtemp") as stage,
+            patch.object(backup_module, "BACKUPS_DIR", backups),
+        ):
+            if held == "control":
+                monkeypatch.setattr(hostctl, "control_guard",
+                                    lambda: (_ for _ in ()).throw(hostctl.HostctlError("busy")))
+            result = runner.invoke(app, ["backup", "--no-encrypt"] if command == "backup"
+                                   else ["restore"], input="y\n")
+        assert result.exit_code == 1, result.output
+        message = "creation is pending" if held == "creator" else "busy"
+        assert message in result.output
+        assert isinstance(result.exception, SystemExit)
+        for spy in (load, running, collect, listing, stage):
+            spy.assert_not_called()
+        assert not backups.exists()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 @pytest.mark.parametrize(
@@ -173,7 +605,8 @@ def test_declared_volume_restore_namespace(
         patch.object(backup_module, "get_running_containers", return_value=[]),
         patch.object(backup_module, "BACKUPS_DIR", backups_dir),
         patch.object(backup_module, "restore_volume", return_value=RunResult(0)) as volume,
-        patch.object(backup_module, "restore_sync_path", return_value=RunResult(0)) as sync,
+        patch.object(backup_module, "restore_sync_path",
+                     return_value=SyncRestoreResult(0, extraction_admitted=True)) as sync,
     ):
         result = runner.invoke(app, ["restore"], input="y\n")
     assert result.exit_code == 0, (case, result.output)
@@ -1861,3 +2294,61 @@ class TestControllingTerminalCheck:
                 backup_module.backup()
             assert exc_info.value.exit_code == 1
             assert mock_backup.call_count == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory read permissions")
+def test_restore_unreadable_sync_root_and_child_hardens_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    root = tmp_path / "config"
+    config = AppConfig(code_dir=code, config_root=root)
+    backups = _sync_backup_fixture(tmp_path, ("claude", "codex"))
+    inner_path = tmp_path / "djinn-sync-claude.tar.gz"
+    with tarfile.open(inner_path, "w:gz") as inner:
+        inner.add(tmp_path / "restored.txt", arcname="blocked/nested/restored.txt")
+        inner.add(tmp_path / "restored.txt", arcname="later/restored.txt")
+        for name, mode in ((".", 0o000), ("blocked", 0o000), ("blocked/nested", 0o755),
+                           ("later", 0o755)):
+            directory = tarfile.TarInfo(name)
+            directory.type = tarfile.DIRTYPE
+            directory.mode = mode
+            inner.addfile(directory)
+    with tarfile.open(backups / "djinn-backup-2026-10-12.tar.gz", "w:gz") as outer:
+        for name in ("claude", "codex"):
+            inner_path = tmp_path / f"djinn-sync-{name}.tar.gz"
+            outer.add(inner_path, arcname=inner_path.name)
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    directories = [root / "claude", root / "claude/blocked", root / "claude/blocked/nested",
+                   root / "claude/later", root / "codex"]
+    real_chmod = os.chmod
+    archived_modes: dict[Path, int] = {}
+
+    def chmod(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) in directories[:2]:
+            archived_modes[Path(path)] = Path(path).stat().st_mode & 0o777
+        real_chmod(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.os, "chmod", chmod)
+    fds = len(os.listdir("/proc/self/fd"))
+    try:
+        with (
+            patch.object(backup_module, "load_config", return_value=config),
+            patch.object(backup_module, "get_running_containers", return_value=[]),
+            patch.object(backup_module, "BACKUPS_DIR", backups),
+            patch.object(backup_module.typer, "confirm", return_value=True),
+        ):
+            backup_module.restore()
+        assert archived_modes == {root / "claude": 0o000, root / "claude/blocked": 0o000}
+        assert all(directory.stat().st_mode & 0o777 == 0o700 for directory in directories)
+        for path in (
+            root / "claude/blocked/nested/restored.txt", root / "claude/later/restored.txt",
+            root / "codex/restored.txt",
+        ):
+            assert path.read_bytes() == b"restored bytes"
+        assert len(os.listdir("/proc/self/fd")) == fds
+    finally:
+        for directory in directories:
+            if directory.is_dir():
+                real_chmod(directory, 0o700)

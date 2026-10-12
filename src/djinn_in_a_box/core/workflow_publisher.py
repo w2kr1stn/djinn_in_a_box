@@ -1232,7 +1232,9 @@ def _refuse_link_or_non_directory(error: OSError) -> None:
         raise PublishError(DriftClass.COLLISION) from error
 
 
-def _open_child_directory(parent: int, name: str, *, create: bool) -> int | None:
+def _open_child_directory(
+    parent: int, name: str, *, create: bool, mode: int = 0o777
+) -> int | None:
     try:
         return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
     except FileNotFoundError:
@@ -1242,7 +1244,7 @@ def _open_child_directory(parent: int, name: str, *, create: bool) -> int | None
         _refuse_link_or_non_directory(error)
         raise
     with suppress(FileExistsError):
-        os.mkdir(name, 0o777, dir_fd=parent)
+        os.mkdir(name, mode, dir_fd=parent)
     try:
         return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
     except OSError as error:

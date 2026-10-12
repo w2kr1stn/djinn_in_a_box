@@ -566,11 +566,16 @@ When stdout or stderr is a TTY, `build_compose_env()` also renders
 variable is left to inherited host environment or Compose defaults.
 
 `ensure_host_env(config)` provisions bind-mount sources before Compose runs.
-It creates the three zone roots, credential subdirectories and every assigned
-local/shared overlay directory as the invoking user, with mode `0700`, plus
-sessions/backups/gitconfig sources. Host `.ssh` is neither provisioned nor delivered. Existing overlay content remains
-untouched. Current directory checks reject files and symlinks; private-directory
-modes are secured without changing ownership. `djinn doctor` reports permission
+It creates missing zone roots under trusted ancestors, then opens them without
+following links and secures them with `fchmod(0700)`. Explicitly configured roots
+arrive canonicalized; linked derived roots are refused. Credential subdirectories
+and assigned local/shared overlay directories are walked from those descriptors
+without following links and secured to `0700`. Owner-unreadable directories are
+tightened before they are opened. Existing content remains untouched.
+Bind-mount placeholders use the same walk: new directories are `0700`, new files
+are empty, exclusive and `0600`; existing directories keep their modes and existing
+files must be regular. Sessions/backups/gitconfig sources keep pathname creation.
+Host `.ssh` is neither provisioned nor delivered. `djinn doctor` reports permission
 drift and `djinn doctor --fix` repairs it.
 
 ## Host-Side Seeding
@@ -604,20 +609,21 @@ The seeded `AGENTS.md` instructs agents to read agent-relevant material from a
 working directory's `.agents/` directory before working there. Djinn provides no
 additional per-directory discovery, mounting, or synchronization.
 
-`seed_config(project_root)` is copy-if-absent. Existing targets of the correct
-type are never overwritten. Wrong-type targets are repaired by `_repair_wrong_type()`.
-Dangling symlinks are treated as existing targets because `Path.exists()` would
-otherwise miss them.
+`seed_config(project_root)` is copy-if-absent. An initialized Claude root is
+untouched. After the gate admits a baseline, the Claude root is opened without
+following links. Target type checks use no-follow stat at its descriptor; links
+and wrong types are removed without following and replaced. Correct types remain.
+Files use the publisher's random exclusive temporary file and rename; trees use
+an exclusive random temporary directory and rename. Files keep shipped bytes and
+the executable bit. The committed file is read back and must match the shipped
+bytes and executable bit, and the committed tree must be the populated directory.
+`.gitkeep` files are skipped. Containment refusals and OS
+failures become `SeedingError` with the path and a remedy.
 
-The publisher is the only writer for publisher-managed workflow roots.
-
-Copies are atomic:
-
-- file seeds copy to `.<name>.seed-tmp`, then `os.replace()`
-- directory seeds copy to a temporary directory, then `os.replace()`
-- `.gitkeep` files are ignored by `_ignore_gitkeep()`
-
-Blocking ancestors are handled explicitly. `_blocking_ancestor()` detects the
+Shared seeds keep pathname copies inside the installation. Wrong types are
+repaired by `_repair_wrong_type()`, including dangling links. Files and directories
+copy to `.<name>.seed-tmp`, then `os.replace()`; `_ignore_gitkeep()` skips `.gitkeep`.
+For these shared seeds, `_blocking_ancestor()` detects the
 nearest non-directory or dangling symlink in the parent chain and raises a
 `SeedingError` with a removal remedy. Permission failures name the existing
 ancestor and provide an ownership or removal remedy. Missing seed sources also
@@ -1451,6 +1457,11 @@ is `PASS` when clean and `WARN` when drift or validation needs attention.
 - `ensure_host_env(config)`
 - `ensure_network()`
 
+Directory-mode repair reopens each finding from its zone root without following
+links and applies `fchmod(0700)` to the opened directory. A swapped or refused path
+is reported as `Could not fix` with its path; outside targets are never chmodded.
+Provisioning refusals are reported with their kind and path.
+
 It exits non-zero when hard checks or repairs fail.
 
 `preflight(config)` first verifies Docker is installed and the daemon is
@@ -1524,10 +1535,13 @@ Host workspaces live under:
 The `project` name must match `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`, enforced by
 `core/session.py::SessionManager.__init__()`.
 
-The command resolves both the sessions root and requested workspace and rejects
-paths that escape the sessions root. `--create` may create a missing workspace,
-but only after that containment check. Existing non-directories are rejected.
-Without `--create`, the workspace must already exist.
+With `--create`, the command creates a missing sessions root under trusted
+ancestors, then opens it without following links. Every workspace, including an
+existing one, is validated through a no-follow descriptor walk. Missing workspaces
+are created with the usual umask; linked roots/workspaces and non-directories
+refuse with the path and exit 1. Existing-file refusals keep their removal remedy.
+Without `--create`, the existing resolve/containment check remains and the workspace
+must already exist.
 
 `SessionManager` runs in container mode when a running `djinn` container exists.
 It maps host paths under `~/.djinn/sessions` to `/home/dev/sessions/...` and uses
@@ -1596,7 +1610,7 @@ archives and `declared-volumes/*.tar.gz`. Classification order is binding:
    declared as data/cache; removed or current `none` warns by name and skips
    without creating or clearing a volume. A data/cache category change does
    not affect restore: the archive contents determine selection, with no selector.
-2. Root `djinn-sync-*`: existing config-root sync route, unchanged.
+2. Root `djinn-sync-*`: config-root sync route, only for names in `SYNC_PATHS`.
 3. Other root members: existing validated volume-name route, unchanged.
 
 The raw volume restore helper receives the declared subdirectory as its archive
@@ -1605,6 +1619,25 @@ to root members: a `sync-claude` declaration at `none` skips its namespaced
 volume archive while root `djinn-sync-claude.tar.gz` still restores credentials.
 There is no manifest, arbitrary-bind restore, compatibility adapter or migration.
 `none` means excluded from backup/restore, without protection from `clean all`.
+
+Both commands hold `control_guard()` then `creation_guard()` from before the
+running-container check through staging cleanup. Concurrent dev creation is
+blocked; a pending creation or busy control guard makes the command fail.
+
+Clean discovers configured sync entries with `lstat`, including dangling links
+and wrong types. Clearing opens the root without following and removes children
+through directory descriptors. Links are unlinked; swapped directories refuse.
+Every sibling is visited. Only empty mount placeholders that cannot be removed
+with `EACCES`, `EBUSY` or `EPERM`, and their ancestors, survive a successful clear.
+Any other unremovable entry fails it.
+
+Restore creates a missing sync root under the trusted config root. Linked or
+non-directory roots, unknown names and failed clears are failed items without
+extraction or hardening. Admitted items extract with tar, then harden real
+directories to `0700` even if tar fails. The hardening walk tightens each real
+directory to `0700` before reading it, does not follow links and runs under the
+lifecycle guard. Hardening failures fail that item and the
+loop continues; any failed item makes restore exit non-zero.
 
 Cache volumes are intentionally excluded from default backups because they are
 large and rebuildable.

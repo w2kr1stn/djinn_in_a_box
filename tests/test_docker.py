@@ -1,14 +1,18 @@
 """Tests for djinn_in_a_box.core.docker module."""
 
+import errno
+import io
 import json
 import os
 import re
 import socket
 import subprocess
+import sys
 import tarfile
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +23,7 @@ import djinn_in_a_box.core.docker as docker_mod
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import AppConfig, BuildConfig, ShellConfig
 from djinn_in_a_box.config.zones import ZoneAssignments, ZoneName
+from djinn_in_a_box.core import contained_paths
 from djinn_in_a_box.core.docker import (
     ContainerMount,
     ContainerOptions,
@@ -44,6 +49,7 @@ from djinn_in_a_box.core.docker import (
     get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
+    get_sync_paths_to_clear_by_category,
     get_zone_overlay_mount_args,
     is_background_process_group,
     is_container_running,
@@ -63,35 +69,37 @@ def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
 
 
 def _deny_empty_placeholder_removal(
-    monkeypatch: pytest.MonkeyPatch, placeholder: Path
+    monkeypatch: pytest.MonkeyPatch, placeholder: Path, denied_errno: int
 ) -> None:
     original_rmdir = docker_mod.os.rmdir
 
-    def deny_placeholder_removal(path: str, *, dir_fd: int | None = None) -> None:
+    def deny_placeholder_removal(path: str, *args: object, **kwargs: object) -> None:
         if Path(path).name == placeholder.name:
-            raise PermissionError("Docker-owned mount placeholder")
-        original_rmdir(path, dir_fd=dir_fd)
+            raise PermissionError(denied_errno, "Docker-owned mount placeholder")
+        original_rmdir(path, *args, **kwargs)
 
     monkeypatch.setattr(docker_mod.os, "rmdir", deny_placeholder_removal)
 
 
+@pytest.mark.parametrize("denied_errno", [errno.EACCES, errno.EBUSY, errno.EPERM])
 def test_clear_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied_errno: int
 ) -> None:
     sync_path = tmp_path / "claude"
     placeholder = sync_path / "plugins" / "marketplaces"
     placeholder.mkdir(parents=True)
     removable = sync_path / "credentials.json"
     removable.write_text("remove me")
-    _deny_empty_placeholder_removal(monkeypatch, placeholder)
+    _deny_empty_placeholder_removal(monkeypatch, placeholder, denied_errno)
 
     assert clear_sync_path(sync_path) is True
     assert placeholder.is_dir()
     assert not removable.exists()
 
 
+@pytest.mark.parametrize("denied_errno", [errno.EACCES, errno.EBUSY, errno.EPERM])
 def test_restore_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied_errno: int
 ) -> None:
     config_root = tmp_path / "config"
     sync_path = config_root / "claude"
@@ -109,7 +117,7 @@ def test_restore_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
     projects = tmp_path / "projects"
     projects.mkdir()
     config = AppConfig(code_dir=projects, config_root=config_root)
-    _deny_empty_placeholder_removal(monkeypatch, placeholder)
+    _deny_empty_placeholder_removal(monkeypatch, placeholder, denied_errno)
 
     result = restore_sync_path("claude", staging, config)
 
@@ -117,6 +125,388 @@ def test_restore_sync_path_preserves_an_empty_nonremovable_mount_placeholder(
     assert placeholder.is_dir()
     assert not stale.exists()
     assert (sync_path / restored.name).read_text() == "restore me"
+
+
+@pytest.mark.parametrize("kind", ["link", "dangling", "file", "fifo"])
+@pytest.mark.parametrize("operation", ["clear", "restore"])
+def test_sync_operations_refuse_wrong_type_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, operation: str
+) -> None:
+    root = tmp_path / "config"
+    root.mkdir()
+    target = root / "claude"
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "keep").write_bytes(b"outside bytes")
+    before = (outside.stat().st_mode, (outside / "keep").stat().st_mode)
+    if kind in {"link", "dangling"}:
+        target.symlink_to(outside if kind == "link" else outside / "missing")
+    elif kind == "fifo":
+        os.mkfifo(target)
+    else:
+        target.write_bytes(b"wrong type")
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    with (
+        patch.object(docker_mod, "_run_captured") as extract,
+        patch.object(docker_mod, "clear_directory", wraps=docker_mod.clear_directory) as clear,
+    ):
+        if operation == "clear":
+            with patch.object(docker_mod, "warning") as warn:
+                assert clear_sync_path(target) is False
+            messages = [call.args[0] for call in warn.call_args_list]
+            assert messages[0].startswith(f"Failed to clear sync path '{target}':")
+            assert messages[1:] == [f"Replace {target} with a real directory, then retry."]
+        else:
+            staging = tmp_path / "staging"
+            staging.mkdir()
+            (staging / "djinn-sync-claude.tar.gz").touch()
+            result = restore_sync_path("claude", staging)
+            assert not result.success
+            assert not result.extraction_admitted
+            assert str(target) in result.stderr
+            assert ("symlink" if kind in {"link", "dangling"}
+                    else "not a directory") in result.stderr
+            assert result.stderr.splitlines()[-1] == (
+                f"Replace {target} with a real directory, then retry."
+            )
+            clear.assert_not_called()
+        extract.assert_not_called()
+    assert before == (outside.stat().st_mode, (outside / "keep").stat().st_mode)
+    assert (outside / "keep").read_bytes() == b"outside bytes"
+
+
+@pytest.mark.parametrize("failure", ["other-errno", "nonempty", "unlink", "no-errno"])
+def test_clear_sync_path_removal_failures_warn_and_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    root = tmp_path / "claude"
+    entry = root / "entry"
+    entry.mkdir(parents=True)
+    real_rmdir = os.rmdir
+    real_unlink = os.unlink
+
+    def rmdir(name: Any, *args: Any, **kwargs: Any) -> None:
+        if name == "entry":
+            if failure == "nonempty":
+                (entry / "arrived").write_bytes(b"content")
+            if failure == "no-errno":
+                raise PermissionError("synthetic permission error")
+            raise OSError(errno.EIO if failure == "other-errno" else errno.EACCES, "denied")
+        real_rmdir(name, *args, **kwargs)
+
+    def unlink(name: Any, *args: Any, **kwargs: Any) -> None:
+        if name == "entry":
+            raise PermissionError(errno.EACCES, "denied")
+        real_unlink(name, *args, **kwargs)
+
+    if failure == "unlink":
+        entry.rmdir()
+        entry.write_bytes(b"unremovable")
+        monkeypatch.setattr(contained_paths.os, "unlink", unlink)
+    else:
+        monkeypatch.setattr(contained_paths.os, "rmdir", rmdir)
+    with patch.object(docker_mod, "warning") as warn:
+        assert clear_sync_path(root) is False
+    assert str(root) in warn.call_args.args[0]
+    warn.assert_called_once()
+    assert "Replace" not in warn.call_args.args[0]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_restore_creates_only_missing_root_before_clear_and_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    root = tmp_path / "config"
+    target = root / "claude"
+    if existing:
+        target.mkdir(parents=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "djinn-sync-claude.tar.gz").touch()
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    real_mkdir = Path.mkdir
+    calls: list[str] = []
+
+    def mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == target and not calls:
+            assert kwargs == {"parents": True}
+            calls.append("mkdir")
+        real_mkdir(path, *args, **kwargs)
+
+    def clear(path: Path) -> None:
+        assert path == target and path.is_dir()
+        calls.append("clear")
+
+    def extract(argv: list[str]) -> docker_mod.RunResult:
+        assert argv == ["tar", "xzf", str(staging / "djinn-sync-claude.tar.gz"), "-C", str(target)]
+        calls.append("extract")
+        return docker_mod.RunResult(1, stdout="partial", stderr="tar failed")
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    monkeypatch.setattr(docker_mod, "clear_directory", clear)
+    monkeypatch.setattr(docker_mod, "_run_captured", extract)
+    result = restore_sync_path("claude", staging)
+    assert calls == (["clear", "extract"] if existing else ["mkdir", "clear", "extract"])
+    assert result.extraction_admitted
+    assert (result.returncode, result.stdout, result.stderr) == (1, "partial", "tar failed")
+
+
+def test_clean_discovery_includes_all_lstat_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "claude").symlink_to(tmp_path / "missing")
+    (root / "codex").write_bytes(b"file")
+    os.mkfifo(root / "opencode")
+    (root / "gh").mkdir()
+    (root / "age").symlink_to(root / "gh")
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    assert get_sync_paths_to_clear_by_category("credentials") == [
+        root / name for name in ("claude", "codex", "opencode", "gh", "age")
+    ]
+    assert get_sync_paths_to_clear_by_category("repo-dotfiles") == []
+    assert get_existing_sync_paths_by_category("credentials") == [root / "gh", root / "age"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses filesystem EACCES")
+def test_clean_discovery_keeps_inaccessible_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "config"
+    (root / "claude").mkdir(parents=True)
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    assert get_sync_paths_to_clear_by_category("credentials") == [root / "claude"]
+    root.chmod(0)
+    try:
+        assert get_sync_paths_to_clear_by_category("credentials") == [
+            root / name for name in ("claude", "codex", "opencode", "gh", "age")
+        ]
+    finally:
+        root.chmod(0o700)
+
+
+def test_clean_discovery_keeps_candidates_below_non_directory_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "config"
+    root.write_bytes(b"wrong type")
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    paths = get_sync_paths_to_clear_by_category("credentials")
+    assert paths == [root / name for name in ("claude", "codex", "opencode", "gh", "age")]
+    assert all(not clear_sync_path(path) for path in paths)
+    assert root.read_bytes() == b"wrong type"
+
+
+@pytest.mark.parametrize("operation", ["clear", "restore"])
+def test_sync_operations_handle_tree_beyond_recursion_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    root = tmp_path / "config"
+    target = root / "claude"
+    target.mkdir(parents=True)
+    directories = [target / "tree"]
+    directories[0].mkdir()
+    for _ in range(sys.getrecursionlimit() + 11):
+        directories.append(directories[-1] / "d")
+        directories[-1].mkdir()
+    (directories[-1] / "file").write_bytes(b"delete")
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "djinn-sync-claude.tar.gz").write_bytes(b"dummy archive")
+
+    def extract(_argv: list[str]) -> docker_mod.RunResult:
+        assert list(target.iterdir()) == []
+        return docker_mod.RunResult(0)
+
+    fds = len(os.listdir("/proc/self/fd"))
+    try:
+        with patch.object(docker_mod, "_run_captured", side_effect=extract) as extraction:
+            if operation == "clear":
+                success = clear_sync_path(target)
+                extraction.assert_not_called()
+            else:
+                result = restore_sync_path("claude", staging)
+                success = result.success
+                if success:
+                    assert result.extraction_admitted
+                    extraction.assert_called_once()
+                else:
+                    assert not result.extraction_admitted
+                    assert "Failed to clear" in result.stderr
+                    extraction.assert_not_called()
+        if success:
+            assert list(target.iterdir()) == []
+        assert len(os.listdir("/proc/self/fd")) == fds
+    finally:
+        leaf = directories[-1] / "file"
+        if leaf.exists():
+            leaf.unlink()
+        for directory in reversed(directories):
+            if directory.is_dir():
+                directory.rmdir()
+
+
+def test_clear_sync_path_unlinks_nested_link_without_touching_target(tmp_path: Path) -> None:
+    root = tmp_path / "claude"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    sentinel = outside / "keep"
+    sentinel.write_bytes(b"outside bytes")
+    before = (outside.stat().st_mode, sentinel.stat().st_mode)
+    (nested / "link").symlink_to(outside)
+    assert clear_sync_path(root)
+    assert list(root.iterdir()) == []
+    assert sentinel.read_bytes() == b"outside bytes"
+    assert before == (outside.stat().st_mode, sentinel.stat().st_mode)
+
+
+def test_clear_sync_path_stat_to_open_swap_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "claude"
+    child = root / "child"
+    child.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    sentinel = outside / "keep"
+    sentinel.write_bytes(b"outside bytes")
+    before = (outside.stat().st_mode, sentinel.stat().st_mode)
+    real_stat = os.stat
+    swapped = False
+
+    def swap(name: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        nonlocal swapped
+        result = real_stat(name, *args, **kwargs)
+        if name == "child" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            child.rename(root / "saved")
+            child.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(contained_paths.os, "stat", swap)
+    with patch.object(docker_mod, "warning") as warn:
+        assert clear_sync_path(root) is False
+    assert swapped
+    assert [call.args[0] for call in warn.call_args_list] == [
+        f"Failed to clear sync path '{root}': {root / 'child'}: symlink",
+        "The sync tree changed during the clear while the dev container is running; "
+        "stop it with `djinn clean` or retry.",
+    ]
+    assert sentinel.read_bytes() == b"outside bytes"
+    assert before == (outside.stat().st_mode, sentinel.stat().st_mode)
+
+
+@pytest.mark.parametrize("operation", ["clear", "restore"])
+@pytest.mark.parametrize("readonly", [False, True])
+def test_sync_clear_visits_later_link_after_preserved_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readonly: bool, operation: str
+) -> None:
+    if readonly and os.geteuid() == 0:
+        pytest.skip("root bypasses the real EACCES permission check")
+    root = tmp_path / "config" / "claude"
+    parent = root / "parent"
+    placeholder = parent / "a-placeholder"
+    placeholder.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    sentinel = outside / "keep"
+    sentinel.write_bytes(b"outside bytes")
+    before = (outside.stat().st_mode, sentinel.stat().st_mode)
+    link = parent / "z-link"
+    link.symlink_to(outside)
+    _deny_empty_placeholder_removal(monkeypatch, placeholder, errno.EACCES)
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root.parent))
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    # No parent-directory entry: tar would follow z-link if clearing left it.
+    with tarfile.open(staging / "djinn-sync-claude.tar.gz", "w:gz") as archive:
+        member = tarfile.TarInfo("parent/z-link/keep")
+        member.size = len(b"restored bytes")
+        archive.addfile(member, io.BytesIO(b"restored bytes"))
+    if readonly:
+        parent.chmod(0o500)
+    try:
+        with patch.object(docker_mod, "_run_captured", wraps=docker_mod._run_captured) as extract:
+            if operation == "clear":
+                assert clear_sync_path(root) is (not readonly)
+                extract.assert_not_called()
+            else:
+                result = restore_sync_path("claude", staging)
+                assert result.success is (not readonly)
+                assert result.extraction_admitted is (not readonly)
+                if readonly:
+                    extract.assert_not_called()
+                else:
+                    extract.assert_called_once()
+                    assert (parent / "z-link/keep").read_bytes() == b"restored bytes"
+        assert placeholder.is_dir()
+        assert link.is_symlink() is readonly
+        assert sentinel.read_bytes() == b"outside bytes"
+        assert before == (outside.stat().st_mode, sentinel.stat().st_mode)
+    finally:
+        parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("failure", ["containment", "oserror"])
+def test_restore_sync_path_refuses_clear_failure_before_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    root = tmp_path / "config"
+    target = root / "claude"
+    target.mkdir(parents=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "djinn-sync-claude.tar.gz").touch()
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    exc = (contained_paths.PathContainmentError(target, "symlink") if failure == "containment"
+           else PermissionError(errno.EACCES, "denied"))
+    with (
+        patch.object(docker_mod, "clear_directory", side_effect=exc),
+        patch.object(docker_mod, "_run_captured") as extract,
+    ):
+        result = restore_sync_path("claude", staging)
+    assert not result.success
+    assert not result.extraction_admitted
+    assert "Failed to clear" in result.stderr
+    if failure == "containment":
+        assert result.stderr.splitlines()[-1] == (
+            f"Replace {target} with a real directory, then retry."
+        )
+    else:
+        assert "Replace" not in result.stderr
+    extract.assert_not_called()
+
+
+def test_restore_sync_path_reports_below_root_change_before_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "config"
+    target = root / "claude"
+    target.mkdir(parents=True)
+    child = target / "child"
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "djinn-sync-claude.tar.gz").touch()
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    refusal = contained_paths.PathContainmentError(child, "symlink")
+    with (
+        patch.object(docker_mod, "clear_directory", side_effect=refusal),
+        patch.object(docker_mod, "_run_captured") as extract,
+    ):
+        result = restore_sync_path("claude", staging)
+
+    assert not result.success
+    assert not result.extraction_admitted
+    assert result.stderr == (
+        f"Failed to clear {target}: {refusal}\n"
+        "The sync tree changed during the clear while the dev container is running; "
+        "stop it with `djinn clean` or retry."
+    )
+    extract.assert_not_called()
 
 
 def _parse_dockerfile_symlink_line(line: str) -> list[tuple[str, str]]:
@@ -2151,6 +2541,7 @@ class TestRestoreSyncPath:
     def test_missing_archive_returns_error(self, tmp_path: Path) -> None:
         result = restore_sync_path("claude", tmp_path)
         assert not result.success
+        assert not result.extraction_admitted
         assert "Archive not found" in result.stderr
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -3103,3 +3494,61 @@ def test_captured_runs_never_read_the_terminal(monkeypatch):
     monkeypatch.setattr(docker_mod.subprocess, "run", run)
     assert docker_mod._run_captured(["docker", "version"]).success
     assert seen["stdin"] is subprocess.DEVNULL
+
+
+@pytest.mark.parametrize("name", ["..", "a/b", "unknown", "/absolute", ""])
+def test_restore_sync_path_rejects_unknown_names_before_filesystem_access(
+    tmp_path: Path, name: str,
+) -> None:
+    root = tmp_path / "parent/config"
+    root.mkdir(parents=True)
+    sibling = root.parent / "keep"
+    sibling.write_bytes(b"must survive")
+    staging = tmp_path / "staging"
+    archive = staging / f"djinn-sync-{name}.tar.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.touch()
+    with (
+        patch.object(Path, "exists", side_effect=AssertionError("filesystem before allowlist")),
+        patch.object(docker_mod, "get_config_root") as get_root,
+        patch.object(docker_mod, "clear_directory") as clear,
+        patch.object(docker_mod, "_run_captured") as extract,
+    ):
+        result = restore_sync_path(name, staging)
+    assert result.returncode == 1
+    assert result.stderr == f"Unknown sync path name: {name}"
+    assert not result.extraction_admitted
+    get_root.assert_not_called()
+    clear.assert_not_called()
+    extract.assert_not_called()
+    assert root.is_dir()
+    assert sibling.read_bytes() == b"must survive"
+
+
+@pytest.mark.parametrize("name", [n for names in docker_mod.SYNC_PATHS.values() for n in names])
+def test_restore_sync_path_admits_every_configured_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+) -> None:
+    root = tmp_path / "config"
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / f"djinn-sync-{name}.tar.gz").touch()
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    with patch.object(docker_mod, "_run_captured", return_value=docker_mod.RunResult(0)) as extract:
+        result = restore_sync_path(name, staging)
+    assert result.success
+    assert result.extraction_admitted
+    assert (root / name).is_dir()
+    extract.assert_called_once_with([
+        "tar", "xzf", str(staging / f"djinn-sync-{name}.tar.gz"), "-C", str(root / name),
+    ])
+
+
+def test_security_model_names_guarded_backup_restore_pathname_exception() -> None:
+    text = (Path(__file__).parents[1] / "SECURITY-MODEL.md").read_text()
+    section = text.split("## Host-side workflow publishing\n", 1)[1].split("\n## ", 1)[0]
+    paragraph = " ".join(section.split())
+    assert (
+        "Backup and restore keep pathname tar and the post-restore chmod walk "
+        "under the lifecycle guard with no Djinn container running"
+    ) in paragraph

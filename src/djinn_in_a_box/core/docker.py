@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Required, TypedDict, cast
 
 if TYPE_CHECKING:
@@ -40,6 +40,13 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
 from djinn_in_a_box.core import agent_docker, desktop, host_runtime
 from djinn_in_a_box.core.console import warning
+from djinn_in_a_box.core.contained_paths import (
+    PathContainmentError,
+    clear_directory,
+    ensure_directory,
+    ensure_empty_file,
+    secure_root,
+)
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.exceptions import (
     DeclarationSpecificationError,
@@ -2786,81 +2793,56 @@ def ensure_zone_roots(config: AppConfig | None = None) -> ZoneRoots:
     return roots
 
 
+def _path_refusal(error: PathContainmentError, kind: str) -> ZoneRootValidationError:
+    if error.reason == "symlink":
+        return ZoneRootValidationError(f"{kind} must not be a symlink: {error.path}")
+    if error.reason == "substituted":
+        return ZoneRootValidationError(f"{kind} was substituted: {error.path}")
+    return ZoneRootValidationError(f"{kind} is {error.reason}: {error.path}")
+
+
 def _ensure_zone_root(root: Path) -> None:
     try:
-        info = root.lstat()
+        root.lstat()
     except FileNotFoundError:
         try:
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            info = root.lstat()
+            root.mkdir(parents=True, mode=0o700, exist_ok=True)
         except OSError as error:
             msg = f"Cannot create zone root {root}: {error}"
             raise ZoneRootValidationError(msg) from error
     except OSError as error:
-        msg = f"Cannot inspect zone root {root}: {error}"
+        wrapped = type(error)(error.errno, error.strerror, str(root))
+        msg = f"Cannot secure zone root {root}: {wrapped}"
         raise ZoneRootValidationError(msg) from error
-
-    if stat.S_ISLNK(info.st_mode):
-        msg = f"Zone root must not be a symlink: {root}"
-        raise ZoneRootValidationError(msg)
-    if not stat.S_ISDIR(info.st_mode):
-        msg = f"Zone root is not a directory: {root}"
-        raise ZoneRootValidationError(msg)
     try:
-        root.chmod(0o700)
+        secure_root(root, mode=0o700)
+    except PathContainmentError as error:
+        raise _path_refusal(error, "Zone root") from error
     except OSError as error:
         msg = f"Cannot secure zone root {root}: {error}"
         raise ZoneRootValidationError(msg) from error
 
 
 def _ensure_bind_target_directory(config_root: Path, agent: str, relative_path: Path) -> None:
-    directory = config_root / agent
-    for component in relative_path.parts:
-        directory /= component
-        try:
-            info = directory.lstat()
-        except FileNotFoundError:
-            try:
-                directory.mkdir(mode=0o700, exist_ok=True)
-                info = directory.lstat()
-            except OSError as error:
-                msg = f"Cannot create bind-mount target {directory}: {error}"
-                raise ZoneRootValidationError(msg) from error
-        except OSError as error:
-            msg = f"Cannot inspect bind-mount target {directory}: {error}"
-            raise ZoneRootValidationError(msg) from error
-
-        if stat.S_ISLNK(info.st_mode):
-            msg = f"Bind-mount target must not be a symlink: {directory}"
-            raise ZoneRootValidationError(msg)
-        if not stat.S_ISDIR(info.st_mode):
-            msg = f"Bind-mount target is not a directory: {directory}"
-            raise ZoneRootValidationError(msg)
+    relative = PurePosixPath(agent, *relative_path.parts)
+    try:
+        ensure_directory(config_root, relative, mode=0o700, secure=False)
+    except PathContainmentError as error:
+        raise _path_refusal(error, "Bind-mount target") from error
+    except OSError as error:
+        msg = f"Cannot create bind-mount target {config_root / relative}: {error}"
+        raise ZoneRootValidationError(msg) from error
 
 
 def _ensure_bind_target_file(config_root: Path, agent: str, relative_path: Path) -> None:
-    _ensure_bind_target_directory(config_root, agent, relative_path.parent)
-    target = config_root / agent / relative_path
+    relative = PurePosixPath(agent, *relative_path.parts)
     try:
-        info = target.lstat()
-    except FileNotFoundError:
-        try:
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(descriptor)
-            info = target.lstat()
-        except OSError as error:
-            msg = f"Cannot create bind-mount target {target}: {error}"
-            raise ZoneRootValidationError(msg) from error
+        ensure_empty_file(config_root, relative, directory_mode=0o700, file_mode=0o600)
+    except PathContainmentError as error:
+        raise _path_refusal(error, "Bind-mount target") from error
     except OSError as error:
-        msg = f"Cannot inspect bind-mount target {target}: {error}"
+        msg = f"Cannot create bind-mount target {config_root / relative}: {error}"
         raise ZoneRootValidationError(msg) from error
-
-    if stat.S_ISLNK(info.st_mode):
-        msg = f"Bind-mount target must not be a symlink: {target}"
-        raise ZoneRootValidationError(msg)
-    if not stat.S_ISREG(info.st_mode):
-        msg = f"Bind-mount target is not a regular file: {target}"
-        raise ZoneRootValidationError(msg)
 
 
 def workflow_image_compatible(
@@ -2940,17 +2922,23 @@ def ensure_host_env(config: AppConfig | None = None) -> None:
     for agent, by_zone in assignments.by_agent.items():
         for zone in ("local", "shared"):
             for relative_path in by_zone[zone]:
-                directory = zone_roots[zone]
-                for component in (agent, *relative_path.parts):
-                    directory /= component
-                    _ensure_zone_root(directory)
+                try:
+                    ensure_directory(
+                        zone_roots[zone],
+                        PurePosixPath(agent, *relative_path.parts),
+                        mode=0o700,
+                        secure=True,
+                    )
+                except PathContainmentError as error:
+                    raise _path_refusal(error, "Zone root") from error
 
     root = roots.config_root
     for name in SYNC_PATHS.get("credentials", []):
         # 0700: credential stores hold secrets (OAuth tokens, age identities).
-        path = root / name
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.chmod(0o700)
+        try:
+            ensure_directory(root, PurePosixPath(name), mode=0o700, secure=True)
+        except PathContainmentError as error:
+            raise _path_refusal(error, "Credential root") from error
 
     for agent, agent_root in ZONE_CONTAINER_TARGETS.items():
         target_kinds = {
@@ -2990,6 +2978,24 @@ def get_existing_sync_paths_by_category(
     return [root / name for name in SYNC_PATHS.get(category, []) if (root / name).is_dir()]
 
 
+def get_sync_paths_to_clear_by_category(
+    category: str, config: AppConfig | None = None
+) -> list[Path]:
+    """Include every existing configured entry, even dangling links and files."""
+    root = get_config_root(config)
+    paths: list[Path] = []
+    for name in SYNC_PATHS.get(category, []):
+        path = root / name
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass
+        paths.append(path)
+    return paths
+
+
 def backup_sync_path(path: Path, dest_dir: Path) -> RunResult:
     """Tar the contents of a sync path to dest_dir/djinn-sync-<name>.tar.gz."""
     archive = dest_dir / f"{_SYNC_ARCHIVE_PREFIX}{path.name}.tar.gz"
@@ -2998,54 +3004,72 @@ def backup_sync_path(path: Path, dest_dir: Path) -> RunResult:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SyncRestoreResult(RunResult):
+    extraction_admitted: bool = False
+
+
 def restore_sync_path(
     path_name: str, source_dir: Path, config: AppConfig | None = None
-) -> RunResult:
+) -> SyncRestoreResult:
     """Extract djinn-sync-<name>.tar.gz into ${DJINN_CONFIG_ROOT}/<name>/."""
+    if path_name not in {name for names in SYNC_PATHS.values() for name in names}:
+        return SyncRestoreResult(returncode=1, stderr=f"Unknown sync path name: {path_name}")
     archive = source_dir / f"{_SYNC_ARCHIVE_PREFIX}{path_name}.tar.gz"
     if not archive.exists():
-        return RunResult(returncode=1, stdout="", stderr=f"Archive not found: {archive}")
+        return SyncRestoreResult(returncode=1, stderr=f"Archive not found: {archive}")
 
     target = get_config_root(config) / path_name
-    target.mkdir(parents=True, exist_ok=True)
-    _clear_directory_contents(target)
+    try:
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            target.mkdir(parents=True)
+        else:
+            if not stat.S_ISDIR(info.st_mode):
+                reason = "symlink" if stat.S_ISLNK(info.st_mode) else "not a directory"
+                return SyncRestoreResult(
+                    returncode=1,
+                    stderr=(
+                        f"{target}: {reason}\nReplace {target} with a real directory, then retry."
+                    ),
+                )
+        clear_directory(target)
+    except (PathContainmentError, OSError) as error:
+        remedy = (
+            f"\n{_sync_refusal_remedy(target, error)}"
+            if isinstance(error, PathContainmentError) else ""
+        )
+        return SyncRestoreResult(
+            returncode=1, stderr=f"Failed to clear {target}: {error}{remedy}"
+        )
 
-    return _run_captured(["tar", "xzf", str(archive), "-C", str(target)])
+    result = _run_captured(["tar", "xzf", str(archive), "-C", str(target)])
+    return SyncRestoreResult(
+        returncode=result.returncode, stdout=result.stdout, stderr=result.stderr,
+        extraction_admitted=True,
+    )
 
 
 def clear_sync_path(path: Path) -> bool:
     """Remove the contents of a sync path (directory itself is preserved)."""
-    if not path.is_dir():
-        return False
     try:
-        _clear_directory_contents(path)
-    except OSError as e:
+        clear_directory(path)
+    except (PathContainmentError, OSError) as e:
         warning(f"Failed to clear sync path '{path}': {e}")
+        if isinstance(e, PathContainmentError):
+            warning(_sync_refusal_remedy(path, e))
         return False
     return True
 
 
-def _clear_directory_contents(path: Path) -> None:
-    for item in path.iterdir():
-        _remove_sync_path_item(item)
-
-
-def _remove_sync_path_item(path: Path) -> bool:
-    if path.is_dir() and not path.is_symlink():
-        for child in path.iterdir():
-            if not _remove_sync_path_item(child):
-                return False
-        try:
-            path.rmdir()
-        except OSError as error:
-            if error.errno not in {errno.EACCES, errno.EBUSY, errno.EPERM, None}:
-                raise
-            if next(path.iterdir(), None) is None:
-                return False
-            raise
-        return True
-    path.unlink()
-    return True
+def _sync_refusal_remedy(root: Path, error: PathContainmentError) -> str:
+    if error.path == root:
+        return f"Replace {root} with a real directory, then retry."
+    return (
+        "The sync tree changed during the clear while the dev container is running; "
+        "stop it with `djinn clean` or retry."
+    )
 
 
 def is_sync_archive(archive_name: str) -> bool:

@@ -69,6 +69,7 @@ from djinn_in_a_box.core.docker import (
     get_existing_volumes_by_category,
     get_running_containers,
     get_shell_mount_args,
+    get_sync_paths_to_clear_by_category,
     is_container_running,
     network_exists,
     resolve_container_mounts,
@@ -720,6 +721,7 @@ def clean_volumes(
         )
 
     categories = volume_categories(config)
+    sync_clear_failed = False
     for category in selected:
         if category in categories:
             volumes = get_existing_volumes_by_category(category, config)
@@ -734,7 +736,7 @@ def clean_volumes(
                 else:
                     error(f"  Failed: {vol} (may be in use)")
         else:
-            paths = get_existing_sync_paths_by_category(category, config)
+            paths = get_sync_paths_to_clear_by_category(category, config)
             if not paths:
                 warning(f"No existing sync paths in category '{category}'")
                 continue
@@ -744,6 +746,9 @@ def clean_volumes(
                     success(f"  Cleared: {path}")
                 else:
                     error(f"  Failed: {path}")
+                    sync_clear_failed = True
+    if sync_clear_failed:
+        raise typer.Exit(1)
 
 
 @clean_app.command("all")
@@ -786,6 +791,7 @@ def clean_all(
             warning(f"Failed to stop containers: {down_result.stderr.strip() or 'unknown error'}")
             raise typer.Exit(down_result.returncode)
 
+        sync_clear_failed = False
         try:
             with host_runtime.creation_guard():
                 if host_runtime.inspect_dev("djinn", host_runtime.DOCKER_EXECUTABLE) is not None:
@@ -806,11 +812,12 @@ def clean_all(
 
                 info("Clearing all sync paths...")
                 for category in SYNC_PATHS:
-                    for path in get_existing_sync_paths_by_category(category, config):
+                    for path in get_sync_paths_to_clear_by_category(category, config):
                         if clear_sync_path(path):
                             success(f"  Cleared: {path}")
                         else:
-                            warning(f"  Failed: {path}")
+                            error(f"  Failed: {path}")
+                            sync_clear_failed = True
 
                 info("Removing network...")
                 if network_exists(DJINN_NETWORK):
@@ -826,6 +833,8 @@ def clean_all(
             raise typer.Exit(1) from None
 
         blank()
+        if sync_clear_failed:
+            raise typer.Exit(1)
         success("Cleanup complete.")
 
 

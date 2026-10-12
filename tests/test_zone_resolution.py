@@ -4,6 +4,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -20,6 +21,7 @@ from djinn_in_a_box.config.zones import (
     ZoneConfigurationError,
     load_zone_assignments,
 )
+from djinn_in_a_box.core import contained_paths
 from djinn_in_a_box.core.docker import (
     build_compose_env,
     ensure_host_env,
@@ -476,6 +478,21 @@ def test_ensure_zone_roots_rejects_a_derived_symlink_without_chmodding_its_targe
     assert stat.S_IMODE(shared_target.stat().st_mode) == 0o755
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory write permissions")
+def test_zone_root_creation_failure_names_failed_ancestor(tmp_path: Path) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    root = blocked / "ancestor" / "config"
+    blocked.chmod(0o500)
+    try:
+        with pytest.raises(ZoneRootValidationError) as failed:
+            docker_mod._ensure_zone_root(root)
+        assert str(failed.value).startswith(f"Cannot create zone root {root}:")
+        assert str(blocked / "ancestor") in str(failed.value)
+    finally:
+        blocked.chmod(0o700)
+
+
 @pytest.mark.parametrize(
     ("zone", "component", "target_side"),
     [
@@ -769,3 +786,330 @@ def test_malformed_or_schema_invalid_zones_file_raises_a_named_error(
 
     with pytest.raises(ZoneConfigurationError):
         load_zone_assignments(_config(tmp_path), path=zones_file)
+
+
+@pytest.mark.parametrize("name", SYNC_PATHS["credentials"])
+def test_credential_root_link_preserves_outside_mode_and_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    root = config.config_root
+    assignments = load_zone_assignments(config)
+    monkeypatch.setattr(zones_mod, "load_zone_assignments", lambda _config: assignments)
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    (outside / "keep").write_bytes(b"private bytes")
+    (root / name).symlink_to(outside)
+    before = (outside.stat().st_mode, _host_tree(outside))
+    diagnostic = f"Credential root must not be a symlink: {root / name}"
+    with pytest.raises(ZoneRootValidationError, match=diagnostic):
+        ensure_host_env(config)
+    assert (outside.stat().st_mode, _host_tree(outside)) == before
+
+
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_bind_placeholder_parent_swap_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    root = config.config_root
+    # The real Codex plugins/cache target is the original issue probe.
+    parent = root / "codex/plugins" if kind == "directory" else root / "claude"
+    parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    (outside / "keep").write_bytes(b"untouched")
+    before = (outside.stat().st_mode, _host_tree(outside))
+    real_open = os.open
+    swapped = False
+
+    def swap(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        if not swapped and name == parent.name and "dir_fd" in kwargs:
+            opened_parent = Path(os.readlink(f"/proc/self/fd/{kwargs['dir_fd']}"))
+            if opened_parent == parent.parent:
+                swapped = True
+                parent.rename(parent.with_name(parent.name + "-saved"))
+                parent.symlink_to(outside)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(contained_paths.os, "open", swap)
+    if kind == "directory":
+        with pytest.raises(ZoneRootValidationError, match=f"symlink: {parent}"):
+            ensure_host_env(config)
+    else:
+        with pytest.raises(ZoneRootValidationError, match=f"symlink: {parent}"):
+            docker_mod._ensure_bind_target_file(root, "claude", Path(".credentials.json"))
+    assert swapped
+    assert (outside.stat().st_mode, _host_tree(outside)) == before
+
+
+def test_declared_rw_zone_alias_swap_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    roots = resolve_zone_roots(config)
+    parent = roots.shared_root / "codex"
+    victim = parent / "sessions"
+    victim.mkdir(parents=True)
+    config = config.model_copy(
+        update={
+            "mounts": {
+                "zone-alias": {
+                    "source": str(parent),
+                    "target": "/archive",
+                    "read_only": False,
+                }
+            }
+        }
+    )
+    resolved = docker_mod.resolve_declared_entries(
+        config,
+        docker_mod.ContainerOptions(),
+        runtime_targets=[],
+        caller_env=None,
+    )
+    resolved.require_valid()
+    assert resolved.mounts[0].source == str(parent)
+    assert not resolved.mounts[0].read_only
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    (outside / "keep").write_bytes(b"untouched")
+    before = (outside.stat().st_mode, _host_tree(outside))
+    real_open = os.open
+    swapped = False
+
+    def swap(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        if (
+            not swapped
+            and name == "sessions"
+            and "dir_fd" in kwargs
+            and Path(os.readlink(f"/proc/self/fd/{kwargs['dir_fd']}")) == parent
+        ):
+            swapped = True
+            victim.rename(parent / "sessions-saved")
+            victim.symlink_to(outside)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(contained_paths.os, "open", swap)
+    with pytest.raises(ZoneRootValidationError, match=f"symlink: {victim}"):
+        ensure_host_env(config)
+    assert swapped
+    assert (outside.stat().st_mode, _host_tree(outside)) == before
+
+
+@pytest.mark.parametrize("root_name", ["config_root", "shared_root", "local_root", "env"])
+def test_explicit_root_links_before_config_load_are_canonicalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_name: str
+) -> None:
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    target.chmod(0o755)
+    (target / "keep").write_bytes(b"owner content")
+    link = tmp_path / "configured-link"
+    link.symlink_to(target)
+    file = tmp_path / "config.toml"
+    setting = f'{root_name} = "{link}"\n' if root_name != "env" else ""
+    file.write_text(f'[general]\ncode_dir = "{projects}"\n{setting}')
+    if root_name == "env":
+        monkeypatch.setenv("DJINN_CONFIG_ROOT", str(link))
+    config = load_config(file)
+    roots = ensure_zone_roots(config)
+    actual = roots.config_root if root_name == "env" else getattr(roots, root_name)
+    assert actual == target
+    assert link.is_symlink()
+    assert (target / "keep").read_bytes() == b"owner content"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("root_name", ["config_root", "shared_root", "local_root"])
+def test_derived_root_link_before_config_load_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_name: str
+) -> None:
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    base = tmp_path / "home/.djinn/config"
+    link = base if root_name == "config_root" else Path(f"{base}.{root_name.split('_')[0]}")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    (outside / "keep").write_bytes(b"untouched")
+    link.symlink_to(outside)
+    before = (outside.stat().st_mode, _host_tree(outside))
+    file = tmp_path / "config.toml"
+    file.write_text(f'[general]\ncode_dir = "{projects}"\n')
+    config = load_config(file)
+    with pytest.raises(ZoneRootValidationError, match=f"symlink: {link}"):
+        ensure_zone_roots(config)
+    assert (outside.stat().st_mode, _host_tree(outside)) == before
+
+
+def test_host_provisioning_tightens_existing_zone_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    expected = _overlay_directories(config)
+    for directory in expected:
+        directory.mkdir(parents=True, exist_ok=True)
+    roots = resolve_zone_roots(config)
+    directories = set(expected)
+    for directory in expected:
+        for parent in directory.parents:
+            if parent in (roots.local_root, roots.shared_root):
+                break
+            directories.add(parent)
+    for directory in directories:
+        directory.chmod(0o755)
+    sentinel = roots.shared_root / "codex/sessions/keep"
+    sentinel.write_bytes(b"persistent data")
+    previous_umask = os.umask(0o022)
+    try:
+        ensure_host_env(config)
+    finally:
+        os.umask(previous_umask)
+    assert all(stat.S_IMODE(directory.stat().st_mode) == 0o700 for directory in directories)
+    assert sentinel.read_bytes() == b"persistent data"
+
+
+@pytest.mark.parametrize(
+    ("operation", "kind", "diagnostic"),
+    [
+        ("root", "link", "Zone root must not be a symlink"),
+        ("root", "file", "Zone root is not a directory"),
+        ("directory", "link", "Bind-mount target must not be a symlink"),
+        ("directory", "file", "Bind-mount target is not a directory"),
+        ("file", "link", "Bind-mount target must not be a symlink"),
+        ("file", "directory", "Bind-mount target is not a regular file"),
+        ("file", "fifo", "Bind-mount target is not a regular file"),
+    ],
+)
+def test_provisioning_kind_specific_diagnostics_unchanged(
+    tmp_path: Path, operation: str, kind: str, diagnostic: str
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    (outside / "keep").write_bytes(b"untouched")
+    victim = root if operation == "root" else root / "agent/entry"
+    if operation == "root":
+        root.rmdir()
+    else:
+        victim.parent.mkdir()
+    if kind == "link":
+        victim.symlink_to(outside)
+    elif kind == "file":
+        victim.write_bytes(b"wrong type")
+    elif kind == "fifo":
+        os.mkfifo(victim)
+    else:
+        victim.mkdir()
+    before = (outside.stat().st_mode, _host_tree(outside))
+    with pytest.raises(ZoneRootValidationError) as refusal:
+        if operation == "root":
+            docker_mod._ensure_zone_root(root)
+        elif operation == "directory":
+            docker_mod._ensure_bind_target_directory(root, "agent", Path("entry"))
+        else:
+            docker_mod._ensure_bind_target_file(root, "agent", Path("entry"))
+    assert str(refusal.value) == f"{diagnostic}: {victim}"
+    assert (outside.stat().st_mode, _host_tree(outside)) == before
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory read permissions")
+@pytest.mark.parametrize("position", ["root", "child"])
+@pytest.mark.parametrize("kind", ["link", "file"])
+@pytest.mark.parametrize("timing", ["before-pin", "after-pin"])
+def test_host_permission_repair_substitution_preserves_kind_and_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, position: str, kind: str, timing: str,
+) -> None:
+    config = _provisioning_config(tmp_path, monkeypatch)
+    root = resolve_zone_roots(config).shared_root
+    victim = root if position == "root" else root / "codex/sessions"
+    victim.mkdir(parents=True)
+    saved = victim.with_name(victim.name + "-saved")
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o750)
+    (outside / "keep").write_bytes(b"outside")
+    before = (outside.stat().st_mode, _host_tree(outside))
+    victim.chmod(0o300)
+    real_open = os.open
+    denied = False
+    swapped = False
+
+    def swap() -> None:
+        nonlocal swapped
+        assert denied and not swapped
+        swapped = True
+        victim.rename(saved)
+        if kind == "link":
+            victim.symlink_to(outside)
+        else:
+            victim.write_bytes(b"substitute")
+            victim.chmod(0o640)
+
+    def open_entry(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal denied
+        parent = kwargs.get("dir_fd")
+        candidate = (
+            Path(name) if parent is None
+            else Path(os.readlink(f"/proc/self/fd/{parent}")) / name
+        )
+        is_pin = candidate == victim and flags & os.O_PATH
+        if is_pin and timing == "before-pin":
+            swap()
+        try:
+            descriptor = real_open(name, flags, *args, **kwargs)
+        except PermissionError:
+            if candidate == victim:
+                denied = True
+            raise
+        if is_pin and timing == "after-pin":
+            swap()
+        return descriptor
+
+    monkeypatch.setattr(contained_paths.os, "open", open_entry)
+    fds = len(os.listdir("/proc/self/fd"))
+    try:
+        with pytest.raises(ZoneRootValidationError) as refused:
+            ensure_host_env(config)
+        diagnostic = (
+            "Zone root must not be a symlink" if kind == "link" else "Zone root is not a directory"
+        )
+        assert str(refused.value) == f"{diagnostic}: {victim}"
+        assert "writable" not in str(refused.value)
+        assert denied and swapped
+        assert saved.stat().st_mode & 0o777 == (0o300 if timing == "before-pin" else 0o700)
+        if kind == "file":
+            assert victim.stat().st_mode & 0o777 == 0o640
+            assert victim.read_bytes() == b"substitute"
+        else:
+            assert victim.is_symlink()
+        assert (outside.stat().st_mode, _host_tree(outside)) == before
+        assert len(os.listdir("/proc/self/fd")) == fds
+    finally:
+        if saved.exists():
+            saved.chmod(0o700)
+        elif victim.is_dir() and not victim.is_symlink():
+            victim.chmod(0o700)
+
+
+@pytest.mark.parametrize("kind", ["Zone root", "Credential root", "Bind-mount target"])
+def test_substituted_refusal_uses_past_tense(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "replaced"
+    refused = docker_mod._path_refusal(
+        contained_paths.PathContainmentError(path, "substituted"), kind
+    )
+    assert str(refused) == f"{kind} was substituted: {path}"
