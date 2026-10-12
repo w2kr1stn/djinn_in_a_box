@@ -48,6 +48,13 @@ def warning(message: str) -> None:
     err_console.print(f"[warning]{ICONS['warning']} Warning: {message}[/warning]")
 
 
+def escape_nonprintable(value: str) -> str:
+    """Escape control characters while preserving printable text for literal output."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in value
+    )
+
+
 def print_captured(text: str, *, err: bool = True, end: str = "") -> None:
     """Print captured subprocess output as data, never as markup.
 
@@ -62,7 +69,7 @@ def print_captured(text: str, *, err: bool = True, end: str = "") -> None:
     ever becomes the requirement.
     """
     target = err_console if err else console
-    target.print(text, end=end, markup=False, highlight=False, soft_wrap=True)
+    target.print(text, end=end, markup=False, emoji=False, highlight=False, soft_wrap=True)
 
 
 def blank() -> None:
