@@ -420,7 +420,13 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
             "private agent socket": canonical(host_runtime.runtime_root() / "private/agent.sock"),
             "host runtime control": canonical(host_runtime.runtime_root() / "runtime.json"),
         }
-        execution = execution_paths()
+        execution: dict[str, tuple[Path, str, str]] = {}
+        execution_error: Exception | None = None
+        try:
+            execution = execution_paths()
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            # Decided once Docker authority is known, as for the nested inventory.
+            execution_error = exc
         sockets = docker_sockets()
         effective: list[dict[str, Any]] = []
         for raw_mount in cast(list[Any], mounts):
@@ -569,6 +575,8 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         if unverified_endpoint:
             causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
         authority = any(f.kind in DOCKER_AUTHORITY_KINDS for f in causes) or unverified_endpoint
+        if execution_error is not None and not authority:
+            errors.append(Finding(f"inspection uncertain: {execution_error}"))
         if not inspection.raw_sources and not authority:
             for writable, source, label, pair in inventory_binds:
                 try:

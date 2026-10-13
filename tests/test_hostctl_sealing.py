@@ -1732,6 +1732,33 @@ def test_inventory_skipped_under_authority(
     result.require(allow_unsealed=True)
 
 
+@pytest.mark.parametrize("authority", [False, True])
+def test_undeterminable_execution_inputs_refuse_only_without_authority(
+    ground, monkeypatch, authority
+):
+    empty_desktop(monkeypatch)
+
+    def undeterminable():
+        raise PermissionError(13, "Permission denied", "/opt/hidden/bin")
+
+    monkeypatch.setattr(sealing, "execution_paths", undeterminable)
+    result = sealing.assess(dev([bind(ground.socket)] if authority else []))
+    if authority:
+        assert not result.errors, result
+        assert "Docker socket" in {f.kind for f in result.cause_findings}
+        with pytest.raises(hostctl.HostctlError):
+            result.require()
+        result.require(allow_unsealed=True)
+    else:
+        assert result.state == "unknown"
+        assert any(
+            "inspection uncertain:" in error and "/opt/hidden/bin" in error
+            for error in result.errors
+        )
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=True)
+
+
 def test_inventory_skip_preserves_unverified_endpoint_error(
     ground, monkeypatch, inventory_source, inventory_calls
 ):

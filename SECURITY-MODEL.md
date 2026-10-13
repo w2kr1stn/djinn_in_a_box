@@ -194,7 +194,8 @@ For a running dev container it requires complete inspection and no named causes:
   At creation, Djinn refuses a writable `[mounts.*]`, `--mount` or `--here` bind
   overlapping this same execution-input inventory. Inaccessible execution inputs
   make the inputs undeterminable: creation refuses writable covered binds and
-  sealing reports inspection uncertain. The creation check applies to pathnames
+  sealing reports inspection uncertain (under Docker authority see below). The
+  creation check applies to pathnames
   at that point in time and pins no inode: sources and their ancestors must stay
   stable and outside any agent's rename authority (for example through another
   writable bind of a parent directory) until Docker has bound them.
@@ -212,6 +213,8 @@ The nested inventory is skipped when a cause is treated as Docker authority:
 a Docker socket or relocated socket bind, a host-root bind, or an unverified
 `DOCKER_HOST`. These are conservative classifications, not verified access.
 Such a dev cannot become sealed, so the inventory cannot change the result. The
+same holds for execution inputs that cannot be determined: under Docker
+authority they do not refuse, without it they leave the inspection uncertain. The
 cause still requires `--allow-unsealed`, and every other inspection error still
 refuses. The inventory is a point-in-time scan: symlinks are not followed and
 entries that vanish during the scan are skipped; a vanished bind root,
