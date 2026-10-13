@@ -243,6 +243,22 @@ validation, including when a declared source overlaps a built-in provisioning pa
 There is no mount-liveness protocol: a drive can disappear after validation.
 The no-create bind setting prevents accidental host directory creation.
 
+At creation, a writable `[mounts.*]` bind is refused if its host source overlaps a
+host execution input. Read-only binds (`read_only = true`) and declared volumes
+are not affected. Host execution inputs are the paths in the invoking CLI's
+sealing inventory ([security model](SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)),
+including the location of every symlink on their paths.
+The inventory uses that CLI process's `PATH`, Python environment and Docker client
+configuration at creation time. A relative `PATH` entry, unreadable or malformed
+Docker client config, or an execution input that cannot be inspected (for example
+a PATH entry below a directory the user cannot traverse) makes the inputs
+undeterminable, so all affected writable binds are refused. Set `read_only = true`
+or remove an affected bind.
+`djinn doctor` reports affected `[mounts.*]` entries as FAIL rows.
+This point-in-time check pins no inode: source pathnames and their ancestors must
+stay stable and outside any agent's rename authority (including through another
+writable bind of a parent directory) until Docker has bound them.
+
 Environment keys must match `[A-Za-z_][A-Za-z0-9_]*`; values must be strings and
 are literal, so `${HOST_VALUE}` above stays exactly that text. Host values do not
 override them. Reserved keys cover every Docker mode and everything the repository
@@ -684,8 +700,8 @@ Common `start` options:
 | `--docker`, `-d` | Starts the rootless `agent-docker` companion and sets a managed Unix `DOCKER_HOST` in dev |
 | `--docker-direct` | Adds `docker-compose.docker-direct.yml` and mounts `/var/run/docker.sock` directly into the dev container |
 | `--firewall`, `-f` | Applies the existing outbound rules in dev and, with `--docker`, before the companion daemon starts |
-| `--here` | Mounts the current directory as `/home/dev/workspace` and uses it as the working directory |
-| `--mount SRC[:DST[:ro\|rw]]`, `-m …` | Repeatable host-directory mount. Without `DST`, it maps to `/home/dev/mount/<basename>`; append `:ro` for read-only. |
+| `--here` | Mounts the current directory as `/home/dev/workspace` and uses it as the working directory; writable overlaps with host execution inputs are refused |
+| `--mount SRC[:DST[:ro\|rw]]`, `-m …` | Repeatable host-directory mount. Without `DST`, it maps to `/home/dev/mount/<basename>`; append `:ro` for read-only; writable overlaps with host execution inputs are refused. |
 
 `--docker` and `--docker-direct` are mutually exclusive.
 
@@ -855,6 +871,11 @@ directory is `/home/dev/workspace` with `--here`, otherwise the first mount targ
 `djinn start` without mounts passes no `--workdir`, so the Compose service default
 `working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` applies: `/home/dev/projects`
 in projects mode or `/home/dev/aios` in aios mode.
+At creation, a writable `--mount`, `--here`, or `djinn run`'s implicit `--here`
+is refused if its source overlaps a host execution input. For `--mount`, append
+`:ro` or remove it. For `--here`, start from a directory outside the input or use
+`--mount SRC:ro`. `djinn doctor` reports affected `[mounts.*]` declarations as
+FAIL rows; it cannot check invocation `--mount` or `--here` binds.
 User mounts cannot equal or contain the active workspace target; children remain
 valid. The unused root is available for explicit user mounts. Djinn creates only
 the selected workspace bind. Targets at or below a Djinn-managed root are refused

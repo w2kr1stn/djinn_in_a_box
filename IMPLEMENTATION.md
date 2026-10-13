@@ -1044,6 +1044,17 @@ The same module owns the repeatable user-mount contract:
   The typed static Compose target table excludes the workspace root;
   `_reserved_mount_targets()` adds only the active `config.workspace_target`.
   The unused workspace root remains available for explicit user mounts.
+  After all target checks, writable invocation binds are checked against host
+  execution inputs; read-only mounts skip this check. The inventory is built on
+  the first writable source that needs comparison and reused for that validator
+  call. `host_sealing.execution_overlap()` applies the sealing canonicalizer and
+  overlap predicate, returning the first match. Inventory or comparison failures
+  fail closed with `cannot be checked against host execution inputs (<cause>)`.
+  The inventory also records the resolved location of every symlink traversed
+  on an execution input's path. Resolved invocation sources containing `:` are
+  refused, as for declared binds.
+  The execution inventory and guard comparison use strict presence checks that
+  propagate inspection errors; other sealing paths retain lenient checks.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
   `MountCollisionError` reports the two involved mounts and the conflict path;
   managed-root conflicts identify the Djinn-managed root.
@@ -1088,6 +1099,13 @@ checked against the unchanged entrypoint repair list; the remaining roots are
 the reserved `/var/lib/djinn-packages` (no dev ownership repair), managed SSH targets, desktop directories and the agent-Docker endpoint. The
 declared diagnostic retains its `Djinn-managed volume root` wording. Actual volume
 names are `djinn-<name>` and cannot collide with the built-in volume registry.
+After source and target validation, `resolve_declared_entries()` applies the same
+lazy check to error-free writable binds; read-only binds and declared volumes are
+skipped. Inventory or comparison failures become declaration diagnostics with
+the `cannot be checked against host execution inputs (<cause>)` wording, so
+`djinn doctor` reports the affected declarations as FAIL rows.
+`compose_up_detached()` doubles `$` as `$$` in invocation mount sources, resolved
+targets and `working_dir`, so Compose receives those values literally.
 
 The single reserved-environment registry covers all Compose service modes and
 everything the repository ships into the image or runs at startup: Python,

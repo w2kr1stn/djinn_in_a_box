@@ -120,14 +120,23 @@ class Assessment:
             )
 
 
-def canonical(path: str | Path) -> Path:
+def _present(path: Path) -> bool:
+    """Distinguish proven absence from a host path that cannot be inspected."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
+def canonical(path: str | Path, *, strict: bool = False) -> Path:
     """Resolve existing host ancestors as well as not-yet-created protected paths."""
     value = Path(path)
     if not value.is_absolute():
         raise ValueError(f"non-absolute host path: {value}")
     parent = value
     suffix: list[str] = []
-    while not parent.exists():
+    while not (_present(parent) if strict else parent.exists()):
         if parent.is_symlink():
             raise ValueError(f"dangling host alias: {parent}")
         suffix.insert(0, parent.name)
@@ -144,18 +153,67 @@ def host_file(path: Path) -> Path:
     return path
 
 
-def protected_overlap(source: Path, protected: Path) -> bool:
+def protected_overlap(source: Path, protected: Path, *, strict: bool = False) -> bool:
     if overlap(source, protected):
         return True
 
     def same(a: Path, b: Path) -> bool:
+        present = _present if strict else Path.exists
         return (
-            host_file(a).exists() and host_file(b).exists() and host_file(a).samefile(host_file(b))
+            present(host_file(a)) and present(host_file(b)) and host_file(a).samefile(host_file(b))
         )
 
-    return any(same(source, ancestor) for ancestor in (protected, *protected.parents)) or any(
-        same(protected, ancestor) for ancestor in (source, *source.parents)
+    # A symlink location is protected as a directory entry: a source inside its target is not
+    # an overlap (the resolved input covers what the link leads to).
+    link = host_file(protected).is_symlink()
+    return any(same(source, ancestor) for ancestor in (protected, *protected.parents)) or (
+        not link and any(same(protected, ancestor) for ancestor in (source, *source.parents))
     )
+
+
+def execution_overlap(
+    source: str | Path, inputs: dict[str, tuple[Path, str, str]]
+) -> tuple[str, Path] | None:
+    """Return the first host execution input overlapping a canonical source."""
+    source = canonical(source, strict=True)
+    for name, (path, _kind, _item) in inputs.items():
+        if protected_overlap(source, path, strict=True):
+            return name, path
+    return None
+
+
+def _link_locations(path: Path) -> list[Path]:
+    """Every symlink traversed while resolving ``path``, at its resolved location.
+
+    Whoever can replace such a link chooses what the host executes through it.
+    """
+    links: list[Path] = []
+    current = Path(path.anchor)
+    pending = list(path.parts[1:])
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        try:
+            target = Path(os.readlink(candidate))
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
+            current = candidate
+            continue
+        links.append(candidate)
+        if len(links) > 40:
+            raise ValueError(f"too many host aliases: {path}")
+        if target.is_absolute():
+            current = Path(target.anchor)
+            pending = [*target.parts[1:], *pending]
+        else:
+            pending = [*target.parts, *pending]
+    return links
 
 
 def execution_paths() -> dict[str, tuple[Path, str, str]]:
@@ -198,11 +256,30 @@ def execution_paths() -> dict[str, tuple[Path, str, str]]:
         "/usr/libexec/docker/cli-plugins",
     ]
     config_file = config / "config.json"
-    if config_file.exists():
-        plugin_dirs += json.loads(config_file.read_text()).get("cliPluginsExtraDirs", [])
+    try:
+        config_text = config_file.read_text()
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    else:
+        client_config = json.loads(config_text)
+        if not isinstance(client_config, dict):
+            raise ValueError(f"Docker client configuration '{config_file}' must be a JSON object")
+        extra_dirs = cast(dict[str, Any], client_config).get("cliPluginsExtraDirs", [])
+        if not isinstance(extra_dirs, list):
+            raise ValueError(
+                f"Docker client configuration '{config_file}': cliPluginsExtraDirs must be a list"
+            )
+        plugin_dirs += cast(list[str], extra_dirs)
     for entry in plugin_dirs:
         paths[f"Docker plugin directory {entry}"] = (Path(entry), docker_kind, entry)
-    return {name: (canonical(path), kind, item) for name, (path, kind, item) in paths.items()}
+    inventory = {
+        name: (canonical(path, strict=True), kind, item)
+        for name, (path, kind, item) in paths.items()
+    }
+    for name, (path, kind, item) in paths.items():
+        for link in _link_locations(Path(path)):
+            inventory[f"{name} via link {link}"] = (link, kind, item)
+    return inventory
 
 
 def _socket_is_docker(path: Path) -> bool:
@@ -343,7 +420,13 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
             "private agent socket": canonical(host_runtime.runtime_root() / "private/agent.sock"),
             "host runtime control": canonical(host_runtime.runtime_root() / "runtime.json"),
         }
-        execution = execution_paths()
+        execution: dict[str, tuple[Path, str, str]] = {}
+        execution_error: Exception | None = None
+        try:
+            execution = execution_paths()
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            # Decided once Docker authority is known, as for the nested inventory.
+            execution_error = exc
         sockets = docker_sockets()
         effective: list[dict[str, Any]] = []
         for raw_mount in cast(list[Any], mounts):
@@ -492,6 +575,8 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         if unverified_endpoint:
             causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
         authority = any(f.kind in DOCKER_AUTHORITY_KINDS for f in causes) or unverified_endpoint
+        if execution_error is not None and not authority:
+            errors.append(Finding(f"inspection uncertain: {execution_error}"))
         if not inspection.raw_sources and not authority:
             for writable, source, label, pair in inventory_binds:
                 try:

@@ -185,7 +185,22 @@ For a running dev container it requires complete inspection and no named causes:
 - No writable bind overlapping host execution inputs: Djinn's installation and
   build context, configuration/agent/zone files, Python environments/executable,
   effective import directories and loaded modules, Docker CLI/configuration/
-  plugin directories, and host `PATH` directories, all determined at check time.
+  plugin directories, host `PATH` directories, and the location of every symlink
+  on one of these paths, all determined at check time.
+  Other configuration the host interprets, such as shell startup files, Git, SSH
+  or user service configuration, is not in this inventory, nor are the targets of
+  symlinked commands inside `PATH` directories (for example a tool's own install
+  tree); do not mount them writable.
+  At creation, Djinn refuses a writable `[mounts.*]`, `--mount` or `--here` bind
+  overlapping this same execution-input inventory. Inaccessible execution inputs
+  make the inputs undeterminable: creation refuses writable covered binds and
+  sealing reports inspection uncertain (under Docker authority see below). The
+  creation check applies to pathnames
+  at that point in time and pins no inode: sources and their ancestors must stay
+  stable and outside any agent's rename authority (for example through another
+  writable bind of a parent directory) until Docker has bound them.
+  Sealing continues to report managed-bind and running-state findings. The
+  workspace root is outside this creation-time rule.
 - Desktop channels are absent or verified filtered/locked, with no raw endpoints.
 
 Inspection resolves canonical ancestors, inode aliases and local named-volume
@@ -198,6 +213,8 @@ The nested inventory is skipped when a cause is treated as Docker authority:
 a Docker socket or relocated socket bind, a host-root bind, or an unverified
 `DOCKER_HOST`. These are conservative classifications, not verified access.
 Such a dev cannot become sealed, so the inventory cannot change the result. The
+same holds for execution inputs that cannot be determined: under Docker
+authority they do not refuse, without it they leave the inspection uncertain. The
 cause still requires `--allow-unsealed`, and every other inspection error still
 refuses. The inventory is a point-in-time scan: symlinks are not followed and
 entries that vanish during the scan are skipped; a vanished bind root,
