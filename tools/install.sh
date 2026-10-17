@@ -24,6 +24,7 @@ define_plain_ui_fallbacks() {
     ui_err() { echo "[err] $1" >&2; }
 }
 
+# shellcheck source=/dev/null
 if [[ -r "$OUTPUT_LIB" ]] && source "$OUTPUT_LIB"; then
     :
 else
@@ -37,7 +38,6 @@ export TOOLS_LIB="$CACHE_DIR/lib"
 
 # Ensure tool paths are available (entrypoint doesn't source .zshrc)
 export PATH="$TOOLS_BIN:$HOME/.local/bin:$PATH"
-export LD_LIBRARY_PATH="$TOOLS_LIB:${LD_LIBRARY_PATH:-}"
 
 if [[ ! -f "$TOOLS_FILE" ]]; then
     exit 0

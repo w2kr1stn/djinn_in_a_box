@@ -108,7 +108,7 @@ ARG CODEX_VERSION=0.160.0
 ARG OPENCODE_VERSION=1.18.34
 
 # Claude Code via native installer (no npm/Node.js dependency)
-# Installs to ~/.local/bin/claude (already in PATH via .zshrc)
+# Installs to ~/.local/bin/claude (already in the image PATH)
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
 
 # Global NPM Packages (remaining agents + dev tools)
@@ -137,13 +137,11 @@ RUN check-build-dns.sh && \
 
 RUN uv tool install ruff
 
-# Non-interactive processes do not source fnm's shell initialization.
-ENV PATH="/home/${USERNAME}/.local/share/fnm/aliases/default/bin:$PATH"
+# Tools precede Node for every process, without shell initialization.
+ENV PATH="/home/${USERNAME}/.cache/djinn-tools/bin:/home/${USERNAME}/.local/share/fnm/aliases/default/bin:$PATH"
 
 # Shell config (.zshrc)
 RUN cat > ~/.zshrc << 'EOF'
-export PATH="$HOME/.cache/djinn-tools/bin:$HOME/.local/bin:$HOME/.local/share/fnm/aliases/default/bin:$HOME/.local/share/fnm:$PATH"
-export LD_LIBRARY_PATH="$HOME/.cache/djinn-tools/lib:${LD_LIBRARY_PATH:-}"
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
 plugins=(git zsh-autosuggestions docker)

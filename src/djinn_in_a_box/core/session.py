@@ -296,7 +296,7 @@ class SessionManager:
                 cmd.extend(["-e", key])
             cmd.extend(["-w", cwd])
             cmd.append(container_id)
-            cmd.extend(["bash", "-lc", full_cmd])
+            cmd.extend(["bash", "-c", full_cmd])
 
             log.debug("Running interactive container command: %s", cmd)
             try:
@@ -370,7 +370,7 @@ class SessionManager:
                 cmd.extend(["-e", key])
             cmd.extend(["-w", cwd])
             cmd.append(container_id)
-            cmd.extend(["bash", "-lc", full_cmd])
+            cmd.extend(["bash", "-c", full_cmd])
 
             log.debug("Running headless container command: %s", cmd)
             try:
