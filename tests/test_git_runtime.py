@@ -5,6 +5,7 @@ import os
 import pwd
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -58,17 +59,20 @@ def fake_docker(git_inputs, monkeypatch):
 
 
 def observed_dev(state, runtime, dev_id="dev-1", running=True):
-    state.write_text(
-        json.dumps(
-            [
-                {
-                    "Id": dev_id,
-                    "State": {"Running": running},
-                    "Config": {"Labels": {GENERATION_LABEL: runtime.generation}},
-                }
-            ]
+    fd, temporary = tempfile.mkstemp(dir=state.parent)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(
+            json.dumps(
+                [
+                    {
+                        "Id": dev_id,
+                        "State": {"Running": running},
+                        "Config": {"Labels": {GENERATION_LABEL: runtime.generation}},
+                    }
+                ]
+            )
         )
-    )
+    os.replace(temporary, state)
 
 
 def wait_for_absence(path):
@@ -168,7 +172,7 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
 def test_detached_agent_survives_actual_creator_exit(git_inputs, fake_docker):
     driver = """
 from types import SimpleNamespace
-import json, os, sys, pytest
+import json, os, sys, tempfile, pytest
 from pathlib import Path
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import host_runtime
@@ -181,15 +185,20 @@ with pytest.MonkeyPatch.context() as monkeypatch:
     )
     monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
     with host_runtime.git_runtime(config, "djinn") as runtime:
-        Path(sys.argv[2]).write_text(json.dumps([{
-            "Id": "dev-detached", "State": {"Running": True},
-            "Config": {"Labels": {host_runtime.GENERATION_LABEL: runtime.generation}}
-        }]))
+        state = Path(sys.argv[2])
+        fd, temporary = tempfile.mkstemp(dir=state.parent)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps([{
+                "Id": "dev-detached", "State": {"Running": True},
+                "Config": {"Labels": {host_runtime.GENERATION_LABEL: runtime.generation}}
+            }]))
+        os.replace(temporary, state)
         runtime.retain()
 """
     result = subprocess.run(
         [sys.executable, "-c", driver, git_inputs.model_dump_json(), str(fake_docker)],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=15,
     )

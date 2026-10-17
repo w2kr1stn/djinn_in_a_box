@@ -29,6 +29,15 @@ _MUTATING_DOCKER_VERBS = frozenset({
 
 
 @pytest.fixture(autouse=True)
+def _pin_console_width(monkeypatch):
+    """CLI assertions must not depend on COLUMNS, terminal width or tmp path length."""
+    from djinn_in_a_box.core.console import console, err_console
+
+    monkeypatch.setattr(console, "width", 1000)
+    monkeypatch.setattr(err_console, "width", 1000)
+
+
+@pytest.fixture(autouse=True)
 def _forbid_real_docker(request, monkeypatch):
     """Unit tests never change the host daemon; opt-in live modules are exempt."""
     if request.module.__name__.endswith("_live_docker"):

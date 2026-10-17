@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from test_desktop_runtime import calls, dev
+from test_desktop_runtime import calls, dev, write_json
 from test_desktop_runtime import fake_owner as daemon_owner_fixture
 
 from djinn_in_a_box.config.defaults import volume_categories
@@ -313,23 +313,23 @@ def test_observer_stops_and_resumes_daemon_by_id(fake_owner, evidence, git_enabl
         state = host_runtime.read_state(owner.root)
         state["agent_docker"] = manifest
         host_runtime.save_state(owner.root, state)
-        objects.write_text(json.dumps({"djinn": dev(owner), "agent-id": actual}))
+        write_json(objects, {"djinn": dev(owner), "agent-id": actual})
         owner.retain()
         data = json.loads(objects.read_text())
         data["djinn"]["State"]["Running"] = False
-        objects.write_text(json.dumps(data))
+        write_json(objects, data)
         deadline = time.monotonic() + 5
         while ["stop", "-t", "20", "agent-id"] not in calls(log):
             assert time.monotonic() < deadline
             time.sleep(0.05)
         data = json.loads(objects.read_text())
         data["djinn"]["State"]["Running"] = True
-        objects.write_text(json.dumps(data))
+        write_json(objects, data)
         while ["start", "agent-id"] not in calls(log):
             assert time.monotonic() < deadline
             time.sleep(0.05)
         assert json.loads(objects.read_text())["agent-id"]["State"]["Running"]
-        objects.write_text(json.dumps({"agent-id": json.loads(objects.read_text())["agent-id"]}))
+        write_json(objects, {"agent-id": json.loads(objects.read_text())["agent-id"]})
         owner.observer.wait(timeout=5)
         assert not json.loads(objects.read_text())
         assert not (owner.root / "state.json").exists()
@@ -362,7 +362,7 @@ def test_companion_stop_subprocess_outlasts_grace(fake_owner, evidence, monkeypa
     if path in {"observer", "clean", "resume-failure"}:
         inventory["djinn"] = dev(owner, identifier="djinn")
         inventory["djinn"]["Config"]["Labels"]["com.docker.compose.project"] = project
-    objects.write_text(json.dumps(inventory))
+    write_json(objects, inventory)
     stops = []
     original_run = subprocess.run
 
@@ -388,7 +388,7 @@ def test_companion_stop_subprocess_outlasts_grace(fake_owner, evidence, monkeypa
                     data["djinn"]["State"]["Running"] = False
                 elif self.tick == 3 and path == "resume-failure":
                     data["djinn"]["State"]["Running"] = True
-                objects.write_text(json.dumps(data))
+                write_json(objects, data)
                 return self.tick > (3 if path == "resume-failure" else 2)
 
         monkeypatch.setattr(host_runtime.threading, "Event", Transitions)
@@ -422,7 +422,7 @@ def test_companion_stop_subprocess_outlasts_grace(fake_owner, evidence, monkeypa
                 data = json.loads(objects.read_text())
                 data[initializer["Id"]] = initializer
                 data[manifest["name"] + "-firewall"] = initializer
-                objects.write_text(json.dumps(data))
+                write_json(objects, data)
                 return docker.RunResult(0, initializer["Id"] + "\n")
             return docker.RunResult(0, "23\n" if argv[1] == "wait" else "firewall failed")
 

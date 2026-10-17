@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -15,6 +16,14 @@ from djinn_in_a_box.core import docker, host_runtime, hostctl
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 
+def write_json(path, data):
+    """A concurrent fake Docker call must never read a partial file."""
+    fd, temporary = tempfile.mkstemp(dir=path.parent)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(json.dumps(data))
+    os.replace(temporary, path)
+
+
 @pytest.fixture
 def fake_owner(git_inputs, tmp_path, monkeypatch):
     directory = tmp_path / "trusted"
@@ -22,12 +31,18 @@ def fake_owner(git_inputs, tmp_path, monkeypatch):
     binary = directory / "docker"
     objects = directory / "objects.json"
     log = directory / "calls.jsonl"
-    objects.write_text("{}")
+    write_json(objects, {})
     binary.write_text(f"""#!{sys.executable}
-import json, pathlib, sys
+import json, os, pathlib, sys, tempfile
 store = pathlib.Path({str(objects)!r})
 log = pathlib.Path({str(log)!r})
-data = json.loads(store.read_text())
+
+def write_json(data):
+    fd, temporary = tempfile.mkstemp(dir=store.parent)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(json.dumps(data))
+    os.replace(temporary, store)
+
 args = sys.argv[1:]
 # Docker 29 daemon messages for missing objects; volumes use lower case.
 MISSING = {{
@@ -35,26 +50,29 @@ MISSING = {{
     'image': 'No such image: %s',
     'volume': 'get %s: no such volume',
 }}
-with log.open('a') as stream:
-    stream.write(json.dumps(args) + '\\n')
-if len(args) > 1 and args[1] == 'inspect':
-    name = args[2]
-    if name not in data:
-        print('Error response from daemon: ' + MISSING[args[0]] % name, file=sys.stderr)
-        sys.exit(1)
-    print(json.dumps([data[name]]))
-elif args[0] == 'ps':
-    pass
-elif args[:2] == ['rm', '-f'] or args[:2] == ['volume', 'rm']:
-    for key in list(data):
-        if key == args[-1] or data[key].get('Id') == args[-1]:
-            data.pop(key, None)
-    store.write_text(json.dumps(data))
-elif args[0] in ('stop', 'start'):
-    data[args[-1]].setdefault('State', {{}})['Running'] = args[0] == 'start'
-    store.write_text(json.dumps(data))
-else:
-    sys.exit(2)
+try:
+    data = json.loads(store.read_text())
+    if len(args) > 1 and args[1] == 'inspect':
+        name = args[2]
+        if name not in data:
+            print('Error response from daemon: ' + MISSING[args[0]] % name, file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps([data[name]]))
+    elif args[0] == 'ps':
+        pass
+    elif args[:2] == ['rm', '-f'] or args[:2] == ['volume', 'rm']:
+        for key in list(data):
+            if key == args[-1] or data[key].get('Id') == args[-1]:
+                data.pop(key, None)
+        write_json(data)
+    elif args[0] in ('stop', 'start'):
+        data[args[-1]].setdefault('State', {{}})['Running'] = args[0] == 'start'
+        write_json(data)
+    else:
+        sys.exit(2)
+finally:
+    with log.open('a') as stream:
+        stream.write(json.dumps(args) + '\\n')
 """)
     binary.chmod(0o700)
     monkeypatch.setattr(host_runtime, "DOCKER_EXECUTABLE", str(binary))
@@ -127,23 +145,23 @@ def test_observer_desktop_stop_start_remove_and_pinned_path(fake_owner, monkeypa
             "Labels": {host_runtime.GENERATION_LABEL: owner.generation},
         }
         data = {"djinn": dev(owner), "helper-id": helper, "djinn-desktop-audio": volume}
-        objects.write_text(json.dumps(data))
+        write_json(objects, data)
         owner.register("audio-helper", helper, "djinn-desktop-audio")
         owner.retain()
         (planted / "docker").write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
         (planted / "docker").chmod(0o700)
         data["djinn"] = dev(owner, False)
-        objects.write_text(json.dumps(data))
+        write_json(objects, data)
         wait_for(lambda: ["stop", "helper-id"] in calls(log))
         assert json.loads(objects.read_text())["helper-id"]["State"]["Running"] is False
         assert (owner.root / "state.json").exists()
         data = json.loads(objects.read_text())
         data["djinn"] = dev(owner)
-        objects.write_text(json.dumps(data))
+        write_json(objects, data)
         wait_for(lambda: ["start", "helper-id"] in calls(log))
         data = json.loads(objects.read_text())
         del data["djinn"]
-        objects.write_text(json.dumps(data))
+        write_json(objects, data)
         wait_for(lambda: not (owner.root / "state.json").exists())
         assert "helper-id" not in json.loads(objects.read_text())
         assert "djinn-desktop-audio" not in json.loads(objects.read_text())
@@ -206,7 +224,7 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
             }
         },
     }
-    objects.write_text(json.dumps({"agent-id": obj}))
+    write_json(objects, {"agent-id": obj})
     if condition == "replacement":
         state["generation"] = "replacement"
         (root / "state.json").write_text(json.dumps(state))
@@ -217,17 +235,16 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
             lambda *args: (_ for _ in ()).throw(GitSSHError("daemon unavailable")),
         )
     elif condition == "consumed":
-        objects.write_text(
-            json.dumps(
-                {
-                    "agent-id": obj,
-                    "djinn": {
-                        "Id": "dev-id",
-                        "State": {"Running": True},
-                        "Config": {"Labels": {host_runtime.GENERATION_LABEL: generation}},
-                    },
-                }
-            )
+        write_json(
+            objects,
+            {
+                "agent-id": obj,
+                "djinn": {
+                    "Id": "dev-id",
+                    "State": {"Running": True},
+                    "Config": {"Labels": {host_runtime.GENERATION_LABEL: generation}},
+                },
+            },
         )
     try:
         host_runtime.cleanup_owned(root, generation, str(binary))
@@ -247,7 +264,7 @@ def test_clean_removes_dev_before_helpers_and_joins_outside_guard(fake_owner, mo
     config = config.model_copy(update={"git": GitConfig()})
     monkeypatch.setattr(docker, "is_own_container", lambda *args: False)
     with host_runtime.git_runtime(config, "djinn") as owner:
-        objects.write_text(json.dumps({"djinn": dev(owner)}))
+        write_json(objects, {"djinn": dev(owner)})
         owner.retain()
 
         def down(*args, **kwargs):
@@ -295,7 +312,7 @@ def test_degraded_foreground_releases_guard_after_actual_id(fake_owner, monkeypa
     with host_runtime.git_runtime(config, "djinn") as owner:
         assert owner.observer is None
         owner.begin_creation()
-        objects.write_text(json.dumps({"djinn": dev(owner)}))
+        write_json(objects, {"djinn": dev(owner)})
 
         def guard_available():
             try:
@@ -316,7 +333,7 @@ def test_degraded_detached_retain_never_rewrites_released_ownership(fake_owner, 
     )
     state = {"generation": "mine", "dev_id": "dev-id", "container_name": "djinn"}
     (root / "state.json").write_text(json.dumps(state))
-    objects.write_text(json.dumps({"djinn": dev(owner)}))
+    write_json(objects, {"djinn": dev(owner)})
     monkeypatch.setattr(
         host_runtime, "save_state", lambda *args: pytest.fail("state rewritten after guard release")
     )
@@ -361,7 +378,7 @@ def test_creator_reclaims_only_a_stopped_recorded_dev(fake_owner, condition):
             }
         },
     }
-    objects.write_text(json.dumps({"djinn": dev, "helper-id": helper}))
+    write_json(objects, {"djinn": dev, "helper-id": helper})
     if condition == "stale":
         with host_runtime.git_runtime(config, "djinn") as owner:
             assert owner.generation != "old"
