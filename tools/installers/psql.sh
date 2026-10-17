@@ -9,40 +9,54 @@ INSTALL_LIB="${TOOLS_LIB:-$HOME/.cache/djinn-tools/lib}"
 install_psql_binaries() {
     local pg_bin_dir="$1"
     local real_bin_dir="${TOOLS_DIR:-$HOME/.cache/djinn-tools}/postgresql/bin"
-    local bin staged quoted_lib quoted_bin
+    local bin quoted_lib quoted_bin
 
     if [[ ! -d "$pg_bin_dir" ]]; then
         echo "Warning: PostgreSQL bin directory not found at $pg_bin_dir"
         return 1
     fi
 
-    mkdir -p "$INSTALL_BIN" "$INSTALL_LIB" "$real_bin_dir"
-    INSTALL_LIB=$(cd "$INSTALL_LIB" && pwd)
-    real_bin_dir=$(cd "$real_bin_dir" && pwd)
-
     for bin in psql pg_dump pg_restore pg_dumpall; do
-        if [[ -f "$pg_bin_dir/$bin" ]]; then
-            # Stage beside each destination so readers never see partial files.
-            staged=$(mktemp "$real_bin_dir/.$bin.XXXXXX")
-            cp "$pg_bin_dir/$bin" "$staged"
-            chmod 755 "$staged"
-            mv -f "$staged" "$real_bin_dir/$bin"
+        if [[ ! -f "$pg_bin_dir/$bin" ]]; then
+            echo "Error: PostgreSQL binary not found at $pg_bin_dir/$bin" >&2
+            return 1
+        fi
+    done
 
-            # Escape single quotes for literal, absolute paths in POSIX sh.
-            quoted_lib=${INSTALL_LIB//\'/\'\\\'\'}
-            quoted_bin=${real_bin_dir//\'/\'\\\'\'}
-            staged=$(mktemp "$INSTALL_BIN/.$bin.XXXXXX")
-            cat > "$staged" <<WRAPPER
+    mkdir -p "$INSTALL_BIN" "$INSTALL_LIB" "$real_bin_dir"
+    [[ "$INSTALL_LIB" == /* ]] || INSTALL_LIB="$PWD/$INSTALL_LIB"
+    [[ "$real_bin_dir" == /* ]] || real_bin_dir="$PWD/$real_bin_dir"
+
+    # Non-local: EXIT can run after the function's local scope has unwound.
+    psql_staged=""
+    trap 'rm -f "$psql_staged"' EXIT
+    for bin in psql pg_dump pg_restore pg_dumpall; do
+        # Stage beside each destination so readers never see partial files.
+        psql_staged=$(mktemp "$real_bin_dir/.$bin.XXXXXX")
+        cp "$pg_bin_dir/$bin" "$psql_staged"
+        chmod 755 "$psql_staged"
+        mv -fT "$psql_staged" "$real_bin_dir/$bin"
+        psql_staged=""
+
+        # Escape single quotes for literal, absolute paths in POSIX sh.
+        quoted_lib=${INSTALL_LIB//\'/\'\\\'\'}
+        quoted_bin=${real_bin_dir//\'/\'\\\'\'}
+        psql_staged=$(mktemp "$INSTALL_BIN/.$bin.XXXXXX")
+        cat > "$psql_staged" <<WRAPPER
 #!/bin/sh
 LD_LIBRARY_PATH='$quoted_lib'"\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 export LD_LIBRARY_PATH
 exec '$quoted_bin/$bin' "\$@"
 WRAPPER
-            chmod 755 "$staged"
-            mv -f "$staged" "$INSTALL_BIN/$bin"
-        fi
+        chmod 755 "$psql_staged"
+        mv -fT "$psql_staged" "$INSTALL_BIN/$bin"
+        psql_staged=""
     done
+    trap - EXIT
 
+    for bin in pg_dump pg_restore pg_dumpall; do
+        "$INSTALL_BIN/$bin" --version > /dev/null
+    done
     "$INSTALL_BIN/psql" --version
 }
 

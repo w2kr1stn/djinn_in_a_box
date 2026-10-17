@@ -8,6 +8,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "install.sh"
 
@@ -309,3 +311,20 @@ def test_failed_psql_installer_leaves_no_marker(tmp_path: Path) -> None:
     assert "Failed to install psql" in result.stderr
     assert "psql: error: connection to server failed" in result.stdout
     assert not (cache_dir / "psql.installed").exists()
+
+
+@pytest.mark.parametrize("missing", ["pg_dump", "pg_restore", "pg_dumpall"])
+def test_missing_psql_sibling_leaves_no_marker(tmp_path: Path, missing: str) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["psql"])
+    source = write_psql_installer_fixture(tmp_path, cache_dir, installers_dir)
+    (source / missing).unlink()
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt")
+
+    assert result.returncode == 0, result.stderr  # Other tools can still install.
+    assert "Failed to install psql" in result.stderr
+    assert f"Error: PostgreSQL binary not found at {source / missing}" in result.stdout
+    assert not (cache_dir / "psql.installed").exists()
+    for name in ("psql", "pg_dump", "pg_restore", "pg_dumpall"):
+        assert not (cache_dir / "bin" / name).exists()
+        assert not (cache_dir / "postgresql/bin" / name).exists()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -34,7 +35,7 @@ def psql_env(tmp_path: Path) -> dict[str, str]:
             source / name,
             '#!/bin/sh\n'
             'if [ "${1:-}" = --version ]; then\n'
-            '    echo "psql (PostgreSQL) 18.0"\n'
+            f'    echo "{name} (PostgreSQL) 18.0"\n'
             '    exit 0\n'
             'fi\n'
             'printf "PID=%s\\nLD=%s\\n" "$$" "$LD_LIBRARY_PATH"\n'
@@ -56,14 +57,27 @@ def source_bin(env: dict[str, str]) -> Path:
 
 
 def run_placement(
-    env: dict[str, str], source: Path | None = None
+    env: dict[str, str], source: Path | None = None, *, entrypoint: str = "source"
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
+    source = source or source_bin(env)
+    if entrypoint == "main":
+        # Keep the script guard and main's placement call; omit host provisioning.
+        script = SCRIPT.read_text()
+        start = script.index("    mkdir -p", script.index("main() {\n"))
+        end = script.index('    install_psql_binaries "$PG_BIN_DIR"', start)
+        main_script = Path(env["HOME"]) / "psql-main.sh"
+        write_executable(
+            main_script, script[:start] + '    local PG_BIN_DIR="$1"\n' + script[end:]
+        )
+        command = ["bash", str(main_script), str(source)]
+    else:
+        command = [
             "bash", "-c",
             'source "$1"; install_psql_binaries "$2"',
-            "psql-test", str(SCRIPT), str(source or source_bin(env)),
-        ],
+            "psql-test", str(SCRIPT), str(source),
+        ]
+    return subprocess.run(
+        command,
         cwd=env["HOME"],
         env=env,
         stdin=subprocess.DEVNULL,
@@ -154,6 +168,7 @@ def test_default_cache_paths(psql_env: dict[str, str], empty: bool) -> None:
 def test_relative_paths_are_baked_absolute(psql_env: dict[str, str]) -> None:
     for name in ("TOOLS_DIR", "TOOLS_BIN", "TOOLS_LIB"):
         psql_env[name] = f"relative {name.lower()}"
+    psql_env["CDPATH"] = psql_env["HOME"]
     result = run_placement(psql_env)
     assert result.returncode == 0, result.stderr
     home = Path(psql_env["HOME"])
@@ -168,7 +183,7 @@ def test_relative_paths_are_baked_absolute(psql_env: dict[str, str]) -> None:
         check=False,
     )
     assert child.returncode == 0, child.stderr
-    assert f"\nLD={home / psql_env['TOOLS_LIB']}\n" in child.stdout
+    assert child.stdout.split("\n", 1)[1] == f"LD={home / psql_env['TOOLS_LIB']}\nprobe\0"
 
 
 def test_final_verification_failure_is_returned(psql_env: dict[str, str]) -> None:
@@ -188,12 +203,156 @@ def test_missing_source_directory_fails(psql_env: dict[str, str], tmp_path: Path
     assert f"Warning: PostgreSQL bin directory not found at {missing}" in result.stdout
 
 
-def test_missing_optional_binary_is_skipped(psql_env: dict[str, str]) -> None:
-    (source_bin(psql_env) / "pg_dumpall").unlink()
+@pytest.mark.parametrize("missing", BINARIES)
+def test_missing_binary_prevents_all_publication(
+    psql_env: dict[str, str], missing: str
+) -> None:
+    (source_bin(psql_env) / missing).unlink()
+    result = run_placement(psql_env)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert result.stderr.splitlines() == [
+        f"Error: PostgreSQL binary not found at {source_bin(psql_env) / missing}"
+    ]
+    for name in BINARIES:
+        assert not (Path(psql_env["TOOLS_BIN"]) / name).exists()
+        assert not (Path(psql_env["TOOLS_DIR"]) / "postgresql/bin" / name).exists()
+
+
+@pytest.mark.parametrize("name", BINARIES[1:])
+def test_sibling_verification_failure_is_returned(
+    psql_env: dict[str, str], name: str
+) -> None:
+    error = (
+        f"{name}: error while loading shared libraries: libpq.so.5: "
+        "cannot open shared object file: No such file or directory"
+    )
+    write_executable(
+        source_bin(psql_env) / name,
+        f"#!/bin/sh\necho {shlex.quote(error)} >&2\nexit 127\n",
+    )
+    result = run_placement(psql_env)
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert error in result.stderr
+
+
+def test_verification_runs_psql_last_and_keeps_its_version_on_stdout(
+    psql_env: dict[str, str], tmp_path: Path
+) -> None:
+    trace = tmp_path / "versions"
+    for name in BINARIES:
+        write_executable(
+            source_bin(psql_env) / name,
+            '#!/bin/sh\n[ "$1" = --version ] || exit 2\n'
+            f"echo {name} >> {shlex.quote(str(trace))}\n"
+            f'echo "{name} (PostgreSQL) 18.0"\n',
+        )
     result = run_placement(psql_env)
     assert result.returncode == 0, result.stderr
-    assert not (Path(psql_env["TOOLS_BIN"]) / "pg_dumpall").exists()
-    assert not (Path(psql_env["TOOLS_DIR"]) / "postgresql/bin/pg_dumpall").exists()
+    assert trace.read_text().splitlines() == [*BINARIES[1:], "psql"]
+    assert result.stdout == "psql (PostgreSQL) 18.0\n"
+
+
+@pytest.mark.parametrize("side", ["wrapper", "real"])
+def test_directory_destination_fails_without_moving_stage_inside(
+    psql_env: dict[str, str], side: str
+) -> None:
+    directory = (
+        Path(psql_env["TOOLS_BIN"])
+        if side == "wrapper"
+        else Path(psql_env["TOOLS_DIR"]) / "postgresql/bin"
+    )
+    target = directory / "pg_dump"
+    target.mkdir(parents=True)
+    result = run_placement(psql_env)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "mv: cannot overwrite directory" in result.stderr
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert list(directory.glob(".pg_dump.*")) == []
+
+
+@pytest.mark.parametrize("entrypoint", ["source", "main"])
+@pytest.mark.parametrize(
+    ("tool", "side"),
+    [
+        ("mktemp", "real"), ("mktemp", "wrapper"), ("cp", "real"),
+        ("chmod", "real"), ("chmod", "wrapper"), ("cat", "wrapper"),
+        ("mv", "real"), ("mv", "wrapper"),
+    ],
+    ids=[
+        "mktemp-real", "mktemp-wrapper", "cp-real", "chmod-real",
+        "chmod-wrapper", "cat-wrapper", "mv-real", "mv-wrapper",
+    ],
+)
+def test_failed_stage_is_cleaned_on_exit(
+    psql_env: dict[str, str], tmp_path: Path, entrypoint: str, tool: str, side: str
+) -> None:
+    wrapper_dir = Path(psql_env["TOOLS_BIN"])
+    real_dir = Path(psql_env["TOOLS_DIR"]) / "postgresql/bin"
+    previous_stages = []
+    for directory in (wrapper_dir, real_dir):
+        directory.mkdir(parents=True)
+        previous = directory / ".pg_dump.previous"
+        previous.write_text("other invocation\n")
+        previous_stages.append(previous)
+    fail_dir = wrapper_dir if side == "wrapper" else real_dir
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    write_executable(
+        fake_bin / tool,
+        f"#!{sys.executable}\n"
+        "import os, pathlib, sys\n"
+        f"tool = {tool!r}\n"
+        "stage = (os.readlink('/proc/self/fd/1') if tool == 'cat' "
+        "else sys.argv[-2] if tool == 'mv' else sys.argv[-1])\n"
+        f"if pathlib.Path(stage).parent == pathlib.Path({str(fail_dir)!r}):\n"
+        "    messages = {\n"
+        "        'mktemp': f\"mktemp: failed to create file via template '{stage}': "
+        "No space left on device\",\n"
+        "        'cp': f\"cp: error writing '{stage}': No space left on device\",\n"
+        "        'chmod': f\"chmod: changing permissions of '{stage}': "
+        "Operation not permitted\",\n"
+        "        'cat': 'cat: write error: No space left on device',\n"
+        "        'mv': f\"mv: cannot move '{stage}' to '{sys.argv[-1]}': "
+        "Permission denied\",\n"
+        "    }\n"
+        "    print(messages[tool], file=sys.stderr)\n"
+        "    sys.exit(41)\n"
+        "os.execv('/usr/bin/' + tool, [tool, *sys.argv[1:]])\n",
+    )
+    psql_env["PATH"] = f"{fake_bin}:{psql_env['PATH']}"
+    result = run_placement(psql_env, entrypoint=entrypoint)
+    assert result.returncode == 41, result.stdout + result.stderr
+    assert result.stderr.startswith(f"{tool}:")
+    for directory, previous in zip((wrapper_dir, real_dir), previous_stages, strict=True):
+        assert previous.read_text() == "other invocation\n"
+        stages = [*directory.rglob(".psql.*"), *directory.rglob(".pg_*.*")]
+        assert stages == [previous]
+
+
+def test_success_clears_stage_tracking_and_exit_trap(psql_env: dict[str, str]) -> None:
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            'source "$1"\n'
+            'mktemp() {\n'
+            '    [[ -z "$psql_staged" ]] || return 43\n'
+            '    command mktemp "$@"\n'
+            '}\n'
+            'install_psql_binaries "$2"\n'
+            '[[ -z "$psql_staged" ]] || exit 44\n'
+            'trap -p EXIT\n',
+            "psql-test", str(SCRIPT), str(source_bin(psql_env)),
+        ],
+        cwd=psql_env["HOME"],
+        env=psql_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == "psql (PostgreSQL) 18.0\n"
 
 
 def test_replacements_are_staged_executable_and_renamed(
@@ -239,7 +398,7 @@ def test_replacements_are_staged_executable_and_renamed(
     ]
     assert [entry[2] for entry in renames] == expected_targets
     for flags, source, target, mode in renames:
-        assert flags == ["-f"]
+        assert flags == ["-fT"]
         assert Path(source).parent == Path(target).parent
         assert source != target
         assert mode == 0o755
