@@ -801,7 +801,7 @@ def test_runtime_publish_rechecks_native_only_input_after_delivery_view_load(
     project, config_path, _runtime = _workspace(tmp_path)
     plugin = project / "config/opencode/plugins/ready-notify.js"
     plugin.parent.mkdir()
-    plugin.write_bytes(b"export const Plugin = () => ({});\n")
+    plugin.write_bytes(b"export default { id: 'fixture', setup() {} };\n")
     target = WorkflowDeliveryTarget("opencode", tmp_path / "host-opencode", provision=True)
     assert prepare_config_workflow(
         project, (target,), config_path=config_path, confirm_host_workflow=lambda review: True
@@ -823,7 +823,7 @@ def test_runtime_publish_rechecks_native_only_input_after_delivery_view_load(
             config_path=config_path,
             canonical_lease=canonical_lease,
         )
-        plugin.write_bytes(b"export const Plugin = () => ({ changed: true });\n")
+        plugin.write_bytes(b"export default { id: 'fixture', setup() { return () => {}; } };\n")
         return loaded
 
     monkeypatch.setattr(

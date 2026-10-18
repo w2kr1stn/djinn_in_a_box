@@ -93,3 +93,17 @@ def test_doctor_reports_skipped_shipped_default_and_names_conflicting_file(
     assert str(conflict) in row.detail
     assert str(conflict) in row.remedy
     assert "move or remove" in row.remedy.lower()
+
+
+def test_opencode_personal_cli_and_themes_are_known_entries(zone_config: AppConfig) -> None:
+    root = zone_config.config_root / "opencode"
+    (root / "themes").mkdir(parents=True)
+    (root / "themes/night.json").write_text("{}")
+    (root / "cli.json").write_text("{}")
+    unexpected = root / "unexpected.json"
+    unexpected.write_text("{}")
+    row = _check_named(doctor_mod.run_checks(zone_config), "Zone drift")
+    assert row.status is doctor_mod.Status.WARN
+    assert str(unexpected) in row.detail
+    assert str(root / "themes") not in row.detail
+    assert str(root / "cli.json") not in row.detail

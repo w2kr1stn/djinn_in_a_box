@@ -63,7 +63,7 @@ color_text() {
 declare -A PACKAGES=(
     ["CLAUDE_CODE_VERSION"]="@anthropic-ai/claude-code"
     ["CODEX_VERSION"]="@openai/codex"
-    ["OPENCODE_VERSION"]="opencode-ai"
+    ["OPENCODE_VERSION"]="@opencode/cli"
 )
 
 if [[ "$print_mode" == "false" ]]; then

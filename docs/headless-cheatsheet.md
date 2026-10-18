@@ -27,6 +27,9 @@ the selected agent CLI; otherwise it uses that agent's configured
 | `opencode` | `-m <name>` | Uses `opencode run` for headless runs. |
 
 Check available models with the agent's own documentation or CLI help.
+The OpenCode example below assumes the optional local provider from the
+[OpenCode 2 guide](opencode-v2.md). It also explains persistent `opencode.json`,
+endpoint declarations and the `provider/model#variant` syntax.
 
 ---
 
@@ -55,8 +58,8 @@ outside this ownership boundary.
 
 Known hooks are native-only per tool. Their scripts, OpenCode plugins, and hook
 registrations are optional author-owned artifacts: when present they are
-validated in their own view (OpenCode plugins also require the export marker),
-but they are never projected to another tool or stale-removed. Runtime delivery
+validated in their own view (OpenCode plugins also require the v2 default-export
+marker), but they are never projected to another tool or stale-removed. Runtime delivery
 still receives the complete native view, including those hooks and registrations.
 
 `djinn config status` is safe for diagnostics and automation: it reports a
@@ -95,7 +98,7 @@ djinn run claude "Fix the bug in main.py" --write --model sonnet
 djinn run codex "Review this change" --model gpt-5
 
 # OpenCode in read-only plan mode
-djinn run opencode "Plan a cleanup for this module" --model default
+djinn run opencode "Plan a cleanup for this module" --model local/primary
 
 # JSON output for scripting
 djinn run claude "List all TODOs" --model sonnet --json | jq '.result'

@@ -9,6 +9,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "mcp-register.sh"
 RAW_UI_MARKERS = ("✓", "⚠", "✗", "ℹ", "↻", "⊕", "✕")
@@ -51,12 +53,14 @@ def run_register(
         "CODEX_CONFIG": str(tmp_path / ".codex" / "config.toml"),
         "MCP_SERVERS_CONFIG": str(config_path),
         "NO_COLOR": "1",
+        "WORKFLOW_PUBLISHER": str(ROOT / "src/djinn_in_a_box/core/workflow_publisher.py"),
         "PATH": f"{bin_dir}:{Path(jq).parent}:/usr/bin:/bin",
     }
     env.pop("DJINN_FORCE_UI_COLOR", None)
     if env_updates is not None:
         env.update(env_updates)
 
+    (tmp_path / ".config/opencode").mkdir(parents=True, exist_ok=True)
     return subprocess.run(
         [
             zsh,
@@ -168,7 +172,7 @@ def test_registry_skips_an_entry_without_transport(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Skipping invalid transport for missing-transport" in result.stderr
     assert "Summary: 0 registered, 0 disabled, 1 skipped" in result.stderr
-    assert json.loads((tmp_path / ".config/opencode/.opencode.json").read_text()) == {}
+    assert not (tmp_path / ".config/opencode/opencode.json").exists()
     assert not (tmp_path / ".codex/config.toml").exists()
 
 
@@ -252,3 +256,121 @@ def test_plain_fallback_when_output_lib_is_absent(tmp_path: Path) -> None:
     assert_plain_startup_output(result.stderr)
     assert "[warn] output library not found" in result.stderr
     assert "[ok] local-http (streamable-http)" in result.stderr
+
+
+def test_opencode_mcp_uses_v2_carrier_and_preserves_provider(tmp_path: Path) -> None:
+    root = tmp_path / ".config/opencode"
+    root.mkdir(parents=True)
+    config = root / "opencode.json"
+    personal = {"providers": {"local": {"settings": {"baseURL": "http://model.example/v1"}}}}
+    carrier = tmp_path / "carrier"
+    carrier.mkdir()
+    (carrier / "opencode.json").write_text(json.dumps({**personal, "mcp": {"servers": {
+        "off": {"type": "remote", "url": "http://off.example/mcp"},
+        "sse": {"type": "remote", "url": "http://old.example/mcp"},
+        "personal": {"type": "remote", "url": "http://personal.example/mcp"},
+    }}}))
+    copied = subprocess.run(
+        ["python3", str(ROOT / "src/djinn_in_a_box/core/workflow_publisher.py"),
+         "personal-carrier", "copy", "--carrier", str(carrier), "--runtime", str(root)],
+        capture_output=True, text=True, check=False,
+    )
+    assert copied.returncode == 0, copied.stderr
+    result = run_register(tmp_path, {
+        "remote": {"transport": "streamable-http", "url": "http://mcp.example/mcp"},
+        "off": {"transport": "streamable-http", "url": "http://off.example/mcp", "enabled": False},
+        "sse": {"transport": "sse", "url": "http://sse.example/sse"},
+    })
+    assert result.returncode == 0, result.stderr
+    output = json.loads(config.read_text())
+    assert output["providers"] == personal["providers"]
+    assert output["mcp"]["servers"] == {
+        "remote": {"type": "remote", "url": "http://mcp.example/mcp"},
+        "personal": {"type": "remote", "url": "http://personal.example/mcp"},
+    }
+    assert "OpenCode does not support sse, skipped" in result.stderr
+    assert not (root / ".opencode.json").exists()
+
+
+@pytest.mark.parametrize(
+    "transport,enabled", (("streamable-http", True), ("streamable-http", False), ("sse", True))
+)
+def test_opencode_mcp_never_writes_through_fixed_temp_link(tmp_path, transport, enabled):
+    root = tmp_path / ".config/opencode"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"sentinel")
+    (root / "opencode.json.tmp").symlink_to(outside)
+    config = root / "opencode.json"
+    config.write_text('{"provider":{"local":{}},"mcp":{"servers":{"fixture":{"old":true}}}}')
+    result = run_register(
+        tmp_path,
+        {"fixture": {"url": "https://mcp.example/mcp", "transport": transport, "enabled": enabled}},
+    )
+    assert result.returncode == 0, result.stderr
+    assert outside.read_bytes() == b"sentinel"
+    assert (root / "opencode.json.tmp").is_symlink()
+    assert not config.is_symlink()
+    assert config.stat().st_mode & 0o777 == 0o600
+    data = json.loads(config.read_bytes())
+    assert data["provider"] == {"local": {}}
+    if transport == "streamable-http" and enabled:
+        assert data["mcp"]["servers"]["fixture"] == {
+            "type": "remote",
+            "url": "https://mcp.example/mcp",
+        }
+    else:
+        assert "fixture" not in data["mcp"]["servers"]
+
+
+def test_missing_main_mcp_uses_empty_object_and_private_install(tmp_path):
+    result = run_register(
+        tmp_path, {"fixture": {"url": "https://mcp.example/mcp", "transport": "streamable-http"}}
+    )
+    assert result.returncode == 0, result.stderr
+    path = tmp_path / ".config/opencode/opencode.json"
+    assert json.loads(path.read_bytes()) == {
+        "mcp": {"servers": {"fixture": {"type": "remote", "url": "https://mcp.example/mcp"}}}
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("fault", ("capture", "install"))
+def test_opencode_mcp_failed_write_warns_and_preserves_main(tmp_path, fault):
+    root = tmp_path / ".config/opencode"
+    root.mkdir(parents=True)
+    main = root / "opencode.json"
+    original = b'{"provider":{"local":{}}}'
+    main.write_bytes(original)
+    env_updates = {}
+    bin_scripts = {}
+    if fault == "capture":
+        bin_scripts["mktemp"] = "#!/bin/sh\nexit 1\n"
+    else:
+        helper = tmp_path / "refuse.py"
+        helper.write_text("raise SystemExit(1)\n")
+        env_updates["WORKFLOW_PUBLISHER"] = str(helper)
+    result = run_register(
+        tmp_path,
+        {"fixture": {"transport": "streamable-http", "url": "https://mcp.example/mcp"}},
+        env_updates=env_updates,
+        bin_scripts=bin_scripts,
+    )
+    assert result.returncode == 0, result.stderr
+    assert main.read_bytes() == original
+    assert "OpenCode: could not" in result.stderr
+    assert list(root.iterdir()) == [main]
+
+
+@pytest.mark.parametrize("original", (b"", b" \t\n"), ids=("empty", "whitespace"))
+def test_opencode_mcp_empty_json_warns_and_preserves_main(tmp_path: Path, original: bytes) -> None:
+    main = tmp_path / ".config/opencode/opencode.json"
+    main.parent.mkdir(parents=True)
+    main.write_bytes(original)
+    result = run_register(
+        tmp_path,
+        {"fixture": {"transport": "streamable-http", "url": "https://mcp.example/mcp"}},
+    )
+    assert result.returncode == 0, result.stderr
+    assert main.read_bytes() == original
+    assert "OpenCode: could not install MCP configuration" in result.stderr

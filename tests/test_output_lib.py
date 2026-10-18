@@ -335,8 +335,8 @@ def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
     instructions = b"OpenCode instructions.\n"
     (opencode_seed / "AGENTS.md").write_bytes(instructions)
     personal_opencode_settings = b'{"personal":true}\n'
-    if not (tmp_path / ".opencode" / ".opencode.json").exists():
-        (tmp_path / ".opencode" / ".opencode.json").write_bytes(personal_opencode_settings)
+    if not (tmp_path / ".opencode" / "opencode.json").exists():
+        (tmp_path / ".opencode" / "opencode.json").write_bytes(personal_opencode_settings)
     canonical = tmp_path / "canonical"
     canonical.mkdir(exist_ok=True)
     (canonical / ".djinn-config-sync.json").write_text(
@@ -414,9 +414,9 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert "[warn] Docker Access: Disabled" in result.stderr
     assert "[info] Enable with: djinn start --docker" in result.stderr
     assert "MCP Gateway" not in result.stderr
-    persistent_settings = tmp_path / ".opencode" / ".opencode.json"
+    persistent_settings = tmp_path / ".opencode" / "opencode.json"
     assert json.loads(persistent_settings.read_bytes())["personal"] is True
-    runtime_settings = tmp_path / "runtime-opencode" / ".opencode.json"
+    runtime_settings = tmp_path / "runtime-opencode" / "opencode.json"
     assert runtime_settings.read_bytes() == personal_opencode_settings
 
     from test_entrypoint_shutdown import Session, _atomic_edit, _pid_running

@@ -1,5 +1,7 @@
 #!/bin/zsh
 
+typeset -ga opencode_protected_paths
+
 if ! whence -w ui_info >/dev/null 2>&1; then
     ui_section() { echo "[info] $1" >&2; }
     ui_ok() { echo "[ok] $1" >&2; }
@@ -148,7 +150,7 @@ _capture_session_runtime() {
 _sync_session_carrier() {
     local runtime_file=$1 target_file=$2 acknowledged_file=$3 mode=$4 filter_kind=$5
     local seed_dir_path=${target_file:h} state_dir=${acknowledged_file:h}
-    local capture='' filtered='' payload message compare_result=1
+    local capture='' message
     message="could not persist ${runtime_file} → ${target_file}"
     [[ -f "$runtime_file" && -d "$seed_dir_path" ]] || return 0
 
@@ -161,6 +163,33 @@ _sync_session_carrier() {
         rm -f -- "$capture" 2>/dev/null || :
         return 0
     fi
+    _sync_session_capture "$runtime_file" "$target_file" "$acknowledged_file" "$mode" \
+        "$filter_kind" "$capture" _install_settings_capture _validate_settings_capture
+}
+
+_install_settings_capture() {
+    local payload=$1 target_file=$2 mode=$3
+    if [[ "$mode" == checkpoint ]]; then
+        python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null 2>&1
+    else
+        python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null
+    fi
+}
+
+_validate_settings_capture() {
+    jq -s -e 'length == 1' "$1"
+}
+
+_validate_opencode_capture() {
+    python3 "$WORKFLOW_PUBLISHER" personal-carrier validate --source "$1"
+}
+
+_sync_session_capture() {
+    local runtime_file=$1 target_file=$2 acknowledged_file=$3 mode=$4 filter_kind=$5
+    local capture=$6 installer=$7 validator=$8
+    local seed_dir_path=${target_file:h} state_dir=${acknowledged_file:h}
+    local filtered='' payload message compare_result=1
+    message="could not persist ${runtime_file} → ${target_file}"
     if [[ -f "$acknowledged_file" ]]; then
         compare_result=0
         cmp -s "$capture" "$acknowledged_file" || compare_result=$?
@@ -173,7 +202,7 @@ _sync_session_carrier() {
         rm -f -- "$capture" 2>/dev/null || :
         return 0
     fi
-    if ! jq -s -e 'length == 1' "$capture" >/dev/null 2>&1; then
+    if ! "$validator" "$capture" >/dev/null 2>&1; then
         [[ "$mode" == final ]] && ui_warn "$message (settings are not valid JSON)"
     else
         payload=$capture
@@ -197,21 +226,15 @@ _sync_session_carrier() {
             payload=$filtered
         fi
 
-        if [[ ! -w "$seed_dir_path" ]]; then
+        if [[ "$installer" == _install_settings_capture && ! -w "$seed_dir_path" ]]; then
             _session_sync_warn "$runtime_file" "$mode" "$message (target directory not writable)"
-        elif { [[ "$mode" == checkpoint ]] &&
-            python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null 2>&1; } ||
-            { [[ "$mode" == final ]] &&
-            python3 "$SETTINGS_COPY_HELPER" --copy-settings "$payload" "$target_file" >/dev/null; }; then
+        elif "$installer" "$payload" "$target_file" "$mode"; then
             # mv -T replaces a symlink to a directory, so reject that shape explicitly.
             if [[ -L "$acknowledged_file" && -d "$acknowledged_file" ]] ||
                 ! mv -fT -- "$capture" "$acknowledged_file" 2>/dev/null; then
                 _session_sync_warn "$runtime_file" "$mode" "$message"
             fi
         else
-            if [[ "$mode" == final && "$runtime_file" == "${OPENCODE_RUNTIME_SETTINGS:-}" ]]; then
-                message='could not persist OpenCode personal settings'
-            fi
             _session_sync_warn "$runtime_file" "$mode" "$message"
         fi
     fi
@@ -225,4 +248,61 @@ reverse_sync_file() {
 
 reverse_sync_claude_settings() {
     _sync_session_carrier "$1" "$2" "$3" "$4" claude
+}
+
+
+_opencode_is_protected() {
+    (( ${opencode_protected_paths[(Ie)$1]} ))
+}
+
+_install_opencode_capture() {
+    local payload=$1 target_file=$2 mode=$3
+    local relative=${target_file#"$HOME/.opencode/"}
+    _opencode_is_protected "$relative" && return 0
+    if [[ "$mode" == checkpoint ]]; then
+        python3 "$WORKFLOW_PUBLISHER" personal-carrier install --root "$HOME/.opencode" \
+            --relative "$relative" --source "$payload" >/dev/null 2>&1
+    else
+        python3 "$WORKFLOW_PUBLISHER" personal-carrier install --root "$HOME/.opencode" \
+            --relative "$relative" --source "$payload" >/dev/null
+    fi
+}
+
+_sync_opencode_personal() {
+    local mode=$1 scratch capture entry relative reason runtime_file acknowledged_file
+    if ! scratch=$(mktemp -d "$djinn_state_dir/opencode.XXXXXXXX" 2>/dev/null); then
+        _warn_opencode_unpersisted "$mode"
+        return 0
+    fi
+    capture="$scratch/capture"
+    if ! python3 "$WORKFLOW_PUBLISHER" personal-carrier snapshot \
+        --runtime "$OPENCODE_RUNTIME_ROOT" --capture "$capture" > "$scratch/refused" 2>/dev/null; then
+        _session_sync_warn "$OPENCODE_RUNTIME_ROOT" "$mode" "could not capture $OPENCODE_RUNTIME_ROOT"
+        rm -rf -- "$scratch" 2>/dev/null || :
+        return 0
+    fi
+    while IFS= read -r entry; do
+        relative=$(jq -r '.relative' <<< "$entry")
+        reason=$(jq -r '.reason' <<< "$entry")
+        _session_sync_warn "$OPENCODE_RUNTIME_ROOT/$relative" "$mode" "refused $relative: $reason"
+    done < <(jq -c '.[]' "$scratch/refused")
+    for runtime_file in "$capture"/**/*(.DN); do
+        relative=${runtime_file#"$capture/"}
+        _opencode_is_protected "$relative" && continue
+        [[ "$mode" == checkpoint && "${djinn_checkpoint_stopping:-0}" == 1 ]] && break
+        acknowledged_file="$djinn_state_dir/opencode.ack/$relative"
+        if ! mkdir -p -- "${acknowledged_file:h}" 2>/dev/null; then
+            _session_sync_warn "$OPENCODE_RUNTIME_ROOT/$relative" "$mode" "could not persist $relative"
+            continue
+        fi
+        _sync_session_capture "$OPENCODE_RUNTIME_ROOT/$relative" "$HOME/.opencode/$relative" \
+            "$acknowledged_file" "$mode" raw "$runtime_file" _install_opencode_capture _validate_opencode_capture
+    done
+    rm -rf -- "$scratch" 2>/dev/null || :
+    return 0
+}
+
+_warn_opencode_unpersisted() {
+    local mode=$1
+    _session_sync_warn "$OPENCODE_RUNTIME_ROOT" "$mode" "could not persist $OPENCODE_RUNTIME_ROOT → $HOME/.opencode"
 }

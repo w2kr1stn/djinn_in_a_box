@@ -9,6 +9,16 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Require `DJINN_LIVE_DOCKER=1` before probing or running live Docker overlay
+  tests; CI opts in on its test step.
+- Persist OpenCode `opencode.json`, `cli.json` and custom themes through the
+  allowlisted personal carrier, with contained access, strict JSON write-back
+  and 30 s/final checkpoints.
+- Register OpenCode MCP servers in the 2.x shape, preserve personal settings,
+  and remove disabled or unsupported SSE registrations.
+- Launch OpenCode audits with standalone v2 permissions and verify the native
+  npm archive's integrity before extraction; admit v2 default-export plugins
+  and provide optional reference plugins and a neutral local-provider template.
 - `djinn start --detach` now delivers `--mount` and `--here` paths containing
   `$` literally instead of letting Compose interpolate them. A `--mount` or
   `--here` source whose resolved path contains `:` is refused instead of being
@@ -76,6 +86,9 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Move dev and audit OpenCode installs to npm
+  [`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
+  (published 2026-10-08).
 - Restore refuses unknown sync-path names. Backup and restore block dev container
   creation while they run. Clearing fails when an entry other than an empty mount
   placeholder cannot be removed.

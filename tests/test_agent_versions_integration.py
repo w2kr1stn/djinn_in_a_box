@@ -21,7 +21,7 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
     project, env, calls = request.getfixturevalue("script_env")
     context = project / "assistant"
     context.mkdir()
-    for name in ("Dockerfile", "entrypoint.sh"):
+    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh"):
         (context / name).write_bytes((ROOT / "assistant" / name).read_bytes())
     with (project / "Dockerfile").open("a") as stream:
         stream.write("ARG DOCKER_VERSION=27.4.1\n")
@@ -59,7 +59,7 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
     assert len(calls.read_text().splitlines()) == 3
     assert set(calls.read_text().splitlines()) == {
         "view @anthropic-ai/claude-code version", "view @openai/codex version",
-        "view opencode-ai version",
+        "view @opencode/cli version",
     }
     monkeypatch.setattr(container, "load_config", lambda: mock_app_config)
     for name in ("preflight", "_sync_build_files", "_pull_agent_docker_image_if_missing"):
@@ -88,7 +88,7 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
     assert bake[bake.index("--set"):] == [
         "--set", "dev.args.CLAUDE_CODE_VERSION=2.1.300",
         "--set", "dev.args.CODEX_VERSION=0.161.0",
-        "--set", "dev.args.OPENCODE_VERSION=1.18.40", "dev", "dbus-helper",
+        "--set", "dev.args.OPENCODE_VERSION=2.0.25", "dev", "dbus-helper",
     ]
     image = assistant.ensure_image(project, agent, "linux/amd64", "default")
     build = next(argv for argv, _ in fake.calls if argv[1:3] == ["buildx", "build"])

@@ -395,16 +395,42 @@ that Claude and Codex registrations remain paired with those scripts. See
 [Native-only workflow artifacts](IMPLEMENTATION.md#native-only-workflow-artifacts)
 for the per-tool tables, container paths, and validation behavior.
 
+### OpenCode 2
+
+OpenCode uses the pinned `@opencode/cli` v2 package. Its personal carrier
+`<config-root>/opencode/` persists `opencode.json`, `cli.json` and
+`themes/<name>.json` (flat, non-empty UTF-8 names without a leading `.`). Startup
+admits the runtime entries before workflow publication and MCP registration, then
+copies carrier bytes into `~/.config/opencode/` without JSON validation.
+Directory-descriptor access refuses symlinks and non-regular allowlisted entries
+in either tree; these violations and copy failures stop startup with the entry
+and reason. Each file is limited to 1 MiB; oversized carrier files warn, are
+skipped and stay protected from write-back for the session. See the
+[OpenCode 2 guide](docs/opencode-v2.md) for the pin, theme selection, local-provider
+template, endpoint declarations and optional plugins.
+
 ### Tool-Owned Runtime State
 
 Claude state, Claude personal settings and OpenCode personal settings are
-checkpointed every 30 s with atomic writes. Changes older than about 30 s survive
+checkpointed every 30 s and at clean stop or `docker stop`, using atomic writes
+and exactly one JSON document for write-back. Changes older than about 30 s survive
 a crash, plus checkpoint duration and scheduling delay, when JSON is valid and
 storage is writable and healthy. Unchanged runtime content leaves host edits
 alone, including `settings.local.json` at clean stop; when both changed, runtime
 wins. Without checkpoint references (failed setup or lost private state), final
-sync writes every valid carrier and can overwrite a host-only edit, provided it
-can recreate its private state at stop; otherwise it warns and writes nothing.
+sync writes every valid carrier except protected OpenCode paths and can overwrite
+a host-only edit or restore a deleted carrier file, provided it can recreate its
+private state at stop; otherwise it warns and writes nothing.
+
+OpenCode re-enumerates the allowlist each time, including runtime-created themes
+and `cli.json`; write-back requires strict UTF-8 JSON (no malformed numbers,
+`NaN` or `Infinity`/`-Infinity`); JSONC is not persisted. Refused runtime entries
+leave the carrier and acknowledgement unchanged, warn once during checkpoints and again at final
+sync if unresolved; invalid JSON is retried and warned about at final sync.
+An oversized runtime entry at initialization keeps safe sibling checkpoints
+running and can persist after repair; capture I/O failures disable checkpoints.
+Persistence is upsert-only: a theme deleted at runtime returns after recreation.
+For reliable removal, stop the container, delete it in the carrier, then recreate.
 
 Crash residue (`.djinn-settings-*`) is never restored or projected into workflow
 delivery. `djinn doctor` reports it as zone drift in config-root `claude/` and

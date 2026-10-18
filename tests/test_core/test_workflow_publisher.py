@@ -908,9 +908,9 @@ def test_opencode_cli_profile_rejects_foreign_seed_files(tmp_path: Path, foreign
     _write(view / "AGENTS.md", instructions)
     _write(view / "agents/reviewer.md", agent)
     plugins = {
-        "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
-        "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
-        "plugins/ready-notify.js": b"export const Plugin = () => ({});\n",
+        "plugins/session-start-status.js": b"const x = {}; export { x as default };\n",
+        "plugins/security-reminder.js": b"export default { id: 'fixture', setup() {} };\n",
+        "plugins/ready-notify.js": b"export default { id: 'fixture', setup() {} };\n",
     }
     for path, content in plugins.items():
         _write(view / path, content)
@@ -951,8 +951,14 @@ def test_opencode_cli_blocks_seed_content_that_differs_from_canonical_manifest(
     assert _tree(target) == before
 
 
+@pytest.mark.parametrize(
+    "export_clause",
+    (b"export {p as default}", b"export{p as default}", b"export\n{p as default}"),
+    ids=("spaced", "compact", "newline"),
+)
 def test_opencode_cli_delivers_native_plugins_not_managed_by_canonical_manifest(
     tmp_path: Path,
+    export_clause: bytes,
 ) -> None:
     canonical = tmp_path / "canonical"
     target = tmp_path / "target"
@@ -962,9 +968,9 @@ def test_opencode_cli_delivers_native_plugins_not_managed_by_canonical_manifest(
     seed.mkdir()
     instructions = b"OpenCode instructions\n"
     plugins = {
-        "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
-        "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
-        "plugins/ready-notify.js": b"export const Plugin = () => ({});\n",
+        "plugins/session-start-status.js": b"const p = {}; " + export_clause + b";\n",
+        "plugins/security-reminder.js": b"export default { id: 'fixture', setup() {} };\n",
+        "plugins/ready-notify.js": b"export default { id: 'fixture', setup() {} };\n",
     }
     _canonical_identity(canonical, files={"AGENTS.md": (instructions, False)})
     _write(seed / "AGENTS.md", instructions)
@@ -986,7 +992,7 @@ def test_opencode_cli_delivers_native_plugins_not_managed_by_canonical_manifest(
         assert (target / path).read_bytes() == content
 
     tracked_plugin = target / "plugins/ready-notify.js"
-    tracked_plugin.write_bytes(b"export const Plugin = () => ({ edited: true });\n")
+    tracked_plugin.write_bytes(b"export default { id: 'fixture', setup() { return () => {}; } };\n")
     before_drift = _tree(target)
     drift = _run_cli(seed, canonical, target, "--profile", "opencode")
 
@@ -1004,7 +1010,7 @@ def test_opencode_cli_rejects_untracked_non_native_seed_file(tmp_path: Path) -> 
     instructions = b"OpenCode instructions\n"
     _canonical_identity(canonical, files={"AGENTS.md": (instructions, False)})
     _write(seed / "AGENTS.md", instructions)
-    _write(seed / "plugins/ready-notify.js", b"export const Plugin = () => ({});\n")
+    _write(seed / "plugins/ready-notify.js", b"export default { id: 'fixture', setup() {} };\n")
     _write(seed / "commands/untracked.md", b"---\nname: untracked\n---\nUntracked\n")
     _write(target / "personal.json", b'{"keep":true}\n')
     before = _tree(target)
@@ -1015,7 +1021,17 @@ def test_opencode_cli_rejects_untracked_non_native_seed_file(tmp_path: Path) -> 
     assert _tree(target) == before
 
 
-def test_opencode_cli_rejects_invalid_native_plugin_before_runtime_mutation(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"const plugin = () => ({});",
+        b"export const Plugin = () => ({});",
+        b"exportdefault { id: 'fixture', setup() {} };",
+    ],
+)
+def test_opencode_cli_rejects_invalid_native_plugin_before_runtime_mutation(
+    tmp_path: Path, content: bytes
+) -> None:
     canonical = tmp_path / "canonical"
     target = tmp_path / "target"
     seed = tmp_path / "seed"
@@ -1024,7 +1040,7 @@ def test_opencode_cli_rejects_invalid_native_plugin_before_runtime_mutation(tmp_
     seed.mkdir()
     _canonical_identity(canonical, files={"AGENTS.md": (b"OpenCode instructions\n", False)})
     _write(seed / "AGENTS.md", b"OpenCode instructions\n")
-    _write(seed / "plugins/ready-notify.js", b"const plugin = () => ({});\n")
+    _write(seed / "plugins/ready-notify.js", content)
     _write(target / "personal.json", b'{"keep":true}\n')
     before = _tree(target)
 

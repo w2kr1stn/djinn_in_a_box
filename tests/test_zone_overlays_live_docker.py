@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -31,7 +32,8 @@ def _docker_daemon_reachable() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _docker_daemon_reachable(), reason="Docker daemon is not reachable"
+    os.environ.get("DJINN_LIVE_DOCKER") != "1" or not _docker_daemon_reachable(),
+    reason="Requires DJINN_LIVE_DOCKER=1 and a reachable Docker daemon",
 )
 
 

@@ -66,8 +66,7 @@ def _tree(root: Path) -> dict[PurePosixPath, tuple[bytes, int]]:
 
 
 def _hook_content(name: str) -> bytes:
-    marker = b'"tool.execute.before"' if name == "security" else b"event"
-    return b"export const Plugin = async () => ({ " + marker + b": async () => {} });\n"
+    return f"export default {{ id: '{name}', setup() {{}} }};\n".encode()
 
 
 def _hook_registrations(tool: ConfigSyncSource) -> dict[str, object]:
@@ -282,13 +281,11 @@ def test_full_surface_projection_excludes_hooks_and_preserves_native_ones(
         assert (target_root / "hooks.json").read_bytes() == native_carrier
         assert tomllib.loads((target_root / "config.toml").read_text())
     manifest = json.loads((project / "config" / MANIFEST_NAME).read_text())
+    assert not {item["path"] for item in manifest["items"]} & {
+        f"{target}/{hook.script_path}" for hook in owned.hooks
+    }
     assert not {
-        item["path"] for item in manifest["items"]
-    } & {f"{target}/{hook.script_path}" for hook in owned.hooks}
-    assert not {
-        (item["path"], tuple(item["key_path"]))
-        for item in manifest["items"]
-        if "key_path" in item
+        (item["path"], tuple(item["key_path"])) for item in manifest["items"] if "key_path" in item
     } & {
         (f"{target}/{hook.carrier_path}", ("hooks", hook.event))
         for hook in owned.hooks
@@ -348,7 +345,15 @@ def test_projection_to_native_only_target_path_blocks_without_silent_drop(tmp_pa
     assert _tree(project / "config") == before
 
 
-@pytest.mark.parametrize("content", [b"const plugin = async () => ({});\n", b"\xff"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"const plugin = async () => ({});\n",
+        b"export const Plugin = () => ({});",
+        b"exportdefault { id: 'fixture', setup() {} };",
+        b"\xff",
+    ],
+)
 def test_invalid_opencode_plugin_blocks_without_mutating_target_or_manifest(
     tmp_path: Path, content: bytes
 ) -> None:
@@ -364,7 +369,10 @@ def test_invalid_opencode_plugin_blocks_without_mutating_target_or_manifest(
     assert not (project / "config" / MANIFEST_NAME).exists()
 
 
-@pytest.mark.parametrize("content", [b"const plugin = async () => ({});\n", b"\xff"])
+@pytest.mark.parametrize(
+    "content",
+    [b"const plugin = async () => ({});\n", b"export const Plugin = () => ({});", b"\xff"],
+)
 def test_invalid_native_target_plugin_blocks_its_delivery_without_mutation(
     tmp_path: Path, content: bytes
 ) -> None:
@@ -414,7 +422,7 @@ def test_real_claude_python_hooks_are_not_projected_and_native_plugin_is_preserv
     plugin = _write(
         opencode_root,
         "plugins/ready-notify.js",
-        b"export const Plugin = async () => ({ event: async () => {} });\n",
+        b"export default { id: 'fixture', setup() {} };\n",
     )
     plugin_bytes = plugin.read_bytes()
 
@@ -429,8 +437,14 @@ def test_real_claude_python_hooks_are_not_projected_and_native_plugin_is_preserv
     }[PurePosixPath("plugins/ready-notify.js")] == plugin_bytes
 
 
+@pytest.mark.parametrize(
+    "export_clause",
+    (b"export {p as default}", b"export{p as default}", b"export\n{p as default}"),
+    ids=("spaced", "compact", "newline"),
+)
 def test_opencode_runtime_publisher_delivers_native_plugins_after_claude_sync(
     tmp_path: Path,
+    export_clause: bytes,
 ) -> None:
     project, config_path = _workspace(tmp_path, "claude")
     claude_root = project / "config" / "claude"
@@ -443,9 +457,9 @@ def test_opencode_runtime_publisher_delivers_native_plugins_after_claude_sync(
             f"#!/usr/bin/env python3\nprint({hook.name!r})\n",
         )
     plugins = {
-        "plugins/session-start-status.js": b"export const Plugin = () => ({});\n",
-        "plugins/security-reminder.js": b"export const Plugin = () => ({});\n",
-        "plugins/ready-notify.js": b"export const Plugin = () => ({});\n",
+        "plugins/session-start-status.js": b"const p = {}; " + export_clause + b";\n",
+        "plugins/security-reminder.js": b"export default { id: 'fixture', setup() {} };\n",
+        "plugins/ready-notify.js": b"export default { id: 'fixture', setup() {} };\n",
     }
     for path, content in plugins.items():
         _write(opencode_root, path, content)

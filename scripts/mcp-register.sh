@@ -144,6 +144,31 @@ _codex_disable_server() {
     _codex_remove_server_from_toml "$server"
 }
 
+# The entrypoint has admitted this root before registration. jq's output stays
+# in private storage; only the contained writer commits into the runtime root.
+_opencode_update_config() {
+    local config=$1 scratch
+    shift
+    if ! scratch=$(mktemp -d -t djinn-mcp.XXXXXXXX 2>/dev/null); then
+        ui_warn "OpenCode: could not create MCP capture"
+        return 0
+    fi
+    if { if [[ -f "$config" ]]; then
+            jq "$@" "$config"
+        else
+            jq "$@" <<< '{}'
+        fi
+    } > "$scratch/opencode.json" &&
+        [[ -s "$scratch/opencode.json" ]] &&
+        python3 "${WORKFLOW_PUBLISHER:-/home/dev/workflow-publisher.py}" personal-carrier install \
+            --root "${config:h}" --relative opencode.json --source "$scratch/opencode.json"; then
+        :
+    else
+        ui_warn "OpenCode: could not install MCP configuration"
+    fi
+    rm -rf -- "$scratch"
+}
+
 register_mcp_servers() {
     local mcp_config="${MCP_SERVERS_CONFIG:-$HOME/.config/mcp-servers.json}"
 
@@ -167,15 +192,13 @@ register_mcp_servers() {
 
     ui_info "[mcp] Registering servers from $mcp_config_name..."
 
-    local opencode_config=~/.config/opencode/.opencode.json
-    mkdir -p "${opencode_config:h}"
-    [[ ! -f "$opencode_config" ]] && echo '{}' > "$opencode_config"
+    local opencode_config="${OPENCODE_RUNTIME_SETTINGS:-$HOME/.config/opencode/opencode.json}"
 
     local registered=0
     local disabled=0
     local skipped=0
 
-    local entry server url transport enabled host claude_transport opencode_transport
+    local entry server url transport enabled host claude_transport
     local tool_timeout_sec startup_timeout_sec
     while IFS= read -r entry; do
         server=$(jq -r '.key' <<< "$entry")
@@ -223,8 +246,7 @@ register_mcp_servers() {
                 _mcp_run_boxed "claude mcp" claude mcp remove --scope user "$server" || true
             fi
             _codex_disable_server "$server"
-            jq --arg name "$server" 'del(.mcpServers[$name])' \
-                "$opencode_config" > "$opencode_config.tmp" && mv "$opencode_config.tmp" "$opencode_config"
+            _opencode_update_config "$opencode_config" --arg name "$server" 'del(.mcp.servers[$name])'
             ui_item "-" "${server} (disabled)"
             (( ++disabled ))
             continue
@@ -244,11 +266,15 @@ register_mcp_servers() {
             _mcp_run_boxed "claude mcp" claude mcp add --transport "$claude_transport" --scope user "$server" "$url" || true
         fi
 
-        opencode_transport="$transport"
-        [[ "$transport" == "streamable-http" ]] && opencode_transport="http"
-        jq --arg name "$server" --arg url "$url" --arg transport "$opencode_transport" \
-            '.mcpServers[$name] = {"type": $transport, "url": $url}' \
-            "$opencode_config" > "$opencode_config.tmp" && mv "$opencode_config.tmp" "$opencode_config"
+        if [[ "$transport" == "streamable-http" ]]; then
+            _opencode_update_config "$opencode_config" --arg name "$server" --arg url "$url" \
+                '.mcp.servers[$name] = {"type": "remote", "url": $url}'
+        else
+            # OpenCode 2 supports Streamable HTTP, not the legacy SSE transport.
+            # Remove a previous managed registration instead of trying its URL as HTTP.
+            _opencode_update_config "$opencode_config" --arg name "$server" 'del(.mcp.servers[$name])'
+            ui_warn "${server}: OpenCode does not support ${transport}, skipped"
+        fi
 
         _codex_register_server "$server" "$url" "$transport" "$tool_timeout_sec" "$startup_timeout_sec"
 

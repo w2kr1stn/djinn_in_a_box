@@ -25,6 +25,16 @@ PUBLISHER_WRITE_ERROR_PREFIX = "workflow publisher write-error: "
 PUBLISHER_LOCK_ERROR_PREFIX = "workflow publisher lock-error: "
 
 
+def opencode_plugin_has_default_export(content: bytes) -> bool:
+    """Check the v2 entrypoint marker; JavaScript execution is OpenCode's job."""
+    try:
+        return re.search(
+            r"\bexport(?:\s+default\b|\s*\{[^}]*\bas\s+default\s*[,}])", content.decode()
+        ) is not None
+    except UnicodeDecodeError:
+        return False
+
+
 class DriftClass(StrEnum):
     CLEAN = "clean"
     SOURCE_CHANGED = "source-changed"
@@ -1275,7 +1285,7 @@ def _open_parent(root: int, path: PurePosixPath, *, create: bool) -> int | None:
             os.close(descriptor)
 
 
-def _read_at(directory: int, name: str) -> _Snapshot | None:
+def _read_at(directory: int, name: str, *, limit: int | None = None) -> _Snapshot | None:
     """Read a regular file without opening anything else for I/O.
 
     The entry is pinned with O_PATH, which runs no driver open and does not
@@ -1291,8 +1301,10 @@ def _read_at(directory: int, name: str) -> _Snapshot | None:
         info = os.fstat(pin)
         if not stat.S_ISREG(info.st_mode):
             raise PublishError(DriftClass.COLLISION)
+        if limit is not None and info.st_size > limit:
+            raise _PersonalOversizeError
         try:
-            content = _read_pinned(pin)
+            content = _read_pinned(pin) if limit is None else _read_pinned(pin, limit=limit)
         except OSError as error:
             raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     finally:
@@ -1300,12 +1312,18 @@ def _read_at(directory: int, name: str) -> _Snapshot | None:
     return _Snapshot(content, bool(info.st_mode & stat.S_IXUSR))
 
 
-def _read_pinned(pin: int) -> bytes:
+def _read_pinned(pin: int, *, limit: int | None = None) -> bytes:
     descriptor = os.open(f"/proc/self/fd/{pin}", os.O_RDONLY | os.O_CLOEXEC)
     try:
         chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1 << 20):
+        total = 0
+        while chunk := os.read(
+            descriptor, 1 << 20 if limit is None else min(1 << 20, limit + 1 - total)
+        ):
             chunks.append(chunk)
+            total += len(chunk)
+            if limit is not None and total > limit:
+                raise _PersonalOversizeError
         return b"".join(chunks)
     finally:
         os.close(descriptor)
@@ -1331,7 +1349,9 @@ def _replace_relative(root: int, path: PurePosixPath, content: bytes, executable
         os.close(parent)
 
 
-def _replace_at(directory: int, name: str, content: bytes, executable: bool) -> None:
+def _replace_at(
+    directory: int, name: str, content: bytes, executable: bool, *, mode: int | None = None
+) -> None:
     _require_entry_name(name)
     temporary = _TEMPORARY_PREFIX + os.urandom(8).hex()
     descriptor = os.open(
@@ -1345,7 +1365,7 @@ def _replace_at(directory: int, name: str, content: bytes, executable: bool) -> 
             remaining = memoryview(content)
             while remaining:
                 remaining = remaining[os.write(descriptor, remaining) :]
-            os.fchmod(descriptor, 0o755 if executable else 0o644)
+            os.fchmod(descriptor, mode if mode is not None else (0o755 if executable else 0o644))
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -1482,11 +1502,11 @@ def _read_directory(
         content = snapshot.content
         if profile == "opencode" and relative in _NATIVE_ONLY_PATHS["opencode"]:
             try:
-                valid_plugin = "export" in content.decode()
+                content.decode()
             except UnicodeDecodeError as error:
                 raise OSError("OpenCode plugin is not UTF-8") from error
-            if not valid_plugin:
-                raise OSError("OpenCode plugin export marker is missing")
+            if not opencode_plugin_has_default_export(content):
+                raise OSError("OpenCode v2 plugin default export marker is missing")
         files.append(PublishedFile(relative, content, snapshot.executable))
     return subdirectories
 
@@ -1726,6 +1746,232 @@ def _verify_seed_against_canonical_manifest(
         raise PublishError(DriftClass.SOURCE_CHANGED)
 
 
+# Personal OpenCode files are deliberately outside workflow ownership/manifests.
+_PERSONAL_LIMIT = 1 << 20
+
+
+class _PersonalOversizeError(ValueError):
+    pass
+
+
+def _personal_relative(value: str) -> PurePosixPath:
+    relative = PurePosixPath(value)
+    relative.name.encode("utf-8")  # surrogate-escaped filesystem names are not allowlisted
+    if value in {"opencode.json", "cli.json"} or (
+        len(relative.parts) == 2
+        and relative.parts[0] == "themes"
+        and not relative.name.startswith(".")
+        and relative.name.endswith(".json")
+        and str(relative) == value
+    ):
+        return relative
+    raise ValueError("not a personal carrier path")
+
+
+def _personal_reason(error: Exception) -> str:
+    if isinstance(error, _PersonalOversizeError):
+        return "larger than 1 MiB"
+    if isinstance(error, PublishError):
+        if error.drift_class == DriftClass.COLLISION:
+            return "symlink or non-regular entry"
+        return "read failed"
+    return str(error)
+
+
+def _personal_root(path: Path, *, create: bool = False) -> int:
+    descriptor = _open_root(path)
+    if descriptor is None and create:
+        path.parent.mkdir(parents=True, exist_ok=True)  # ancestors above the root are trusted
+        path.mkdir(exist_ok=True)
+        descriptor = _open_root(path)
+    if descriptor is None:
+        raise FileNotFoundError(f"root does not exist: {path}")
+    return descriptor
+
+
+def _personal_paths(root: int) -> tuple[list[PurePosixPath], list[tuple[str, Exception]]]:
+    paths = [PurePosixPath("opencode.json"), PurePosixPath("cli.json")]
+    refused: list[tuple[str, Exception]] = []
+    try:
+        themes = _open_child_directory(root, "themes", create=False)
+        if themes is not None:
+            try:
+                for name in sorted(os.listdir(themes)):
+                    try:
+                        paths.append(_personal_relative(f"themes/{name}"))
+                    except ValueError:
+                        continue
+            finally:
+                os.close(themes)
+    except (PublishError, OSError) as error:
+        refused.append(("themes", error))
+    return paths, refused
+
+
+def _personal_admit(root: int, relative: PurePosixPath) -> None:
+    parent = _open_parent(root, relative, create=False)
+    if parent is None:
+        return
+    try:
+        try:
+            pin = os.open(relative.name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        except FileNotFoundError:
+            return
+        try:
+            if not stat.S_ISREG(os.fstat(pin).st_mode):
+                raise PublishError(DriftClass.COLLISION)
+        finally:
+            os.close(pin)
+    finally:
+        os.close(parent)
+
+
+def _personal_read(root: int, relative: PurePosixPath) -> bytes | None:
+    parent = _open_parent(root, relative, create=False)
+    if parent is None:
+        return None
+    try:
+        snapshot = _read_at(parent, relative.name, limit=_PERSONAL_LIMIT)
+        return None if snapshot is None else snapshot.content
+    finally:
+        os.close(parent)
+
+
+def _personal_write(root: int, relative: PurePosixPath, content: bytes) -> None:
+    _personal_admit(root, relative)
+    parent = _open_parent(root, relative, create=True)
+    assert parent is not None
+    try:
+        _replace_at(parent, relative.name, content, False, mode=0o600)
+    finally:
+        os.close(parent)
+
+
+def _personal_refusals(refused: Sequence[tuple[str, Exception]]) -> None:
+    for relative, error in refused:
+        print(f"refused {relative}: {_personal_reason(error)}", file=sys.stderr)
+
+
+def _personal_copy(carrier: Path, runtime: Path) -> int:
+    # Admission precedes even reading the carrier: a restarted runtime may be unsafe.
+    with _personal_opened_root(runtime, create=True) as target:
+        paths, refused = _personal_paths(target)
+        for relative in paths:
+            try:
+                _personal_admit(target, relative)
+            except (PublishError, OSError) as error:
+                refused.append((str(relative), error))
+        if refused:
+            _personal_refusals(refused)
+            return 1
+        with _personal_opened_root(carrier) as source:
+            paths, refused = _personal_paths(source)
+            protected: list[str] = []
+            for relative in paths:
+                try:
+                    content = _personal_read(source, relative)
+                    if content is not None:
+                        _personal_write(target, relative, content)
+                except _PersonalOversizeError:
+                    protected.append(str(relative))
+                    print(f"skipped {relative}: larger than 1 MiB", file=sys.stderr)
+                except (PublishError, OSError) as error:
+                    refused.append((str(relative), error))
+            _personal_refusals(refused)
+            print(json.dumps(protected))
+            return int(bool(refused))
+
+
+@contextmanager
+def _personal_opened_root(path: Path, *, create: bool = False) -> Iterator[int]:
+    try:
+        descriptor = _personal_root(path, create=create)
+    except (PublishError, OSError) as error:
+        raise ValueError(f"root {path}: {_personal_reason(error)}") from error
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _personal_refusal_kind(error: Exception) -> str:
+    if isinstance(error, _PersonalOversizeError) or (
+        isinstance(error, PublishError) and error.drift_class == DriftClass.COLLISION
+    ):
+        return "entry"
+    return "io"
+
+
+def _personal_snapshot(runtime: Path, capture: Path) -> int:
+    with _personal_opened_root(runtime) as source:
+        capture.mkdir(mode=0o700)  # require a fresh directory; never reuse stale captures
+        with _personal_opened_root(capture) as target:
+            paths, refused = _personal_paths(source)
+            kinds = {rel: _personal_refusal_kind(error) for rel, error in refused}
+            for relative in paths:
+                try:
+                    content = _personal_read(source, relative)
+                except (PublishError, OSError, _PersonalOversizeError) as error:
+                    refused.append((str(relative), error))
+                    kinds[str(relative)] = _personal_refusal_kind(error)
+                    continue
+                if content is not None:
+                    try:
+                        _personal_write(target, relative, content)
+                    except (PublishError, OSError) as error:
+                        refused.append((str(relative), error))
+                        kinds[str(relative)] = "io"  # capture storage failures degrade the session
+            _personal_refusals(refused)
+            print(json.dumps([
+                {"relative": rel, "reason": _personal_reason(error), "kind": kinds[rel]}
+                for rel, error in refused
+            ]))
+    return 0
+
+
+def _personal_reject_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _personal_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="workflow-publisher personal-carrier")
+    operations = parser.add_subparsers(dest="operation", required=True)
+    copy_parser = operations.add_parser("copy")
+    copy_parser.add_argument("--carrier", required=True, type=Path)
+    copy_parser.add_argument("--runtime", required=True, type=Path)
+    snapshot_parser = operations.add_parser("snapshot")
+    snapshot_parser.add_argument("--runtime", required=True, type=Path)
+    snapshot_parser.add_argument("--capture", required=True, type=Path)
+    install_parser = operations.add_parser("install")
+    install_parser.add_argument("--root", required=True, type=Path)
+    install_parser.add_argument("--relative", required=True)
+    install_parser.add_argument("--source", required=True, type=Path)
+    validate_parser = operations.add_parser("validate")
+    validate_parser.add_argument("--source", required=True, type=Path)
+    arguments = parser.parse_args(argv)
+    relative = "."
+    try:
+        if arguments.operation == "copy":
+            return _personal_copy(arguments.carrier, arguments.runtime)
+        if arguments.operation == "snapshot":
+            return _personal_snapshot(arguments.runtime, arguments.capture)
+        relative = arguments.relative if arguments.operation == "install" else "."
+        with _personal_opened_root(arguments.source.parent) as source:
+            content = _personal_read(source, PurePosixPath(arguments.source.name))
+        if content is None:
+            raise ValueError("capture is missing")
+        if arguments.operation == "validate":
+            json.loads(content.decode("utf-8"), parse_constant=_personal_reject_constant)
+            return 0
+        path = _personal_relative(relative)
+        with _personal_opened_root(arguments.root) as target:
+            _personal_write(target, path, content)
+        return 0
+    except (PublishError, OSError, ValueError, RecursionError) as error:
+        _personal_refusals([(relative, error)])
+        return 1
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="workflow-publisher")
     parser.add_argument("--view", "--view-dir", dest="view", required=True)
@@ -1759,6 +2005,9 @@ def _lock_error_diagnostic(root: Path, error: OSError) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    personal_args = list(sys.argv[1:] if argv is None else argv)
+    if personal_args[:1] == ["personal-carrier"]:
+        return _personal_main(personal_args[1:])
     arguments = _parse_args(argv)
     lock_error: OSError | None = None
     if arguments.fragment:

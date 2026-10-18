@@ -72,7 +72,7 @@ fi
 # Tool Configuration & Seed Sync
 # =============================================================================
 ui_section "Seed & Config"
-mkdir -p ~/.claude/{agents,skills,commands} ~/.codex ~/.config/opencode/commands
+mkdir -p ~/.claude/{agents,skills,commands} ~/.codex
 SEED_LIB="${SEED_LIB:-/home/dev/seed-lib.sh}"
 if [[ ! -r "$SEED_LIB" ]]; then
     ui_err "seed library not found at $SEED_LIB — the image is stale or broken."
@@ -92,20 +92,32 @@ claude_settings_merge "$HOME/.claude_seed" "$HOME/.claude/settings.json" >&2
 # OpenCode workflow files come from the canonical seed; personal settings live
 # beside that seed on the persistent parent mount and never flow back into it.
 OPENCODE_RUNTIME_ROOT="${OPENCODE_RUNTIME_ROOT:-$HOME/.config/opencode}"
-OPENCODE_RUNTIME_SETTINGS="$OPENCODE_RUNTIME_ROOT/.opencode.json"
-OPENCODE_PERSISTENT_SETTINGS="$HOME/.opencode/.opencode.json"
+OPENCODE_RUNTIME_SETTINGS="$OPENCODE_RUNTIME_ROOT/opencode.json"
 SETTINGS_COPY_HELPER="${SETTINGS_COPY_HELPER:-/home/dev/settings-copy.py}"
-if [[ -e "$OPENCODE_PERSISTENT_SETTINGS" || -L "$OPENCODE_PERSISTENT_SETTINGS" ]]; then
-    python3 "$SETTINGS_COPY_HELPER" \
-        --copy-settings "$OPENCODE_PERSISTENT_SETTINGS" "$OPENCODE_RUNTIME_SETTINGS" >&2
+WORKFLOW_PUBLISHER="${WORKFLOW_PUBLISHER:-/home/dev/workflow-publisher.py}"
+typeset -a opencode_protected_paths
+if ! opencode_copy_result=$(python3 "$WORKFLOW_PUBLISHER" personal-carrier copy \
+    --carrier "$HOME/.opencode" --runtime "$OPENCODE_RUNTIME_ROOT"); then
+    ui_err "OpenCode personal configuration could not be copied from $HOME/.opencode to $OPENCODE_RUNTIME_ROOT; see refusal above."
+    exit 1
 fi
+if ! opencode_protected_result=$(jq -j -s '
+    if length == 1 and (.[0] | type == "array" and all(.[]; type == "string"))
+    then .[0][] | . + "\u0000"
+    else error("expected one JSON array of strings") end
+' <<< "$opencode_copy_result"); then
+    ui_err "OpenCode personal protected paths from $HOME/.opencode to $OPENCODE_RUNTIME_ROOT could not be parsed as a JSON array of strings."
+    exit 1
+fi
+while IFS= read -r -d '' relative; do
+    opencode_protected_paths+=("$relative")
+done <<< "$opencode_protected_result"
 
 OPENCODE_CREDENTIALS_HELPER="${OPENCODE_CREDENTIALS_HELPER:-/home/dev/opencode-credentials.sh}"
 source "$OPENCODE_CREDENTIALS_HELPER"
 ensure_opencode_credentials
 
 ui_info "[workflow-delivery] opencode:"
-WORKFLOW_PUBLISHER="${WORKFLOW_PUBLISHER:-/home/dev/workflow-publisher.py}"
 CANONICAL_CONFIG_ROOT="${DJINN_CANONICAL_ROOT:-/home/dev/.djinn-canonical}"
 OPENCODE_WORKFLOW_VIEW="${OPENCODE_WORKFLOW_VIEW:-/home/dev/.opencode/seed}"
 python3 "$WORKFLOW_PUBLISHER" \
@@ -113,7 +125,7 @@ python3 "$WORKFLOW_PUBLISHER" \
     --canonical-root "$CANONICAL_CONFIG_ROOT" \
     --target "$OPENCODE_RUNTIME_ROOT" \
     --manifest "$OPENCODE_RUNTIME_ROOT/.djinn-workflow-state.json" \
-    --ignore .opencode.json \
+    --ignore opencode.json \
     --profile opencode >&2
 
 # =============================================================================
@@ -206,13 +218,13 @@ djinn_state_dir=''
 djinn_checkpoint_pid=''
 
 initialize_session_state() {
-    local runtime_file acknowledged_file i
-    local -a runtime_files=("$HOME/.claude.json" "$HOME/.claude/settings.json" "$OPENCODE_RUNTIME_SETTINGS")
-    local -a names=(claude-state claude-settings opencode-settings)
+    local runtime_file acknowledged_file i initial_snapshot
+    local -a runtime_files=("$HOME/.claude.json" "$HOME/.claude/settings.json")
+    local -a names=(claude-state claude-settings)
     if ! djinn_state_dir=$(mktemp -d -t djinn-session-state.XXXXXXXX 2>/dev/null); then
         return 1
     fi
-    for i in 1 2 3; do
+    for i in 1 2; do
         runtime_file=${runtime_files[$i]}
         acknowledged_file="$djinn_state_dir/${names[$i]}.ack"
         if [[ -f "$runtime_file" ]]; then
@@ -223,6 +235,13 @@ initialize_session_state() {
             fi
         fi
     done
+    if ! initial_snapshot=$(python3 "$WORKFLOW_PUBLISHER" personal-carrier snapshot \
+        --runtime "$OPENCODE_RUNTIME_ROOT" --capture "$djinn_state_dir/opencode.ack" 2>/dev/null) ||
+        ! jq -e 'all(.[]; .kind == "entry")' <<< "$initial_snapshot" >/dev/null 2>&1; then
+        rm -rf -- "$djinn_state_dir" 2>/dev/null || :
+        djinn_state_dir=''
+        return 1
+    fi
     return 0
 }
 
@@ -231,13 +250,14 @@ sync_session_state() {
     if [[ "$mode" == final && ! -d "$djinn_state_dir" ]]; then
         if ! djinn_state_dir=$(mktemp -d -t djinn-session-state.XXXXXXXX 2>/dev/null); then
             local i
-            local -a runtime_files=("$HOME/.claude.json" "$HOME/.claude/settings.json" "$OPENCODE_RUNTIME_SETTINGS")
-            local -a target_files=("$HOME/.claude/claude.json" "$HOME/.claude_seed/settings.local.json" "$OPENCODE_PERSISTENT_SETTINGS")
-            for i in 1 2 3; do
+            local -a runtime_files=("$HOME/.claude.json" "$HOME/.claude/settings.json")
+            local -a target_files=("$HOME/.claude/claude.json" "$HOME/.claude_seed/settings.local.json")
+            for i in 1 2; do
                 if [[ -f "${runtime_files[$i]}" && -d "${target_files[$i]:h}" ]]; then
                     ui_warn "could not persist ${runtime_files[$i]} → ${target_files[$i]}"
                 fi
             done
+            _warn_opencode_unpersisted "$mode"
             return 0
         fi
     fi
@@ -248,8 +268,7 @@ sync_session_state() {
     reverse_sync_claude_settings "$HOME/.claude/settings.json" "$HOME/.claude_seed/settings.local.json" \
         "$djinn_state_dir/claude-settings.ack" "$mode"
     [[ "$mode" == checkpoint && "${djinn_checkpoint_stopping:-0}" == 1 ]] && return 0
-    reverse_sync_file "$OPENCODE_RUNTIME_SETTINGS" "$OPENCODE_PERSISTENT_SETTINGS" \
-        "$djinn_state_dir/opencode-settings.ack" "$mode"
+    _sync_opencode_personal "$mode"
     return 0
 }
 

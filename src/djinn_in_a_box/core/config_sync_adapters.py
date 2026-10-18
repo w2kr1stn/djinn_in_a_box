@@ -19,6 +19,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     PublishError,
     is_runtime_residue,
     load_strict_json,
+    opencode_plugin_has_default_export,
     read_regular_file,
     runtime_residue_prefixes,
 )
@@ -232,7 +233,7 @@ def read_native_only_workflow(root: Path, tool: ConfigSyncSource) -> NativeOnlyR
             issues.append(
                 _issue(
                     f"plugin-export:{item.name}",
-                    "OpenCode plugin export marker is missing.",
+                    "OpenCode v2 plugin default export marker is missing.",
                     item.script_path,
                 )
             )
@@ -714,7 +715,7 @@ def _file_issues(tool: ConfigSyncSource, item: RenderedFile) -> tuple[Validation
         return (
             _issue(
                 f"invalid-plugin:{item.artifact_id}",
-                "OpenCode plugin export marker is missing.",
+                "OpenCode v2 plugin default export marker is missing.",
                 item.relative_path,
             ),
         )
@@ -853,10 +854,7 @@ def _valid_agent(data: Mapping[str, object], name: str) -> bool:
 
 
 def _plugin(content: bytes) -> bool:
-    try:
-        return "export" in content.decode()
-    except UnicodeDecodeError:
-        return False
+    return opencode_plugin_has_default_export(content)
 
 
 def _nested(data: Mapping[str, object] | None, event: str | None) -> object | None:

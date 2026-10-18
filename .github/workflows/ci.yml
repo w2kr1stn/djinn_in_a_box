@@ -40,6 +40,8 @@ jobs:
         run: uv run pyright src/
 
       - name: Run tests
+        env:
+          DJINN_LIVE_DOCKER: "1"
         run: uv run pytest
 
       - name: Run Bandit

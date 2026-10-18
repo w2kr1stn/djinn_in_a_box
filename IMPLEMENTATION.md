@@ -386,8 +386,8 @@ mounts the shipped `templates/claude/CLAUDE.md` read-only in the container and
 publishes it as a managed file on the host fallback; it imports `AGENTS.md`.
 Hooks and their registrations are native-only, like the Claude-only `/codex-review`
 command: a present native item is validated for ownership, UTF-8, and containment
-(with the OpenCode export-marker check), but is never cross-tool projected or
-stale-removed. Missing native hooks are allowed.
+(with the OpenCode v2 default-export marker check), but is never cross-tool
+projected or stale-removed. Missing native hooks are allowed.
 Repository-local instruction files, agents, skills, and commands are outside
 this global projection and are not rewritten.
 
@@ -463,8 +463,8 @@ stable while Claude Code re-syncs its account skills through the writable
 renderers, and validation. It produces a transient typed IR; it is never a
 persisted user format. Validation covers ownership, UTF-8, containment,
 required fields, and JSON/TOML parsing. The three known OpenCode plugins are
-copied byte-for-byte after UTF-8 and export-marker checks. A non-portable item
-is invalid rather than translated: workflow synchronization contains no
+copied byte-for-byte after UTF-8 and v2 default-export marker checks. A
+non-portable item is invalid rather than translated: workflow synchronization contains no
 provider-invocation path.
 
 `core/config_sync.py` snapshots the selected source, renders the other two
@@ -662,7 +662,7 @@ container start
   +-- source seed-lib.sh
   +-- restore ~/.claude.json from the persistent config root when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
-  +-- settings-copy.py persists personal OpenCode settings only
+  +-- workflow-publisher.py admits OpenCode runtime entries and copies the personal carrier
   +-- opencode-credentials.sh initializes config-root credentials and
       canonical data-volume symlinks
   +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
@@ -743,28 +743,67 @@ merged. This Compose-Claude runtime is manifestless: the publisher never writes
 to `${DJINN_CONFIG_ROOT}/claude`. In-session settings changes are reverse-synced
 to `config/claude/settings.local.json`, not to the tracked baseline template.
 
-The entrypoint captures initial runtime references in a private mode-0700
-directory, then checkpoints Claude state, filtered Claude personal settings and
-OpenCode personal settings every fixed 30 s. Changes older than about 30 s
-survive a crash, qualified by checkpoint duration, scheduling, valid JSON and
-writable healthy storage. Each carrier is captured once and compared with its
-last acknowledged runtime bytes first; unchanged content skips validation and
-writing. Changed content is validated as exactly one JSON document, copied
-atomically through `settings-copy.py`, and acknowledged only after file fsync,
-replacement and directory fsync succeed. Destination files have mode 0600.
+OpenCode's personal carrier is `~/.opencode/` (host `<config-root>/opencode/`),
+with exactly `opencode.json`, `cli.json` and direct `themes/<name>.json` children
+(non-empty UTF-8 names without a leading `.`), each a regular file of at most 1 MiB.
+Before any OpenCode runtime access, startup admits the runtime root and existing
+allowlisted entries, then atomically copies carrier bytes to `~/.config/opencode/`
+without JSON validation, before workflow publication and MCP registration.
+Symlinked roots, symlinks or non-regular allowlisted entries (including `themes/`)
+in either tree, and failed copies, stop startup with the entry and reason;
+nothing behind a refused entry is accessed. An oversized carrier file is skipped
+with a named warning and protected from all write-back for the session, including
+degraded final sync. Invalid JSON is copied; OpenCode reports its content errors.
+
+The personal carrier uses `workflow-publisher.py`'s contained directory-descriptor
+operations: `O_NOFOLLOW`, pinned regular files, bounded reads, temporary-file
+fsync, atomic rename and directory fsync. The workflow publisher and MCP writer
+also use these contained operations for every write into the runtime root;
+there are no fixed-name temporary paths there. Root ancestors are trusted;
+concurrent swaps by another process of the same user are outside this boundary.
+Optional plugin, theme and local-model examples are in [OpenCode 2](docs/opencode-v2.md).
+
+After workflow publication and MCP registration, the entrypoint captures initial
+runtime references in a private mode-0700 directory, then checkpoints Claude
+state, filtered Claude personal settings and OpenCode personal settings every
+fixed 30 s. OpenCode enumerates the allowlist anew at each sync, picking up
+runtime-created themes and `cli.json`. Changes older than about 30 s survive a
+crash, qualified by checkpoint duration, scheduling, valid JSON and writable
+healthy storage. Each file is captured once and compared with its last
+acknowledged runtime bytes; unchanged content skips validation and writing.
+Changed content must parse as exactly one JSON document, then is installed
+atomically and acknowledged only after file fsync, replacement and directory
+fsync succeed. Destination files have mode 0600. OpenCode uses the contained
+writer and a strict UTF-8 JSON validator rejecting malformed numbers, `NaN` and
+`Infinity`/`-Infinity`; Claude keeps its jq validator and `settings-copy.py`.
+JSONC is not persisted.
+
 Claude acknowledgement retains raw captured bytes; only the destination has the
 three managed hook keys removed. Unchanged runtime content leaves host edits
 alone, including a host-only `settings.local.json` edit at clean stop; when both
-changed, runtime wins. Checkpoint failures warn once per carrier per session and
-retry; changed invalid input is silent until final sync. Claude settings must
-be an object accepted by the managed-hook filter; filtered-output failures warn
-as storage failures. Comparison read errors preserve destinations and references
-and retry. Clean stop joins any in-flight write, runs the same sync, and keeps
-shell/TERM/INT exit codes. Failed initial capture or state creation disables
-checkpointing with one warning. Final sync
-recreates missing private state once; failure warns per existing carrier and
-writes nothing. Without references, every valid carrier is written, so a
-host-only overlay edit can be overwritten in that degraded path.
+changed, runtime wins. Refused OpenCode runtime entries (symlink, non-regular or
+over 1 MiB) preserve the carrier and acknowledgement. Refused or unwritable
+entries warn once during checkpoints and again at final sync if unresolved;
+changed invalid JSON is retried and warned about at final sync. Claude settings
+must be an object accepted by the managed-hook filter; filtered-output failures
+warn as storage failures. Comparison read errors preserve destinations and
+references and retry. Clean stop or `docker stop` (SIGTERM/SIGINT) joins any
+in-flight write, runs the same sync, and keeps shell/TERM/INT exit codes.
+Initial OpenCode entry refusals (including oversize) leave that path unacknowledged,
+keep sibling checkpoints running and permit later repair. Failed initial capture
+I/O or state creation disables checkpointing with one warning.
+Final sync recreates missing private state once; failure writes nothing and warns
+per existing Claude file, plus once naming the OpenCode runtime and carrier roots
+without enumerating their files. Without references (initial failure or later state loss,
+with no extra warning for the latter), every valid runtime file except protected
+OpenCode paths is written, so host-only edits can be overwritten and deleted
+carrier files can return in that degraded path.
+
+OpenCode persistence is upsert-only: deletions do not propagate in either
+direction. A theme deleted only at runtime returns after recreation. A theme
+deleted in the carrier stays absent after recreation unless a later runtime edit
+or degraded final sync wrote it back. Reliable removal means stopping the
+container, deleting the carrier file, then recreating.
 
 Limits: JSON validation cannot detect coherent-looking mixed bytes from an
 in-place writer; carriers are independent snapshots. Invalid input, storage
@@ -1309,7 +1348,9 @@ copies the stdlib-only `workflow_publisher.py` to
 `/home/dev/workflow-publisher.py` and `settings-copy.py` to
 `/home/dev/settings-copy.py`. The Dockerfile also sets
 `djinn.workflow.publisher="1"`; Compose starts and OpenCode session refreshes
-check that label before doing workflow work. Node agents are installed through
+check that label before doing workflow work. OpenCode is installed from npm as
+[`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
+(published 2026-10-08), with the numeric `OPENCODE_VERSION` pin. Node agents are installed through
 fnm. The final image PATH is `~/.cache/djinn-tools/bin`,
 `~/.local/share/fnm/aliases/default/bin`, `~/.local/bin`, `~/.local/share/fnm`,
 then the base system paths, so every process resolves optional tools and agents
@@ -1450,8 +1491,10 @@ TOML, zones and missing workspace paths fall back to derivable default mounts
 and Claude (unless overridden), with the loader error in the initial message.
 
 `assistant/Dockerfile` installs the selected native CLI and basic diagnostic
-tools. The selected agent uses the shared effective version policy, independent
-of AppConfig recovery; `DOCKER_VERSION` stays an upstream-only Dockerfile pin.
+tools. OpenCode's native npm archive is checked against the registry's `sha512`
+integrity before extraction by `assistant/install-opencode.sh`. The selected
+agent uses the shared effective version policy, independent of AppConfig
+recovery; `DOCKER_VERSION` stays an upstream-only Dockerfile pin.
 An invalid complete record aborts before image inspection/build even if the bad
 entry belongs to another agent. One content label covers the effective selected
 version, agent, Dockerfile/runtime bytes, host
@@ -1466,7 +1509,9 @@ The entrypoint copies credential files into fresh native homes and writes only
 refreshes back at exit, accommodating CLIs that atomically replace auth files.
 Claude imports only account metadata from its mixed `claude.json` carrier;
 settings and session history remain ephemeral. Claude safe mode suppresses
-customizations; OpenCode uses pure mode and asks for edits/bash; Codex keeps
+customizations; OpenCode runs `opencode --standalone --prompt <prompt>` with v2
+`permissions` asking before `edit` and `shell`, without the personal carrier;
+Codex keeps
 `--sandbox danger-full-access --ask-for-approval on-request`: its sandbox needs user
 namespaces the container does not grant, and 0.160 offers only `on-request`/`never`.
 After interruption or client failure, cleanup verifies the unique session label
