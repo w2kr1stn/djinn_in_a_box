@@ -599,7 +599,7 @@ class TestRunInteractiveContainer:
             session_mgr.run_interactive(workspace_dir=Path("/tmp/ws"))
 
             cmd = mock_run.call_args[0][0]
-            shell_cmd = cmd[-1]  # last arg to bash -lc
+            shell_cmd = cmd[-1]  # last arg to bash -c
             assert "git init -q" in shell_cmd
 
     def test_returns_workspace_dir(self, session_mgr: SessionManager) -> None:
@@ -925,7 +925,7 @@ def test_session_environment_is_literal_and_isolated(
             expected_forwarded.add("AGENT_PROMPT=test prompt")
         assert set(forwarded) == expected_forwarded
         assert cmd[cmd.index("-w") + 1] == "/home/dev/sessions/testproject/task with space"
-        assert cmd[-4:-1] == [target.container_id, "bash", "-lc"]
+        assert cmd[-4:-1] == [target.container_id, "bash", "-c"]
         assert "git init -q" in cmd[-1] and "selected-model" in cmd[-1]
         if method == "run_headless":
             assert "AGENT_PROMPT=test prompt" in forwarded
@@ -1263,6 +1263,7 @@ def test_container_session_shell_preserves_allowed_environment(session_mgr, tmp_
             **additions,
         },
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=10,
         check=False,
@@ -1270,3 +1271,19 @@ def test_container_session_shell_preserves_allowed_environment(session_mgr, tmp_
     assert child.returncode == 0, child.stderr
     assert child.stderr == ""
     assert json.loads(child.stdout) == additions
+
+
+@pytest.mark.parametrize("method", ["run_interactive", "run_headless"])
+def test_container_session_uses_non_login_bash(session_mgr, tmp_path, method):
+    kwargs = {"prompt": "test prompt"} if method == "run_headless" else {}
+    with (
+        patch.object(session_mgr, "_resolve_container_workdir", return_value=str(tmp_path)),
+        patch(_SUBPROCESS_RUN, return_value=MagicMock(returncode=0, stdout="", stderr="")) as run,
+    ):
+        result = getattr(session_mgr, method)(
+            workspace_dir=tmp_path,
+            target=SessionTarget(container_id="synthetic"),
+            **kwargs,
+        )
+    assert result.returncode == 0
+    assert run.call_args.args[0][-3:-1] == ["bash", "-c"]

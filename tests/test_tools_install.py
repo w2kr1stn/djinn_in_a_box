@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "install.sh"
@@ -52,6 +55,7 @@ def run_install(
         "NO_COLOR": "1",
     }
     env.pop("DJINN_FORCE_UI_COLOR", None)
+    env.pop("LD_LIBRARY_PATH", None)
 
     return subprocess.run(
         ["bash", str(SCRIPT)],
@@ -238,3 +242,89 @@ def test_installer_runs_from_root(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (cache_dir / "probe.installed").read_text(encoding="utf-8") == "probe-version\n"
     assert (cache_dir / "installer-cwd").read_text(encoding="utf-8") == "/\n"
+
+
+def write_psql_installer_fixture(
+    tmp_path: Path, cache_dir: Path, installers_dir: Path, *, failing: bool = False
+) -> Path:
+    source = tmp_path / "postgresql source"
+    source.mkdir()
+    version = "psql (PostgreSQL) 18.0"
+    missing_lib = (
+        "psql: error while loading shared libraries: libpq.so.5: "
+        "cannot open shared object file: No such file or directory"
+    )
+    body = (
+        "#!/bin/sh\n"
+        f"lib={shlex.quote(str(cache_dir / 'lib'))}\n"
+        'case ":${LD_LIBRARY_PATH:-}:" in\n'
+        f'    *":$lib:"*) echo "{version}" ;;\n'
+        f'    *) echo "{missing_lib}" >&2; exit 127 ;;\n'
+        "esac\n"
+    )
+    if failing:
+        body = '#!/bin/sh\necho "psql: error: connection to server failed" >&2\nexit 23\n'
+    for name in ("psql", "pg_dump", "pg_restore", "pg_dumpall"):
+        write_executable(source / name, body)
+    script = ROOT / "tools" / "installers" / "psql.sh"
+    write_executable(
+        installers_dir / "psql.sh",
+        "#!/bin/bash\n"
+        f"source {shlex.quote(str(script))}\n"
+        'echo installed >> "$TOOLS_DIR/psql-install-calls"\n'
+        f"install_psql_binaries {shlex.quote(str(source))}\n",
+    )
+    return source
+
+
+def test_psql_cache_rejects_legacy_binary_then_skips_generated_wrapper(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["psql"])
+    source = write_psql_installer_fixture(tmp_path, cache_dir, installers_dir)
+    (cache_dir / "psql.installed").write_text("legacy marker\n")
+    write_executable(cache_dir / "bin" / "psql", (source / "psql").read_text())
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt")
+
+    assert result.returncode == 0, result.stderr
+    assert "Cache check failed for psql" in result.stderr
+    assert "psql installed (psql (PostgreSQL) 18.0)" in result.stderr
+    assert (cache_dir / "psql.installed").read_text() == "psql (PostgreSQL) 18.0\n"
+    assert (cache_dir / "psql-install-calls").read_text() == "installed\n"
+    assert (cache_dir / "postgresql" / "bin" / "psql").is_file()
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt")
+
+    assert result.returncode == 0, result.stderr
+    assert "1 tool(s) already installed (cached)" in result.stderr
+    assert "Installing psql" not in result.stderr
+    assert "Cache check failed" not in result.stderr
+    assert (cache_dir / "psql-install-calls").read_text() == "installed\n"
+
+
+def test_failed_psql_installer_leaves_no_marker(tmp_path: Path) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["psql"])
+    write_psql_installer_fixture(tmp_path, cache_dir, installers_dir, failing=True)
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt")
+
+    assert result.returncode == 0, result.stderr  # Other tools can still install.
+    assert "Failed to install psql" in result.stderr
+    assert "psql: error: connection to server failed" in result.stdout
+    assert not (cache_dir / "psql.installed").exists()
+
+
+@pytest.mark.parametrize("missing", ["pg_dump", "pg_restore", "pg_dumpall"])
+def test_missing_psql_sibling_leaves_no_marker(tmp_path: Path, missing: str) -> None:
+    home, cache_dir, installers_dir = write_install_fixture(tmp_path, ["psql"])
+    source = write_psql_installer_fixture(tmp_path, cache_dir, installers_dir)
+    (source / missing).unlink()
+
+    result = run_install(home, cache_dir, installers_dir, tmp_path / "tools.txt")
+
+    assert result.returncode == 0, result.stderr  # Other tools can still install.
+    assert "Failed to install psql" in result.stderr
+    assert f"Error: PostgreSQL binary not found at {source / missing}" in result.stdout
+    assert not (cache_dir / "psql.installed").exists()
+    for name in ("psql", "pg_dump", "pg_restore", "pg_dumpall"):
+        assert not (cache_dir / "bin" / name).exists()
+        assert not (cache_dir / "postgresql/bin" / name).exists()

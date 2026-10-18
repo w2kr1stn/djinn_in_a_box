@@ -126,9 +126,9 @@ and fixed terminal values; host OpenCode starts add
 `OPENCODE_DISABLE_PROJECT_CONFIG=1` last. Container starts forward only the additional names
 with `docker exec -e NAME`; their values travel in the Docker subprocess
 environment, outside argv and Djinn-authored logs or diagnostics. The existing
-prompt transport is unchanged. Container session shells and their Git/agent
-descendants inherit the entries; login profiles can intentionally change them,
-and Djinn does not reapply them afterwards.
+prompt transport is unchanged. Container sessions launch non-login `bash -c`
+shells that inherit the image PATH and forward the entries to their Git/agent
+descendants.
 
 Inherited credentials are not scrubbed. Values remain visible to the OS, Docker
 daemon, descendants, and user profile scripts. Child stdout/stderr passes through

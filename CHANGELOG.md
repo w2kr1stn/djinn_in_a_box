@@ -25,6 +25,12 @@ Versioning before and after the first stable release.
   duration and scheduling delay, given valid JSON and healthy writable storage.
   Host-only overlay edits survive clean stop; runtime wins when both changed.
   Missing checkpoint references can let final sync overwrite host-only edits.
+- Optional tools from the tools volume are now on the image `PATH`, so
+  `docker exec`, `zsh -c`, headless agents and `djinn session` find them without
+  an interactive shell. `djinn session` starts a non-login `bash -c`, so a login
+  profile no longer resets that `PATH`. psql, pg_dump, pg_restore and pg_dumpall
+  run through wrappers that add the tools library directory only for themselves;
+  the image and `.zshrc` no longer set `LD_LIBRARY_PATH`.
 
 ### Security
 

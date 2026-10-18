@@ -1310,15 +1310,18 @@ copies the stdlib-only `workflow_publisher.py` to
 `/home/dev/settings-copy.py`. The Dockerfile also sets
 `djinn.workflow.publisher="1"`; Compose starts and OpenCode session refreshes
 check that label before doing workflow work. Node agents are installed through
-fnm, and the final image PATH includes `~/.local/share/fnm/aliases/default/bin`
-so non-interactive processes resolve Codex and OpenCode without sourcing shell
-initialization.
+fnm. The final image PATH is `~/.cache/djinn-tools/bin`,
+`~/.local/share/fnm/aliases/default/bin`, `~/.local/bin`, `~/.local/share/fnm`,
+then the base system paths, so every process resolves optional tools and agents
+without sourcing shell initialization.
 
 The image locale is `C.UTF-8`. Runtime Docker access is disabled unless the user
 starts with agent or direct Docker options.
 
 Optional runtime tool installers are copied from `tools/`, with cache locations
-backed by named volumes.
+backed by named volumes. The psql family uses wrappers in the tools bin directory
+that prepend the tools library directory only for their real binaries in
+`<tools dir>/postgresql/bin`, preserving any existing `LD_LIBRARY_PATH`.
 
 ## Container Lifecycle Commands
 
@@ -1564,10 +1567,10 @@ environment, additions, and fixed terminal values, and for OpenCode a final
 and image/workflow preparation receive no additions. Container starts use
 name-only `docker exec -e NAME` forwarding with values in the subprocess
 environment. The Docker connection, target, prompt transport, and TTY behavior
-retain their existing contracts. Session shells and their descendants inherit
-the additions, subject to intentional login-profile changes. Map values stay
-out of argv and Djinn-authored logs/errors; inherited credentials are not
-scrubbed and child output is preserved. OS, daemon, descendant, and profile
+retain their existing contracts. Container sessions launch non-login `bash -c`
+shells that inherit the image PATH and forward the additions to their descendants.
+Map values stay out of argv and Djinn-authored logs/errors; inherited credentials
+are not scrubbed and child output is preserved. OS, daemon, descendant, and profile
 visibility, or values independently supplied in prompts, are outside this
 secrecy guarantee. No provider selection, authentication checks, or CLI flags
 are added.
