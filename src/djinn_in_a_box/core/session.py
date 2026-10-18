@@ -228,7 +228,7 @@ class SessionManager:
             "--manifest",
             "/home/dev/.config/opencode/.djinn-workflow-state.json",
             "--ignore",
-            ".opencode.json",
+            "opencode.json",
             "--profile",
             "opencode",
         ]

@@ -156,7 +156,7 @@ def ensure_image(project: Path, agent: AssistantAgent, platform: str, network: s
         [agent, version, docker_version, platform, network, os.getuid(), os.getgid()]
     )
     digest = hashlib.sha256(content.encode())
-    for name in ("Dockerfile", "entrypoint.sh"):
+    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh"):
         digest.update((context / name).read_bytes())
     fingerprint = digest.hexdigest()
     image = inspect("image", ASSISTANT_IMAGE)
@@ -249,7 +249,7 @@ def agent_argv(agent: AssistantAgent, prompt: str) -> list[str]:
             "on-request",
             prompt,
         ]
-    return ["opencode", "--pure", "--prompt", prompt]
+    return ["opencode", "--standalone", "--prompt", prompt]
 
 
 def session_argv(
@@ -287,7 +287,10 @@ def session_argv(
         "HOME": "/home/dev",
         "TZ": timezone,
         "DOCKER_HOST": "unix:///var/run/docker.sock",
-        "OPENCODE_CONFIG_CONTENT": '{"permission":{"edit":"ask","bash":"ask"}}',
+        "OPENCODE_CONFIG_CONTENT": (
+            '{"permissions":[{"action":"edit","resource":"*","effect":"ask"},'
+            '{"action":"shell","resource":"*","effect":"ask"}]}'
+        ),
         "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
     }
     for key in ("TERM", "NO_COLOR"):

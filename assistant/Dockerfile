@@ -13,6 +13,7 @@ RUN case "$TARGETARCH" in amd64) arch=x86_64;; arm64) arch=aarch64;; *) exit 1;;
 
 ARG AGENT
 ARG AGENT_VERSION
+COPY install-opencode.sh /tmp/install-opencode.sh
 RUN set -eu; mkdir -p /opt/djinn-agent; \
     case "$AGENT" in \
       claude) \
@@ -33,15 +34,9 @@ RUN set -eu; mkdir -p /opt/djinn-agent; \
         ln -s /opt/djinn-agent/bin/codex /usr/local/bin/codex; \
         rm "/tmp/$asset" /tmp/checksums /tmp/selected-checksum;; \
       opencode) \
-        case "$TARGETARCH" in amd64) arch=x64-baseline;; arm64) arch=arm64;; esac; \
-        asset="opencode-linux-$arch.tar.gz"; \
-        curl -fsSL "https://api.github.com/repos/anomalyco/opencode/releases/tags/v$AGENT_VERSION" -o /tmp/release.json; \
-        digest=$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .digest | select(startswith("sha256:")) | ltrimstr("sha256:")' /tmp/release.json); \
-        curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v$AGENT_VERSION/$asset" -o /tmp/agent.tgz; \
-        printf '%s  /tmp/agent.tgz\n' "$digest" | sha256sum -c -; \
-        tar xzf /tmp/agent.tgz -C /opt/djinn-agent; \
+        sh /tmp/install-opencode.sh "$TARGETARCH" "$AGENT_VERSION" /opt/djinn-agent; \
         ln -s /opt/djinn-agent/opencode /usr/local/bin/opencode; \
-        rm /tmp/release.json /tmp/agent.tgz;; \
+        rm /tmp/install-opencode.sh;; \
       *) exit 1;; \
     esac; "$AGENT" --version
 

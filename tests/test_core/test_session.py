@@ -209,7 +209,7 @@ class TestRefreshOpenCodeWorkflow:
                 "--manifest",
                 "/home/dev/.config/opencode/.djinn-workflow-state.json",
                 "--ignore",
-                ".opencode.json",
+                "opencode.json",
                 "--profile",
                 "opencode",
             ],
@@ -1287,3 +1287,67 @@ def test_container_session_uses_non_login_bash(session_mgr, tmp_path, method):
         )
     assert result.returncode == 0
     assert run.call_args.args[0][-3:-1] == ["bash", "-c"]
+
+
+def test_session_refresh_keeps_personal_files_unowned(session_mgr, tmp_path):
+    import hashlib
+
+    from djinn_in_a_box.core import workflow_publisher as publisher
+
+    canonical, seed, runtime = (tmp_path / name for name in ("canonical", "seed", "runtime"))
+    for root in (canonical, seed, runtime):
+        root.mkdir()
+    personal = ("opencode.json", "cli.json", "themes/night.json")
+    for name in personal:
+        path = runtime / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'{"personal":1}')
+
+    def refresh(argv, **kwargs):
+        assert argv[:5] == [
+            DOCKER_EXECUTABLE,
+            "exec",
+            "fixture",
+            "python3",
+            "/home/dev/workflow-publisher.py",
+        ]
+        arguments = list(argv[5:])
+        for flag, value in (
+            ("--view", seed),
+            ("--canonical-root", canonical),
+            ("--target", runtime),
+            ("--manifest", runtime / publisher.RUNTIME_MANIFEST_NAME),
+        ):
+            arguments[arguments.index(flag) + 1] = str(value)
+        return subprocess.CompletedProcess(argv, publisher.main(arguments), "", "")
+
+    with (
+        patch.object(
+            session_mgr,
+            "workflow_image_compatible",
+            return_value=WorkflowImageCompatibility.COMPATIBLE,
+        ),
+        patch(_SUBPROCESS_RUN, side_effect=refresh),
+    ):
+        for generation in (b"one\n", b"two\n"):
+            (seed / "AGENTS.md").write_bytes(generation)
+            (canonical / publisher.CANONICAL_MANIFEST_NAME).write_text(
+                json.dumps(
+                    {
+                        "source": "opencode",
+                        "items": [
+                            {
+                                "path": "opencode/AGENTS.md",
+                                "content_hash": hashlib.sha256(generation).hexdigest(),
+                                "executable": False,
+                            }
+                        ],
+                    }
+                )
+            )
+            result = session_mgr.refresh_opencode_workflow(SessionTarget(container_id="fixture"))
+            assert result.success
+            assert (runtime / "AGENTS.md").read_bytes() == generation
+            assert all((runtime / name).read_bytes() == b'{"personal":1}' for name in personal)
+            manifest = json.loads((runtime / publisher.RUNTIME_MANIFEST_NAME).read_bytes())
+            assert {item["path"] for item in manifest["items"]}.isdisjoint(personal)

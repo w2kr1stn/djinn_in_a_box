@@ -105,7 +105,7 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 # djinn update records local versions; builds pass higher versions as ARG overrides.
 ARG CLAUDE_CODE_VERSION=2.1.288
 ARG CODEX_VERSION=0.160.0
-ARG OPENCODE_VERSION=1.18.34
+ARG OPENCODE_VERSION=2.0.26
 
 # Claude Code via native installer (no npm/Node.js dependency)
 # Installs to ~/.local/bin/claude (already in the image PATH)
@@ -132,7 +132,7 @@ RUN check-build-dns.sh && \
     prettier \
     eslint \
     @openai/codex@${CODEX_VERSION} \
-    opencode-ai@${OPENCODE_VERSION} \
+    @opencode/cli@${OPENCODE_VERSION} \
     && npm cache clean --force
 
 RUN uv tool install ruff

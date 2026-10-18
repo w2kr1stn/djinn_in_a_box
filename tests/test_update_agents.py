@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PINS = {"CLAUDE_CODE_VERSION": "2.1.300", "CODEX_VERSION": "0.161.0",
-        "OPENCODE_VERSION": "1.18.40"}
+        "OPENCODE_VERSION": "2.0.25"}
 NPM_FAILURE = (
     "npm error code EAI_AGAIN\n"
     "npm error syscall getaddrinfo\n"
@@ -19,7 +19,7 @@ NPM_FAILURE = (
 )
 NPM_MISSING_PACKAGE = (
     "npm error code E404\n"
-    "npm error 404 Not Found - GET https://registry.npmjs.org/opencode-ai - Not found\n"
+    "npm error 404 Not Found - GET https://registry.npmjs.org/@opencode/cli - Not found\n"
 )
 
 
@@ -57,11 +57,11 @@ def script_env(tmp_path):
         f"      printf '%s' '{NPM_FAILURE}' >&2; exit 1\n"
         '    fi\n'
         '    printf "%s\\n" "${codex_value:-0.161.0}" ;;\n'
-        '  opencode-ai)\n'
+        '  @opencode/cli)\n'
         '    if [[ "${npm_failure:-}" == missing ]]; then\n'
         f"      printf '%s' '{NPM_MISSING_PACKAGE}' >&2; exit 1\n"
         '    fi\n'
-        '    printf "%s\\n" "${opencode_value:-1.18.40}" ;;\n'
+        '    printf "%s\\n" "${opencode_value:-2.0.25}" ;;\n'
         '  *) exit 2 ;;\n'
         'esac\n'
     )
@@ -102,7 +102,7 @@ def test_print_outputs_exact_agent_set_without_writes(script_env):
     assert len(result.stdout.splitlines()) == 3
     assert set(calls.read_text().splitlines()) == {
         "view @anthropic-ai/claude-code version", "view @openai/codex version",
-        "view opencode-ai version",
+        "view @opencode/cli version",
     }
     assert snapshot(project) == before
 
@@ -185,7 +185,7 @@ def test_maintainer_mode_keeps_skip_on_failure_behavior(script_env):
     dockerfile = (project / "Dockerfile").read_text()
     assert "ARG CODEX_VERSION=0.160.0" in dockerfile
     assert "ARG CLAUDE_CODE_VERSION=2.1.300" in dockerfile
-    assert "ARG OPENCODE_VERSION=1.18.40" in dockerfile
+    assert "ARG OPENCODE_VERSION=2.0.25" in dockerfile
     assert "Failed to fetch version" in result.stdout
     assert NPM_FAILURE not in result.stderr
 

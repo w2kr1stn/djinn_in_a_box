@@ -107,7 +107,7 @@ def installation(tmp_path, monkeypatch):
         "ARG OPENCODE_VERSION=1.18.34\nARG DOCKER_VERSION=27.4.1\n"
     )
     (project / "assistant").mkdir()
-    for name in ("Dockerfile", "entrypoint.sh", "audit-briefing.md"):
+    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh", "audit-briefing.md"):
         (project / "assistant" / name).write_bytes((real / "assistant" / name).read_bytes())
     sock = socket.socket(socket.AF_UNIX)
     sock_path = tmp_path / "docker.sock"
@@ -166,10 +166,13 @@ def test_launch_contract(installation, agent, monkeypatch):
     expected = {
         "claude": ["claude", "--permission-mode", "manual", "--safe-mode"],
         "codex": ["codex", "--sandbox", "danger-full-access", "--ask-for-approval", "on-request"],
-        "opencode": ["opencode", "--pure", "--prompt"],
+        "opencode": ["opencode", "--standalone", "--prompt"],
     }
     assert argv[-len(expected[agent]) - 1 : -1] == expected[agent]
-    assert 'OPENCODE_CONFIG_CONTENT={"permission":{"edit":"ask","bash":"ask"}}' in argv
+    assert (
+        'OPENCODE_CONFIG_CONTENT={"permissions":[{"action":"edit","resource":"*","effect":"ask"},'
+        '{"action":"shell","resource":"*","effect":"ask"}]}'
+    ) in argv
     assert "OPENCODE_DISABLE_PROJECT_CONFIG=true" in argv
 
 
@@ -178,7 +181,7 @@ def test_config_selection_general_and_override(installation, monkeypatch):
     config = AppConfig.model_validate({**f.config.model_dump(), "assistant": {"agent": "opencode"}})
     monkeypatch.setattr(a, "audit_config", lambda: (config, ""))
     a.run_audit(None)
-    assert run_call(f)[-4:-1] == ["opencode", "--pure", "--prompt"]
+    assert run_call(f)[-4:-1] == ["opencode", "--standalone", "--prompt"]
     assert "general installation health check" in run_call(f)[-1]
     f.docker.calls.clear()
     a.run_audit(None, "codex")
@@ -467,3 +470,12 @@ def test_local_socket_and_platform(installation, monkeypatch):
     monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
     monkeypatch.setattr(a, "capture", lambda *args: "linux/x86_64\n")
     assert a.local_daemon() == (installation.socket, "linux/amd64")
+
+
+def test_opencode_installer_change_invalidates_assistant_image(installation):
+    f = installation
+    first = a.ensure_image(f.project, "opencode", "linux/amd64", "default")
+    script = f.project / "assistant/install-opencode.sh"
+    script.write_text(script.read_text() + "\n# changed installer\n")
+    second = a.ensure_image(f.project, "opencode", "linux/amd64", "default")
+    assert first != second

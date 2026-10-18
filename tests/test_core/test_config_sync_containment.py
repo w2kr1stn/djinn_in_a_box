@@ -224,7 +224,9 @@ def test_linked_output_carrier_is_a_collision(
 def test_native_only_reads_refuse_links_inside_the_root(tmp_path: Path) -> None:
     root = tmp_path / "opencode"
     (root / "plugins-real").mkdir(parents=True)
-    (root / "plugins-real/ready-notify.js").write_text("export const Plugin = () => ({});\n")
+    (root / "plugins-real/ready-notify.js").write_text(
+        "export default { id: 'fixture', setup() {} };\n"
+    )
     (root / "plugins").symlink_to(root / "plugins-real", target_is_directory=True)
 
     result = read_native_only_workflow(root, "opencode")
@@ -246,7 +248,7 @@ def test_native_only_reads_of_a_regular_tree_are_unchanged(tmp_path: Path) -> No
     root = tmp_path / "opencode"
     (root / "plugins").mkdir(parents=True)
     plugin = root / "plugins/ready-notify.js"
-    plugin.write_text("export const Plugin = () => ({});\n")
+    plugin.write_text("export default { id: 'fixture', setup() {} };\n")
 
     result = read_native_only_workflow(root, "opencode")
 

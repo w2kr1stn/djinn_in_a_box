@@ -46,6 +46,7 @@ def _harness(tmp_path: Path) -> Path:
     """Wrap the real section in stubs so it can run outside a container."""
     log = tmp_path / "sync.log"
     (tmp_path / "home").mkdir()
+    (tmp_path / "runtime").mkdir()
     helper = tmp_path / "settings_copy.py"
     helper.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
 
@@ -63,7 +64,11 @@ def _harness(tmp_path: Path) -> Path:
         f'source "{ROOT / "scripts" / "seed-lib.sh"}"\n'
         f'SETTINGS_COPY_HELPER="{helper}"\n'
         f'OPENCODE_RUNTIME_SETTINGS="{tmp_path / "opencode.json"}"\n'
-        f'OPENCODE_PERSISTENT_SETTINGS="{tmp_path / "persistent-opencode.json"}"\n'
+        f'OPENCODE_RUNTIME_ROOT="{tmp_path / "runtime"}"\n'
+        f'WORKFLOW_PUBLISHER="{ROOT / "src/djinn_in_a_box/core/workflow_publisher.py"}"\n'
+        'typeset -a opencode_protected_paths\n'
+        '_sync_opencode_personal() {\n'
+        'echo "${1}:personal:$OPENCODE_RUNTIME_SETTINGS" >> "$SYNC_LOG"; }\n'
         'reverse_sync_file() { echo "${4}:file:$1" >> "$SYNC_LOG"; }\n'
         'reverse_sync_claude_settings() { echo "${4}:claude:$1" >> "$SYNC_LOG"; }\n'
         # The real UI library, not stubs. Variadic `$*` stubs accept any arity and
@@ -337,9 +342,6 @@ def _spawn_pty(harness: Path, *, detached: bool = False) -> tuple[subprocess.Pop
     return process, master
 
 
-CARRIER_NAMES = ("claude-state", "claude-settings", "opencode-settings")
-
-
 def _wait_for(predicate: Callable[[], bool], description: str, timeout: float = 8) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -371,7 +373,16 @@ class Session:
         ):
             dest = self.persistent / directory
             dest.mkdir(parents=True, exist_ok=True)
-            (self.home / name).symlink_to(dest, target_is_directory=True)
+            if name == ".opencode":
+                # Model a mounted directory, never a symlink at the admitted carrier root.
+                shutil.copytree(dest, self.home / name)
+                if dest.is_symlink():
+                    dest.unlink()
+                else:
+                    shutil.rmtree(dest)
+                dest.symlink_to(self.home / name, target_is_directory=True)
+            else:
+                (self.home / name).symlink_to(dest, target_is_directory=True)
         baseline = self.persistent / "seed/settings.json"
         if not baseline.exists():
             baseline.write_text(
@@ -452,6 +463,35 @@ class Session:
             'log("begin")\nrc = m["main"]()\nlog("end")\nsys.exit(rc)\n'
         )
         self.env["SETTINGS_COPY_HELPER"] = str(helper)
+        publisher = root / "publisher.py"
+        publisher.write_text(
+            "import json, os, runpy, stat, sys, time\nfrom pathlib import Path\n"
+            f"m = runpy.run_path({str(ROOT / 'src/djinn_in_a_box/core/workflow_publisher.py')!r})\n"
+            'active = sys.argv[1:3] == ["personal-carrier", "install"]\n'
+            'target = str(Path(sys.argv[sys.argv.index("--root") + 1]) / '
+            'sys.argv[sys.argv.index("--relative") + 1]) if active else ""\n'
+            f"events = Path({str(self.events)!r})\n"
+            "def log(action):\n"
+            "    if active:\n"
+            '        with events.open("a") as f:\n'
+            '            f.write(json.dumps([action, os.getpid(), os.getppid(), target]) + "\\n")\n'
+            "replace, fsync = os.replace, os.fsync\n"
+            "def recorded_fsync(fd):\n"
+            '    log("directory-fsync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file-fsync")\n'
+            "    fsync(fd)\n"
+            "def recorded_replace(src, dst, **kwargs):\n"
+            '    log("replace")\n'
+            f"    if active and Path({str(self.hold)!r}).exists():\n"
+            f"        Path({str(self.blocked)!r}).write_text(str(os.getppid()))\n"
+            f"        while not Path({str(self.release)!r}).exists(): time.sleep(0.01)\n"
+            f"    fault = Path({str(self.fail)!r})\n"
+            '    if active and fault.exists() and fault.read_text() in ("all", target):\n'
+            '        raise OSError("injected replacement failure")\n'
+            "    replace(src, dst, **kwargs)\n"
+            "os.replace, os.fsync = recorded_replace, recorded_fsync\n"
+            'log("begin")\nrc = m["main"]()\nlog("end")\nsys.exit(rc)\n'
+        )
+        self.env["WORKFLOW_PUBLISHER"] = str(publisher)
         self.process: subprocess.Popen | None = None
         self.out = root / "stdout"
         self.err = root / "stderr"
@@ -489,7 +529,7 @@ class Session:
         return (
             self.home / ".claude.json",
             self.home / ".claude/settings.json",
-            self.home / "runtime-opencode/.opencode.json",
+            self.home / "runtime-opencode/opencode.json",
         )
 
     @property
@@ -497,11 +537,15 @@ class Session:
         return (
             self.home / ".claude/claude.json",
             self.home / ".claude_seed/settings.local.json",
-            self.home / ".opencode/.opencode.json",
+            self.home / ".opencode/opencode.json",
         )
 
     def acknowledgements(self) -> tuple[Path, Path, Path]:
-        return tuple(self.state / f"{name}.ack" for name in CARRIER_NAMES)
+        return (
+            self.state / "claude-state.ack",
+            self.state / "claude-settings.ack",
+            self.state / "opencode.ack/opencode.json",
+        )
 
     def sleepers(self) -> list[int]:
         return (
@@ -706,7 +750,10 @@ def test_failed_destination_write_warns_once_per_carrier_per_session(
         _atomic_edit(path, _changed_settings(5) if index == 1 else b'{"version":5}\n')
     for _ in range(3):
         session.tick()
-    for runtime, target in zip(session.runtimes, session.targets, strict=True):
+    warning_pairs = list(zip(session.runtimes, session.targets, strict=True))
+    if fault != "copier":
+        warning_pairs[2] = (session.runtimes[2].parent, session.targets[2].parent)
+    for runtime, target in warning_pairs:
         assert (
             session.err.read_text().count(f"  [warn] could not persist {runtime} → {target}\n") == 1
         )
@@ -715,7 +762,7 @@ def test_failed_destination_write_warns_once_per_carrier_per_session(
         assert [path.read_bytes() for path in session.acknowledgements()] == originals
     if fault == "scratch-final":
         stderr = session.finish(stop_signal)
-        for runtime, target in zip(session.runtimes, session.targets, strict=True):
+        for runtime, target in warning_pairs:
             assert stderr.count(f"  [warn] could not persist {runtime} → {target}\n") == 2
         assert "settings copy failed" not in stderr
         return
@@ -745,8 +792,10 @@ def test_failed_destination_write_warns_once_per_carrier_per_session(
             )
             == 2
         )
-    assert stderr.count("  [warn] could not persist OpenCode personal settings\n") == 1
-    assert stderr.count("settings copy failed\n") == 3
+    assert stderr.count(
+        f"  [warn] could not persist {session.runtimes[2]} → {session.targets[2]}\n"
+    ) == 2
+    assert stderr.count("settings copy failed\n") == 2
 
 
 @pytest.mark.parametrize("index", range(3))
@@ -774,7 +823,8 @@ def test_all_carriers_use_atomic_helper_and_keep_previous_on_failure(sessions, i
     assert session.targets[index].read_bytes() == b'{"old":true}\n'
     assert session.acknowledgements()[index].read_bytes() == original
     assert session.acknowledgements()[sibling].read_bytes() == sibling_content
-    assert not list(session.targets[index].parent.glob(".djinn-settings-*"))
+    temporary_prefix = ".djinn-publisher-*" if index == 2 else ".djinn-settings-*"
+    assert not list(session.targets[index].parent.glob(temporary_prefix))
     session.fail.unlink()
     session.tick()
     assert session.acknowledgements()[index].read_bytes() == content
@@ -897,6 +947,8 @@ def test_unavailable_private_state_degrades_explicitly(
             _assert_payload(target, runtime.read_bytes(), index)
         else:
             assert (target.read_bytes() if target.exists() else None) == previous[index]
+            if index == 2 and not transient:
+                runtime, target = runtime.parent, target.parent
             suffix = " (settings are not valid JSON)" if transient else ""
             assert stderr.count(f"  [warn] could not persist {runtime} → {target}{suffix}\n") == 1
 
@@ -972,7 +1024,9 @@ def test_failed_initial_capture_disables_worker_and_retries_at_stop(sessions) ->
         + f'source "{ROOT / "scripts/seed-lib.sh"}"\n'
         + f'SETTINGS_COPY_HELPER="{ROOT / "scripts/settings-copy.py"}"\n'
         + f'OPENCODE_RUNTIME_SETTINGS="{session.runtimes[2]}"\n'
-        + f'OPENCODE_PERSISTENT_SETTINGS="{session.targets[2]}"\n'
+        + f'OPENCODE_RUNTIME_ROOT="{session.runtimes[2].parent}"\n'
+        + f'WORKFLOW_PUBLISHER="{session.env["WORKFLOW_PUBLISHER"]}"\n'
+        + 'typeset -a opencode_protected_paths\n'
         + _shutdown_section()
     )
     session.start(entrypoint)
@@ -1179,3 +1233,683 @@ def test_parent_traps_are_installed_before_worker_start(sessions) -> None:
     assert result.returncode == 143, "startup signal missed the installed parent trap"
     assert result.stdout == b""
     assert not session.sleepers(), "signal probe should exit before worker launch"
+
+
+def test_opencode_provider_survives_checkpoint_and_recreation(sessions) -> None:
+    session = sessions()
+    session.start()
+    provider = json.loads((ROOT / "templates/opencode/opencode.json.example").read_text())
+    payload = json.dumps(provider).encode()
+    _atomic_edit(session.runtimes[2], payload)
+    session.tick()
+    assert session.targets[2].read_bytes() == payload
+    assert session.targets[2].name == "opencode.json"
+    session.finish()
+    recreated = sessions(persistent=session.persistent)
+    recreated.start()
+    assert json.loads(recreated.runtimes[2].read_bytes()) == provider
+    recreated.finish()
+
+
+PERSONAL_NAMES = ("opencode.json", "cli.json", "themes/night.json")
+
+
+def _personal_paths(session: Session, base: str) -> list[Path]:
+    root = session.runtimes[2].parent if base == "runtime" else session.home / ".opencode"
+    return [root / name for name in PERSONAL_NAMES]
+
+
+def _personal_seed(session: Session, raw: bytes = b'{"initial":true}\n') -> None:
+    for path in _personal_paths(session, "carrier"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+
+
+def test_personal_copy_tick_conflict_retry_final_and_recreation(sessions):
+    session = sessions()
+    initial = b'{"initial":true}\n'
+    _personal_seed(session, initial)
+    session.start()
+    runtimes, targets = _personal_paths(session, "runtime"), _personal_paths(session, "carrier")
+    for runtime in runtimes:
+        assert runtime.read_bytes() == initial
+        assert runtime.stat().st_mode & 0o777 == 0o600
+    # Raw snapshots acknowledge a TUI-like atomic rename, then preserve a host edit.
+    for runtime in runtimes:
+        _atomic_edit(runtime, b'{"tick":1}\n')
+    session.tick()
+    for relative, target in zip(PERSONAL_NAMES, targets, strict=True):
+        assert target.read_bytes() == b'{"tick":1}\n'
+        assert (session.state / "opencode.ack" / relative).read_bytes() == b'{"tick":1}\n'
+        target.write_bytes(b'{"host":2}')
+    session.tick()
+    assert all(p.read_bytes() == b'{"host":2}' for p in targets)
+    for runtime in runtimes:
+        _atomic_edit(runtime, b'{"torn":')
+    session.tick()
+    assert "not valid JSON" not in session.err.read_text()
+    assert all(p.read_bytes() == b'{"host":2}' for p in targets)
+    for runtime in runtimes:
+        _atomic_edit(runtime, b'{"runtime":3}')
+    session.tick()
+    assert all(p.read_bytes() == b'{"runtime":3}' for p in targets)
+    for runtime in runtimes:
+        _atomic_edit(runtime, b'{"final":4}')
+    session.finish(signal.SIGTERM)
+    assert all(p.read_bytes() == b'{"final":4}' for p in targets)
+    recreated = sessions(persistent=session.persistent)
+    recreated.start()
+    assert all(p.read_bytes() == b'{"final":4}' for p in _personal_paths(recreated, "runtime"))
+    recreated.finish()
+
+
+def test_runtime_created_cli_and_theme_advance_ack_and_keep_host_edits(sessions):
+    session = sessions()
+    session.start()
+    runtimes, targets = (
+        _personal_paths(session, "runtime")[1:],
+        _personal_paths(session, "carrier")[1:],
+    )
+    for path in runtimes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_edit(path, b'{"created":1}')
+    assert not (session.home / ".opencode/themes").exists()
+    session.tick()
+    for name, target in zip(PERSONAL_NAMES[1:], targets, strict=True):
+        assert target.read_bytes() == b'{"created":1}'
+        assert (session.state / "opencode.ack" / name).read_bytes() == b'{"created":1}'
+        target.write_bytes(b'{"host":2}')
+    session.tick()
+    assert all(p.read_bytes() == b'{"host":2}' for p in targets)
+    session.finish(signal.SIGTERM)
+    assert all(p.read_bytes() == b'{"host":2}' for p in targets)
+
+
+def test_personal_completed_tick_survives_sigkill_and_recreation(sessions):
+    session = sessions()
+    _personal_seed(session)
+    session.start()
+    for runtime in _personal_paths(session, "runtime"):
+        _atomic_edit(runtime, b'{"checkpoint":1}')
+    session.tick()
+    for name in PERSONAL_NAMES:
+        assert (session.state / "opencode.ack" / name).read_bytes() == b'{"checkpoint":1}'
+    assert session.process is not None
+    os.killpg(session.process.pid, signal.SIGKILL)
+    assert session.process.wait(timeout=5) == -signal.SIGKILL
+    recreated = sessions(persistent=session.persistent)
+    recreated.start()
+    assert all(p.read_bytes() == b'{"checkpoint":1}' for p in _personal_paths(recreated, "runtime"))
+    recreated.finish()
+
+
+@pytest.mark.parametrize("deletion", ("runtime", "carrier", "both", "carrier-then-edit"))
+def test_personal_upsert_only_four_deletion_cases(sessions, deletion):
+    session = sessions()
+    _personal_seed(session)
+    session.start()
+    runtimes, targets = _personal_paths(session, "runtime"), _personal_paths(session, "carrier")
+    if deletion in {"runtime", "both"}:
+        for path in runtimes:
+            path.unlink()
+    if deletion in {"carrier", "both", "carrier-then-edit"}:
+        for path in targets:
+            path.unlink()
+    if deletion == "carrier-then-edit":
+        for path in runtimes:
+            _atomic_edit(path, b'{"later":1}')
+    session.tick()
+    session.finish()
+    for path in targets:
+        assert path.exists() == (deletion in {"runtime", "carrier-then-edit"})
+    recreated = sessions(persistent=session.persistent)
+    # The generic environment factory seeds a default main; remove that fixture
+    # default when testing a deliberately absent carrier, as a real mount does.
+    if deletion in {"carrier", "both"}:
+        recreated.targets[2].unlink()
+    recreated.start()
+    for path in _personal_paths(recreated, "runtime"):
+        assert path.exists() == (deletion in {"runtime", "carrier-then-edit"})
+    recreated.finish()
+
+
+@pytest.mark.parametrize("side", ("carrier", "runtime"))
+@pytest.mark.parametrize("relative", (*PERSONAL_NAMES, "themes"))
+def test_personal_unsafe_start_stops_before_mcp(sessions, side, relative):
+    session = sessions()
+    marker = session.root / "mcp-ran"
+    fake_mcp = session.root / "mcp.zsh"
+    fake_mcp.write_text(f'register_mcp_servers() {{ touch "{marker}"; }}\n')
+    session.env["MCP_REGISTER"] = str(fake_mcp)
+    root = session.home / ".opencode" if side == "carrier" else session.runtimes[2].parent
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    outside = session.root / "outside"
+    outside.write_bytes(b"sentinel")
+    path.symlink_to(outside)
+    with pytest.raises(AssertionError, match="refused"):
+        session.start()
+    assert session.process is not None and session.process.returncode == 1
+    assert not marker.exists()
+    assert outside.read_bytes() == b"sentinel"
+    errors = [line for line in session.err.read_text().splitlines() if "[err]" in line]
+    assert len(errors) == 1
+    assert str(session.home / ".opencode") in errors[0]
+    assert str(session.runtimes[2].parent) in errors[0]
+
+
+def test_default_runtime_root_link_is_refused_before_any_mkdir(sessions):
+    session = sessions()
+    session.env.pop("OPENCODE_RUNTIME_ROOT")
+    outside = session.root / "outside"
+    outside.mkdir()
+    (session.home / ".config").mkdir(exist_ok=True)
+    (session.home / ".config/opencode").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AssertionError, match="refused"):
+        session.start()
+    assert session.process is not None and session.process.returncode == 1
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("degraded", ("healthy", "initial-recovered", "never", "lost"))
+def test_oversize_protection_for_all_personal_kinds_in_every_sync_path(sessions, degraded):
+    session = sessions()
+    Path(session.env["MCP_SERVERS_CONFIG"]).write_text(
+        json.dumps({"fixture": {"url": "https://mcp.example/mcp", "transport": "streamable-http"}})
+    )
+    session._executable("curl", "#!/bin/sh\nexit 0\n")
+    original = b"x" * ((1 << 20) + 1)
+    _personal_seed(session, original)
+    sibling_name = "themes/safe.json"
+    sibling = session.home / ".opencode" / sibling_name
+    sibling.write_bytes(b'{"initial":0}')
+    if degraded == "initial-recovered":
+        publisher = session.env["WORKFLOW_PUBLISHER"]
+        fail_once = session.root / "fail-initial-snapshot"
+        fail_once.touch()
+        wrapper = session.root / "fail-snapshot.py"
+        wrapper.write_text(
+            "import runpy, sys\nfrom pathlib import Path\n"
+            f"flag = Path({str(fail_once)!r})\n"
+            'if sys.argv[1:3] == ["personal-carrier", "snapshot"] and flag.exists():\n'
+            "    flag.unlink(); sys.exit(1)\n"
+            f"runpy.run_path({publisher!r}, run_name='__main__')\n"
+        )
+        session.env["WORKFLOW_PUBLISHER"] = str(wrapper)
+    elif degraded == "never":
+        session.tmp.chmod(0o500)
+    session.start()
+    if degraded in {"initial-recovered", "never"}:
+        assert "settings checkpoints disabled" in session.err.read_text()
+        assert not session.sleepers()
+    for relative in PERSONAL_NAMES:
+        assert f"skipped {relative}: larger than 1 MiB" in session.err.read_text()
+    if degraded == "lost":
+        shutil.rmtree(session.state)
+    for runtime in _personal_paths(session, "runtime"):
+        runtime.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_edit(runtime, b'{"runtime":1}')
+    safe_runtime = session.runtimes[2].parent / sibling_name
+    _atomic_edit(safe_runtime, b'{"runtime":1}')
+    if degraded == "healthy":
+        session.tick()
+        assert sibling.read_bytes() == b'{"runtime":1}'
+    elif degraded == "initial-recovered":
+        session.tmp.chmod(0o700)
+    session.events.write_text("")
+    stderr = session.finish(signal.SIGTERM)
+    assert all(p.read_bytes() == original for p in _personal_paths(session, "carrier"))
+    events = [json.loads(line) for line in session.events.read_text().splitlines()]
+    assert not any(e[3] in {str(p) for p in _personal_paths(session, "carrier")} for e in events)
+    if degraded == "never":
+        assert sibling.read_bytes() == b'{"initial":0}'
+        assert (
+            f"  [warn] could not persist {session.runtimes[2].parent} → "
+            f"{session.targets[2].parent}\n"
+        ) in stderr
+        session.tmp.chmod(0o700)
+    else:
+        assert sibling.read_bytes() == b'{"runtime":1}'
+    recreated = sessions(persistent=session.persistent)
+    recreated.start()
+    assert all(p.read_bytes() == original for p in _personal_paths(recreated, "carrier"))
+    assert all(not p.exists() for p in _personal_paths(recreated, "runtime"))
+    recreated.finish()
+
+
+@pytest.mark.parametrize("shape", ("symlink", "fifo", "directory", "oversize"))
+def test_checkpoint_refusal_keeps_ack_and_carrier_but_safe_sibling_persists(sessions, shape):
+    session = sessions()
+    _personal_seed(session)
+    session.start()
+    runtime = _personal_paths(session, "runtime")[1]
+    target = _personal_paths(session, "carrier")[1]
+    ack = session.state / "opencode.ack/cli.json"
+    original = ack.read_bytes()
+    runtime.unlink()
+    if shape == "symlink":
+        outside = session.root / "outside"
+        outside.write_bytes(b"sentinel")
+        runtime.symlink_to(outside)
+    elif shape == "fifo":
+        os.mkfifo(runtime)
+    elif shape == "directory":
+        runtime.mkdir()
+    else:
+        runtime.write_bytes(b"x" * ((1 << 20) + 1))
+    safe = _personal_paths(session, "runtime")[2]
+    _atomic_edit(safe, b'{"safe":1}')
+    session.tick()
+    session.tick()
+    assert target.read_bytes() == ack.read_bytes() == original
+    assert _personal_paths(session, "carrier")[2].read_bytes() == b'{"safe":1}'
+    assert session.err.read_text().count("refused cli.json:") == 1
+    if shape == "symlink":
+        assert outside.read_bytes() == b"sentinel"
+    if shape == "directory":
+        runtime.rmdir()
+    else:
+        runtime.unlink()
+    _atomic_edit(runtime, b'{"repaired":1}')
+    session.tick()
+    assert target.read_bytes() == ack.read_bytes() == b'{"repaired":1}'
+    session.finish()
+
+
+@pytest.mark.parametrize("edit", (False, True))
+def test_empty_carrier_acknowledges_real_mcp_before_first_tick(sessions, edit):
+    session = sessions()
+    session.targets[2].unlink()
+    Path(session.env["MCP_SERVERS_CONFIG"]).write_text(
+        json.dumps({"fixture": {"url": "https://mcp.example/mcp", "transport": "streamable-http"}})
+    )
+    session._executable("curl", "#!/bin/sh\nexit 0\n")
+    session.start()
+    original = session.runtimes[2].read_bytes()
+    assert json.loads(original)["mcp"]["servers"]["fixture"]["type"] == "remote"
+    assert session.acknowledgements()[2].read_bytes() == original
+    session.tick()
+    assert not session.targets[2].exists()
+    if edit:
+        _atomic_edit(session.runtimes[2], b'{"later":true}')
+        session.tick()
+        assert session.targets[2].read_bytes() == b'{"later":true}'
+    session.finish(signal.SIGTERM)
+    assert session.targets[2].exists() == edit
+
+
+@pytest.mark.parametrize("relative", PERSONAL_NAMES)
+def test_each_personal_kind_joins_checkpoint_before_final(sessions, relative):
+    session = sessions()
+    _personal_seed(session)
+    order = session.root / "shutdown-order"
+    instrumented = session.root / "ordered-entrypoint.zsh"
+    instrumented.write_text(
+        ENTRYPOINT.read_text()
+        .replace(
+            "stop_session_checkpointer() {\n",
+            f'stop_session_checkpointer() {{\n    echo join >> "{order}"\n',
+        )
+        .replace(
+            "sync_session_state() {\n",
+            f'sync_session_state() {{\n    [[ "$1" != final ]] || echo final >> "{order}"\n',
+        )
+    )
+    session.start(instrumented)
+    runtime = session.runtimes[2].parent / relative
+    target = session.home / ".opencode" / relative
+    _atomic_edit(runtime, b'{"checkpoint":1}')
+    _wait_for(lambda: bool(session.sleepers()), "no interval sleeper")
+    session.hold.touch()
+    session.events.write_text("")
+    (session.root / f"tick-{session.sleepers()[-1]}").touch()
+    _wait_for(session.blocked.exists, "personal installer did not block")
+    _atomic_edit(runtime, b'{"final":2}')
+    assert session.process is not None
+    os.kill(session.process.pid, signal.SIGTERM)
+    time.sleep(0.15)
+    assert session.process.poll() is None
+    assert [json.loads(line)[0] for line in session.events.read_text().splitlines()] == [
+        "begin",
+        "file-fsync",
+        "replace",
+    ]
+    session.hold.unlink()
+    session.release.touch()
+    assert session.process.wait(timeout=5) == 143
+    assert target.read_bytes() == b'{"final":2}'
+    assert order.read_text().splitlines() == ["join", "final"]
+    actions = [json.loads(line)[0] for line in session.events.read_text().splitlines()]
+    assert actions == ["begin", "file-fsync", "replace", "directory-fsync", "end"] * 2
+
+
+@pytest.mark.parametrize("cause", ("initial", "lost"))
+@pytest.mark.parametrize("host_action", ("edit", "delete"))
+def test_degraded_final_keeps_documented_overwrite_and_upsert(sessions, cause, host_action):
+    session = sessions()
+    _personal_seed(session)
+    if cause == "initial":
+        session.tmp.chmod(0o500)
+    session.start()
+    originals = [path.read_bytes() for path in _personal_paths(session, "runtime")]
+    if cause == "initial":
+        session.tmp.chmod(0o700)
+    else:
+        shutil.rmtree(session.state)
+    for target in _personal_paths(session, "carrier"):
+        if host_action == "edit":
+            target.write_bytes(b'{"host-only":true}')
+        else:
+            target.unlink()
+    stderr = session.finish()
+    assert [p.read_bytes() for p in _personal_paths(session, "carrier")] == originals
+    assert ("settings checkpoints disabled" in stderr) == (cause == "initial")
+
+
+def test_unresolved_personal_refusals_warn_once_at_ticks_and_again_at_final(sessions):
+    session = sessions()
+    _personal_seed(session)
+    session.start()
+    originals = [p.read_bytes() for p in _personal_paths(session, "carrier")]
+    for runtime in _personal_paths(session, "runtime"):
+        runtime.unlink()
+        runtime.symlink_to(session.root / "missing")
+    session.tick()
+    session.tick()
+    for name in PERSONAL_NAMES:
+        assert session.err.read_text().count(f"refused {name}:") == 1
+    stderr = session.finish(signal.SIGTERM)
+    for name in PERSONAL_NAMES:
+        assert stderr.count(f"refused {name}:") == 2
+    assert [p.read_bytes() for p in _personal_paths(session, "carrier")] == originals
+
+
+@pytest.mark.parametrize("runtime_entry", ("ordinary", "themes-link", "non-utf8"))
+def test_unavailable_state_warns_once_for_opencode_roots_without_writes(sessions, runtime_entry):
+    session = sessions()
+    _personal_seed(session)
+    original = [p.read_bytes() for p in _personal_paths(session, "carrier")]
+    session.tmp.chmod(0o500)
+    session.start()
+    assert not session.events.exists()
+    for runtime in _personal_paths(session, "runtime"):
+        _atomic_edit(runtime, b'{"changed":1}')
+    runtime_root = session.runtimes[2].parent
+    carrier_root = session.home / ".opencode"
+    (runtime_root / "themes/café.json").write_bytes(b'{"created":1}')
+    outside = session.root / "outside-themes"
+    outside.mkdir()
+    sentinel = outside / "outside-only.json"
+    sentinel.write_bytes(b"sentinel")
+    # These entries exist before final sync, after startup admission has completed.
+    if runtime_entry == "themes-link":
+        shutil.rmtree(runtime_root / "themes")
+        (runtime_root / "themes").symlink_to(outside, target_is_directory=True)
+    elif runtime_entry == "non-utf8":
+        (runtime_root / os.fsdecode(b"themes/caf\xe9.json")).write_bytes(b'{"ignored":1}')
+    stderr = session.finish(signal.SIGTERM)
+    assert [p.read_bytes() for p in _personal_paths(session, "carrier")] == original
+    assert not session.events.exists()
+    assert sentinel.read_bytes() == b"sentinel"
+    assert sorted(p.name for p in (carrier_root / "themes").iterdir()) == ["night.json"]
+    assert [
+        line
+        for line in stderr.splitlines()
+        if str(runtime_root) in line or str(carrier_root) in line
+    ] == [f"  [warn] could not persist {runtime_root} → {carrier_root}"]
+    assert "outside-only.json" not in stderr
+    assert "café.json" not in stderr
+
+
+def test_late_runtime_root_refusal_preserves_carrier_and_ack(sessions):
+    session = sessions()
+    _personal_seed(session)
+    session.start()
+    original = [p.read_bytes() for p in _personal_paths(session, "carrier")]
+    root = session.runtimes[2].parent
+    root.rename(session.home / "old-runtime")
+    outside = session.root / "outside"
+    outside.mkdir()
+    (outside / "cli.json").write_bytes(b"sentinel")
+    root.symlink_to(outside, target_is_directory=True)
+    session.tick()
+    session.tick()
+    assert session.err.read_text().count(f"could not capture {root}") == 1
+    assert [
+        (session.state / "opencode.ack" / name).read_bytes() for name in PERSONAL_NAMES
+    ] == original
+    stderr = session.finish(signal.SIGTERM)
+    assert stderr.count(f"could not capture {root}") == 2
+    assert [p.read_bytes() for p in _personal_paths(session, "carrier")] == original
+    assert (outside / "cli.json").read_bytes() == b"sentinel"
+
+
+def test_protected_paths_remain_protected_after_host_repairs_content(sessions):
+    session = sessions()
+    _personal_seed(session, b"x" * ((1 << 20) + 1))
+    session.start()
+    for runtime in _personal_paths(session, "runtime"):
+        runtime.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_edit(runtime, b'{"runtime":1}')
+    session.tick()
+    for target in _personal_paths(session, "carrier"):
+        target.write_bytes(b'{"host-repair":true}')
+    for runtime in _personal_paths(session, "runtime"):
+        _atomic_edit(runtime, b'{"runtime":2}')
+    session.tick()
+    session.finish(signal.SIGTERM)
+    assert all(
+        p.read_bytes() == b'{"host-repair":true}' for p in _personal_paths(session, "carrier")
+    )
+    recreated = sessions(persistent=session.persistent)
+    recreated.start()
+    assert all(
+        p.read_bytes() == b'{"host-repair":true}' for p in _personal_paths(recreated, "runtime")
+    )
+    recreated.finish()
+
+
+def test_partial_initial_snapshot_failure_disables_worker_and_degrades_as_a_unit(sessions):
+    session = sessions()
+    _personal_seed(session)
+    flag = session.root / "fail-capture-once"
+    flag.touch()
+    wrapper = session.root / "partial-capture.py"
+    wrapper.write_text(
+        "import runpy, sys\nfrom pathlib import Path\n"
+        f"m = runpy.run_path({str(ROOT / 'src/djinn_in_a_box/core/workflow_publisher.py')!r})\n"
+        f"flag = Path({str(flag)!r})\n"
+        'if sys.argv[1:3] == ["personal-carrier", "snapshot"] and flag.exists():\n'
+        '    def fail_cli(*args, **kwargs):\n'
+        '        if args[1] == "cli.json":\n'
+        '            flag.unlink(); raise OSError("injected capture write failure")\n'
+        '        return original(*args, **kwargs)\n'
+        '    original = m["main"].__globals__["_replace_at"]\n'
+        '    m["main"].__globals__["_replace_at"] = fail_cli\n'
+        'raise SystemExit(m["main"]())\n'
+    )
+    session.env["WORKFLOW_PUBLISHER"] = str(wrapper)
+    session.start()
+    assert "settings checkpoints disabled" in session.err.read_text()
+    assert not session.sleepers()
+    assert not list(session.tmp.glob("djinn-session-state.*"))
+    original = [p.read_bytes() for p in _personal_paths(session, "runtime")]
+    for target in _personal_paths(session, "carrier"):
+        target.write_bytes(b'{"host":true}')
+    session.finish(signal.SIGTERM)
+    assert [p.read_bytes() for p in _personal_paths(session, "carrier")] == original
+
+
+def test_protected_theme_names_are_literal_and_preserve_newlines(sessions):
+    session = sessions()
+    relative = "themes/custom\n[x]*.json"
+    target = session.home / ".opencode" / relative
+    target.parent.mkdir()
+    original = b"x" * ((1 << 20) + 1)
+    target.write_bytes(original)
+    session.start()
+    runtime = session.runtimes[2].parent / relative
+    runtime.parent.mkdir(exist_ok=True)
+    _atomic_edit(runtime, b'{"runtime":1}')
+    session.tick()
+    assert target.read_bytes() == original
+    session.finish(signal.SIGTERM)
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("degraded", (False, True), ids=("healthy", "degraded"))
+def test_non_utf8_theme_is_ignored_through_checkpoint_and_final(sessions, degraded):
+    session = sessions()
+    session.events.write_text("")
+    relative = os.fsdecode(b"themes/caf\xe9.json")
+    target = session.home / ".opencode" / relative
+    runtime = session.runtimes[2].parent / relative
+    original = b"x" * ((1 << 20) + 1)
+    for path, raw in ((target, original), (runtime, b'{"runtime":1}')):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    session.start()
+    assert "skipped themes/" not in session.err.read_text()
+    assert runtime.read_bytes() == b'{"runtime":1}'
+    ack = session.state / "opencode.ack" / relative
+    assert not ack.exists()
+    _atomic_edit(runtime, b'{"runtime":2}')
+    session.tick()
+    assert target.read_bytes() == original
+    assert not ack.exists()
+    if degraded:
+        shutil.rmtree(session.state)
+    session.finish(signal.SIGTERM)
+    assert target.read_bytes() == original
+    assert not ack.exists()
+    events = [json.loads(line) for line in session.events.read_text().splitlines()]
+    assert not any(event[3] == str(target) for event in events)
+
+
+def test_utf8_non_ascii_theme_round_trips(sessions):
+    session = sessions()
+    relative = "themes/café.json"
+    target = session.home / ".opencode" / relative
+    target.parent.mkdir()
+    target.write_bytes(b'{"initial":true}')
+    session.start()
+    runtime = session.runtimes[2].parent / relative
+    assert runtime.read_bytes() == target.read_bytes()
+    ack = session.state / "opencode.ack" / relative
+    assert ack.read_bytes() == target.read_bytes()
+    _atomic_edit(runtime, b'{"checkpoint":true}')
+    session.tick()
+    assert target.read_bytes() == ack.read_bytes() == b'{"checkpoint":true}'
+    _atomic_edit(runtime, b'{"final":true}')
+    session.finish()
+    assert target.read_bytes() == b'{"final":true}'
+    recreated = sessions(persistent=session.persistent)
+    recreated.start()
+    assert (recreated.runtimes[2].parent / relative).read_bytes() == b'{"final":true}'
+    recreated.finish()
+
+
+@pytest.mark.parametrize(
+    "fault", ("jq", "truncated", "malformed", "object", "string", "null", "number-element",
+              "null-element", "two-arrays", "empty-output"),
+)
+def test_protected_set_conversion_fails_closed_before_runtime_writers(sessions, fault):
+    session = sessions()
+    original = b"x" * ((1 << 20) + 1)
+    _personal_seed(session, original)
+    markers = [session.root / name for name in ("credentials-ran", "publisher-ran", "mcp-ran")]
+    credentials = session.root / "credentials.zsh"
+    credentials.write_text(f'ensure_opencode_credentials() {{ touch "{markers[0]}"; }}\n')
+    session.env["OPENCODE_CREDENTIALS_HELPER"] = str(credentials)
+    mcp = session.root / "mcp.zsh"
+    mcp.write_text(f'register_mcp_servers() {{ touch "{markers[2]}"; }}\n')
+    session.env["MCP_REGISTER"] = str(mcp)
+    publisher = session.env["WORKFLOW_PUBLISHER"]
+    wrapper = session.root / "copy-result.py"
+    bad_output = {
+        "truncated": '["opencode.json"', "malformed": "not JSON", "object": "{}",
+        "string": '"opencode.json"', "null": "null", "number-element": '["cli.json", 1]',
+        "null-element": "[null]", "two-arrays": "[] []", "empty-output": "",
+    }
+    wrapper.write_text(
+        "import runpy, sys\nfrom pathlib import Path\n"
+        + (f'if sys.argv[1:3] == ["personal-carrier", "copy"]:\n'
+           f'    print({bad_output.get(fault, "")!r}); sys.exit(0)\n' if fault != "jq" else "")
+        + f'if sys.argv[1:2] != ["personal-carrier"]: Path({str(markers[1])!r}).touch()\n'
+        + f"runpy.run_path({publisher!r}, run_name='__main__')\n"
+    )
+    session.env["WORKFLOW_PUBLISHER"] = str(wrapper)
+    if fault == "jq":
+        jq = shutil.which("jq")
+        assert jq
+        session._executable(
+            "jq", "#!/usr/bin/python3\nimport os, sys\n"
+            'if sys.argv[1:2] == ["-j"]:\n'
+            '    print("injected protected-set conversion failure", file=sys.stderr); sys.exit(5)\n'
+            f"os.execv({jq!r}, [{jq!r}] + sys.argv[1:])\n",
+        )
+    with pytest.raises(AssertionError, match="protected paths"):
+        session.start()
+    assert session.process is not None and session.process.returncode == 1
+    assert not session.ready.exists()
+    assert all(not marker.exists() for marker in markers)
+    assert all(path.read_bytes() == original for path in _personal_paths(session, "carrier"))
+    errors = [line for line in session.err.read_text().splitlines() if "[err]" in line]
+    assert len(errors) == 1
+    assert "JSON array of strings" in errors[0]
+
+
+def test_empty_protected_set_allows_runtime_writers(sessions):
+    session = sessions()
+    session.start()
+    _atomic_edit(session.runtimes[2], b'{"checkpoint":true}')
+    session.tick()
+    assert session.targets[2].read_bytes() == b'{"checkpoint":true}'
+    session.finish()
+
+
+@pytest.mark.parametrize("repair", (False, True), ids=("unresolved", "repaired"))
+def test_initial_oversize_runtime_entry_keeps_sibling_checkpoints_and_host_edits(sessions, repair):
+    session = sessions()
+    _personal_seed(session)
+    relative = "themes/restarted.json"
+    runtime = session.runtimes[2].parent / relative
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    oversized = b"x" * ((1 << 20) + 1)
+    runtime.write_bytes(oversized)
+    session.start()
+    assert "settings checkpoints disabled" not in session.err.read_text()
+    ack = session.state / "opencode.ack" / relative
+    target = session.home / ".opencode" / relative
+    assert not ack.exists()
+    assert not target.exists()
+    # The refused runtime-only theme must not disturb any safe carrier.
+    _atomic_edit(session.runtimes[0], b'{"claude":true}')
+    cli = session.runtimes[2].parent / "cli.json"
+    _atomic_edit(cli, b'{"safe":true}')
+    session.tick()
+    session.tick()
+    assert session.targets[0].read_bytes() == b'{"claude":true}'
+    assert (session.home / ".opencode/cli.json").read_bytes() == b'{"safe":true}'
+    assert not ack.exists()
+    assert not target.exists()
+    assert runtime.read_bytes() == oversized
+    assert session.err.read_text().count(f"refused {relative}:") == 1
+    # An unchanged runtime main retains its baseline, preserving this host edit at final.
+    session.targets[2].write_bytes(b'{"host":true}')
+    if repair:
+        _atomic_edit(runtime, b'{"repaired":true}')
+        session.tick()
+        assert target.read_bytes() == ack.read_bytes() == b'{"repaired":true}'
+    stderr = session.finish()
+    assert session.targets[2].read_bytes() == b'{"host":true}'
+    assert "settings checkpoints disabled" not in stderr
+    assert stderr.count(f"refused {relative}:") == (1 if repair else 2)
+    if repair:
+        assert target.read_bytes() == b'{"repaired":true}'
+    else:
+        assert not target.exists()
+        events = [json.loads(line) for line in session.events.read_text().splitlines()]
+        assert not any(event[3] == str(target) for event in events)

@@ -785,3 +785,145 @@ def test_capture_failure_returns_failure_without_os_chatter(tmp_path: Path) -> N
     assert result.returncode == 0
     assert result.stdout == "continued\n"
     assert result.stderr == ""
+
+
+def test_opencode_protection_defaults_to_empty_under_nounset(tmp_path: Path) -> None:
+    result = run_seed_lib(tmp_path, '_opencode_is_protected x')
+    assert result.returncode == 1
+    assert result.stdout == result.stderr == ""
+
+
+def test_opencode_declarations_preserve_existing_protection(tmp_path: Path) -> None:
+    result = run_seed_lib(
+        tmp_path,
+        'opencode_protected_paths=(cli.json); '
+        f'source {shlex.quote(str(SCRIPT))}; '
+        'typeset -a opencode_protected_paths; _opencode_is_protected cli.json',
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == ""
+
+
+def test_opencode_installer_itself_honors_protected_set(tmp_path: Path) -> None:
+    carrier = tmp_path / ".opencode"
+    carrier.mkdir()
+    target = carrier / "cli.json"
+    target.write_bytes(b"protected sentinel")
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"{}")
+    marker = tmp_path / "installed"
+    fake = tmp_path / "publisher.py"
+    fake.write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\n')
+    result = run_seed_lib(
+        tmp_path,
+        f'WORKFLOW_PUBLISHER={shlex.quote(str(fake))}; '
+        'typeset -a opencode_protected_paths=(cli.json); '
+        f'_install_opencode_capture {shlex.quote(str(payload))} {shlex.quote(str(target))} final',
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert target.read_bytes() == b"protected sentinel"
+
+
+OPENCODE_PERSONAL_NAMES = ("opencode.json", "cli.json", "themes/night.json")
+
+
+def _personal_sync_fixture(tmp_path: Path, relative: str) -> tuple[Path, Path, Path, str]:
+    runtime, target, ack = (
+        tmp_path / root / relative for root in ("runtime", ".opencode", "state/opencode.ack")
+    )
+    for path in (runtime, target, ack):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'{"previous":true}')
+    publisher = ROOT / "src/djinn_in_a_box/core/workflow_publisher.py"
+    command = (
+        f'WORKFLOW_PUBLISHER={shlex.quote(str(publisher))}; '
+        f'OPENCODE_RUNTIME_ROOT={shlex.quote(str(tmp_path / "runtime"))}; '
+        f'djinn_state_dir={shlex.quote(str(tmp_path / "state"))}; '
+        'typeset -a opencode_protected_paths; '
+    )
+    return runtime, target, ack, command
+
+
+@pytest.mark.parametrize("mode", ("checkpoint", "final"))
+def test_opencode_theme_install_refusal_keeps_reason_at_final(tmp_path: Path, mode: str) -> None:
+    runtime, target, ack, command = _personal_sync_fixture(tmp_path, "themes/night.json")
+    previous = target.read_bytes()
+    target.unlink()
+    target.parent.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "night.json"
+    sentinel.write_bytes(previous)
+    target.parent.symlink_to(outside, target_is_directory=True)
+    runtime.write_bytes(b'{"changed":true}')
+    result = run_seed_lib(tmp_path, command + f'_sync_opencode_personal {mode}')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    reason = "refused themes/night.json: symlink or non-regular entry\n"
+    warning = f"  [warn] could not persist {runtime} → {target}\n"
+    assert result.stderr == (reason if mode == "final" else "") + warning
+    assert sentinel.read_bytes() == ack.read_bytes() == previous
+    assert target.parent.is_symlink()
+
+
+@pytest.mark.parametrize("relative", OPENCODE_PERSONAL_NAMES)
+@pytest.mark.parametrize(
+    "document",
+    (b'{"value":01}', b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}',
+     b'{"value":"\xff"}', b'{} {}', b'// comment\n{}'),
+    ids=("leading-zero", "nan", "infinity", "negative-infinity", "non-utf8", "two-docs", "jsonc"),
+)
+def test_opencode_strict_json_preserves_carrier_and_ack_then_retries(
+    tmp_path: Path, relative: str, document: bytes
+) -> None:
+    runtime, target, ack, command = _personal_sync_fixture(tmp_path, relative)
+    previous = target.read_bytes()
+    runtime.write_bytes(document)
+    for mode in ("checkpoint", "final"):
+        calls = (
+            '_sync_opencode_personal checkpoint; _sync_opencode_personal checkpoint'
+            if mode == "checkpoint" else '_sync_opencode_personal final'
+        )
+        result = run_seed_lib(tmp_path, command + calls)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+        expected = (
+            f"  [warn] could not persist {runtime} → {target} (settings are not valid JSON)\n"
+        )
+        assert result.stderr == ("" if mode == "checkpoint" else expected)
+        assert target.read_bytes() == ack.read_bytes() == previous
+        assert [entry.name for entry in (tmp_path / "state").iterdir()] == ["opencode.ack"]
+    repaired = b'{"repaired":{"nested":[null,false,1]}}'
+    runtime.write_bytes(repaired)
+    result = run_seed_lib(tmp_path, command + '_sync_opencode_personal checkpoint')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == ""
+    assert target.read_bytes() == ack.read_bytes() == repaired
+
+
+@pytest.mark.parametrize("relative", OPENCODE_PERSONAL_NAMES)
+@pytest.mark.parametrize(
+    "document", (b'null', b'false', b'[]', b'{"nested":{"values":[1,true,null]}}')
+)
+def test_opencode_strict_json_accepts_all_document_types(tmp_path, relative, document):
+    runtime, target, ack, command = _personal_sync_fixture(tmp_path, relative)
+    runtime.write_bytes(document)
+    result = run_seed_lib(tmp_path, command + '_sync_opencode_personal checkpoint')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == ""
+    assert target.read_bytes() == ack.read_bytes() == document
+
+
+@pytest.mark.parametrize(
+    "document", (b'{"value":01}', b'{"value":NaN}', b'{"value":Infinity}', b'{"value":"\xff"}')
+)
+def test_claude_raw_sync_retains_its_jq_acceptance(tmp_path: Path, document: bytes) -> None:
+    runtime, target, ack = (tmp_path / name for name in ("runtime", "target", "ack"))
+    runtime.write_bytes(document)
+    target.write_bytes(b"previous")
+    ack.write_bytes(b"previous")
+    result = run_seed_lib(tmp_path, f'reverse_sync_file "{runtime}" "{target}" "{ack}" checkpoint')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == result.stderr == ""
+    assert target.read_bytes() == ack.read_bytes() == document
