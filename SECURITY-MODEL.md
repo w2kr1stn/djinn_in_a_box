@@ -181,7 +181,8 @@ For a running dev container it requires complete inspection and no named causes:
   host proxy matters even without a Docker start flag.
 - No bind of host `/`, the controller user's home or its ancestors; no exposure
   of `djinn-hostctl-state`, its backing storage or the Docker data root.
-- No bind exposing private controller/journal, agent or runtime control state.
+- No bind exposing private controller/journal, post-mortem records, agent or
+  runtime control state.
 - No writable bind overlapping host execution inputs: Djinn's installation and
   build context, configuration/agent/zone files, Python environments/executable,
   effective import directories and loaded modules, Docker CLI/configuration/
@@ -286,6 +287,30 @@ IDs, destinations, UTC start/end and end reason, plus helper events. These are
 metadata logs, not payload or session recordings; login URLs and private keys
 are not journaled. SIGKILL, host loss, observer outages or log-write failures can
 leave gaps or unmatched starts; exact missing end times cannot be reconstructed.
+
+Post-mortem records are separate JSON files under
+`~/.local/state/djinn/post-mortem/`, fixed to the controller's passwd home rather
+than `XDG_STATE_HOME`. They include final container state, limits and log tails;
+those tails may contain secrets that agents printed and are not filtered.
+The directory is `0700`, files are `0600`, with at most 10 records / 8 MiB
+retained and a 1 MiB cap per record. They share the protection of the private
+git-agent socket beside them. Commands and observer notifications print only
+the record path or a recorder-owned failure code, never record contents.
+Records are never included in Djinn backups; operator-managed backup and sync
+must exclude `~/.local/state/djinn` too.
+
+This confidentiality is documented best effort. Sealing's private-path map
+includes the records directory, so hostctl admission and doctor report a bind
+exposing it. Ordinary dev starts do not enforce this private-state boundary.
+An operator who binds the controller home or state directory into dev exposes
+the records to its agents.
+
+Evidence is best effort too: Docker removes a stopped container's cgroup, so
+cgroup memory figures may already be unavailable. Foreground `--rm` containers
+leave no container evidence after removal. Recording failures do not prevent
+recovery. The 15 s budget bounds Docker calls and records-lock waits; local
+filesystem calls, including write, fsync, rename and pruning, are outside that
+bound. A hung host state filesystem can still block the command.
 
 ## Direct routes and target authority
 
