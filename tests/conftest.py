@@ -175,7 +175,7 @@ def _isolate_legacy_compose_subprocess_tests(request, monkeypatch, tmp_path):
     """Legacy Compose tests mock Docker. Dedicated Git tests exercise the real lifecycle."""
     dedicated = {"test_git_runtime", "test_desktop", "test_desktop_runtime", "test_desktop_live",
                  "test_hostctl", "test_hostctl_observer", "test_hostctl_doctor",
-                 "test_agent_docker", "test_agent_docker_p2"}
+                 "test_agent_docker", "test_agent_docker_p2", "test_post_mortem"}
     if request.module.__name__.split(".")[-1] in dedicated:
         return
     from djinn_in_a_box.core import docker
@@ -353,3 +353,49 @@ def djinn_named_project_root(tmp_path: Path) -> Path:
     for compose_file in repository_root.glob("docker-compose*.yml"):
         shutil.copy(compose_file, project_root / compose_file.name)
     return project_root
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _post_mortem_real_directory_guard():
+    """Detect any real passwd-home evidence changes without creating that directory."""
+    import pwd
+    import stat
+
+    root = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/state/djinn/post-mortem"
+
+    def snapshot():
+        entries = {}
+        pending = [root]
+        while pending:
+            path = pending.pop()
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            entries[str(path.relative_to(root))] = (
+                info.st_mode, info.st_uid, info.st_gid, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns,
+            )
+            if stat.S_ISDIR(info.st_mode):
+                pending.extend(path.iterdir())
+        return entries
+
+    before = snapshot()
+    yield
+    assert snapshot() == before, "tests changed the real passwd-home post-mortem directory"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_post_mortem_records(monkeypatch, tmp_path, _post_mortem_real_directory_guard):
+    from djinn_in_a_box.core import host_runtime, post_mortem
+
+    original = post_mortem.records_root
+    root = tmp_path / "post-mortem"
+
+    def isolated(*, create):
+        if create:
+            host_runtime.private_directory(root)
+        return root
+
+    monkeypatch.setattr(post_mortem, "records_root", isolated)
+    return original
