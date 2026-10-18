@@ -233,7 +233,7 @@ def test_marker_matches_episode_not_container(fake_docker, evidence):
 @pytest.mark.parametrize(
     "outcome", ["succeeded", "running", "stopped", "error", "absent", "different", "different-id"]
 )
-def test_mark_terminated_owner_matrix(fake_docker, evidence, outcome):
+def test_mark_terminated_owner_matrix(fake_docker, evidence, capsys, outcome):
     identity = evidence["Id"]
     if outcome == "running":
         evidence["State"]["Running"] = True
@@ -254,6 +254,9 @@ def test_mark_terminated_owner_matrix(fake_docker, evidence, outcome):
         assert json.loads((root / "provenance.json").read_text()) == {identity: STARTED}
         assert stat.S_IMODE((root / "provenance.json").stat().st_mode) == 0o600
     assert len(daemon_calls(fake_docker)) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ("Post-mortem record failed (inspect)\n" if outcome == "error" else "")
     if outcome == "running":
         evidence["State"]["Running"] = False
         inventory(fake_docker, dev=evidence)

@@ -148,6 +148,9 @@ sys.exit(1)
     def mark(*args, **kwargs):
         assert events == ["stop", "external-dev-teardown"]
         assert kwargs == {"blocking": False, "root": records_root}
+        assert not getattr(hostctl._held, "active", False)
+        with hostctl.control_guard():
+            pass
         events.append("marker")
 
     def record(trigger, **kwargs):
@@ -247,7 +250,14 @@ def test_hostctl_other_closures_use_launcher_root(tmp_path, monkeypatch, closure
     monkeypatch.setattr(hostctl, "admit_locked", lambda *a, **kw: None)
     monkeypatch.setattr(host_runtime, "inspect_dev", failed)
     markers = []
-    monkeypatch.setattr(post_mortem, "mark_terminated", lambda *a, **kw: markers.append((a, kw)))
+
+    def mark(*args, **kwargs):
+        assert not getattr(hostctl._held, "active", False)
+        with hostctl.control_guard():
+            pass
+        markers.append((args, kwargs))
+
+    monkeypatch.setattr(post_mortem, "mark_terminated", mark)
 
     def stop(*args, **kwargs):
         assert args == ("stop", "-t", "3", "helper-a")

@@ -1364,6 +1364,111 @@ def test_clean_unreached_state_resource_records_on_retry(clean_owner, monkeypatc
     assert {s["id"] for doc in records() for s in doc["subjects"]} == {"helper-id"}
 
 
+@pytest.mark.parametrize("change", ["stopped", "restarted"])
+def test_clean_compose_uses_immediate_running_snapshot(clean_owner, monkeypatch, change):
+    _, _, objects, log = clean_owner
+    cleanup_inventory(clean_owner, dev_running=True, helper_running=True)
+    record = post_mortem.record
+    run = docker._run_captured
+
+    def recorded(trigger, **kwargs):
+        snapshot = record(trigger, **kwargs)
+        assert snapshot is not None and snapshot.running["helper-id"] == "run-a"
+        return snapshot
+
+    def removed_dev(argv, **kwargs):
+        result = run(argv, **kwargs)
+        if argv[1:] == ["rm", "-f", "dev-id"]:
+            data = json.loads(objects.read_text())
+            data["helper-id"]["State"]["Running"] = change == "restarted"
+            if change == "restarted":
+                data["helper-id"]["State"]["StartedAt"] = "run-b"
+            objects.write_text(json.dumps(data))
+        return result
+
+    monkeypatch.setattr(post_mortem, "record", recorded)
+    monkeypatch.setattr(docker, "_run_captured", removed_dev)
+    behavior(clean_owner, no_record=True, failure={
+        "argv": ["compose-down"], "target": "helper-id", "running": False,
+    })
+    assert docker.compose_down().returncode == 1
+    assert ["compose-down"] in calls(log)
+    assert markers() == ({"helper-id": "run-b"} if change == "restarted" else {})
+    assert records() == []
+    if change == "stopped":
+        monkeypatch.setattr(post_mortem, "record", record)
+        behavior(clean_owner, record={"trigger": "clean", "generation": "mine",
+                                     "ids": ["helper-id"]})
+        assert docker.compose_down().success
+        assert json.loads(objects.read_text()) == {}
+        assert {s["id"] for doc in records() for s in doc["subjects"]} == {"helper-id"}
+
+
+@pytest.mark.parametrize("fault", ["none", "exception"])
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_clean_compose_markers_independent_of_record(clean_owner, monkeypatch, fault, returncode):
+    _, _, objects, _ = clean_owner
+    cleanup_inventory(clean_owner, dev_running=True, helper_running=True)
+
+    def failed_record(*args, **kwargs):
+        if fault == "exception":
+            raise OSError("private recorder failure")
+        return None
+
+    def down(*args, **kwargs):
+        data = json.loads(objects.read_text())
+        data["helper-id"]["State"]["Running"] = False
+        objects.write_text(json.dumps(data))
+        return docker.RunResult(returncode)
+
+    monkeypatch.setattr(post_mortem, "record", failed_record)
+    monkeypatch.setattr(docker, "_run_compose", down)
+    assert docker.compose_down().returncode == returncode
+    assert markers() == {"helper-id": "run-a"}
+
+
+@pytest.mark.parametrize("fault", ["error", "timeout", "absent", "unclear"])
+def test_clean_compose_preinspect_is_best_effort(clean_owner, monkeypatch, capsys, fault):
+    _, _, objects, _ = clean_owner
+    cleanup_inventory(clean_owner, dev_running=True, helper_running=True)
+    inspect = host_runtime.inspect_object
+    timeouts = []
+    marker_calls = []
+
+    def inspected(identity, *args, **kwargs):
+        if identity == "helper-id" and "djinn" not in json.loads(objects.read_text()):
+            timeouts.append(kwargs.get("timeout"))
+            if fault == "error":
+                raise OSError("private pre-operation inspect failure")
+            if fault == "timeout":
+                raise subprocess.TimeoutExpired("private inspect", kwargs["timeout"])
+            if fault == "absent":
+                return None
+            return {"Id": identity, "State": {"StartedAt": "run-a", "Running": None}}
+        return inspect(identity, *args, **kwargs)
+
+    def down(*args, **kwargs):
+        assert len(timeouts) == 1
+        data = json.loads(objects.read_text())
+        data["helper-id"]["State"]["Running"] = False
+        objects.write_text(json.dumps(data))
+        return docker.RunResult(1)
+
+    monkeypatch.setattr(host_runtime, "inspect_object", inspected)
+    monkeypatch.setattr(docker, "_run_compose", down)
+    monkeypatch.setattr(post_mortem, "mark_terminated",
+                        lambda *a, **kw: marker_calls.append((a, kw)))
+    assert docker.compose_down().returncode == 1
+    assert timeouts and all(value is not None and 0 < value <= 5 for value in timeouts)
+    assert all(args[1] != "helper-id" for args, _ in marker_calls)
+    assert markers() == {}
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == (
+        "Post-mortem record failed (inspect)\n" if fault in {"error", "timeout"} else ""
+    )
+
+
 def test_clean_success_verifies_surviving_target(clean_owner, monkeypatch):
     _, _, objects, _ = clean_owner
     cleanup_inventory(clean_owner, dev_running=True, helper_running=True)

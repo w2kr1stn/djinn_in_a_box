@@ -930,6 +930,9 @@ def test_hostctl_marker_after_stop_and_journal(postmortem_helper, monkeypatch, s
         assert kwargs["blocking"] is False
         assert events[-1] == {"off": "off", "guard": "dev-start-closed",
                               "direct": "direct-before"}[site]
+        assert not getattr(hostctl._held, "active", False)
+        with hostctl.control_guard():
+            pass
         mark(path, identity, started_at, **kwargs)
 
     monkeypatch.setattr(hostctl, "journal", journaled)

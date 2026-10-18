@@ -2717,9 +2717,8 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                     post_mortem.Candidate(resource["id"], True, resource["id"])
                     for resource in state.get("resources", {}).values()
                 )
-            snapshot = None
             with suppress(Exception):
-                snapshot = post_mortem.record(
+                post_mortem.record(
                     "clean", docker_path=DOCKER_EXECUTABLE, candidates=candidates,
                     runtime_generation=state["generation"] if state else None,
                 )
@@ -2760,6 +2759,19 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
             if state and "agent_docker" in state:
                 result = RunResult(0)
             else:
+                compose_running: dict[str, str] = {}
+                for identity in compose_targets:
+                    try:
+                        observed = host_runtime.inspect_object(
+                            identity, DOCKER_EXECUTABLE, timeout=5,
+                        )
+                        if (
+                            observed is not None
+                            and observed.get("State", {}).get("Running") is True
+                        ):
+                            compose_running[identity] = observed["State"].get("StartedAt", "")
+                    except Exception:
+                        post_mortem.notify_failure("inspect")
                 try:
                     result = _run_compose(
                         [*get_compose_files(), "down", "--remove-orphans"],
@@ -2768,13 +2780,11 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         timeout=15,
                     )
                 finally:
-                    if snapshot is not None:
-                        for identity, started_at in snapshot.running.items():
-                            if identity in compose_targets:
-                                with suppress(Exception):
-                                    post_mortem.mark_terminated(
-                                        DOCKER_EXECUTABLE, identity, started_at,
-                                    )
+                    for identity, started_at in compose_running.items():
+                        with suppress(Exception):
+                            post_mortem.mark_terminated(
+                                DOCKER_EXECUTABLE, identity, started_at,
+                            )
             if not result.success:
                 return result
             if state is not None:
