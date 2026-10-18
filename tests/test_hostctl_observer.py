@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import time
 
 import pytest
@@ -34,7 +36,7 @@ def observed(tmp_path, monkeypatch):
     )
     binary = tmp_path / "docker"
     binary.write_text(f"""#!{sys.executable}
-import json, pathlib, sys, time
+import json, os, pathlib, sys, tempfile, time
 state = pathlib.Path({str(state)!r})
 calls = pathlib.Path({str(calls)!r})
 args = sys.argv[1:]
@@ -50,7 +52,10 @@ elif args[0] == 'exec' and 'status' in args:
     print(json.dumps({{'BackendState':'NeedsLogin','AuthURL':'https://example.invalid/login'}}))
 elif args[0] == 'stop':
     data=json.loads(state.read_text());data['State']['Running']=False
-    state.write_text(json.dumps(data))
+    fd, temporary = tempfile.mkstemp(dir=state.parent)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(json.dumps(data))
+    os.replace(temporary, state)
 elif args[0] == 'logs': pass
 else: sys.exit(2)
 """)
@@ -86,7 +91,10 @@ def test_cancelled_or_replaced_generation_cannot_publish(observed):
     state, _, root, observation = observed
     data = json.loads(state.read_text())
     data["Config"]["Labels"][hostctl.GENERATION_LABEL] = "generation-b"
-    state.write_text(json.dumps(data))
+    fd, temporary = tempfile.mkstemp(dir=state.parent)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(json.dumps(data))
+    os.replace(temporary, state)
     sentinel = {"generation": "generation-b", "node_state": "owner-observation"}
     (root / "observation.json").write_text(json.dumps(sentinel))
     wait_for(lambda: host_runtime.process_token(observation["observer_pid"]) is None)
