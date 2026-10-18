@@ -20,7 +20,7 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, cast
 
-from djinn_in_a_box.core import agent_docker
+from djinn_in_a_box.core import agent_docker, post_mortem
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.git_agent import AgentFilter, agent_keys, start_agent, stop_agent
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 GENERATION_LABEL = "djinn.git-agent.generation"
 STARTUP_SECONDS = 60
+REMOVE_TIMEOUT_SECONDS = 60
 CONTAINER_USER_UID = 1000
 """Must match the ``USER_UID`` build argument used by the dev image."""
 
@@ -206,8 +207,50 @@ def run_runtime_command(docker_path: str, *args: str, timeout: float = 5) -> Non
         raise GitSSHError(result.stderr.strip() or "Docker runtime operation failed")
 
 
+def remove_runtime_object(docker_path: str, kind: str, identifier: str) -> None:
+    args = ("rm", "-f", identifier) if kind == "container" else ("volume", "rm", identifier)
+    try:
+        run_runtime_command(docker_path, *args, timeout=REMOVE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise GitSSHError(
+            f"Docker is still removing {kind} {identifier} after {REMOVE_TIMEOUT_SECONDS} s; "
+            "the daemon may finish it in the background. Retrying is safe."
+        ) from exc
+
+
+def _teardown_container(
+    docker_path: str,
+    actual: dict[str, Any] | None,
+    *args: str,
+    timeout: float = 5,
+    root: Path | None = None,
+) -> None:
+    """Keep verified teardown provenance independent of the operation's result."""
+    started_at = (
+        actual.get("State", {}).get("StartedAt")
+        if actual and actual.get("State", {}).get("Running") is True
+        else None
+    )
+
+    try:
+        if args[0] == "rm":
+            remove_runtime_object(docker_path, "container", args[-1])
+        else:
+            run_runtime_command(docker_path, *args, timeout=timeout)
+    finally:
+        if started_at:
+            with contextlib.suppress(Exception):
+                post_mortem.mark_terminated(docker_path, args[-1], started_at, root=root)
+
+
 def cleanup_owned(
-    root: Path, generation: str, docker_path: str, *, terminate_dev: bool = False
+    root: Path,
+    generation: str,
+    docker_path: str,
+    *,
+    terminate_dev: bool = False,
+    incident: str | None = None,
+    records_root: Path | None = None,
 ) -> bool:
     """Called under the guard. Preserve replacements, pending owners and unknown state."""
     state = read_state(root)
@@ -226,22 +269,55 @@ def cleanup_owned(
             return False
         if actual[1] and not terminate_dev:
             return False
-        if terminate_dev:
-            run_runtime_command(docker_path, "rm", "-f", actual[0])
-            if inspect_dev(state["container_name"], docker_path) is not None:
-                return False
+    if incident is not None:
+        with contextlib.suppress(Exception):
+            post_mortem.record(
+                incident,
+                docker_path=docker_path,
+                candidates=[
+                    post_mortem.Candidate(
+                        state["container_name"],
+                        actual is not None or bool(state.get("dev_id")),
+                        state.get("dev_id", actual[0] if actual else None),
+                    ),
+                    *(
+                        post_mortem.Candidate(record["id"], True, record["id"])
+                        for record in state.get("resources", {}).values()
+                    ),
+                ],
+                runtime_generation=generation,
+                root=records_root,
+            )
+    if actual is not None and terminate_dev:
+        dev = None
+        if actual[1]:
+            with contextlib.suppress(Exception):
+                inspected = inspect_object(actual[0], docker_path)
+                if inspected is not None and inspected.get("Id") == actual[0]:
+                    dev = inspected
+        _teardown_container(docker_path, dev, "rm", "-f", actual[0], root=records_root)
+        if inspect_dev(state["container_name"], docker_path) is not None:
+            return False
     for record in state.get("resources", {}).values():
-        if inspect_owned_resource(record, generation, docker_path) is not None:
-            if record["service"] == "agent-docker":
-                run_runtime_command(
+        resource = inspect_owned_resource(record, generation, docker_path)
+        if resource is not None:
+            if (
+                record["service"] == "agent-docker"
+                and resource.get("State", {}).get("Running") is not False
+            ):
+                _teardown_container(
                     docker_path,
+                    resource,
                     "stop",
                     "-t",
                     str(agent_docker.STOP_GRACE_SECONDS),
                     record["id"],
                     timeout=agent_docker.STOP_TIMEOUT_SECONDS,
+                    root=records_root,
                 )
-            run_runtime_command(docker_path, "rm", "-f", record["id"])
+            _teardown_container(
+                docker_path, resource, "rm", "-f", record["id"], root=records_root
+            )
     for name in state.get("volumes", []):
         volume = inspect_object(name, docker_path, "volume")
         if volume is None:
@@ -260,7 +336,7 @@ def cleanup_owned(
         )
         if users.returncode or users.stdout.strip():
             raise GitSSHError(f"runtime volume still consumed or inspection failed: {name}")
-        run_runtime_command(docker_path, "volume", "rm", name)
+        remove_runtime_object(docker_path, "volume", name)
     return True
 
 
@@ -285,7 +361,7 @@ def remove_runtime_volume(name: str, docker_path: str) -> None:
     )
     if result.returncode or result.stdout.strip():
         raise GitSSHError(f"runtime volume consumed or inspection unavailable: {name}")
-    run_runtime_command(docker_path, "volume", "rm", name)
+    remove_runtime_object(docker_path, "volume", name)
 
 
 def clear_state(root: Path, generation: str) -> None:
@@ -454,7 +530,7 @@ class GitRuntime:
             )
             if result.returncode or result.stdout.strip():
                 raise GitSSHError("runtime volume consumed or inspection unavailable")
-            run_runtime_command(self.docker_path, "volume", "rm", name)
+            remove_runtime_object(self.docker_path, "volume", name)
         state["volumes"].remove(name)
         save_state(self.root, state)
 
@@ -512,7 +588,10 @@ class GitRuntime:
             stop_agent(self.agent)
         try:
             with creation_guard(self.root):
-                if cleanup_owned(self.root, self.generation, self.docker_path, terminate_dev=True):
+                if cleanup_owned(
+                    self.root, self.generation, self.docker_path,
+                    terminate_dev=True, incident="runtime-close",
+                ):
                     clear_state(self.root, self.generation)
         except (GitSSHError, OSError, subprocess.SubprocessError) as exc:
             warning(f"Runtime cleanup preserved resources: {exc}")
@@ -564,7 +643,8 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                     "a dev container already owns the runtime; clean it from the host first"
                 )
             if not cleanup_owned(
-                root, previous["generation"], runtime.docker_path, terminate_dev=stale_dev
+                root, previous["generation"], runtime.docker_path,
+                terminate_dev=stale_dev, incident="start-reclaim"
             ):
                 raise GitSSHError("previous runtime ownership is unknown")
             if previous.get("agent_pid", -1) > 0:
@@ -622,6 +702,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                         str(root),
                         str(fd),
                         runtime.docker_path,
+                        str(post_mortem.records_root(create=False)),
                     ],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -670,7 +751,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
             runtime.close()
 
 
-def observe(root: Path, lock_fd: int, docker_path: str) -> None:
+def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> None:
     if not Path(docker_path).is_absolute():
         raise GitSSHError("observer requires a pinned absolute Docker executable")
     state = read_state(root)
@@ -751,26 +832,52 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
                                         RuntimeError,
                                         subprocess.SubprocessError
                                     ):
-                                        run_runtime_command(
-                                            docker_path, "stop", "-t", "3", dev_id
-                                        )
+                                        dev = None
+                                        with contextlib.suppress(Exception):
+                                            inspected = inspect_object(dev_id, docker_path)
+                                            if (
+                                                inspected is not None
+                                                and inspected.get("Id") == dev_id
+                                            ):
+                                                dev = inspected
+                                        if (
+                                            dev is None
+                                            or dev.get("State", {}).get("Running") is not False
+                                        ):
+                                            _teardown_container(
+                                                docker_path, dev, "stop", "-t", "3", dev_id,
+                                                root=records_root,
+                                            )
                                         raise
-                                elif inspect_owned_resource(record, generation, docker_path):
-                                    run_runtime_command(
-                                        docker_path,
-                                        "stop",
-                                        "-t",
-                                        str(agent_docker.STOP_GRACE_SECONDS),
-                                        record["id"],
-                                        timeout=agent_docker.STOP_TIMEOUT_SECONDS,
+                                else:
+                                    resource = inspect_owned_resource(
+                                        record, generation, docker_path
                                     )
+                                    if (
+                                        resource
+                                        and resource.get("State", {}).get("Running") is True
+                                    ):
+                                        _teardown_container(
+                                            docker_path,
+                                            resource,
+                                            "stop",
+                                            "-t",
+                                            str(agent_docker.STOP_GRACE_SECONDS),
+                                            record["id"],
+                                            timeout=agent_docker.STOP_TIMEOUT_SECONDS,
+                                            root=records_root,
+                                        )
                                 continue
-                            if service.endswith("-helper") and inspect_owned_resource(
-                                record, generation, docker_path
-                            ):
-                                run_runtime_command(
-                                    docker_path, "start" if actual[1] else "stop", record["id"]
-                                )
+                            if service.endswith("-helper"):
+                                resource = inspect_owned_resource(record, generation, docker_path)
+                                if resource is not None:
+                                    if actual[1]:
+                                        run_runtime_command(docker_path, "start", record["id"])
+                                    elif resource.get("State", {}).get("Running") is True:
+                                        _teardown_container(
+                                            docker_path, resource, "stop", record["id"],
+                                            root=records_root,
+                                        )
                         running = actual[1]
                         if not running and server is not None:
                             server.stop.set()
@@ -791,7 +898,10 @@ def observe(root: Path, lock_fd: int, docker_path: str) -> None:
             os.close(lock_fd)
         try:
             with creation_guard(root):
-                if cleanup_owned(root, generation, docker_path):
+                if cleanup_owned(
+                    root, generation, docker_path,
+                    incident="observer-cleanup", records_root=records_root,
+                ):
                     clear_state(root, generation)
                 else:
                     # A stopped Git-only dev keeps no runtime resources.
@@ -818,6 +928,7 @@ def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) ->
                 helper_id,
                 generation,
                 docker_path,
+                str(post_mortem.records_root(create=False)),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -827,7 +938,9 @@ def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) ->
         )
 
 
-def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
+def observe_hostctl(
+    helper_id: str, generation: str, docker_path: str, records_root: Path | None = None,
+) -> None:
     """Enroll and report; helper PID 1 remains the only expiry timer."""
     from djinn_in_a_box.core import hostctl
 
@@ -935,7 +1048,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                     and enrollment.poll() == 0
                     and node.get("BackendState") == "Running"
                 ):
-                    with hostctl.control_guard():
+                    with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
                         fresh = hostctl.inspect_helper()
                         if (
                             fresh
@@ -952,11 +1065,25 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
             if actual and actual[1] and dev_id is None:
                 raise GitSSHError("unassessed dev appeared during open window")
             if dev_id is not None and (actual is None or not actual[1] or actual[0] != dev_id):
-                with hostctl.control_guard():
+                with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
                     fresh = hostctl.inspect_helper()
                     if fresh and fresh["Id"] == helper_id:
                         hostctl.stop_helper_locked()
                         hostctl.journal("external-dev-teardown", generation=generation)
+                with contextlib.suppress(Exception):
+                    post_mortem.record(
+                        "hostctl-teardown", docker_path=docker_path,
+                        candidates=[post_mortem.Candidate(dev_id, True, dev_id)],
+                        observed={
+                            "state": (
+                                "absent" if actual is None
+                                else "replaced" if actual[0] != dev_id else "stopped"
+                            ),
+                            "expected_id": dev_id,
+                            "actual_id": actual[0] if actual else None,
+                        },
+                        hostctl_generation=generation, root=records_root,
+                    )
                 return
             if admitted and not opening.get("creator"):
                 hostctl.verify_agent(dev_id, agent_evidence)
@@ -977,7 +1104,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
             time.sleep(0.5)
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
         warning(f"Hostctl observation gap: {exc}")
-        with hostctl.control_guard():
+        with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
             fresh = hostctl.inspect_helper()
             if fresh and fresh["Id"] == helper_id:
                 hostctl.stop_helper_locked()
@@ -993,6 +1120,6 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
 
 if __name__ == "__main__":
     if sys.argv[1] == "--hostctl":
-        observe_hostctl(sys.argv[2], sys.argv[3], sys.argv[4])
+        observe_hostctl(sys.argv[2], sys.argv[3], sys.argv[4], Path(sys.argv[5]))
     else:
-        observe(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3])
+        observe(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], Path(sys.argv[4]))

@@ -19,6 +19,9 @@ Versioning before and after the first stable release.
 - Launch OpenCode audits with standalone v2 permissions and verify the native
   npm archive's integrity before extraction; admit v2 default-export plugins
   and provide optional reference plugins and a neutral local-provider template.
+- Removal of a large stale dev container no longer fails after 5 s. Runtime
+  container and volume removals use the named 60 s `REMOVE_TIMEOUT_SECONDS`
+  timeout; a timeout names the object and says retrying is safe (#156).
 - `djinn start --detach` now delivers `--mount` and `--here` paths containing
   `$` literally instead of letting Compose interpolate them. A `--mount` or
   `--here` source whose resolved path contains `:` is refused instead of being
@@ -107,6 +110,10 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- Host-private post-mortem records before recovery removes unexpectedly stopped
+  containers, plus hostctl teardown observations. Records keep bounded log tails
+  and final state under `~/.local/state/djinn/post-mortem/` (last 10 / 8 MiB);
+  commands print only the path and doctor reports the latest record (#135).
 - Runtime package installs for agents, with a root-owned persistent package list and
   missing-only start replay in the `djinn-packages` data volume. The firewall
   allowlist includes `deb.debian.org` for the Debian archive.

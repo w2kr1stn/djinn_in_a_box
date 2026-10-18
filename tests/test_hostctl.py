@@ -362,7 +362,10 @@ def test_async_observer_spawn_does_not_wait_for_enrollment(inputs, monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", popen)
     host_runtime.start_hostctl_observer("helper-a", "generation-a", "/usr/bin/docker")
-    assert calls[0][0][-4:] == ["--hostctl", "helper-a", "generation-a", "/usr/bin/docker"]
+    from djinn_in_a_box.core import post_mortem
+
+    assert calls[0][0][-5:] == ["--hostctl", "helper-a", "generation-a", "/usr/bin/docker",
+                              str(post_mortem.records_root(create=False))]
     assert calls[0][1]["start_new_session"]
     assert calls[0][1]["stdin"] == subprocess.DEVNULL
 
@@ -797,3 +800,307 @@ def test_status_doctor_hint_when_grouped_view_differs(inputs, monkeypatch, case)
     for detail in (*assessment.cause_details, *assessment.error_details):
         if detail not in (*assessment.causes, *assessment.errors):
             assert detail not in result.output
+
+
+@pytest.fixture
+def postmortem_helper(inputs, tmp_path, monkeypatch):
+    import sys
+
+    from djinn_in_a_box.core import post_mortem
+
+    store = tmp_path / "containers.json"
+    calls = tmp_path / "docker-calls.jsonl"
+    logs = tmp_path / "helper-logs"
+    logs.write_text("")
+    data = helper(running=False)
+    data["State"].update(StartedAt="2026-10-18T10:00:00Z", FinishedAt="2026-10-18T10:01:00Z",
+                         OOMKilled=True, ExitCode=137)
+    store.write_text(json.dumps(data))
+    root = post_mortem.records_root(create=False)
+    binary = tmp_path / "docker"
+    binary.write_text(f"""#!{sys.executable}
+import json, pathlib, sys, time
+store = pathlib.Path({str(store)!r})
+calls = pathlib.Path({str(calls)!r})
+logs = pathlib.Path({str(logs)!r})
+records = pathlib.Path({str(root)!r})
+args = sys.argv[1:]
+with calls.open('a') as out: out.write(json.dumps([time.monotonic(), args])+'\\n')
+obj = json.loads(store.read_text())
+if args[:2] == ['container', 'inspect']:
+    if obj and args[2] in ('djinn-hostctl', 'helper-a', obj['Id']):
+        print(json.dumps([obj]))
+    else:
+        print('Error response from daemon: No such container: '+args[2], file=sys.stderr)
+        sys.exit(1)
+elif args[:2] == ['network', 'inspect']: print(json.dumps([{{'Name': 'djinn-network'}}]))
+elif args[:2] == ['volume', 'inspect']:
+    print('Error response from daemon: get '+args[2]+': no such volume', file=sys.stderr)
+    sys.exit(1)
+elif args[0] == 'ps': pass
+elif args[0] == 'logs': print(logs.read_text())
+elif args[0] == 'stop':
+    obj['State']['Running'] = False
+    store.write_text(json.dumps(obj))
+elif args[0] == 'rm':
+    expectation = store.with_suffix('.expect')
+    if expectation.exists():
+        docs = [json.loads(p.read_text()) for p in records.glob('*Z-*.json')]
+        if expectation.read_text() == 'record':
+            assert any(d['trigger'] == 'hostctl-helper'
+                       and d['hostctl_generation'] == 'generation-a'
+                       and d['subjects'][0]['id'] == 'helper-a' for d in docs), 'missing record'
+        else: assert not docs, 'unexpected record'
+    store.write_text('null')
+elif args[0] == 'run':
+    gen = args[args.index('--generation')+1]
+    store.write_text(json.dumps({{'Id': 'new-helper', 'State': {{'Running': True}},
+                                 'Config': {{'Labels': {{'djinn.hostctl.generation': gen}}}}}}))
+else: sys.exit(2)
+""")
+    binary.chmod(0o700)
+    monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", str(binary))
+    monkeypatch.setattr(docker, "DOCKER_EXECUTABLE", str(binary))
+    monkeypatch.setattr(docker, "is_own_container", lambda *a: False)
+    monkeypatch.setattr(docker, "_run_compose", lambda *a, **kw: docker.RunResult(0))
+    monkeypatch.setattr(docker, "ensure_network", lambda *a: True)
+    monkeypatch.setattr(host_runtime, "start_hostctl_observer", lambda *a: None)
+    return store, calls, logs, root
+
+
+@pytest.mark.parametrize("route", ["reopen", "clean", "clean-all"])
+@pytest.mark.parametrize("episode", ["oom", "expiry", "marked", "old-expiry", "bad-time",
+                                      "wrong-generation", "bad-start", "equal-expiry", "noise"])
+def test_hostctl_helper_run_eligibility(inputs, postmortem_helper, route, episode):
+    from djinn_in_a_box.core import post_mortem
+
+    store, call_log, logs, root = postmortem_helper
+    if episode in {"expiry", "old-expiry", "bad-time", "wrong-generation", "equal-expiry"}:
+        stamp = {"old-expiry": "2026-10-18T09:59:00Z", "bad-time": "invalid",
+                 "equal-expiry": "2026-10-18T10:00:00Z"}.get(episode, "2026-10-18T10:00:30Z")
+        logs.write_text(json.dumps({"event": "expiry", "generation":
+                                   "foreign" if episode == "wrong-generation" else "generation-a",
+                                   "time": stamp}))
+        # Cache deliberately disagrees with current-run eligibility.
+        hostctl.state_root().joinpath("observed-expiry.json").write_text('["generation-a"]')
+    if episode == "noise":
+        logs.write_text('not-json\n[]\n' + json.dumps({
+            "event": "startup", "generation": "generation-a", "time": "2026-10-18T10:00:30Z",
+        }))
+    if episode == "bad-start":
+        data = json.loads(store.read_text())
+        data["State"]["StartedAt"] = "invalid"
+        store.write_text(json.dumps(data))
+    if episode == "marked":
+        post_mortem.mark_terminated(hostctl.DOCKER_EXECUTABLE, "helper-a", "2026-10-18T10:00:00Z")
+    eligible = episode not in {"expiry", "marked", "equal-expiry"}
+    store.with_suffix('.expect').write_text("record" if eligible else "none")
+    if route == "reopen":
+        hostctl.open_window(inputs)
+    else:
+        assert docker.compose_down().success
+        if route == "clean-all":
+            with hostctl.control_guard():
+                hostctl.delete_state_locked()
+    assert bool(list(root.glob("*Z-*.json"))) == eligible
+    assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
+
+
+@pytest.mark.parametrize("site", ["off", "guard", "direct"])
+def test_hostctl_marker_after_stop_and_journal(postmortem_helper, monkeypatch, site):
+    from djinn_in_a_box.core import host_sealing, post_mortem
+
+    store, calls, _, root = postmortem_helper
+    data = json.loads(store.read_text())
+    data["State"]["Running"] = True
+    store.write_text(json.dumps(data))
+    events = []
+    journal = hostctl.journal
+    mark = post_mortem.mark_terminated
+    marker_calls = []
+
+    def journaled(event, **kwargs):
+        events.append(event)
+        journal(event, **kwargs)
+
+    def marked(path, identity, started_at, **kwargs):
+        marker_calls.append((identity, started_at, kwargs))
+        assert any(row[1][0] == "stop" for row in map(json.loads, calls.read_text().splitlines()))
+        assert not json.loads(store.read_text())["State"]["Running"]
+        assert kwargs["blocking"] is False
+        assert events[-1] == {"off": "off", "guard": "dev-start-closed",
+                              "direct": "direct-before"}[site]
+        assert not getattr(hostctl._held, "active", False)
+        with hostctl.control_guard():
+            pass
+        mark(path, identity, started_at, **kwargs)
+
+    monkeypatch.setattr(hostctl, "journal", journaled)
+    monkeypatch.setattr(post_mortem, "mark_terminated", marked)
+    if site == "off":
+        hostctl.close_window()
+    elif site == "guard":
+        monkeypatch.setattr(host_sealing, "assess", lambda *a, **kw: host_sealing.Assessment(
+            "dev-id", (host_sealing.Finding("unsealed"),),
+        ))
+        hostctl.guard_dev_start({}, "creator")
+    else:
+        hostctl.journal("direct-before")
+        hostctl.stop_helper_locked()
+    assert json.loads((root / "provenance.json").read_text()) == {
+        "helper-a": "2026-10-18T10:00:00Z",
+    }
+    assert len(marker_calls) == 1
+
+
+def test_hostctl_records_lock_never_delays_relay_stop(postmortem_helper):
+    import sys
+    import time
+
+    from djinn_in_a_box.core import post_mortem
+
+    store, calls, _, root = postmortem_helper
+    data = json.loads(store.read_text())
+    data["State"]["Running"] = True
+    store.write_text(json.dumps(data))
+    post_mortem.records_root(create=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import fcntl,os,sys; "
+         "f=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); "
+         "fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.readline()",
+         str(root / ".lock")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        before = time.monotonic()
+        hostctl.close_window()
+        finished = time.monotonic()
+        stop_time = next(row[0] for row in map(json.loads, calls.read_text().splitlines())
+                         if row[1][0] == "stop")
+        assert stop_time - before < 1
+        assert finished - before < 1
+        assert not (root / "provenance.json").exists()
+    finally:
+        holder.communicate("release\n", timeout=5)
+
+
+@pytest.mark.parametrize("outcome", ["running", "stopped", "unclear", "different-run"])
+def test_hostctl_stop_failure_retry(postmortem_helper, monkeypatch, outcome):
+    store, call_log, _, root = postmortem_helper
+    data = json.loads(store.read_text())
+    data["State"]["Running"] = True
+    store.write_text(json.dumps(data))
+    command = hostctl.command
+    inspect = host_runtime.inspect_object
+    attempted = False
+
+    def failed(*args, **kwargs):
+        nonlocal attempted
+        if args[0] != "stop":
+            return command(*args, **kwargs)
+        attempted = True
+        if outcome != "running":
+            data["State"]["Running"] = False
+        if outcome == "different-run":
+            data["State"]["StartedAt"] = "2026-10-18T11:00:00Z"
+        store.write_text(json.dumps(data))
+        raise hostctl.HostctlError("Docker stop failed (exit 124)")
+
+    def inspected(*args, **kwargs):
+        if attempted and outcome == "unclear":
+            raise RuntimeError("inspection unavailable")
+        return inspect(*args, **kwargs)
+
+    monkeypatch.setattr(hostctl, "command", failed)
+    monkeypatch.setattr(host_runtime, "inspect_object", inspected)
+    with pytest.raises(hostctl.HostctlError, match="stop failed"):
+        hostctl.close_window()
+    marker = root / "provenance.json"
+    assert (json.loads(marker.read_text()) if marker.exists() else {}) == (
+        {"helper-a": "2026-10-18T10:00:00Z"} if outcome == "stopped" else {}
+    )
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(host_runtime, "inspect_object", inspect)
+    data["State"]["Running"] = False
+    store.write_text(json.dumps(data))
+    store.with_suffix('.expect').write_text("none" if outcome == "stopped" else "record")
+    call_log.write_text("")
+    hostctl.stop_helper_locked(remove=True)
+    assert bool(list(root.glob("*Z-*.json"))) == (outcome != "stopped")
+    assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
+
+
+@pytest.mark.parametrize("fault", ["record", "mark_terminated"])
+def test_hostctl_diagnostic_exception_keeps_closure(postmortem_helper, monkeypatch, fault):
+    from djinn_in_a_box.core import post_mortem
+
+    store, _, _, _ = postmortem_helper
+    data = json.loads(store.read_text())
+    data["State"]["Running"] = fault == "mark_terminated"
+    store.write_text(json.dumps(data))
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("diagnostic failure")
+
+    monkeypatch.setattr(post_mortem, fault, broken)
+    hostctl.stop_helper_locked(remove=True)
+    assert json.loads(store.read_text()) is None
+
+
+def test_hostctl_running_remove_skips_record_without_marker(postmortem_helper, monkeypatch):
+    from djinn_in_a_box.core import post_mortem
+
+    store, _, _, _ = postmortem_helper
+    data = json.loads(store.read_text())
+    data["State"]["Running"] = True
+    store.write_text(json.dumps(data))
+    store.with_suffix('.expect').write_text("none")
+    monkeypatch.setattr(post_mortem, "mark_terminated", lambda *a, **kw: None)
+    hostctl.stop_helper_locked(remove=True)
+
+
+def test_hostctl_deferred_marker_exception_keeps_journal(postmortem_helper, monkeypatch, capsys):
+    from djinn_in_a_box.core import post_mortem
+
+    store, _, _, _ = postmortem_helper
+    data = json.loads(store.read_text())
+    data["State"]["Running"] = True
+    store.write_text(json.dumps(data))
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("diagnostics marker failure")
+
+    monkeypatch.setattr(post_mortem, "mark_terminated", broken)
+    hostctl.close_window()
+    assert not json.loads(store.read_text())["State"]["Running"]
+    assert '"event": "off"' in (hostctl.state_root() / "journal.jsonl").read_text()
+    captured = capsys.readouterr()
+    assert "diagnostics marker failure" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_hostctl_stopped_helper_never_stops_on_removal(postmortem_helper, monkeypatch, retry):
+    store, call_log, _, root = postmortem_helper
+    command = hostctl.command
+    original_error = hostctl.HostctlError("removal refused")
+    failed = False
+
+    def checked(*args, **kwargs):
+        nonlocal failed
+        assert args[0] != "stop", "already-stopped helper must not receive stop"
+        if retry and args[0] == "rm" and not failed:
+            failed = True
+            raise original_error
+        return command(*args, **kwargs)
+
+    monkeypatch.setattr(hostctl, "command", checked)
+    store.with_suffix('.expect').write_text("record")
+    if retry:
+        with pytest.raises(hostctl.HostctlError) as caught:
+            hostctl.stop_helper_locked(remove=True)
+        assert caught.value is original_error
+        assert not (root / "provenance.json").exists()
+    hostctl.stop_helper_locked(remove=True)
+    assert json.loads(store.read_text()) is None
+    assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
+    assert not (root / "provenance.json").exists()

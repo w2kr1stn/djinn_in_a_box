@@ -114,8 +114,9 @@ Stop Djinn containers before backup or restore; the command enforces this.
 
 Do not sync live containers, Docker volume directories, Unix sockets, PID files,
 or the local zone's runtime cache directories. Do not run a file synchronizer
-against Docker's internal storage. Use `djinn clean`, `djinn backup`, and
-`djinn restore` for Djinn-managed runtime state.
+against Docker's internal storage. Exclude `~/.local/state/djinn`: it contains
+host-private post-mortem records and runtime state. Use `djinn clean`,
+`djinn backup`, and `djinn restore` for Djinn-managed runtime state.
 
 ## Hostctl node identity
 

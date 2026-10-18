@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -38,7 +38,7 @@ from djinn_in_a_box.config.defaults import (
     volume_categories,
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing
+from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing, post_mortem
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.contained_paths import (
     PathContainmentError,
@@ -2077,12 +2077,32 @@ def _prepare_companions(
             record = owner.resources.get(endpoint.service)
             if record is not None:
                 try:
-                    if host_runtime.inspect_owned_resource(
+                    owned = host_runtime.inspect_owned_resource(
                         record, owner.generation, DOCKER_EXECUTABLE
-                    ):
-                        result = _run_captured(
-                            [DOCKER_EXECUTABLE, "rm", "-f", record["id"]], timeout=5
+                    )
+                    if owned:
+                        started_at = (
+                            owned.get("State", {}).get("StartedAt")
+                            if owned.get("State", {}).get("Running") is True else None
                         )
+                        with suppress(Exception):
+                            post_mortem.record(
+                                "helper-fallback", docker_path=DOCKER_EXECUTABLE,
+                                candidates=[
+                                    post_mortem.Candidate(record["id"], True, record["id"]),
+                                ],
+                                runtime_generation=owner.generation,
+                            )
+                        try:
+                            result = _run_captured(
+                                [DOCKER_EXECUTABLE, "rm", "-f", record["id"]], timeout=5
+                            )
+                        finally:
+                            if started_at:
+                                with suppress(Exception):
+                                    post_mortem.mark_terminated(
+                                        DOCKER_EXECUTABLE, record["id"], started_at,
+                                    )
                         if result.success:
                             owner.forget(endpoint.service)
                         else:
@@ -2656,32 +2676,115 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         return RunResult(
                             1, stderr="unknown project resources; preserving resources"
                         )
+            # Diagnostic discovery must never change clean's outcome.
+            candidates: list[post_mortem.Candidate] = []
+            compose_targets: set[str] = set()
+            try:
+                listed = _run_captured(
+                    [
+                        DOCKER_EXECUTABLE, "ps", "-aq", "--no-trunc", "--filter",
+                        f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                    ],
+                    timeout=5,
+                )
+                if not listed.success:
+                    raise RuntimeError("post-mortem discovery failed")
+                compose_targets.update(listed.stdout.split())
+                # A stale state dev_id must not filter out a dev that clean removes.
+                candidates.extend(
+                    post_mortem.Candidate(identity, True, identity)
+                    for identity in compose_targets
+                )
+            except Exception:
+                post_mortem.notify_failure("inspect")
+                with suppress(Exception):
+                    dev = host_runtime.inspect_object(
+                        _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE
+                    )
+                    dev_labels: dict[str, Any] = (
+                        (dev.get("Config", {}).get("Labels") or {}) if dev else {}
+                    )
+                    if (
+                        dev is not None
+                        and dev_labels.get("com.docker.compose.project") == COMPOSE_PROJECT
+                    ):
+                        candidates.append(
+                            post_mortem.Candidate(_SERVICE_CONTAINER_NAMES["dev"], True)
+                        )
+                        compose_targets.add(str(dev["Id"]))
+            if state:
+                candidates.extend(
+                    post_mortem.Candidate(resource["id"], True, resource["id"])
+                    for resource in state.get("resources", {}).values()
+                )
+            with suppress(Exception):
+                post_mortem.record(
+                    "clean", docker_path=DOCKER_EXECUTABLE, candidates=candidates,
+                    runtime_generation=state["generation"] if state else None,
+                )
             hostctl.stop_helper_locked(remove=True)
             actual = host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
             if actual is not None:
                 labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
                 if labels.get("com.docker.compose.project") != COMPOSE_PROJECT:
                     return RunResult(1, stderr="dev ownership is unknown; preserving resources")
-                result = _run_captured(
-                    [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])], timeout=10
-                )
+                try:
+                    result = _run_captured(
+                        [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])],
+                        timeout=host_runtime.REMOVE_TIMEOUT_SECONDS,
+                    )
+                finally:
+                    if actual.get("State", {}).get("Running") is True:
+                        with suppress(Exception):
+                            post_mortem.mark_terminated(
+                                DOCKER_EXECUTABLE, str(actual["Id"]),
+                                actual["State"].get("StartedAt", ""),
+                            )
                 if not result.success:
+                    if result.returncode == 124:
+                        return RunResult(
+                            124,
+                            stderr=(
+                                f"Docker is still removing container {actual['Id']} after "
+                                f"{host_runtime.REMOVE_TIMEOUT_SECONDS} s; the daemon may finish "
+                                "it in the background. Retrying is safe."
+                            ),
+                        )
                     return result
                 if (
                     host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
                     is not None
                 ):
                     return RunResult(1, stderr="dev termination could not be verified")
-            result = (
-                RunResult(0)
-                if state and "agent_docker" in state
-                else _run_compose(
-                    [*get_compose_files(), "down", "--remove-orphans"],
-                    config=None,
-                    cwd=get_project_root(),
-                    timeout=15,
-                )
-            )
+            if state and "agent_docker" in state:
+                result = RunResult(0)
+            else:
+                compose_running: dict[str, str] = {}
+                for identity in compose_targets:
+                    try:
+                        observed = host_runtime.inspect_object(
+                            identity, DOCKER_EXECUTABLE, timeout=5,
+                        )
+                        if (
+                            observed is not None
+                            and observed.get("State", {}).get("Running") is True
+                        ):
+                            compose_running[identity] = observed["State"].get("StartedAt", "")
+                    except Exception:
+                        post_mortem.notify_failure("inspect")
+                try:
+                    result = _run_compose(
+                        [*get_compose_files(), "down", "--remove-orphans"],
+                        config=None,
+                        cwd=get_project_root(),
+                        timeout=15,
+                    )
+                finally:
+                    for identity, started_at in compose_running.items():
+                        with suppress(Exception):
+                            post_mortem.mark_terminated(
+                                DOCKER_EXECUTABLE, identity, started_at,
+                            )
             if not result.success:
                 return result
             if state is not None:

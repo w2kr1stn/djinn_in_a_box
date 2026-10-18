@@ -524,6 +524,11 @@ health and cache storage. Unused companion rows say "not in use"; stale/orphan
 resources are listed separately. These checks use bounded, read-only host
 inspection and never start or repair a daemon. Doctor never starts helpers.
 
+The filesystem-only `Post-mortem records` row works without valid config or a
+Docker daemon. It reports `PASS` with `none` or the kept count and latest record
+path; historical records do not signal a current failure. An unreadable or
+unsafe records directory reports `WARN`.
+
 For idempotent local repairs:
 
 ```sh
@@ -1071,6 +1076,10 @@ By default, this backs up:
 - `repo-dotfiles`: the optional config-root `repo-dotfiles` directory if present
 - `data`: the OpenCode data, VS Code workspace, and `djinn-packages` named volumes
 
+Post-mortem records under `~/.local/state/djinn/post-mortem/` are never part of
+a Djinn backup. Exclude `~/.local/state/djinn` from operator-managed backups and
+synchronization too.
+
 The archive is written to:
 
 ```text
@@ -1117,8 +1126,20 @@ Remove running Djinn containers while keeping volumes, config, and the network:
 djinn clean
 ```
 
-This keeps every declared volume and bind. Category cleanup includes declared
-volumes of that category. It also keeps built-in named volumes such as
+Before `djinn clean` or `djinn start` removes a dev, companion or helper
+container that stopped without Djinn, it writes a post-mortem record to
+`~/.local/state/djinn/post-mortem/`. The directory is `0700`, files are `0600`,
+and retention keeps at most the last 10 records within 8 MiB. The command prints
+only the record path, never its contents. Recording is best effort: failure
+does not block recovery. See the [security model](SECURITY-MODEL.md#window-state-expiry-and-logs)
+for confidentiality and evidence limits.
+
+Removal of a large stale container waits up to 60 s. A timeout names the object,
+explains that Docker may finish removing it in the background, and says retrying
+is safe. A record already written remains available after a removal timeout.
+
+`djinn clean` keeps every declared volume and bind. Category cleanup includes
+declared volumes of that category. It also keeps built-in named volumes such as
 `djinn-packages`. `backup = "none"` excludes backup and restore; it offers no
 protection from `clean all`. Declared bind sources and markers, arbitrary host
 binds, the workspace, SSH and shared/local zone data are outside the cleanup sets.
@@ -1187,6 +1208,8 @@ uv tool uninstall djinn-in-a-box
 
 That only removes the installed Python CLI package. It does not delete your
 Docker image, Docker volumes, config file, config root, backups, or sessions.
+To discard retained post-mortem records when uninstalling, delete
+`~/.local/state/djinn/post-mortem/` by hand.
 
 ## MCP
 

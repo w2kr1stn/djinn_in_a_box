@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from djinn_in_a_box.core import host_runtime
+from djinn_in_a_box.core import host_runtime, post_mortem
 from djinn_in_a_box.core.git_agent import agent_keys
 from djinn_in_a_box.core.host_runtime import (
     GENERATION_LABEL,
@@ -359,7 +359,9 @@ def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):
     monkeypatch.setattr(host_runtime, "agent_keys", lambda path: frozenset())
     monkeypatch.setattr(host_runtime, "stop_owned_process", lambda *args: stopped.append(args))
     monkeypatch.setattr(host_runtime.signal, "signal", lambda *args: None)
-    host_runtime.observe(root, lock_fd, host_runtime.DOCKER_EXECUTABLE)
+    host_runtime.observe(
+        root, lock_fd, host_runtime.DOCKER_EXECUTABLE, post_mortem.records_root(create=False)
+    )
     assert observations == ["djinn", "djinn"]
     assert stopped == [(123456, "fake")]
     assert not (root / "state.json").exists()

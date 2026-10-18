@@ -113,3 +113,56 @@ def test_doctor_per_item_rows(monkeypatch):
         line = next(line for line in result.output.splitlines() if row.name in line)
         assert row.status.value.upper() in line and row.detail in line
     assert all(line not in result.output for line in (*assessment.causes, *assessment.errors))
+
+
+@pytest.mark.parametrize("state", ["none", "kept", "bad-directory"])
+@pytest.mark.parametrize("config_present", [False, True])
+def test_postmortem_doctor_row(tmp_path, monkeypatch, state, config_present):
+    from djinn_in_a_box.commands import doctor
+    from djinn_in_a_box.core import post_mortem
+
+    root = post_mortem.records_root(create=False)
+    newest = None
+    if state != "none":
+        root.mkdir(mode=0o700)
+        if state == "bad-directory":
+            root.chmod(0o755)
+        else:
+            for stamp in ("120000000000", "120001000000"):
+                newest = root / f"20261018T{stamp}Z-clean-123456789abc.json"
+                newest.write_text("contents must never be read [red]secret[/red]")
+                newest.chmod(0o600)
+    from djinn_in_a_box.core import host_runtime
+
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *a, **kw: None)
+    monkeypatch.setattr(doctor, "_docker_installed", lambda: False)
+    config = AppConfig(code_dir=tmp_path) if config_present else None
+    row = next(r for r in doctor.run_checks(config) if r.name == "Post-mortem records")
+    assert row.status is (Status.WARN if state == "bad-directory" else Status.PASS)
+    assert row.detail == {"none": "none", "kept": f"2 kept; latest {newest}",
+                          "bad-directory": "directory"}[state]
+    assert "secret" not in row.detail
+
+
+def test_postmortem_doctor_path_is_literal(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from djinn_in_a_box.cli.djinn import app
+    from djinn_in_a_box.commands import doctor
+    from djinn_in_a_box.core import post_mortem
+
+    path = tmp_path / "[red]literal[/red]\n\t.json"
+    monkeypatch.setattr(doctor.console, "width", 240)
+    monkeypatch.setattr(post_mortem, "latest", lambda: (1, path, None))
+    from djinn_in_a_box.core import host_runtime
+
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *a, **kw: None)
+    monkeypatch.setattr(doctor, "_docker_installed", lambda: False)
+    row = next(r for r in doctor.run_checks(None) if r.name == "Post-mortem records")
+    monkeypatch.setattr(doctor, "run_checks", lambda *a: [row])
+    result = CliRunner().invoke(app, ["doctor"], terminal_width=240)
+    assert result.exit_code == 0
+    assert row.detail == f"1 kept; latest {tmp_path}/[red]literal[/red]\\n\\t.json"
+    assert "\n" not in row.detail and "\t" not in row.detail
+    assert "[red]literal[/red]\\n\\t.json" in result.output
+    assert "secret" not in result.output

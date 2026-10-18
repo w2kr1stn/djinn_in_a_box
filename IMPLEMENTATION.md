@@ -1050,6 +1050,38 @@ transitions. Docker's absolute executable is resolved once and passed to the
 isolated observer. Empty Git identities still create no agent, keys or SSH mounts.
 Unknown Docker state and replacement generations authorize no resource cleanup.
 
+`core/post_mortem.py` collects host-private JSON records outside the records
+lock, then serializes deduplication, publication and pruning under
+`~/.local/state/djinn/post-mortem/.lock`. The root uses the controller's passwd
+home, with no `XDG_STATE_HOME` relocation: directory `0700`, files `0600`.
+Publication uses an exclusive no-follow temporary file, fsync and atomic rename.
+Only record-pattern regular files owned by this UID with no group/other access
+participate in deduplication, latest lookup and retention; other entries are ignored.
+
+The dedup key is the first 12 hex characters of SHA-256 over sorted
+`id|FinishedAt` subject pairs. Observation-only records use hostctl generation
+and expected/actual dev IDs. After publication, pruning drops oldest records to
+keep at most 10 files / 8 MiB, always keeping the new record. Each record is capped
+at 1 MiB, dropping log tails with a marker to fit. Inspect strings are capped at
+2 KiB; `docker logs --tail 200` streams into a 64 KiB tail buffer. Records include
+UTC time, trigger, separate runtime/hostctl generations, observed dev identity,
+final state (including exit code and OOM flag), image, labels, restart count,
+resource limits and best-effort cgroup v2 memory readings with unavailable reasons.
+
+`RECORD_SECONDS = 15` bounds waits started by the recorder: each Docker call gets
+`min(5, remaining)`, and lock retries use the remaining budget. Expiry may leave
+an incomplete record or no record if the lock cannot be acquired. Local filesystem
+calls are outside this bound. Callers can hold lifecycle guards during recording,
+so concurrent lifecycle commands may see the existing busy refusal. Recorder and
+notification failures never abort recovery. Start/clean print
+`Post-mortem record: <path>` for a new or matched record, or
+`Post-mortem record failed (<code>)`; output is literal with control characters
+escaped, never raw Docker errors or record contents. Detached observers send
+these lines to their host-only `observer.log`. The Git observer closes Git
+delivery before final `observer-cleanup` recording; that hook can capture the
+stopped dev even when it leaves the dev for a later clean. Records survive runtime
+state cleanup and are never included in backup or sync sets.
+
 `core/docker.py` also auto-detects optional shell mounts:
 
 - `get_shell_mount_args(config)` mounts `.zshrc`, an explicit Oh My Posh theme,
@@ -1259,6 +1291,22 @@ The observer revalidates the companion throughout an open window and closes on
 replacement, profile/storage/network drift or inspection uncertainty. Pause preserves immutable routes and helper-owned deadlines;
 creator starts never inherit an override. External replacement/removal closes.
 
+On external dev stop/removal/replacement, the observer stops the helper and
+journals closure first, then releases the control guard before recording
+`hostctl-teardown`. The observation stores `absent`, `stopped` or `replaced`,
+expected/actual dev IDs and the hostctl generation; only the expected stopped
+dev can supply container evidence. A replacement is named by ID without inspection.
+Recorder failures are best effort, independent of the journal's closure policy.
+
+`open_window()` and `stop_helper_locked(remove=True)` record an already stopped
+helper before removing it (`hostctl-helper`), unless a matching teardown marker
+exists or the helper log contains an expiry event for this generation at or
+after the current run's `StartedAt`. A cached generation-level expiry does not
+exempt a later failed restart. For a running helper, closure comes first.
+Hostctl teardown markers are written after stop and the closure journal, using
+one non-blocking records-lock attempt; diagnostic lock contention never delays
+relay closure.
+
 ## Image Build
 
 The Dockerfile refuses a build network it cannot resolve names on:
@@ -1383,6 +1431,10 @@ that prepend the tools library directory only for their real binaries in
   `compose_up_detached()` instead and retains the generation observer. It refuses when a
   Djinn container is already running, because `up` collides with the fixed
   `container_name`.
+  A stopped dev matching persisted runtime ownership can be reclaimed after a
+  host or Docker restart once its observer is gone. `cleanup_owned()` records
+  `start-reclaim` after ownership checks and before the first mutation; running
+  or replacement containers keep the existing refusal.
 - Background-start guard: `compose_run()` refuses an interactive start from a
   background process group. `docker compose run` allocates a TTY and calls
   `tcsetattr()` on it; from the background that raises SIGTTOU unconditionally
@@ -1424,6 +1476,10 @@ that prepend the tools library directory only for their real binaries in
   container can trigger it. Teardown from the host is unaffected. Agent generations are removed by exact owned IDs after ownership checks; their
   clean path preserves foreign resources. Other modes retain Compose teardown for
   the base services, with explicit removal of the one-off dev container.
+  Before the first mutation, recording (`clean`) covers every container labelled
+  with the Compose project plus recorded runtime resources, even without runtime
+  state. A stale recorded dev ID does not hide a project-owned stopped dev.
+  Hostctl helper removal has its own recording hook.
 - `clean_volumes()`: lists or deletes named volume categories and clears
   config-root sync paths by category. Its cache/data flags include existing
   declared volumes of the category; credentials/repo-dotfiles keep their paths.
@@ -1434,7 +1490,8 @@ that prepend the tools library directory only for their real binaries in
   config-zone sync paths, and deletes the network. It does not clear shared or
   local zone data.
   It attempts deletion of every built-in and declared volume, including absent
-  ones and `none`. Default `clean` keeps all volumes and declared binds.
+  ones and `none`. Default `clean` keeps persistent data/cache volumes and
+  declared binds; disposable desktop/endpoint runtime volumes are removed.
 - `update()`: runs `scripts/update-agents.sh --print` without loading AppConfig
   or requiring init. Captured stdin is closed; discovery runs in a new session
   with one aggregate 120-second timeout. Timeout or interruption kills the owned
@@ -1443,6 +1500,38 @@ that prepend the tools library directory only for their real binaries in
   atomic save. Failure leaves the old record unchanged; success prints effective
   before/after versions and `djinn build` guidance. It writes no checkout file.
 - `enter()`: opens a zsh shell in the first running Djinn container.
+
+The recording subject rule is shared: present, stopped containers within the
+caller's removal ownership boundary, excluding Compose
+`com.docker.compose.oneoff=True`, `HostConfig.AutoRemove=true`, the one-shot
+`agent-docker-firewall` initializer, and runs Djinn verifiably ended. Foreground
+devs are one-offs; persistent companions/helpers that fail during those sessions
+still qualify. Other recording points are `runtime-close` on every runtime
+close (including failed creation), `observer-cleanup` before final owned cleanup,
+and `helper-fallback` before removing a failed desktop helper. The observer also
+captures an eligible stopped dev that it leaves for later removal.
+
+`provenance.json` in the records directory maps container ID to `StartedAt`,
+under the same lock and owner-only atomic writer, with at most 128 entries.
+Markers describe verified outcomes for containers seen running before Djinn's
+stop/removal: success, or a failed/timed-out operation followed by bounded
+re-inspection showing the same run stopped. Removed containers need no marker.
+Unreached operations, ambiguous outcomes and already stopped runs get none.
+A restart changes `StartedAt`, so an old marker cannot hide a later failure.
+Marker errors remain inside the recorder's best-effort boundary.
+
+`host_runtime.REMOVE_TIMEOUT_SECONDS = 60` applies to container `rm -f` and
+runtime `volume rm` via `remove_runtime_object()` (`cleanup_owned`,
+`remove_runtime_volume`, `GitRuntime.discard_volume`), and clean's direct dev
+removal. Other operations retain their deadlines, including the 5 s runtime
+command default, desktop fallback and hostctl removals, and 15 s Compose down.
+A removal timeout says `Docker is still removing <container|volume> <id or name>
+after 60 s; the daemon may finish it in the background. Retrying is safe.`
+Start/run propagate `GitSSHError` to the CLI's `Internal runtime mount
+construction failed: <message>` route. Clean's direct dev timeout returns
+`RunResult(124, <message>)`; cleanup through `cleanup_owned` returns
+`RunResult(1, "Cleanup preserved resources: <message>")`. Recording precedes
+removal, so a removal timeout does not lose an already published record.
 
 Status and `clean volumes` listing group declared data/cache/none volumes and
 mark absent declared volumes `not created`. They load one optional config;
@@ -1543,6 +1632,12 @@ image, network, actual agent Docker endpoint/identity/health/storage (with separ
 stale/orphan reporting), actual D-Bus/audio delivery and raw desktop exposure, and seed
 config presence. It also includes the read-only `Config workflow` audit, which
 is `PASS` when clean and `WARN` when drift or validation needs attention.
+
+The `Post-mortem records` row calls `post_mortem.latest()` independently of config
+and Docker availability. It reads only the host filesystem, returning `PASS`
+with `none` or `<n> kept; latest <path>`. A historical incident is not a current
+failure. Directory ownership/mode violations or read failures yield `WARN` with
+a recorder-owned code; no record contents are printed.
 
 `doctor --fix` calls `_doctor_fix(config)`, which attempts:
 
@@ -1736,6 +1831,10 @@ Declared volume archives are staged as
 `declared-volumes/<actual-name>.tar.gz`, included in the outer tar; built-in
 archives keep their root names/layout. The existing raw Docker volume helper
 uses the selected actual name and mounts the backup source read-only.
+
+Post-mortem records in `~/.local/state/djinn/post-mortem/` are outside every backup
+selector and are never archived. Operator-managed backups and synchronization
+must also exclude `~/.local/state/djinn`.
 
 `restore()` also refuses to run while containers are active. It identifies an
 age archive from its `age-encryption.org/v1` header, decrypts it into a separate
