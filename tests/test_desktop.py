@@ -693,3 +693,98 @@ def test_doctor_consumes_read_only_inspector(state, monkeypatch):
     assert raw.status.value == (
         "fail" if state == "raw" else "warn" if state == "unknown" else "pass"
     )
+
+
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "running", "stopped", "unclear", "different-run"])
+@pytest.mark.parametrize("recorder_broken", [False, True])
+def test_fallback_records_before_rm(
+    tmp_path, monkeypatch, running, outcome, recorder_broken, marker_broken=False,
+):
+    import subprocess
+
+    from djinn_in_a_box.core import post_mortem
+
+    e = endpoint()
+    _, helper, image, _ = objects(e)
+    helper["State"].update(Running=running, StartedAt="helper-run", ExitCode=137,
+                            OOMKilled=True, FinishedAt="helper-finished")
+    inventory = {helper["Id"]: helper}
+    owner = SimpleNamespace(
+        generation="generation", resources={}, observer=SimpleNamespace(poll=lambda: None),
+        register=lambda service, obj, volume: owner.resources.update(
+            {service: {"id": obj["Id"], "service": service}}),
+        register_volume=lambda *a, **kw: None,
+        forget=lambda service: owner.resources.pop(service), discard_volume=lambda *a: None,
+    )
+    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", __import__("os").getuid())
+    monkeypatch.setattr(desktop, "discover_desktop_endpoints", lambda: (e,))
+    monkeypatch.setattr(docker, "_run_compose", lambda *a, **kw: docker.RunResult(0))
+    inspected = []
+
+    def inspect(name, path, resource="container", **kwargs):
+        if resource == "image":
+            return image
+        if resource == "volume":
+            return None
+        if outcome == "unclear" and inspected:
+            raise RuntimeError("inspection unavailable")
+        return inventory.get(name)
+
+    monkeypatch.setattr(host_runtime, "inspect_object", inspect)
+    found = iter([None, helper])
+    monkeypatch.setattr(docker, "_service_inspect", lambda *a: next(found))
+    monkeypatch.setattr(docker, "_helper_evidence", lambda *a: (_ for _ in ()).throw(
+        RuntimeError("readiness failure")))
+    # Avoid launching log children: snapshots still go through the real recorder and writer.
+    monkeypatch.setattr(post_mortem, "_logs", lambda *a: ("helper log", None))
+    if marker_broken:
+        def broken_marker(*a, **kw):
+            raise RuntimeError("diagnostics marker failure")
+        monkeypatch.setattr(post_mortem, "mark_ended", broken_marker)
+    if recorder_broken:
+        monkeypatch.setattr(post_mortem, "record", lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("recorder failure")))
+
+    def execute(argv, **kwargs):
+        assert argv == [docker.DOCKER_EXECUTABLE, "rm", "-f", helper["Id"]]
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["timeout"] == 5
+        docs = [json.loads(p.read_text())
+                for p in post_mortem.records_root(create=False).glob("*Z-*.json")]
+        assert bool(docs) == (not running and not recorder_broken)
+        if docs:
+            assert docs[0]["trigger"] == "helper-fallback"
+            assert docs[0]["runtime_generation"] == "generation"
+            assert docs[0]["subjects"][0]["id"] == helper["Id"]
+        inspected.append("rm")
+        if outcome == "success":
+            inventory.clear()
+        elif outcome in {"stopped", "different-run"}:
+            helper["State"]["Running"] = False
+            if outcome == "different-run":
+                helper["State"]["StartedAt"] = "external-restart"
+        return SimpleNamespace(
+            returncode=0 if outcome == "success" else 1, stdout="", stderr="refused",
+        )
+
+    monkeypatch.setattr(docker.subprocess, "run", execute)
+    fragment = {"services": {"dev": {}}}
+    docker._prepare_companions(
+        AppConfig(code_dir=tmp_path), docker.ContainerOptions(), fragment, owner,
+    )
+    assert inspected == ["rm"]
+    assert "dbus-helper" not in fragment["services"]
+    marker = post_mortem.records_root(create=False) / "provenance.json"
+    assert (json.loads(marker.read_text()) if marker.exists() else {}) == (
+        {helper["Id"]: "helper-run"}
+        if running and outcome == "stopped" and not marker_broken else {}
+    )
+
+
+def test_fallback_marker_exception_keeps_path(tmp_path, monkeypatch, capsys):
+    test_fallback_records_before_rm(
+        tmp_path, monkeypatch, True, "stopped", False, marker_broken=True,
+    )
+    captured = capsys.readouterr()
+    assert "diagnostics marker failure" not in captured.out + captured.err

@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -38,7 +38,7 @@ from djinn_in_a_box.config.defaults import (
     volume_categories,
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing
+from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing, post_mortem
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.contained_paths import (
     PathContainmentError,
@@ -2077,12 +2077,31 @@ def _prepare_companions(
             record = owner.resources.get(endpoint.service)
             if record is not None:
                 try:
-                    if host_runtime.inspect_owned_resource(
+                    owned = host_runtime.inspect_owned_resource(
                         record, owner.generation, DOCKER_EXECUTABLE
-                    ):
+                    )
+                    if owned:
+                        started_at = (
+                            owned.get("State", {}).get("StartedAt")
+                            if owned.get("State", {}).get("Running") is True else None
+                        )
+                        with suppress(Exception):
+                            post_mortem.record(
+                                "helper-fallback", docker_path=DOCKER_EXECUTABLE,
+                                candidates=[
+                                    post_mortem.Candidate(record["id"], True, record["id"]),
+                                ],
+                                runtime_generation=owner.generation,
+                            )
                         result = _run_captured(
                             [DOCKER_EXECUTABLE, "rm", "-f", record["id"]], timeout=5
                         )
+                        if not result.success and started_at:
+                            with suppress(Exception):
+                                post_mortem.mark_ended(
+                                    DOCKER_EXECUTABLE, record["id"],
+                                    started_at, succeeded=False,
+                                )
                         if result.success:
                             owner.forget(endpoint.service)
                         else:
@@ -2656,6 +2675,30 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         return RunResult(
                             1, stderr="unknown project resources; preserving resources"
                         )
+            listed = _run_captured(
+                [
+                    DOCKER_EXECUTABLE, "ps", "-aq", "--no-trunc", "--filter",
+                    f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                ],
+                timeout=5,
+            )
+            # The project label is the boundary of the removals below; a stale runtime
+            # dev_id must not filter out a stopped dev that clean still removes.
+            candidates = [
+                post_mortem.Candidate(identity, True, identity)
+                for identity in listed.stdout.split() if listed.success
+            ]
+            if state:
+                candidates.extend(
+                    post_mortem.Candidate(resource["id"], True, resource["id"])
+                    for resource in state.get("resources", {}).values()
+                )
+            snapshot = None
+            with suppress(Exception):
+                snapshot = post_mortem.record(
+                    "clean", docker_path=DOCKER_EXECUTABLE, candidates=candidates,
+                    runtime_generation=state["generation"] if state else None,
+                )
             hostctl.stop_helper_locked(remove=True)
             actual = host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
             if actual is not None:
@@ -2663,9 +2706,25 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                 if labels.get("com.docker.compose.project") != COMPOSE_PROJECT:
                     return RunResult(1, stderr="dev ownership is unknown; preserving resources")
                 result = _run_captured(
-                    [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])], timeout=10
+                    [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])],
+                    timeout=host_runtime.REMOVE_TIMEOUT_SECONDS,
                 )
                 if not result.success:
+                    if actual.get("State", {}).get("Running") is True:
+                        with suppress(Exception):
+                            post_mortem.mark_ended(
+                                DOCKER_EXECUTABLE, str(actual["Id"]),
+                                actual["State"].get("StartedAt", ""), succeeded=False,
+                            )
+                    if result.returncode == 124:
+                        return RunResult(
+                            124,
+                            stderr=(
+                                f"Docker is still removing container {actual['Id']} after "
+                                f"{host_runtime.REMOVE_TIMEOUT_SECONDS} s; the daemon may finish "
+                                "it in the background. Retrying is safe."
+                            ),
+                        )
                     return result
                 if (
                     host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
@@ -2683,6 +2742,12 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                 )
             )
             if not result.success:
+                if snapshot is not None:
+                    for identity, started_at in snapshot.running.items():
+                        with suppress(Exception):
+                            post_mortem.mark_ended(
+                                DOCKER_EXECUTABLE, identity, started_at, succeeded=False,
+                            )
                 return result
             if state is not None:
                 if not host_runtime.cleanup_owned(root, state["generation"], DOCKER_EXECUTABLE):

@@ -33,6 +33,7 @@ from djinn_in_a_box.config.zones import (
     load_zone_assignments,
 )
 from djinn_in_a_box.core import docker as docker_core
+from djinn_in_a_box.core import post_mortem
 from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
 from djinn_in_a_box.core.console import blank, console, error, rule, warning
 from djinn_in_a_box.core.contained_paths import PathContainmentError, tighten_directory
@@ -721,7 +722,11 @@ def declaration_checks(
 
 def run_checks(config: AppConfig | None, config_error: str | None = None) -> list[Check]:
     """Run every diagnostic and return the results (no side effects)."""
-    checks: list[Check] = []
+    kept, latest, problem = post_mortem.latest()
+    checks = [Check(
+        "Post-mortem records", Status.WARN if problem else Status.PASS,
+        problem if problem else f"{kept} kept; latest {latest}" if latest else "none",
+    )]
 
     installed = _docker_installed()
     checks.append(

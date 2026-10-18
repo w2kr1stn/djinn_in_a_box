@@ -2354,3 +2354,29 @@ def test_restore_unreadable_sync_root_and_child_hardens_and_continues(
         for directory in directories:
             if directory.is_dir():
                 real_chmod(directory, 0o700)
+
+
+def test_default_backup_excludes_postmortem_records(tmp_path, monkeypatch):
+    from djinn_in_a_box.config.defaults import SYNC_PATHS
+    from djinn_in_a_box.core import docker, post_mortem
+
+    home = tmp_path / "home"
+    config_root = home / ".djinn/config"
+    root = home / ".local/state/djinn/post-mortem"
+    root.mkdir(parents=True, mode=0o700)
+    (root / "evidence.json").write_text("private evidence")
+    for names in SYNC_PATHS.values():
+        for name in names:
+            (config_root / name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(post_mortem, "records_root", lambda **kw: root)
+    monkeypatch.setattr(docker, "get_config_root", lambda *a: config_root)
+    monkeypatch.setattr(backup_module, "get_existing_volumes_by_category", lambda *a: [])
+    monkeypatch.setattr(backup_module, "get_existing_sync_paths_by_category",
+                        docker.get_existing_sync_paths_by_category)
+    _, paths = backup_module._collect_items(["credentials", "repo-dotfiles", "data"])
+    assert paths
+    assert all(not root.is_relative_to(path) and not path.is_relative_to(root) for path in paths)
+    assert set(paths) == {
+        config_root / name for category in ("credentials", "repo-dotfiles", "data")
+        for name in SYNC_PATHS.get(category, [])
+    }

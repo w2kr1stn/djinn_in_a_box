@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.ssh import HostctlConfig, duration_minutes
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
+from djinn_in_a_box.core import post_mortem
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 
 if TYPE_CHECKING:
@@ -425,7 +426,7 @@ def guard_dev_start(planned: dict[str, Any], creator: str) -> None:
     from djinn_in_a_box.core.host_sealing import assess
 
     checked = assess(planned, planned_generation=creator)
-    with control_guard():
+    with teardown_markers(), control_guard():
         helper = inspect_helper()
         if helper is None or not helper["State"]["Running"]:
             return
@@ -558,6 +559,7 @@ def open_window(
             )
         if helper is not None:
             reconcile(helper)
+            _record_stopped_helper(helper)
             command("rm", str(helper["Id"]))
         if not docker.ensure_network(HELPER_NETWORK):
             journal("on-refused", reason="network ensure failed")
@@ -598,14 +600,83 @@ def open_window(
     return gen
 
 
+@contextlib.contextmanager
+def teardown_markers(*, root: Path | None = None) -> Iterator[None]:
+    """Defer diagnostic persistence until the caller has attempted its closure journal."""
+    pending: list[tuple[str, str, bool]] = []
+    previous = getattr(_held, "teardown_markers", None)
+    _held.teardown_markers = pending
+    try:
+        yield
+    finally:
+        _held.teardown_markers = previous
+        for identity, started_at, succeeded in pending:
+            with contextlib.suppress(Exception):
+                post_mortem.mark_ended(
+                    DOCKER_EXECUTABLE, identity, started_at,
+                    succeeded=succeeded, blocking=False, root=root,
+                )
+
+
+def _helper_marker(identity: str, started_at: str, succeeded: bool) -> None:
+    pending = getattr(_held, "teardown_markers", None)
+    if pending is not None:
+        pending.append((identity, started_at, succeeded))
+    else:
+        with contextlib.suppress(Exception):
+            post_mortem.mark_ended(
+                DOCKER_EXECUTABLE, identity, started_at, succeeded=succeeded, blocking=False,
+            )
+
+
+def _record_stopped_helper(helper: dict[str, Any]) -> None:
+    """Only an expiry from this run exempts an otherwise eligible stopped helper."""
+    expired = False
+    try:
+        started = datetime.fromisoformat(helper["State"]["StartedAt"])
+        logs = command("logs", "--tail", "100", str(helper["Id"]))
+        for line in logs.splitlines():
+            try:
+                raw_event: Any = json.loads(line)
+                if not isinstance(raw_event, dict):
+                    continue
+                event = cast(dict[str, Any], raw_event)
+                if (
+                    event.get("event") == "expiry"
+                    and event.get("generation") == generation(helper)
+                    and datetime.fromisoformat(event["time"]) >= started
+                ):
+                    expired = True
+                    break
+            except (ValueError, KeyError, TypeError):
+                continue
+    except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+    if not expired:
+        with contextlib.suppress(Exception):
+            post_mortem.record(
+                "hostctl-helper", docker_path=DOCKER_EXECUTABLE,
+                candidates=[post_mortem.Candidate(str(helper["Id"]), True, str(helper["Id"]))],
+                hostctl_generation=generation(helper),
+            )
+
+
 def stop_helper_locked(*, remove: bool = False) -> None:
     helper = inspect_helper()
     if helper is None:
         return
     identity = str(helper["Id"])
     gen = generation(helper)
-    if helper["State"]["Running"]:
-        command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+    was_running = helper["State"]["Running"]
+    if was_running:
+        started_at = str(helper["State"].get("StartedAt", ""))
+        succeeded = False
+        try:
+            command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+            succeeded = True
+        finally:
+            if started_at:
+                _helper_marker(identity, started_at, succeeded)
     current = inspect_helper()
     if current is None or current["Id"] != identity or generation(current) != gen:
         raise HostctlError("Helper changed during teardown; preserving resources")
@@ -613,13 +684,15 @@ def stop_helper_locked(*, remove: bool = False) -> None:
         raise HostctlError("Helper termination could not be verified")
     reconcile(current)
     if remove:
+        if not was_running:
+            _record_stopped_helper(current)
         command("rm", identity)
         if inspect_helper() is not None:
             raise HostctlError("Helper removal could not be verified")
 
 
 def close_window() -> None:
-    with control_guard():
+    with teardown_markers(), control_guard():
         helper = inspect_helper()
         control_journal("off-attempt", generation=generation(helper) if helper else None)
         try:

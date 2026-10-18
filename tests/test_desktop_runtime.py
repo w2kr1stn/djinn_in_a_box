@@ -62,7 +62,7 @@ try:
         return next((key for key, obj in data.items()
                      if key == name or obj.get('Id') == name), None)
 
-    mutating = args[0] in ('stop', 'start', 'rm') or args[:2] == ['volume', 'rm']
+    mutating = args[0] in ('stop', 'start', 'rm', 'compose-down') or args[:2] == ['volume', 'rm']
     if mutating:
         documents = [json.loads(p.read_text()) for p in records.glob('*Z-*.json')]
         if settings.get('record'):
@@ -77,7 +77,7 @@ try:
             assert json.loads((records / 'provenance.json').read_text()) == settings['markers']
         failure = settings.get('failure', {{}})
         if args == failure.get('argv'):
-            key = lookup(args[-1])
+            key = lookup(failure.get('target', args[-1]))
             if 'running' in failure:
                 data[key]['State']['Running'] = failure['running']
             if failure.get('new_started'):
@@ -105,8 +105,20 @@ try:
     elif args[0] == 'logs':
         print('isolated container log')
     elif args[0] == 'ps':
-        pass
-    elif args[:2] == ['rm', '-f'] or args[:2] == ['volume', 'rm']:
+        if '--filter' in args:
+            constraint = args[args.index('--filter') + 1]
+            if constraint.startswith('label='):
+                label, expected = constraint[6:].split('=', 1)
+                for obj in data.values():
+                    if obj.get('Config', {{}}).get('Labels', {{}}).get(label) == expected:
+                        if '-aq' in args or obj.get('State', {{}}).get('Running'):
+                            print(obj['Id'])
+    elif args[0] == 'compose-down':
+        data = {{k: v for k, v in data.items()
+                 if v.get('Config', {{}}).get('Labels', {{}}).get('com.docker.compose.project')
+                 != 'djinn-in-a-box'}}
+        write_json(data)
+    elif args[0] == 'rm' or args[:2] == ['volume', 'rm']:
         for key in list(data):
             if key == args[-1] or data[key].get('Id') == args[-1]:
                 data.pop(key, None)
@@ -1105,3 +1117,221 @@ def test_record_dev_candidate_cannot_widen_ownership(fake_owner, monkeypatch, ex
     )
     assert records() == []
     assert json.loads(objects.read_text())["djinn"]["Id"] == "replacement-id"
+
+
+@pytest.fixture
+def clean_owner(fake_owner, monkeypatch):
+    monkeypatch.setattr(docker, "is_own_container", lambda *args: False)
+    monkeypatch.setattr(
+        docker, "_run_compose",
+        lambda *a, **kw: docker._run_captured([str(fake_owner[1]), "compose-down"], timeout=15),
+    )
+    return fake_owner
+
+
+@pytest.mark.parametrize("layout", ["state", "no-state", "stale-state", "oneoff", "running"])
+@pytest.mark.parametrize("service", ["audio-helper", "agent-docker"])
+def test_clean_records_before_mutation(clean_owner, layout, service):
+    _, _, objects, log = clean_owner
+    owner = cleanup_inventory(clean_owner, dev_running=layout == "running",
+                              helper_running=layout == "running", service=service)
+    data = json.loads(objects.read_text())
+    if layout == "stale-state":
+        data["djinn"]["Config"]["Labels"].pop(host_runtime.GENERATION_LABEL)
+    if layout == "oneoff":
+        data["djinn"]["Config"]["Labels"]["com.docker.compose.oneoff"] = "True"
+        data["djinn"]["HostConfig"] = {"AutoRemove": True}
+    objects.write_text(json.dumps(data))
+    if layout == "no-state":
+        host_runtime.clear_state(owner.root, owner.generation)
+    ids = ["helper-id"] if layout == "oneoff" else ["dev-id", "helper-id"]
+    behavior(clean_owner, **({"no_record": True} if layout == "running" else {
+        "record": {"trigger": "clean", "generation": None if layout == "no-state" else "mine",
+                   "ids": ids},
+    }))
+    assert docker.compose_down().success
+    assert ["ps", "-aq", "--no-trunc", "--filter",
+            "label=com.docker.compose.project=djinn-in-a-box"] in calls(log)
+    assert bool(records()) == (layout != "running")
+    assert markers() == {}  # Successful removals need no provenance.
+
+
+def test_clean_discovery_excludes_foreign_project(clean_owner):
+    _, _, objects, _ = clean_owner
+    owner = cleanup_inventory(clean_owner)
+    host_runtime.clear_state(owner.root, owner.generation)
+    data = json.loads(objects.read_text())
+    data["foreign"] = dev(owner, False, "foreign-id")
+    data["foreign"]["Config"]["Labels"]["com.docker.compose.project"] = "other-project"
+    objects.write_text(json.dumps(data))
+    behavior(clean_owner, record={"trigger": "clean", "generation": None, "ids": ["helper-id"]})
+    assert docker.compose_down().success
+    assert "foreign" in json.loads(objects.read_text())
+
+
+def test_clean_candidates_follow_removal_boundary(clean_owner, monkeypatch):
+    _, _, objects, log = clean_owner
+    owner = cleanup_inventory(clean_owner, dev_running=False)
+    state = host_runtime.read_state(owner.root)
+    state["dev_id"] = "expected-old-dev"
+    host_runtime.save_state(owner.root, state)
+    captured = []
+    original = post_mortem.record
+
+    def record(trigger, **kwargs):
+        captured.extend(kwargs["candidates"])
+        return original(trigger, **kwargs)
+
+    monkeypatch.setattr(post_mortem, "record", record)
+    behavior(
+        clean_owner,
+        record={"trigger": "clean", "generation": "mine", "ids": ["dev-id", "helper-id"]},
+    )
+    assert docker.compose_down().success
+    # A stale runtime dev_id never filters out the stopped dev that clean removes.
+    assert post_mortem.Candidate("dev-id", True, "dev-id") in captured
+    assert ["rm", "-f", "dev-id"] in calls(log)  # Removal boundary stays as before.
+
+    owner = cleanup_inventory(clean_owner)
+    data = json.loads(objects.read_text())
+    data["helper-id"]["Config"]["Labels"][host_runtime.GENERATION_LABEL] = "foreign"
+    objects.write_text(json.dumps(data))
+    captured.clear()
+    assert not docker.compose_down().success
+    assert captured == []
+
+
+@pytest.mark.parametrize("outcome", ["running", "stopped", "unclear", "different-run"])
+@pytest.mark.parametrize("site", ["dev", "compose"])
+def test_clean_verified_failure_retry(clean_owner, monkeypatch, site, outcome):
+    _, binary, objects, log = clean_owner
+    cleanup_inventory(clean_owner, service="agent-docker", dev_running=True, helper_running=True)
+    target = "dev-id" if site == "dev" else "helper-id"
+    argv = ["rm", "-f", target] if site == "dev" else ["compose-down"]
+    failure = {"argv": argv, "target": target}
+    if outcome == "stopped":
+        failure["running"] = False
+    elif outcome == "unclear":
+        failure["unclear"] = True
+    elif outcome == "different-run":
+        failure.update(running=False, new_started="run-b")
+    behavior(clean_owner, no_record=True, failure=failure)
+    execute = subprocess.run
+
+    def run(command, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        result = execute(command, **kwargs)
+        if command == [str(binary), *argv]:
+            if site == "dev":
+                assert kwargs["timeout"] == 60
+            if outcome == "stopped":
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return result
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = docker.compose_down()
+    assert not result.success
+    if outcome == "stopped":
+        assert result.returncode == 124
+        if site == "dev":
+            assert result.stderr == (
+                "Docker is still removing container dev-id after 60 s; the daemon may finish "
+                "it in the background. Retrying is safe."
+            )
+    assert markers() == ({target: "run-a"} if outcome == "stopped" else {})
+    if site == "dev":
+        assert ["compose-down"] not in calls(log)
+        assert "helper-id" not in markers()
+    data = json.loads(objects.read_text())
+    for obj in data.values():
+        obj.pop("InspectionError", None)
+        obj["State"]["Running"] = False  # Later external failure, including unreached companion.
+    objects.write_text(json.dumps(data))
+    expected = [obj["Id"] for obj in data.values() if obj["Id"] not in markers()]
+    behavior(clean_owner, **({"record": {"trigger": "clean", "generation": "mine", "ids": expected}}
+                             if expected else {"no_record": True}))
+    monkeypatch.setattr(subprocess, "run", execute)
+    assert docker.compose_down().success
+    assert {s["id"] for doc in records() for s in doc["subjects"]} == set(expected)
+
+
+@pytest.mark.parametrize("fault", ["record", "mark_ended"])
+def test_clean_diagnostics_failure_keeps_result(clean_owner, monkeypatch, fault):
+    cleanup_inventory(clean_owner, dev_running=True)
+    behavior(clean_owner, failure={"argv": ["rm", "-f", "dev-id"], "running": False})
+
+    def broken(*a, **kw):
+        raise RuntimeError("diagnostics failure")
+
+    monkeypatch.setattr(post_mortem, fault, broken)
+    result = docker.compose_down()
+    assert result.returncode == 1 and result.stderr.strip() == "operation refused"
+
+
+def test_clean_records_before_hostctl_stop(clean_owner):
+    _, _, objects, _ = clean_owner
+    cleanup_inventory(clean_owner, dev_running=False)
+    data = json.loads(objects.read_text())
+    data["djinn-hostctl"] = {
+        "Id": "hostctl-id", "State": {"Running": True, "StartedAt": "hostctl-run"},
+        "Config": {"Labels": {hostctl.GENERATION_LABEL: "hostctl-generation"}},
+    }
+    objects.write_text(json.dumps(data))
+    behavior(clean_owner, record={"trigger": "clean", "generation": "mine",
+                                 "ids": ["dev-id", "helper-id"]})
+    assert docker.compose_down().success
+
+
+def test_clean_includes_state_resources_outside_compose_label(clean_owner):
+    _, _, objects, _ = clean_owner
+    owner = cleanup_inventory(clean_owner)
+    data = json.loads(objects.read_text())
+    data["helper-id"]["Config"]["Labels"]["com.docker.compose.project"] = "other-project"
+    objects.write_text(json.dumps(data))
+    state = host_runtime.read_state(owner.root)
+    state["resources"]["audio-helper"]["project"] = "other-project"
+    host_runtime.save_state(owner.root, state)
+    behavior(clean_owner, record={"trigger": "clean", "generation": "mine", "ids": ["helper-id"]})
+    assert docker.compose_down().success
+
+
+def test_clean_discovery_is_bounded_and_captured(clean_owner, monkeypatch):
+    cleanup_inventory(clean_owner)
+    execute = subprocess.run
+    discoveries = []
+
+    def run(argv, **kwargs):
+        if argv[1] == "ps" and "-aq" in argv:
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            assert kwargs["timeout"] == 5
+            assert kwargs["capture_output"] is True and kwargs["text"] is True
+            discoveries.append(argv)
+        return execute(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert docker.compose_down().success
+    assert discoveries
+
+
+def test_clean_shared_cleanup_has_no_incident(clean_owner, monkeypatch):
+    cleanup_inventory(clean_owner)
+    cleanup = host_runtime.cleanup_owned
+    seen = []
+
+    def checked(*args, **kwargs):
+        assert kwargs.get("incident") is None
+        seen.append(True)
+        return cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(host_runtime, "cleanup_owned", checked)
+    assert docker.compose_down().success
+    assert seen == [True]
+
+
+def test_clean_already_stopped_failure_never_marks(clean_owner):
+    cleanup_inventory(clean_owner, dev_running=False)
+    behavior(clean_owner, record={"trigger": "clean", "generation": "mine",
+                                 "ids": ["dev-id", "helper-id"]},
+             failure={"argv": ["rm", "-f", "dev-id"]})
+    assert not docker.compose_down().success
+    assert markers() == {}

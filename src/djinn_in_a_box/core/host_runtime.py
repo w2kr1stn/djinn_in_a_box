@@ -930,6 +930,7 @@ def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) ->
                 helper_id,
                 generation,
                 docker_path,
+                str(post_mortem.records_root(create=False)),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -939,7 +940,9 @@ def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) ->
         )
 
 
-def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
+def observe_hostctl(
+    helper_id: str, generation: str, docker_path: str, records_root: Path | None = None,
+) -> None:
     """Enroll and report; helper PID 1 remains the only expiry timer."""
     from djinn_in_a_box.core import hostctl
 
@@ -1047,7 +1050,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
                     and enrollment.poll() == 0
                     and node.get("BackendState") == "Running"
                 ):
-                    with hostctl.control_guard():
+                    with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
                         fresh = hostctl.inspect_helper()
                         if (
                             fresh
@@ -1064,11 +1067,25 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
             if actual and actual[1] and dev_id is None:
                 raise GitSSHError("unassessed dev appeared during open window")
             if dev_id is not None and (actual is None or not actual[1] or actual[0] != dev_id):
-                with hostctl.control_guard():
+                with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
                     fresh = hostctl.inspect_helper()
                     if fresh and fresh["Id"] == helper_id:
                         hostctl.stop_helper_locked()
                         hostctl.journal("external-dev-teardown", generation=generation)
+                with contextlib.suppress(Exception):
+                    post_mortem.record(
+                        "hostctl-teardown", docker_path=docker_path,
+                        candidates=[post_mortem.Candidate(dev_id, True, dev_id)],
+                        observed={
+                            "state": (
+                                "absent" if actual is None
+                                else "replaced" if actual[0] != dev_id else "stopped"
+                            ),
+                            "expected_id": dev_id,
+                            "actual_id": actual[0] if actual else None,
+                        },
+                        hostctl_generation=generation, root=records_root,
+                    )
                 return
             if admitted and not opening.get("creator"):
                 hostctl.verify_agent(dev_id, agent_evidence)
@@ -1089,7 +1106,7 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
             time.sleep(0.5)
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
         warning(f"Hostctl observation gap: {exc}")
-        with hostctl.control_guard():
+        with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
             fresh = hostctl.inspect_helper()
             if fresh and fresh["Id"] == helper_id:
                 hostctl.stop_helper_locked()
@@ -1105,6 +1122,6 @@ def observe_hostctl(helper_id: str, generation: str, docker_path: str) -> None:
 
 if __name__ == "__main__":
     if sys.argv[1] == "--hostctl":
-        observe_hostctl(sys.argv[2], sys.argv[3], sys.argv[4])
+        observe_hostctl(sys.argv[2], sys.argv[3], sys.argv[4], Path(sys.argv[5]))
     else:
         observe(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], Path(sys.argv[4]))

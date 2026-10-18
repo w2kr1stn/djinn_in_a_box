@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
-from djinn_in_a_box.core import agent_docker, desktop, host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, desktop, host_runtime, hostctl, post_mortem
 from djinn_in_a_box.core import paths as host_paths
 from djinn_in_a_box.core.paths import get_project_root
 
@@ -416,6 +416,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         private = {
             "host controller/journal": canonical(hostctl.state_root(create=False)),
             "journal": canonical(hostctl.state_root(create=False) / "journal.jsonl"),
+            "post-mortem records": canonical(post_mortem.records_root(create=False)),
             "private agent": canonical(host_runtime.runtime_root() / "private"),
             "private agent socket": canonical(host_runtime.runtime_root() / "private/agent.sock"),
             "host runtime control": canonical(host_runtime.runtime_root() / "runtime.json"),

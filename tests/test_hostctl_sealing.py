@@ -1146,7 +1146,7 @@ def test_root_bind_groups_execution_inventory(ground, monkeypatch):
     assert result.causes == (
         "/ -> /delivery: host root; user home or ancestor; "
         "Docker data root/helper backing storage; "
-        f"exposed controller/journal/agent state (5 items); Docker socket {ground.socket}; "
+        f"exposed controller/journal/agent state (6 items); Docker socket {ground.socket}; "
         "writable Djinn installation and configuration (5 items); "
         "writable Python environment (17 items); "
         "writable Docker CLI and plugins (7 items); writable PATH directory (4 items)",
@@ -1160,6 +1160,7 @@ def test_root_bind_groups_execution_inventory(ground, monkeypatch):
             for name in (
                 "host controller/journal",
                 "journal",
+                "post-mortem records",
                 "private agent",
                 "private agent socket",
                 "host runtime control",
@@ -2223,3 +2224,18 @@ def test_inventory_errors_are_caught_per_bind(
     assert all(f.kind == "hard-link provenance unknown" for f in result.error_findings[1:])
     with pytest.raises(hostctl.HostctlError):
         result.require(allow_unsealed=True)
+
+
+@pytest.mark.parametrize("relative", ["", "record.json"])
+def test_postmortem_private_bind(ground, tmp_path, monkeypatch, relative):
+    from djinn_in_a_box.core import post_mortem
+
+    root = tmp_path / "diagnostics"
+    root.mkdir(mode=0o700)
+    root.joinpath("record.json").touch(mode=0o600)
+    monkeypatch.setattr(post_mortem, "records_root", lambda **kw: root)
+    assessment = sealing.assess(dev([bind(root / relative)]))
+    assert any(
+        f.kind == "exposed controller/journal/agent state" and f.item == "post-mortem records"
+        for f in assessment.cause_findings
+    )
