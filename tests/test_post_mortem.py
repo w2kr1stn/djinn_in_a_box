@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
@@ -222,7 +223,7 @@ def test_no_candidates_no_file(fake_docker):
 
 def test_marker_matches_episode_not_container(fake_docker, evidence):
     inventory(fake_docker, dev=evidence)
-    pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=True)
+    pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)
     assert capture(fake_docker).path is None
     evidence["State"]["StartedAt"] = "2026-10-17T03:00:00Z"
     inventory(fake_docker, dev=evidence)
@@ -232,7 +233,7 @@ def test_marker_matches_episode_not_container(fake_docker, evidence):
 @pytest.mark.parametrize(
     "outcome", ["succeeded", "running", "stopped", "error", "absent", "different", "different-id"]
 )
-def test_mark_ended_owner_matrix(fake_docker, evidence, outcome):
+def test_mark_terminated_owner_matrix(fake_docker, evidence, outcome):
     identity = evidence["Id"]
     if outcome == "running":
         evidence["State"]["Running"] = True
@@ -243,7 +244,7 @@ def test_mark_ended_owner_matrix(fake_docker, evidence, outcome):
     inventory(fake_docker, **({} if outcome == "absent" else {identity: evidence}))
     behavior(fake_docker, inspect_error=outcome == "error")
     assert (
-        pm.mark_ended(fake_docker.binary, identity, STARTED, succeeded=outcome == "succeeded")
+        pm.mark_terminated(fake_docker.binary, identity, STARTED)
         is None
     )
     root = pm.records_root(create=False)
@@ -252,10 +253,7 @@ def test_mark_ended_owner_matrix(fake_docker, evidence, outcome):
     if marked:
         assert json.loads((root / "provenance.json").read_text()) == {identity: STARTED}
         assert stat.S_IMODE((root / "provenance.json").stat().st_mode) == 0o600
-    if outcome == "succeeded":
-        assert not fake_docker.calls.exists()
-    else:
-        assert len(daemon_calls(fake_docker)) == 1
+    assert len(daemon_calls(fake_docker)) == 1
     if outcome == "running":
         evidence["State"]["Running"] = False
         inventory(fake_docker, dev=evidence)
@@ -265,7 +263,10 @@ def test_mark_ended_owner_matrix(fake_docker, evidence, outcome):
 def test_marker_cap_and_refresh_order(fake_docker, monkeypatch):
     monkeypatch.setattr(pm, "MARKER_LIMIT", 2)
     for identity in ("a", "b", "a", "c"):
-        pm.mark_ended(fake_docker.binary, identity, STARTED, succeeded=True)
+        inventory(fake_docker, **{identity: {
+            "Id": identity, "State": {"Running": False, "StartedAt": STARTED},
+        }})
+        pm.mark_terminated(fake_docker.binary, identity, STARTED)
     assert list(pm._markers(pm.records_root(create=False))) == ["a", "c"]
 
 
@@ -301,6 +302,7 @@ os.close(fd)
 
 def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, tmp_path):
     monkeypatch.setattr(pm, "RECORD_SECONDS", 1.2)
+    inventory(fake_docker, dev=evidence)
     root = pm.records_root(create=True)
     attempts = []
     original = pm.fcntl.flock
@@ -312,7 +314,7 @@ def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, tmp_
     monkeypatch.setattr(pm.fcntl, "flock", counted)
     with held_lock(root, tmp_path):
         started = time.monotonic()
-        pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=True, blocking=False)
+        pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED, blocking=False)
         assert time.monotonic() - started < 0.35
     assert attempts == [pm.fcntl.LOCK_EX | pm.fcntl.LOCK_NB]
     assert not (root / "provenance.json").exists()
@@ -709,7 +711,7 @@ def test_failing_output_sink_never_raises(fake_docker, evidence, monkeypatch):
 
     monkeypatch.setattr(pm.console, "print_captured", fail)
     assert capture(fake_docker) is None
-    assert pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=True) is None
+    assert pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED) is None
 
 
 def test_marker_write_failure_does_not_prevent_record(fake_docker, evidence, monkeypatch, capsys):
@@ -722,7 +724,7 @@ def test_marker_write_failure_does_not_prevent_record(fake_docker, evidence, mon
         return original(root, name, payload)
 
     monkeypatch.setattr(pm, "_atomic_write", write)
-    pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=True)
+    pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)
     assert document(capture(fake_docker))["subjects"][0]["id"] == evidence["Id"]
     output = capsys.readouterr().err
     assert "Post-mortem record failed (marker)" in output
@@ -788,7 +790,7 @@ def test_no_follow_for_internal_files(fake_docker, evidence, tmp_path, name):
 
 def test_unrelated_marker_does_not_exclude_subject(fake_docker, evidence):
     inventory(fake_docker, dev=evidence)
-    pm.mark_ended(fake_docker.binary, "a" * 64, STARTED, succeeded=True)
+    pm.mark_terminated(fake_docker.binary, "a" * 64, STARTED)
     assert document(capture(fake_docker))["subjects"][0]["id"] == evidence["Id"]
 
 
@@ -802,12 +804,12 @@ def test_marker_reinspect_budget(fake_docker, evidence, monkeypatch):
         return original(name, docker_path, timeout=timeout)
 
     monkeypatch.setattr(host_runtime, "inspect_object", inspected)
-    pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=False)
+    pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)
     assert timeouts == [5]
     monkeypatch.setattr(pm, "RECORD_SECONDS", 0.1)
     behavior(fake_docker, inspect_delay=0.5)
     started = time.monotonic()
-    pm.mark_ended(fake_docker.binary, "a" * 64, STARTED, succeeded=False)
+    pm.mark_terminated(fake_docker.binary, "a" * 64, STARTED)
     assert time.monotonic() - started < 0.5
     assert 0 < timeouts[-1] <= 0.1
     assert "a" * 64 not in pm._markers(pm.records_root(create=False))
@@ -1004,7 +1006,8 @@ def test_empty_id_is_not_a_subject(fake_docker, evidence):
 
 
 @pytest.mark.parametrize("kind", ["corrupt", "mode", "symlink", "fifo"])
-def test_mark_ended_repairs_marker_store(fake_docker, evidence, kind, tmp_path):
+def test_mark_terminated_repairs_marker_store(fake_docker, evidence, kind, tmp_path, capsys):
+    inventory(fake_docker, dev=evidence)
     root = pm.records_root(create=True)
     path = root / "provenance.json"
     foreign = tmp_path / "foreign"
@@ -1017,11 +1020,100 @@ def test_mark_ended_repairs_marker_store(fake_docker, evidence, kind, tmp_path):
         path.write_text("invalid" if kind == "corrupt" else '{"old": "untrusted"}')
         path.chmod(0o600 if kind == "corrupt" else 0o644)
     inode = path.lstat().st_ino
-    pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=True)
+    pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)
     assert not path.is_symlink()
     assert path.stat().st_ino != inode
     assert path.stat().st_mode & 0o777 == 0o600
     assert json.loads(path.read_text()) == {evidence["Id"]: STARTED}
     assert foreign.read_text() == "untouched"
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Post-mortem record failed (marker)\n"
     inventory(fake_docker, dev=evidence)
     assert capture(fake_docker).path is None
+
+
+def provenance_violations(sources):
+    """Allow only the private filename declaration, read, and verified write."""
+    violations = []
+    for path, source in sources.items():
+        tree = ast.parse(source)
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def enclosing(node, parents=parents):
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return node.name
+            return None
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value == "provenance.json":
+                parent = parents[node]
+                if not (
+                    path == "core/post_mortem.py"
+                    and isinstance(parent, ast.Assign)
+                    and len(parent.targets) == 1
+                    and isinstance(parent.targets[0], ast.Name)
+                    and parent.targets[0].id == "_PROVENANCE_NAME"
+                    and enclosing(node) is None
+                ):
+                    violations.append(f"{path}:{node.lineno}: filename outside its declaration")
+            if not (
+                isinstance(node, ast.Name) and node.id == "_PROVENANCE_NAME"
+                or isinstance(node, ast.Attribute) and node.attr == "_PROVENANCE_NAME"
+            ):
+                continue
+            parent = parents[node]
+            if path == "core/post_mortem.py":
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    continue
+                if (
+                    isinstance(parent, ast.Call)
+                    and isinstance(parent.func, ast.Name)
+                    and parent.func.id == "_atomic_write"
+                    and parent.args[1:2] == [node]
+                    and enclosing(node) == "mark_terminated"
+                ):
+                    continue
+                grandparent = parents.get(parent)
+                if (
+                    isinstance(parent, ast.BinOp)
+                    and isinstance(parent.op, ast.Div)
+                    and isinstance(grandparent, ast.Call)
+                    and ast.unparse(grandparent.func) == "os.open"
+                    and ast.unparse(grandparent.args[1]) == (
+                        "os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK"
+                    )
+                    and enclosing(node) == "_markers"
+                ):
+                    continue
+            violations.append(f"{path}:{node.lineno}: marker access outside the verified path")
+    return violations
+
+
+def provenance_sources():
+    root = Path(pm.__file__).parents[1]
+    return {str(path.relative_to(root)): path.read_text() for path in root.rglob("*.py")}
+
+
+def test_provenance_has_one_write_path():
+    assert provenance_violations(provenance_sources()) == []
+
+
+@pytest.mark.parametrize(
+    "writer", ["local-literal", "local-constant", "foreign-literal", "foreign-constant"]
+)
+def test_provenance_guard_rejects_second_writer(writer):
+    sources = provenance_sources()
+    path = "core/post_mortem.py" if writer.startswith("local") else "core/second_writer.py"
+    name = '"provenance.json"' if writer.endswith("literal") else "_PROVENANCE_NAME"
+    sources[path] = sources.get(path, "") + (
+        f"\ndef second_writer(root):\n    _atomic_write(root, {name}, b'{{}}')\n"
+    )
+    assert provenance_violations(sources)
+
+
+def test_marker_rejects_caller_outcome_flag(fake_docker, evidence):
+    with pytest.raises(TypeError, match="succeeded"):
+        pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED, succeeded=True)

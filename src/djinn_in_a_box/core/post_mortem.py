@@ -30,6 +30,7 @@ LOG_TAIL_BYTES = 64 * 1024
 RECORD_SECONDS = 15
 STRING_BYTES = 2 * 1024
 MARKER_LIMIT = 128
+_PROVENANCE_NAME = "provenance.json"
 CGROUP_BASE = Path("/sys/fs/cgroup")
 
 _TRIGGER = re.compile(r"[a-z][a-z0-9-]*")
@@ -109,7 +110,7 @@ def _emit(message: str) -> None:
     console.print_captured(console.escape_nonprintable(message), end="\n")
 
 
-def _failure(code: str) -> None:
+def notify_failure(code: str) -> None:
     try:
         _emit(f"Post-mortem record failed ({code})")
     except Exception:
@@ -174,7 +175,7 @@ def _atomic_write(root: Path, name: str, payload: bytes) -> Path:
 
 def _markers(root: Path) -> dict[str, str]:
     try:
-        fd = os.open(root / "provenance.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(root / _PROVENANCE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return {}
     try:
@@ -215,19 +216,18 @@ def _stopped_same_run(docker_path: str, identity: str, started_at: str, deadline
     )
 
 
-def mark_ended(
+def mark_terminated(
     docker_path: str,
     container_id: str,
     started_at: str,
     *,
-    succeeded: bool,
     blocking: bool = True,
     root: Path | None = None,
 ) -> None:
     """Remember only verified Djinn teardown outcomes for a previously running episode."""
     try:
         deadline = time.monotonic() + RECORD_SECONDS
-        if not succeeded and not _stopped_same_run(docker_path, container_id, started_at, deadline):
+        if not _stopped_same_run(docker_path, container_id, started_at, deadline):
             return
         directory = _root(root, create=True)
         with _lock(directory, deadline, blocking=blocking):
@@ -235,15 +235,16 @@ def mark_ended(
                 try:
                     markers = _markers(directory)
                 except Exception:
+                    notify_failure("marker")
                     markers = {}
                 markers.pop(container_id, None)
                 markers[container_id] = started_at
                 markers = dict(list(markers.items())[-MARKER_LIMIT:])
-                _atomic_write(directory, "provenance.json", json.dumps(markers).encode())
+                _atomic_write(directory, _PROVENANCE_NAME, json.dumps(markers).encode())
             except Exception as exc:
                 raise _RecorderError("marker") from exc
     except Exception as exc:
-        _failure(_code(exc))
+        notify_failure(_code(exc))
 
 
 def _cap(value: Any) -> Any:
@@ -514,7 +515,7 @@ def record(
         _emit(f"Post-mortem record: {matched}")
         return RecordResult(matched, running)
     except Exception as exc:
-        _failure(_code(exc))
+        notify_failure(_code(exc))
         return None
 
 

@@ -741,7 +741,7 @@ def test_fallback_records_before_rm(
     if marker_broken:
         def broken_marker(*a, **kw):
             raise RuntimeError("diagnostics marker failure")
-        monkeypatch.setattr(post_mortem, "mark_ended", broken_marker)
+        monkeypatch.setattr(post_mortem, "mark_terminated", broken_marker)
     if recorder_broken:
         monkeypatch.setattr(post_mortem, "record", lambda *a, **kw: (_ for _ in ()).throw(
             RuntimeError("recorder failure")))

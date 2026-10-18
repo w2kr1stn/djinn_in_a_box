@@ -2093,15 +2093,16 @@ def _prepare_companions(
                                 ],
                                 runtime_generation=owner.generation,
                             )
-                        result = _run_captured(
-                            [DOCKER_EXECUTABLE, "rm", "-f", record["id"]], timeout=5
-                        )
-                        if not result.success and started_at:
-                            with suppress(Exception):
-                                post_mortem.mark_ended(
-                                    DOCKER_EXECUTABLE, record["id"],
-                                    started_at, succeeded=False,
-                                )
+                        try:
+                            result = _run_captured(
+                                [DOCKER_EXECUTABLE, "rm", "-f", record["id"]], timeout=5
+                            )
+                        finally:
+                            if started_at:
+                                with suppress(Exception):
+                                    post_mortem.mark_terminated(
+                                        DOCKER_EXECUTABLE, record["id"], started_at,
+                                    )
                         if result.success:
                             owner.forget(endpoint.service)
                         else:
@@ -2675,19 +2676,42 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         return RunResult(
                             1, stderr="unknown project resources; preserving resources"
                         )
-            listed = _run_captured(
-                [
-                    DOCKER_EXECUTABLE, "ps", "-aq", "--no-trunc", "--filter",
-                    f"label=com.docker.compose.project={COMPOSE_PROJECT}",
-                ],
-                timeout=5,
-            )
-            # The project label is the boundary of the removals below; a stale runtime
-            # dev_id must not filter out a stopped dev that clean still removes.
-            candidates = [
-                post_mortem.Candidate(identity, True, identity)
-                for identity in listed.stdout.split() if listed.success
-            ]
+            # Diagnostic discovery must never change clean's outcome.
+            candidates: list[post_mortem.Candidate] = []
+            compose_targets: set[str] = set()
+            try:
+                listed = _run_captured(
+                    [
+                        DOCKER_EXECUTABLE, "ps", "-aq", "--no-trunc", "--filter",
+                        f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                    ],
+                    timeout=5,
+                )
+                if not listed.success:
+                    raise RuntimeError("post-mortem discovery failed")
+                compose_targets.update(listed.stdout.split())
+                # A stale state dev_id must not filter out a dev that clean removes.
+                candidates.extend(
+                    post_mortem.Candidate(identity, True, identity)
+                    for identity in compose_targets
+                )
+            except Exception:
+                post_mortem.notify_failure("inspect")
+                with suppress(Exception):
+                    dev = host_runtime.inspect_object(
+                        _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE
+                    )
+                    dev_labels: dict[str, Any] = (
+                        (dev.get("Config", {}).get("Labels") or {}) if dev else {}
+                    )
+                    if (
+                        dev is not None
+                        and dev_labels.get("com.docker.compose.project") == COMPOSE_PROJECT
+                    ):
+                        candidates.append(
+                            post_mortem.Candidate(_SERVICE_CONTAINER_NAMES["dev"], True)
+                        )
+                        compose_targets.add(str(dev["Id"]))
             if state:
                 candidates.extend(
                     post_mortem.Candidate(resource["id"], True, resource["id"])
@@ -2705,17 +2729,19 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                 labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
                 if labels.get("com.docker.compose.project") != COMPOSE_PROJECT:
                     return RunResult(1, stderr="dev ownership is unknown; preserving resources")
-                result = _run_captured(
-                    [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])],
-                    timeout=host_runtime.REMOVE_TIMEOUT_SECONDS,
-                )
-                if not result.success:
+                try:
+                    result = _run_captured(
+                        [DOCKER_EXECUTABLE, "rm", "-f", str(actual["Id"])],
+                        timeout=host_runtime.REMOVE_TIMEOUT_SECONDS,
+                    )
+                finally:
                     if actual.get("State", {}).get("Running") is True:
                         with suppress(Exception):
-                            post_mortem.mark_ended(
+                            post_mortem.mark_terminated(
                                 DOCKER_EXECUTABLE, str(actual["Id"]),
-                                actual["State"].get("StartedAt", ""), succeeded=False,
+                                actual["State"].get("StartedAt", ""),
                             )
+                if not result.success:
                     if result.returncode == 124:
                         return RunResult(
                             124,
@@ -2731,23 +2757,25 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                     is not None
                 ):
                     return RunResult(1, stderr="dev termination could not be verified")
-            result = (
-                RunResult(0)
-                if state and "agent_docker" in state
-                else _run_compose(
-                    [*get_compose_files(), "down", "--remove-orphans"],
-                    config=None,
-                    cwd=get_project_root(),
-                    timeout=15,
-                )
-            )
+            if state and "agent_docker" in state:
+                result = RunResult(0)
+            else:
+                try:
+                    result = _run_compose(
+                        [*get_compose_files(), "down", "--remove-orphans"],
+                        config=None,
+                        cwd=get_project_root(),
+                        timeout=15,
+                    )
+                finally:
+                    if snapshot is not None:
+                        for identity, started_at in snapshot.running.items():
+                            if identity in compose_targets:
+                                with suppress(Exception):
+                                    post_mortem.mark_terminated(
+                                        DOCKER_EXECUTABLE, identity, started_at,
+                                    )
             if not result.success:
-                if snapshot is not None:
-                    for identity, started_at in snapshot.running.items():
-                        with suppress(Exception):
-                            post_mortem.mark_ended(
-                                DOCKER_EXECUTABLE, identity, started_at, succeeded=False,
-                            )
                 return result
             if state is not None:
                 if not host_runtime.cleanup_owned(root, state["generation"], DOCKER_EXECUTABLE):

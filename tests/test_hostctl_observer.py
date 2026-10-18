@@ -147,7 +147,7 @@ sys.exit(1)
 
     def mark(*args, **kwargs):
         assert events == ["stop", "external-dev-teardown"]
-        assert kwargs == {"succeeded": True, "blocking": False, "root": records_root}
+        assert kwargs == {"blocking": False, "root": records_root}
         events.append("marker")
 
     def record(trigger, **kwargs):
@@ -169,7 +169,7 @@ sys.exit(1)
 
     monkeypatch.setattr(hostctl, "command", command)
     monkeypatch.setattr(hostctl, "journal", journaled)
-    monkeypatch.setattr(post_mortem, "mark_ended", mark)
+    monkeypatch.setattr(post_mortem, "mark_terminated", mark)
     monkeypatch.setattr(post_mortem, "record", record)
     host_runtime.observe_hostctl("helper-id", "generation-a", str(binary), records_root)
     assert events == ["stop", "external-dev-teardown", "marker", "record"]
@@ -247,7 +247,7 @@ def test_hostctl_other_closures_use_launcher_root(tmp_path, monkeypatch, closure
     monkeypatch.setattr(hostctl, "admit_locked", lambda *a, **kw: None)
     monkeypatch.setattr(host_runtime, "inspect_dev", failed)
     markers = []
-    monkeypatch.setattr(post_mortem, "mark_ended", lambda *a, **kw: markers.append((a, kw)))
+    monkeypatch.setattr(post_mortem, "mark_terminated", lambda *a, **kw: markers.append((a, kw)))
 
     def stop(*args, **kwargs):
         assert args == ("stop", "-t", "3", "helper-a")
@@ -257,4 +257,4 @@ def test_hostctl_other_closures_use_launcher_root(tmp_path, monkeypatch, closure
     monkeypatch.setattr(hostctl, "command", stop)
     host_runtime.observe_hostctl("helper-a", "generation-a", "/isolated/docker", root)
     assert markers == [(("/isolated/docker", "helper-a", "helper-run"),
-                        {"succeeded": True, "blocking": False, "root": root})]
+                        {"blocking": False, "root": root})]

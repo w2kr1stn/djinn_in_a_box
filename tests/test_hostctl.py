@@ -874,7 +874,7 @@ else: sys.exit(2)
 def test_hostctl_helper_run_eligibility(inputs, postmortem_helper, route, episode):
     from djinn_in_a_box.core import post_mortem
 
-    store, _, logs, root = postmortem_helper
+    store, call_log, logs, root = postmortem_helper
     if episode in {"expiry", "old-expiry", "bad-time", "wrong-generation", "equal-expiry"}:
         stamp = {"old-expiry": "2026-10-18T09:59:00Z", "bad-time": "invalid",
                  "equal-expiry": "2026-10-18T10:00:00Z"}.get(episode, "2026-10-18T10:00:30Z")
@@ -892,8 +892,7 @@ def test_hostctl_helper_run_eligibility(inputs, postmortem_helper, route, episod
         data["State"]["StartedAt"] = "invalid"
         store.write_text(json.dumps(data))
     if episode == "marked":
-        post_mortem.mark_ended(hostctl.DOCKER_EXECUTABLE, "helper-a", "2026-10-18T10:00:00Z",
-                               succeeded=True)
+        post_mortem.mark_terminated(hostctl.DOCKER_EXECUTABLE, "helper-a", "2026-10-18T10:00:00Z")
     eligible = episode not in {"expiry", "marked", "equal-expiry"}
     store.with_suffix('.expect').write_text("record" if eligible else "none")
     if route == "reopen":
@@ -904,6 +903,7 @@ def test_hostctl_helper_run_eligibility(inputs, postmortem_helper, route, episod
             with hostctl.control_guard():
                 hostctl.delete_state_locked()
     assert bool(list(root.glob("*Z-*.json"))) == eligible
+    assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
 
 
 @pytest.mark.parametrize("site", ["off", "guard", "direct"])
@@ -916,7 +916,7 @@ def test_hostctl_marker_after_stop_and_journal(postmortem_helper, monkeypatch, s
     store.write_text(json.dumps(data))
     events = []
     journal = hostctl.journal
-    mark = post_mortem.mark_ended
+    mark = post_mortem.mark_terminated
     marker_calls = []
 
     def journaled(event, **kwargs):
@@ -933,7 +933,7 @@ def test_hostctl_marker_after_stop_and_journal(postmortem_helper, monkeypatch, s
         mark(path, identity, started_at, **kwargs)
 
     monkeypatch.setattr(hostctl, "journal", journaled)
-    monkeypatch.setattr(post_mortem, "mark_ended", marked)
+    monkeypatch.setattr(post_mortem, "mark_terminated", marked)
     if site == "off":
         hostctl.close_window()
     elif site == "guard":
@@ -983,7 +983,7 @@ def test_hostctl_records_lock_never_delays_relay_stop(postmortem_helper):
 
 @pytest.mark.parametrize("outcome", ["running", "stopped", "unclear", "different-run"])
 def test_hostctl_stop_failure_retry(postmortem_helper, monkeypatch, outcome):
-    store, _, _, root = postmortem_helper
+    store, call_log, _, root = postmortem_helper
     data = json.loads(store.read_text())
     data["State"]["Running"] = True
     store.write_text(json.dumps(data))
@@ -1021,17 +1021,19 @@ def test_hostctl_stop_failure_retry(postmortem_helper, monkeypatch, outcome):
     data["State"]["Running"] = False
     store.write_text(json.dumps(data))
     store.with_suffix('.expect').write_text("none" if outcome == "stopped" else "record")
+    call_log.write_text("")
     hostctl.stop_helper_locked(remove=True)
     assert bool(list(root.glob("*Z-*.json"))) == (outcome != "stopped")
+    assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
 
 
-@pytest.mark.parametrize("fault", ["record", "mark_ended"])
+@pytest.mark.parametrize("fault", ["record", "mark_terminated"])
 def test_hostctl_diagnostic_exception_keeps_closure(postmortem_helper, monkeypatch, fault):
     from djinn_in_a_box.core import post_mortem
 
     store, _, _, _ = postmortem_helper
     data = json.loads(store.read_text())
-    data["State"]["Running"] = fault == "mark_ended"
+    data["State"]["Running"] = fault == "mark_terminated"
     store.write_text(json.dumps(data))
 
     def broken(*args, **kwargs):
@@ -1050,7 +1052,7 @@ def test_hostctl_running_remove_skips_record_without_marker(postmortem_helper, m
     data["State"]["Running"] = True
     store.write_text(json.dumps(data))
     store.with_suffix('.expect').write_text("none")
-    monkeypatch.setattr(post_mortem, "mark_ended", lambda *a, **kw: None)
+    monkeypatch.setattr(post_mortem, "mark_terminated", lambda *a, **kw: None)
     hostctl.stop_helper_locked(remove=True)
 
 
@@ -1065,9 +1067,37 @@ def test_hostctl_deferred_marker_exception_keeps_journal(postmortem_helper, monk
     def broken(*args, **kwargs):
         raise RuntimeError("diagnostics marker failure")
 
-    monkeypatch.setattr(post_mortem, "mark_ended", broken)
+    monkeypatch.setattr(post_mortem, "mark_terminated", broken)
     hostctl.close_window()
     assert not json.loads(store.read_text())["State"]["Running"]
     assert '"event": "off"' in (hostctl.state_root() / "journal.jsonl").read_text()
     captured = capsys.readouterr()
     assert "diagnostics marker failure" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_hostctl_stopped_helper_never_stops_on_removal(postmortem_helper, monkeypatch, retry):
+    store, call_log, _, root = postmortem_helper
+    command = hostctl.command
+    original_error = hostctl.HostctlError("removal refused")
+    failed = False
+
+    def checked(*args, **kwargs):
+        nonlocal failed
+        assert args[0] != "stop", "already-stopped helper must not receive stop"
+        if retry and args[0] == "rm" and not failed:
+            failed = True
+            raise original_error
+        return command(*args, **kwargs)
+
+    monkeypatch.setattr(hostctl, "command", checked)
+    store.with_suffix('.expect').write_text("record")
+    if retry:
+        with pytest.raises(hostctl.HostctlError) as caught:
+            hostctl.stop_helper_locked(remove=True)
+        assert caught.value is original_error
+        assert not (root / "provenance.json").exists()
+    hostctl.stop_helper_locked(remove=True)
+    assert json.loads(store.read_text()) is None
+    assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
+    assert not (root / "provenance.json").exists()

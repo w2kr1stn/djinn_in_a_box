@@ -322,7 +322,7 @@ def test_cleanup_uses_generation_ids_and_consumers(fake_owner, condition, monkey
         assert condition == "unknown"
     mutations = [c for c in calls(log) if c[0] in {"rm", "stop", "volume"}]
     assert mutations == (
-        [["stop", "-t", "20", "agent-id"], ["rm", "-f", "agent-id"]]
+        [["rm", "-f", "agent-id"]]
         if condition == "owned"
         else []
     )
@@ -592,7 +592,7 @@ def test_cleanup_subject_episodes(fake_owner, condition):
         data["djinn"]["HostConfig"] = {"AutoRemove": True}
     else:
         data.pop("djinn")
-        post_mortem.mark_ended(str(binary), "helper-id", "run-a", succeeded=True)
+        post_mortem.mark_terminated(str(binary), "helper-id", "run-a")
         if condition == "restarted":
             data["helper-id"]["State"].update(StartedAt="run-b", FinishedAt="finish-b")
     objects.write_text(json.dumps(data))
@@ -721,7 +721,7 @@ def test_diagnostics_failure_preserves_cleanup_result(fake_owner, monkeypatch, f
         behavior(fake_owner, failure={"argv": ["stop", "-t", "20", "helper-id"], "running": False})
     def broken(*args, **kwargs):
         raise RuntimeError("diagnostic failure")
-    monkeypatch.setattr(post_mortem, "record" if fault == "record" else "mark_ended", broken)
+    monkeypatch.setattr(post_mortem, "record" if fault == "record" else "mark_terminated", broken)
     if failed:
         with pytest.raises(GitSSHError, match="^operation refused$"):
             host_runtime.cleanup_owned(owner.root, "mine", str(binary), incident="probe")
@@ -811,12 +811,12 @@ def test_observer_stop_verified_outcomes(fake_owner, monkeypatch, site, outcome)
             failure["unclear"] = True
         behavior(fake_owner, failure=failure)
     marker_roots = []
-    mark_ended = post_mortem.mark_ended
+    mark_terminated = post_mortem.mark_terminated
     def mark(*args, **kwargs):
         if args[1] == identity:
             marker_roots.append(kwargs.get("root"))
-        return mark_ended(*args, **kwargs)
-    monkeypatch.setattr(post_mortem, "mark_ended", mark)
+        return mark_terminated(*args, **kwargs)
+    monkeypatch.setattr(post_mortem, "mark_terminated", mark)
     execute = subprocess.run
     error = subprocess.TimeoutExpired([str(binary), *argv], 5)
     def run(command, **kwargs):
@@ -827,8 +827,6 @@ def test_observer_stop_verified_outcomes(fake_owner, monkeypatch, site, outcome)
         return result
     monkeypatch.setattr(subprocess, "run", run)
     expected = {identity: "run-a"} if outcome in {"success", "stopped"} else {}
-    if site == "resume-dev" and outcome == "already-stopped":
-        expected = {}  # A stop attempt on an already stopped dev grants no provenance.
     cleanup_calls = []
     supplied_root = post_mortem.records_root(create=False)
     def final_cleanup(root, generation, docker_path, **kwargs):
@@ -872,7 +870,7 @@ def test_observer_stop_verified_outcomes(fake_owner, monkeypatch, site, outcome)
     assert cleanup_calls == [True]
     assert marker_roots == ([] if outcome == "already-stopped" else [supplied_root])
     assert markers() == expected
-    if outcome == "already-stopped" and site != "resume-dev":
+    if outcome == "already-stopped":
         assert argv not in calls(log)
     else:
         assert argv in calls(log)
@@ -985,11 +983,11 @@ def test_dev_marker_inspection_is_best_effort(fake_owner, monkeypatch, snapshot)
     owner = cleanup_inventory(fake_owner, dev_running=True, helper_running=True)
     behavior(fake_owner, failure={"argv": ["rm", "-f", "dev-id"], "running": False})
     attempts = []
-    mark_ended = post_mortem.mark_ended
+    mark_terminated = post_mortem.mark_terminated
     def mark(*args, **kwargs):
         attempts.append(args)
-        return mark_ended(*args, **kwargs)
-    monkeypatch.setattr(post_mortem, "mark_ended", mark)
+        return mark_terminated(*args, **kwargs)
+    monkeypatch.setattr(post_mortem, "mark_terminated", mark)
     inspect = host_runtime.inspect_object
     def inspect_dev_run(name, *args, **kwargs):
         if name == "dev-id":
@@ -1255,7 +1253,7 @@ def test_clean_verified_failure_retry(clean_owner, monkeypatch, site, outcome):
     assert {s["id"] for doc in records() for s in doc["subjects"]} == set(expected)
 
 
-@pytest.mark.parametrize("fault", ["record", "mark_ended"])
+@pytest.mark.parametrize("fault", ["record", "mark_terminated"])
 def test_clean_diagnostics_failure_keeps_result(clean_owner, monkeypatch, fault):
     cleanup_inventory(clean_owner, dev_running=True)
     behavior(clean_owner, failure={"argv": ["rm", "-f", "dev-id"], "running": False})
@@ -1334,4 +1332,155 @@ def test_clean_already_stopped_failure_never_marks(clean_owner):
                                  "ids": ["dev-id", "helper-id"]},
              failure={"argv": ["rm", "-f", "dev-id"]})
     assert not docker.compose_down().success
+    assert markers() == {}
+
+
+def test_clean_unreached_state_resource_records_on_retry(clean_owner, monkeypatch):
+    _, _, objects, log = clean_owner
+    owner = cleanup_inventory(clean_owner, dev_running=True, helper_running=True)
+    state = host_runtime.read_state(owner.root)
+    state["resources"]["audio-helper"]["project"] = "other-project"
+    host_runtime.save_state(owner.root, state)
+    data = json.loads(objects.read_text())
+    data["helper-id"]["Config"]["Labels"]["com.docker.compose.project"] = "other-project"
+    objects.write_text(json.dumps(data))
+    down = docker._run_compose
+
+    def failed_down(*args, **kwargs):
+        data = json.loads(objects.read_text())
+        data["helper-id"]["State"]["Running"] = False  # External exit; cleanup is never reached.
+        objects.write_text(json.dumps(data))
+        return docker.RunResult(1, stderr="compose failed")
+
+    monkeypatch.setattr(docker, "_run_compose", failed_down)
+    result = docker.compose_down()
+    assert result.returncode == 1 and result.stderr == "compose failed"
+    assert ["rm", "-f", "helper-id"] not in calls(log)
+    assert markers() == {}
+    monkeypatch.setattr(docker, "_run_compose", down)
+    behavior(clean_owner, record={"trigger": "clean", "generation": "mine", "ids": ["helper-id"]})
+    assert docker.compose_down().success
+    assert json.loads(objects.read_text()) == {}
+    assert {s["id"] for doc in records() for s in doc["subjects"]} == {"helper-id"}
+
+
+def test_clean_success_verifies_surviving_target(clean_owner, monkeypatch):
+    _, _, objects, _ = clean_owner
+    cleanup_inventory(clean_owner, dev_running=True, helper_running=True)
+    cleanup = host_runtime.cleanup_owned
+
+    def down(*args, **kwargs):
+        data = json.loads(objects.read_text())
+        data["helper-id"]["State"]["Running"] = False
+        objects.write_text(json.dumps(data))
+        return docker.RunResult(0)
+
+    def checked_cleanup(*args, **kwargs):
+        assert markers() == {"helper-id": "run-a"}
+        return cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(docker, "_run_compose", down)
+    monkeypatch.setattr(host_runtime, "cleanup_owned", checked_cleanup)
+    assert docker.compose_down().success
+    assert records() == []
+
+
+@pytest.mark.parametrize("fault", [1, 124, "exception"])
+@pytest.mark.parametrize("with_state", [False, True])
+def test_clean_discovery_failure_falls_back(clean_owner, monkeypatch, capsys, fault, with_state):
+    _, _, objects, log = clean_owner
+    owner = cleanup_inventory(clean_owner, dev_running=False, helper_running=False)
+    if not with_state:
+        host_runtime.clear_state(owner.root, owner.generation)
+    run = docker._run_captured
+    record = post_mortem.record
+    candidates = []
+
+    def failed_discovery(argv, **kwargs):
+        if argv[1] == "ps" and "--no-trunc" in argv:
+            if fault == "exception":
+                raise OSError("private-discovery-exception")
+            return docker.RunResult(fault, stderr="private-discovery-stderr")
+        return run(argv, **kwargs)
+
+    def recorded(trigger, **kwargs):
+        candidates.extend(kwargs["candidates"])
+        return record(trigger, **kwargs)
+
+    monkeypatch.setattr(docker, "_run_captured", failed_discovery)
+    monkeypatch.setattr(post_mortem, "record", recorded)
+    expected = ["dev-id", "helper-id"] if with_state else ["dev-id"]
+    behavior(clean_owner, record={"trigger": "clean", "generation": "mine" if with_state else None,
+                                 "ids": expected})
+    result = docker.compose_down()
+    assert result.returncode == 0 and result.stderr == ""
+    assert json.loads(objects.read_text()) == {}
+    assert ["rm", "-f", "dev-id"] in calls(log)
+    assert post_mortem.Candidate("djinn", True) in candidates  # Fixed name, deliberately unpinned.
+    assert {s["id"] for doc in records() for s in doc["subjects"]} == set(expected)
+    output = capsys.readouterr()
+    assert "Post-mortem record failed (inspect)\n" in output.err
+    assert "private-discovery" not in output.out + output.err
+
+
+def test_clean_discovery_fallback_requires_project_label(clean_owner, monkeypatch, capsys):
+    _, _, objects, _ = clean_owner
+    owner = cleanup_inventory(clean_owner, dev_running=False)
+    host_runtime.clear_state(owner.root, owner.generation)
+    data = json.loads(objects.read_text())
+    data["djinn"]["Config"]["Labels"]["com.docker.compose.project"] = "foreign"
+    objects.write_text(json.dumps(data))
+    run = docker._run_captured
+
+    def failed_discovery(argv, **kwargs):
+        if argv[1] == "ps" and "--no-trunc" in argv:
+            return docker.RunResult(124)
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(docker, "_run_captured", failed_discovery)
+    result = docker.compose_down()
+    assert result.returncode == 1
+    assert result.stderr == "dev ownership is unknown; preserving resources"
+    assert records() == []
+    assert markers() == {}
+    assert "Post-mortem record failed (inspect)" in capsys.readouterr().err
+
+
+def test_stopped_companion_skips_failing_stop_and_removes(fake_owner):
+    _, binary, objects, log = fake_owner
+    owner = cleanup_inventory(fake_owner, service="agent-docker", helper_running=False)
+    behavior(fake_owner, failure={"argv": ["stop", "-t", "20", "helper-id"]})
+    assert host_runtime.cleanup_owned(owner.root, "mine", str(binary))
+    assert ["stop", "-t", "20", "helper-id"] not in calls(log)
+    assert ["rm", "-f", "helper-id"] in calls(log)
+    assert json.loads(objects.read_text()) == {}
+    assert markers() == {}
+
+
+def test_stopped_resource_failed_rm_records_before_retry(fake_owner, monkeypatch):
+    _, binary, objects, log = fake_owner
+    owner = cleanup_inventory(fake_owner, helper_running=False)
+    behavior(fake_owner, failure={"argv": ["rm", "-f", "helper-id"]})
+    remove = host_runtime.remove_runtime_object
+    errors = []
+
+    def removed(*args):
+        try:
+            return remove(*args)
+        except GitSSHError as exc:
+            errors.append(exc)
+            raise
+
+    monkeypatch.setattr(host_runtime, "remove_runtime_object", removed)
+    with pytest.raises(GitSSHError, match="^operation refused$") as caught:
+        host_runtime.cleanup_owned(owner.root, "mine", str(binary))
+    assert caught.value is errors[0]
+    assert markers() == {}
+    assert records() == []
+    assert "helper-id" in json.loads(objects.read_text())
+    behavior(fake_owner, record={"trigger": "retry", "generation": "mine", "ids": ["helper-id"]})
+    assert host_runtime.cleanup_owned(owner.root, "mine", str(binary), incident="retry")
+    assert calls(log).count(["rm", "-f", "helper-id"]) == 2
+    assert {s["id"] for doc in records() for s in doc["subjects"]} == {"helper-id"}
+    assert json.loads(objects.read_text()) == {}
     assert markers() == {}

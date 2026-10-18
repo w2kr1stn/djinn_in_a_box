@@ -232,24 +232,15 @@ def _teardown_container(
         else None
     )
 
-    def mark(*, succeeded: bool) -> None:
-        if started_at:
-            with contextlib.suppress(Exception):
-                post_mortem.mark_ended(
-                    docker_path, args[-1], started_at, succeeded=succeeded, root=root
-                )
-
     try:
         if args[0] == "rm":
             remove_runtime_object(docker_path, "container", args[-1])
         else:
             run_runtime_command(docker_path, *args, timeout=timeout)
-    except Exception:
-        mark(succeeded=False)
-        raise
-    else:
-        if args[0] == "stop":
-            mark(succeeded=True)
+    finally:
+        if started_at:
+            with contextlib.suppress(Exception):
+                post_mortem.mark_terminated(docker_path, args[-1], started_at, root=root)
 
 
 def cleanup_owned(
@@ -310,7 +301,10 @@ def cleanup_owned(
     for record in state.get("resources", {}).values():
         resource = inspect_owned_resource(record, generation, docker_path)
         if resource is not None:
-            if record["service"] == "agent-docker":
+            if (
+                record["service"] == "agent-docker"
+                and resource.get("State", {}).get("Running") is not False
+            ):
                 _teardown_container(
                     docker_path,
                     resource,
@@ -846,10 +840,14 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                                                 and inspected.get("Id") == dev_id
                                             ):
                                                 dev = inspected
-                                        _teardown_container(
-                                            docker_path, dev, "stop", "-t", "3", dev_id,
-                                            root=records_root,
-                                        )
+                                        if (
+                                            dev is None
+                                            or dev.get("State", {}).get("Running") is not False
+                                        ):
+                                            _teardown_container(
+                                                docker_path, dev, "stop", "-t", "3", dev_id,
+                                                root=records_root,
+                                            )
                                         raise
                                 else:
                                     resource = inspect_owned_resource(

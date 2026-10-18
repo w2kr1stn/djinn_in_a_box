@@ -603,29 +603,29 @@ def open_window(
 @contextlib.contextmanager
 def teardown_markers(*, root: Path | None = None) -> Iterator[None]:
     """Defer diagnostic persistence until the caller has attempted its closure journal."""
-    pending: list[tuple[str, str, bool]] = []
+    pending: list[tuple[str, str]] = []
     previous = getattr(_held, "teardown_markers", None)
     _held.teardown_markers = pending
     try:
         yield
     finally:
         _held.teardown_markers = previous
-        for identity, started_at, succeeded in pending:
+        for identity, started_at in pending:
             with contextlib.suppress(Exception):
-                post_mortem.mark_ended(
+                post_mortem.mark_terminated(
                     DOCKER_EXECUTABLE, identity, started_at,
-                    succeeded=succeeded, blocking=False, root=root,
+                    blocking=False, root=root,
                 )
 
 
-def _helper_marker(identity: str, started_at: str, succeeded: bool) -> None:
+def _helper_marker(identity: str, started_at: str) -> None:
     pending = getattr(_held, "teardown_markers", None)
     if pending is not None:
-        pending.append((identity, started_at, succeeded))
+        pending.append((identity, started_at))
     else:
         with contextlib.suppress(Exception):
-            post_mortem.mark_ended(
-                DOCKER_EXECUTABLE, identity, started_at, succeeded=succeeded, blocking=False,
+            post_mortem.mark_terminated(
+                DOCKER_EXECUTABLE, identity, started_at, blocking=False,
             )
 
 
@@ -670,13 +670,11 @@ def stop_helper_locked(*, remove: bool = False) -> None:
     was_running = helper["State"]["Running"]
     if was_running:
         started_at = str(helper["State"].get("StartedAt", ""))
-        succeeded = False
         try:
             command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
-            succeeded = True
         finally:
             if started_at:
-                _helper_marker(identity, started_at, succeeded)
+                _helper_marker(identity, started_at)
     current = inspect_helper()
     if current is None or current["Id"] != identity or generation(current) != gen:
         raise HostctlError("Helper changed during teardown; preserving resources")

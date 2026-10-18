@@ -151,7 +151,7 @@ def test_postmortem_doctor_path_is_literal(tmp_path, monkeypatch):
     from djinn_in_a_box.commands import doctor
     from djinn_in_a_box.core import post_mortem
 
-    path = tmp_path / "[red]literal[/red].json"
+    path = tmp_path / "[red]literal[/red]\n\t.json"
     monkeypatch.setattr(doctor.console, "width", 240)
     monkeypatch.setattr(post_mortem, "latest", lambda: (1, path, None))
     from djinn_in_a_box.core import host_runtime
@@ -162,5 +162,7 @@ def test_postmortem_doctor_path_is_literal(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "run_checks", lambda *a: [row])
     result = CliRunner().invoke(app, ["doctor"], terminal_width=240)
     assert result.exit_code == 0
-    assert "[red]literal[/red].json" in result.output
+    assert row.detail == f"1 kept; latest {tmp_path}/[red]literal[/red]\\n\\t.json"
+    assert "\n" not in row.detail and "\t" not in row.detail
+    assert "[red]literal[/red]\\n\\t.json" in result.output
     assert "secret" not in result.output
