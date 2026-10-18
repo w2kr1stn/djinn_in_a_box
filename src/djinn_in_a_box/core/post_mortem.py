@@ -232,7 +232,10 @@ def mark_ended(
         directory = _root(root, create=True)
         with _lock(directory, deadline, blocking=blocking):
             try:
-                markers = _markers(directory)
+                try:
+                    markers = _markers(directory)
+                except Exception:
+                    markers = {}
                 markers.pop(container_id, None)
                 markers[container_id] = started_at
                 markers = dict(list(markers.items())[-MARKER_LIMIT:])

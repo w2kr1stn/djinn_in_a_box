@@ -1001,3 +1001,27 @@ def test_empty_id_is_not_a_subject(fake_docker, evidence):
     inventory(fake_docker, dev=evidence)
     assert capture(fake_docker).path is None
     assert admitted() == []
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "mode", "symlink", "fifo"])
+def test_mark_ended_repairs_marker_store(fake_docker, evidence, kind, tmp_path):
+    root = pm.records_root(create=True)
+    path = root / "provenance.json"
+    foreign = tmp_path / "foreign"
+    foreign.write_text("untouched")
+    if kind == "symlink":
+        path.symlink_to(foreign)
+    elif kind == "fifo":
+        os.mkfifo(path, 0o600)
+    else:
+        path.write_text("invalid" if kind == "corrupt" else '{"old": "untrusted"}')
+        path.chmod(0o600 if kind == "corrupt" else 0o644)
+    inode = path.lstat().st_ino
+    pm.mark_ended(fake_docker.binary, evidence["Id"], STARTED, succeeded=True)
+    assert not path.is_symlink()
+    assert path.stat().st_ino != inode
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text()) == {evidence["Id"]: STARTED}
+    assert foreign.read_text() == "untouched"
+    inventory(fake_docker, dev=evidence)
+    assert capture(fake_docker).path is None
