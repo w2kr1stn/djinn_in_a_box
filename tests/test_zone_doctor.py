@@ -38,14 +38,17 @@ def test_drift_accounts_for_intermediate_assignment_segments(zone_config: AppCon
     assert str(agent_root / "plugins") not in row.detail
 
 
-def test_drift_accounts_for_pattern_entries_but_reports_unmatched_names(
-    zone_config: AppConfig,
-) -> None:
+@pytest.mark.parametrize(
+    "name",
+    ("state_12.sqlite", "state_12.sqlite-wal", "state_12.sqlite-shm", ".sqlite-maintenance.lock"),
+)
+def test_drift_reports_sqlite_leftovers_in_config_root(zone_config: AppConfig, name: str) -> None:
     roots = resolve_zone_roots(zone_config)
     codex_root = roots.config_root / "codex"
     codex_root.mkdir(parents=True)
-    (codex_root / "state_12.sqlite").touch()
-    (codex_root / "state_12.sqlite-wal").touch()
+    leftover = codex_root / name
+    leftover.touch()
+    (codex_root / "config.toml").touch()
     unexpected = codex_root / "unrecognized-runtime-file"
     unexpected.touch()
 
@@ -54,8 +57,8 @@ def test_drift_accounts_for_pattern_entries_but_reports_unmatched_names(
     row = _check_named(checks, "Zone drift")
     assert row.status is doctor_mod.Status.WARN
     assert str(unexpected) in row.detail
-    assert str(codex_root / "state_12.sqlite") not in row.detail
-    assert str(codex_root / "state_12.sqlite-wal") not in row.detail
+    assert str(leftover) in row.detail
+    assert str(codex_root / "config.toml") not in row.detail
 
 
 def test_doctor_reports_large_direct_files_and_loose_zone_permissions(

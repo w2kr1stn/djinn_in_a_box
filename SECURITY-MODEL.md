@@ -581,6 +581,22 @@ a custom helper network outside RFC1918 refuses readiness. This firewall cannot
 replace the host no-forwarding prerequisite. See [the rules](scripts/init-firewall.sh)
 and [firewall usage](README.md#what---firewall-allows).
 
+Codex's managed app-server daemon defaults to remote control off upstream.
+Enabling it requires `codex app-server daemon enable-remote-control` and a
+ChatGPT login; Djinn does not change `remoteControlEnabled`. The log line
+`remote control websocket loop started … initial_desired_state=Disabled`
+describes a waiting task, not an established connection.
+
+Every dev-container start sets only `updater.autoUpdateEnabled=false`, aligns
+an existing daemon selection with the image's Codex CLI and prunes old releases.
+Other settings are preserved; malformed or symlinked settings warn and remain
+untouched, and policy failures do not stop startup. This is an update policy,
+not a vendor-traffic block: plugin discovery can contact `chatgpt.com`,
+`github.com` and `api.github.com`; model traffic can use `api.openai.com` or
+`chatgpt.com` depending on authentication/provider. The optional firewall's
+[listed domains](README.md#what---firewall-allows) include `api.openai.com` and
+`auth.openai.com`, but omit `chatgpt.com`.
+
 Backups are age-encrypted by default under `~/.djinn/backups/`. `age` prompts
 directly at the terminal; Djinn never handles or stores the passphrase. Losing
 it makes the archive unrecoverable. `--no-encrypt` produces cleartext archives
@@ -588,6 +604,8 @@ that need the same protection as live credentials.
 
 The config zone is backed up and may be deliberately mirrored; the shared
 sibling contains transcripts and needs an owner-managed backup/mirror; local
-caches/scratch should remain host-local. Transcripts may contain sensitive
-content. Djinn does not delete agent-owned transcripts; configure retention with
+caches/scratch and Codex SQLite stores should remain host-local. SQLite includes
+durable goals, pending messages and preferences, not just rebuildable history;
+the config-root backup excludes it. Transcripts may contain sensitive content.
+Djinn does not delete agent-owned transcripts; configure retention with
 the agent's native controls. See [backup and sync usage](docs/sync-across-machines.md).

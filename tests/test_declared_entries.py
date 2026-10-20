@@ -273,6 +273,28 @@ def test_volume_name_collision(tmp_path, actual):
         )
 
 
+@pytest.mark.parametrize("key", ["CODEX_HOME", "CODEX_DAEMON_POLICY_HELPER"])
+def test_codex_daemon_environment_is_reserved(tmp_path, key):
+    assert key in RESERVED_ENVIRONMENT
+    result = resolve(tmp_path, environment={key: "/outside"})
+    assert any(
+        key in (d.error or "") and "reserved" in (d.error or "") for d in result.diagnostics
+    )
+
+
+def test_codex_sqlite_environment_is_reserved(tmp_path):
+    with pytest.raises(ValueError, match="CODEX_SQLITE_HOME.*reserved"):
+        AppConfig(code_dir=tmp_path, environment={"CODEX_SQLITE_HOME": "/outside"})
+
+    result = resolve(tmp_path, environment={"CODEX_SQLITE_HOME": "/outside"})
+    assert any(
+        "CODEX_SQLITE_HOME" in (d.error or "") and "reserved" in (d.error or "")
+        for d in result.diagnostics
+    )
+    with pytest.raises(DeclarationSpecificationError):
+        result.require_valid()
+
+
 @pytest.mark.parametrize(
     "key",
     sorted(RESERVED_ENVIRONMENT)

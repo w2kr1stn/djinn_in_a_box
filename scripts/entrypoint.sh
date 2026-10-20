@@ -137,6 +137,17 @@ source "$MCP_REGISTER"
 register_mcp_servers >&2
 
 # =============================================================================
+# Codex daemon policy (dev container starts only)
+# =============================================================================
+if [[ $# -eq 0 ]]; then
+    ui_section "Codex daemon"
+    CODEX_DAEMON_POLICY_HELPER="${CODEX_DAEMON_POLICY_HELPER:-/home/dev/codex-daemon-policy.py}"
+    if ! python3 "$CODEX_DAEMON_POLICY_HELPER" --codex-home "$HOME/.codex" >&2; then
+        ui_warn "Codex daemon policy failed; continuing startup."
+    fi
+fi
+
+# =============================================================================
 # Runtime Packages
 # =============================================================================
 ui_section "Packages"

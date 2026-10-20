@@ -363,6 +363,7 @@ def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
         "MCP_REGISTER": str(ROOT / "scripts" / "mcp-register.sh"),
         "PACKAGE_REPLAY": str(tmp_path / "no-package-replay.sh"),
         "SETTINGS_COPY_HELPER": str(ROOT / "scripts" / "settings-copy.py"),
+        "CODEX_DAEMON_POLICY_HELPER": str(ROOT / "scripts" / "codex-daemon-policy.py"),
         "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
         "OPENCODE_CREDENTIALS_HELPER": str(ROOT / "scripts" / "opencode-credentials.sh"),
         "WORKFLOW_PUBLISHER": str(
@@ -409,6 +410,7 @@ def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) ->
     assert not list(tmp_path.glob("djinn-session-state.*"))
     assert_plain_startup_output(result.stderr)
     assert "\n- Security" in result.stderr
+    assert "\n- Codex daemon" not in result.stderr
     assert "\n- Packages" in result.stderr
     assert "[warn] Firewall:     Disabled" in result.stderr
     assert "[warn] Docker Access: Disabled" in result.stderr

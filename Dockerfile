@@ -184,6 +184,7 @@ COPY --chmod=755 scripts/hostctl-connect.py /usr/local/bin/djinn-hostctl-connect
 COPY --chmod=755 scripts/apt-get-shim.sh /usr/local/bin/apt-get
 COPY --chmod=755 scripts/djinn-apt-root.sh /usr/local/libexec/djinn-apt-root
 COPY --chown=dev:dev scripts/settings-copy.py /home/dev/settings-copy.py
+COPY --chown=dev:dev scripts/codex-daemon-policy.py /home/dev/codex-daemon-policy.py
 COPY --chown=dev:dev scripts/ownership-repair.py /home/dev/ownership-repair.py
 COPY --chown=dev:dev scripts/opencode-credentials.sh /home/dev/opencode-credentials.sh
 COPY --chown=dev:dev scripts/output-lib.sh /home/dev/output-lib.sh

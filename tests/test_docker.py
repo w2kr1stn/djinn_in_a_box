@@ -2049,6 +2049,7 @@ class TestComposeRun:
         assert cmd[second_mount : second_mount + 2] == ["-v", "/host/readwrite:/work/two"]
         assert cmd[cmd.index("--workdir") + 1] == "/work/one"
 
+    @pytest.mark.parametrize("interactive", [True, False])
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_emits_empty_zone_sources_without_using_them_as_workdir(
@@ -2057,6 +2058,7 @@ class TestComposeRun:
         mock_root: MagicMock,
         mock_app_config: AppConfig,
         monkeypatch: pytest.MonkeyPatch,
+        interactive: bool,
     ) -> None:
         """An empty assigned source mounts without changing workdir."""
         self._without_runtime_mounts(monkeypatch)
@@ -2066,14 +2068,29 @@ class TestComposeRun:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         empty_source = Path(f"{mock_app_config.config_root}.shared") / "claude" / "projects"
         empty_source.mkdir(parents=True)
+        sqlite_source = Path(f"{mock_app_config.config_root}.local") / "codex" / "sqlite"
+        sqlite_source.mkdir(parents=True)
 
         overlay_args = get_zone_overlay_mount_args(mock_app_config)
-        compose_run(mock_app_config, ContainerOptions(), command="echo", interactive=False)
+        compose_run(
+            mock_app_config,
+            ContainerOptions(),
+            command=None if interactive else "codex exec test",
+            interactive=interactive,
+        )
 
         expected = f"{empty_source}:/home/dev/.claude/projects"
         assert expected in overlay_args
         cmd = mock_run.call_args.args[0]
         assert expected in cmd
+        sqlite_spec = f"{sqlite_source}:/home/dev/.codex/sqlite"
+        assert overlay_args[
+            overlay_args.index(sqlite_spec) - 1 : overlay_args.index(sqlite_spec) + 1
+        ] == ["-v", sqlite_spec]
+        assert cmd[cmd.index(sqlite_spec) - 1 : cmd.index(sqlite_spec) + 1] == [
+            "-v",
+            sqlite_spec,
+        ]
         assert "--workdir" not in cmd
 
     def test_skips_zone_overlay_when_its_source_is_missing(
@@ -3038,6 +3055,8 @@ class TestComposeUpDetached:
         shared_source.mkdir(parents=True)
         local_source = Path(f"{mock_app_config.config_root}.local") / "claude" / "jobs"
         local_source.mkdir(parents=True)
+        sqlite_source = Path(f"{mock_app_config.config_root}.local") / "codex" / "sqlite"
+        sqlite_source.mkdir(parents=True)
         payload: dict[str, object] = {}
 
         def _read_override(cmd: list[str], **_kwargs: object) -> MagicMock:
@@ -3052,6 +3071,7 @@ class TestComposeUpDetached:
         service = payload["services"]["dev"]  # type: ignore[index]
         assert f"{shared_source}:/home/dev/.claude/projects" in service["volumes"]
         assert f"{local_source}:/home/dev/.claude/jobs" in service["volumes"]
+        assert f"{sqlite_source}:/home/dev/.codex/sqlite" in service["volumes"]
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -3496,6 +3516,10 @@ def test_startup_environment_class_guard():
         "POLICY",
         "DROP",
         "FLOOR",  # Image-owned Python constants, never environment.
+        "DIRECTORY_FLAGS",  # codex-daemon-policy.py constants, never environment.
+        "TERMINATE_GRACE",
+        "UPDATE_TIMEOUT",
+        "VERSION_TIMEOUT",
     }
     assert assigned - RESERVED_ENVIRONMENT.keys() - exceptions == set()
 
