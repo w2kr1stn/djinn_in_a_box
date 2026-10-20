@@ -50,9 +50,9 @@ Versioning before and after the first stable release.
 
 ### Security
 
-- Refuse managed writable binds whose host paths the configuration selects when
-  they overlap host execution inputs: the workspace root (also delivered to the
-  agent-Docker companion), config-root tool directories (`claude`, `codex`,
+- Refuse managed writable binds selected by configuration that overlap host
+  execution inputs or whose path contains `..`: the workspace root (also
+  delivered to the agent-Docker companion), config-root tool directories (`claude`, `codex`,
   `opencode`, `gh`, `age`), assigned shared/local zone overlay sources, and
   `~/.djinn/sessions`. `djinn start` and `djinn run` check immediately after loading
   config, before host provisioning, in every Docker mode, and fail closed when

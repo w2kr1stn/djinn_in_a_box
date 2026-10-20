@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import agent, container, doctor
 from djinn_in_a_box.config import loader, zones
-from djinn_in_a_box.config.defaults import SYNC_PATHS
+from djinn_in_a_box.config.defaults import DEFAULT_ZONES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import docker, git_diagnostics, host_sealing
 from djinn_in_a_box.core.exceptions import ConfigValidationError, MountSpecificationError
@@ -93,6 +93,14 @@ def expected_construction(family, cause):
     )
 
 
+def expected_dotdot(family, source):
+    return (
+        f"{LABELS[family]} {source} cannot be checked against host execution inputs "
+        "(the path contains '..', which Docker and the host resolve differently); "
+        "set it without '..' and retry"
+    )
+
+
 def set_sessions_home(ground, monkeypatch, real_execution_paths, kind="missing-dotdot"):
     config, _, _ = ground
     actual_home = Path.home()
@@ -109,19 +117,96 @@ def set_sessions_home(ground, monkeypatch, real_execution_paths, kind="missing-d
     monkeypatch.setenv("DOCKER_CONFIG", str(config.code_dir.parent / "docker-config"))
     monkeypatch.setattr(host_sealing, "execution_paths", real_execution_paths)
     message = (
-        f"Sessions directory {actual_home / '.djinn/sessions'} is mounted writable and "
+        f"Sessions directory {home / '.djinn/sessions'} is mounted writable and "
         f"overlaps host execution input host PATH directory {path_input} ({path_input}); "
         f"{REMEDIES['sessions']}"
     )
+    if kind == "missing-dotdot":
+        message = expected_dotdot("sessions", home / ".djinn/sessions")
     return missing, message
 
 
-@pytest.mark.parametrize("kind", ["missing-dotdot", "symlink"])
-def test_sessions_home_checks_actual_path(ground, monkeypatch, real_execution_paths, kind):
+def test_sessions_symlink_home_checks_target(ground, monkeypatch, real_execution_paths):
     config, _, _ = ground
-    missing, message = set_sessions_home(ground, monkeypatch, real_execution_paths, kind)
+    missing, message = set_sessions_home(ground, monkeypatch, real_execution_paths, "symlink")
     assert docker.managed_bind_problems(config) == [message]
     assert not missing.exists()
+
+
+def set_dotdot_config(ground, monkeypatch, real_execution_paths, case):
+    config, _, _ = ground
+    base = config.code_dir.parent
+    missing = base / "missing"
+    code = config.code_dir
+    if case == "default-root":
+        home = missing / ".." / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(zones, "DEFAULT_ZONES", DEFAULT_ZONES)
+        zones.ZONES_FILE.unlink()
+        path_input = base / "home/.djinn/config/claude/bin"
+        general = {"code_dir": str(code)}
+    else:
+        target = base / "elsewhere/branch"
+        target.mkdir(parents=True)
+        alias = base / "alias"
+        alias.symlink_to(target, target_is_directory=True)
+        if case == "sessions-dotdot":
+            monkeypatch.setenv("HOME", str(alias / ".." / "home"))
+            path_input = base / "home/.djinn/sessions/bin"
+        else:
+            assert case == "workspace-dotdot"
+            (target.parent / "code").mkdir()
+            code = alias / ".." / "code"
+            path_input = base / "code/bin"
+        general = {"code_dir": str(code), "config_root": str(config.config_root)}
+    path_input.mkdir(parents=True)
+    monkeypatch.setenv("PATH", str(path_input))
+    monkeypatch.setenv("DOCKER_CONFIG", str(base / "docker-config"))
+    monkeypatch.setattr(host_sealing, "execution_paths", real_execution_paths)
+    config_file = base / "config.toml"
+    config_file.write_text(
+        "[general]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in general.items())
+    )
+    monkeypatch.setattr(loader, "CONFIG_FILE", config_file)
+    config = loader.load_config()
+    assert config.code_dir == code
+    if case == "default-root":
+        assert config.config_root == home / ".djinn/config"
+        sources = [
+            *(("config root", config.config_root / name) for name in SYNC_PATHS["credentials"]),
+            *(
+                ("zones", Path(f"{config.config_root}.{zone}") / agent / relative)
+                for agent in zones.ZONE_CONTAINER_TARGETS
+                for zone in ("local", "shared")
+                for relative in DEFAULT_ZONES[agent][zone]
+            ),
+            ("sessions", home / ".djinn/sessions"),
+        ]
+    elif case == "sessions-dotdot":
+        sources = [("sessions", Path.home() / ".djinn/sessions")]
+    else:
+        sources = [("workspace", code)]
+    return config, [expected_dotdot(family, source) for family, source in sources], missing
+
+
+@pytest.mark.parametrize("case", ["default-root", "sessions-dotdot", "workspace-dotdot"])
+def test_dotdot_sources_are_refused(ground, monkeypatch, real_execution_paths, case):
+    config, messages, missing = set_dotdot_config(ground, monkeypatch, real_execution_paths, case)
+    base = ground[0].code_dir.parent
+    before = sorted(base.rglob("*"))
+    assert docker.managed_bind_problems(config) == messages
+    assert sorted(base.rglob("*")) == before
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize("case", ["default-root", "sessions-dotdot", "workspace-dotdot"])
+def test_dotdot_sources_skip_overlap_check(ground, monkeypatch, real_execution_paths, case):
+    config, messages, _ = set_dotdot_config(ground, monkeypatch, real_execution_paths, case)
+    overlap = Mock(wraps=host_sealing.execution_overlap)
+    monkeypatch.setattr(host_sealing, "execution_overlap", overlap)
+    assert docker.managed_bind_problems(config) == messages
+    assert overlap.call_count > 0
+    assert all(".." not in call.args[0].parts for call in overlap.call_args_list)
 
 
 def test_relative_home_fails_closed(ground, monkeypatch):
@@ -285,7 +370,10 @@ def create(kind, config, mode):
 
 @pytest.mark.parametrize("kind", ["attached", "headless", "detached"])
 @pytest.mark.parametrize("mode", list(docker.DockerMode))
-@pytest.mark.parametrize("failure", ["overlap", "zones", "sessions"])
+@pytest.mark.parametrize(
+    "failure",
+    ["overlap", "zones", "sessions", "default-root", "sessions-dotdot", "workspace-dotdot"],
+)
 def test_managed_refusal_precedes_all_creation(
     creators, monkeypatch, real_execution_paths, kind, mode, failure
 ):
@@ -294,6 +382,11 @@ def test_managed_refusal_precedes_all_creation(
         protect(inputs, config.code_dir)
     elif failure == "sessions":
         missing, message = set_sessions_home(creators, monkeypatch, real_execution_paths)
+    elif failure in {"default-root", "sessions-dotdot", "workspace-dotdot"}:
+        config, messages, missing = set_dotdot_config(
+            creators, monkeypatch, real_execution_paths, failure
+        )
+        message = messages[0]
     else:
         zones.ZONES_FILE.write_text("[invalid")
     spies = []
@@ -321,13 +414,13 @@ def test_managed_refusal_precedes_all_creation(
         create(kind, config, mode)
     if failure == "overlap":
         assert str(exc.value) == expected("workspace", config.code_dir, config.code_dir)
-    elif failure == "sessions":
+    elif failure in {"sessions", "default-root", "sessions-dotdot", "workspace-dotdot"}:
         assert str(exc.value) == message
         assert not missing.exists()
     else:
         assert str(exc.value).startswith(f"{LABELS['zones']} ")
         assert "cannot be checked against host execution inputs (Invalid TOML" in str(exc.value)
-    if failure != "sessions":
+    if failure in {"overlap", "zones"}:
         inventory.assert_called_once_with()
     for spy in spies:
         spy.assert_not_called()
@@ -484,6 +577,58 @@ def test_doctor_sessions_dotdot_is_fail_without_provisioning(
     assert not missing.exists()
 
 
+@pytest.mark.parametrize("case", ["default-root", "sessions-dotdot", "workspace-dotdot"])
+def test_doctor_dotdot_sources_keep_fail_row(
+    ground, quiet_doctor, monkeypatch, real_execution_paths, case
+):
+    config, messages, missing = set_dotdot_config(ground, monkeypatch, real_execution_paths, case)
+    base = ground[0].code_dir.parent
+    before = sorted(base.rglob("*"))
+    row = next(r for r in doctor.run_checks(config) if r.name == "Managed bind sources")
+    assert row.status is doctor.Status.FAIL
+    assert row.detail == "; ".join(messages)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert any(
+        "Managed bind sources" in line and "FAIL" in line for line in result.output.splitlines()
+    )
+    assert "contains '..'" in result.output
+    assert sorted(base.rglob("*")) == before
+    assert not missing.exists()
+
+
+def test_doctor_nul_zone_renders_both_rows(ground, quiet_doctor, monkeypatch):
+    config, _, _ = ground
+    zones.ZONES_FILE.write_text('[zones.claude]\nlocal = ["nul\\u0000entry"]\n')
+    assignments = zones.load_zone_assignments(config)
+    assert assignments.by_agent["claude"]["local"] == (Path("nul\x00entry"),)
+    problems = docker.managed_bind_problems(config)
+    assert len(problems) == 1
+    assert "Zone overlay source" in problems[0]
+    assert "cannot be checked" in problems[0]
+    assert "null" in problems[0]
+    before = sorted(config.code_dir.parent.rglob("*"))
+    rows = doctor.run_checks(config)
+    managed = next(r for r in rows if r.name == "Managed bind sources")
+    assert managed.status is doctor.Status.FAIL
+    assert managed.detail == problems[0]
+    zone = next(r for r in rows if r.name == "Zone configuration")
+    assert zone.status is doctor.Status.WARN
+    assert "null" in zone.detail
+    monkeypatch.setattr(loader, "load_config", lambda: config)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert any(
+        "Managed bind sources" in line and "FAIL" in line for line in result.output.splitlines()
+    )
+    assert "Zone configuration" in result.output
+    assert "null" in result.output
+    assert "Fix the zone roots or zones.toml" in result.output
+    assert sorted(config.code_dir.parent.rglob("*")) == before
+
+
 def test_doctor_invalid_utf8_zones_renders_both_rows(ground, quiet_doctor, monkeypatch):
     config, _, _ = ground
     zones.ZONES_FILE.write_bytes(b"\xff")
@@ -528,7 +673,11 @@ def test_doctor_contains_unexpandable_root(ground, quiet_doctor, monkeypatch):
 @pytest.mark.parametrize("mode_args", [[], ["--docker"], ["--docker-direct"]])
 @pytest.mark.parametrize("argv", [["start"], ["start", "--detach"], ["run", "claude", "test"]])
 @pytest.mark.parametrize(
-    "failure", ["overlap", "malformed", "unreadable", "root", "sessions", "utf8"]
+    "failure",
+    [
+        "overlap", "malformed", "unreadable", "root", "sessions", "utf8",
+        "default-root", "sessions-dotdot", "workspace-dotdot",
+    ],
 )
 def test_cli_managed_gate_before_real_workflow(
     ground, monkeypatch, real_execution_paths, argv, failure, mode_args
@@ -539,6 +688,11 @@ def test_cli_managed_gate_before_real_workflow(
     elif failure == "sessions":
         missing, message = set_sessions_home(ground, monkeypatch, real_execution_paths)
         assert docker.managed_bind_problems(config) == [message]
+    elif failure in {"default-root", "sessions-dotdot", "workspace-dotdot"}:
+        config, messages, missing = set_dotdot_config(
+            ground, monkeypatch, real_execution_paths, failure
+        )
+        assert docker.managed_bind_problems(config) == messages
     elif failure == "utf8":
         zones.ZONES_FILE.write_bytes(b"\xff")
     elif failure == "malformed":
@@ -555,8 +709,9 @@ def test_cli_managed_gate_before_real_workflow(
     else:
         monkeypatch.setenv("DJINN_CONFIG_ROOT", "~djinn154-user-does-not-exist/config")
     message = docker.managed_bind_problems(config)[0]
-    monkeypatch.setattr(container, "load_config", lambda: config)
-    monkeypatch.setattr(agent, "load_config", lambda: config)
+    if failure not in {"default-root", "sessions-dotdot", "workspace-dotdot"}:
+        monkeypatch.setattr(container, "load_config", lambda: config)
+        monkeypatch.setattr(agent, "load_config", lambda: config)
     monkeypatch.setattr(container, "is_container_running", lambda *a: False)
     spies = []
     for obj, name in (
@@ -565,21 +720,23 @@ def test_cli_managed_gate_before_real_workflow(
         (container, "compose_up_detached"),
         (agent, "run_headless_agent"),
         (agent, "workflow_image_compatible"),
+        (docker, "_prepare_workspace"),
         (docker.subprocess, "run"),
         (docker.subprocess, "Popen"),
     ):
         spy = Mock(side_effect=AssertionError(f"unexpected {name}"))
         monkeypatch.setattr(obj, name, spy)
         spies.append(spy)
-    before = sorted(config.code_dir.parent.rglob("*"))
+    base = ground[0].code_dir.parent
+    before = sorted(base.rglob("*"))
     result = CliRunner().invoke(app, [*argv, *mode_args])
     assert result.exit_code == 1, result.output
     assert message in result.output, result.output
     assert isinstance(result.exception, SystemExit)
     assert "Traceback" not in result.output
-    if failure == "sessions":
+    if failure in {"sessions", "default-root", "sessions-dotdot", "workspace-dotdot"}:
         assert not missing.exists()
-    assert sorted(config.code_dir.parent.rglob("*")) == before
+    assert sorted(base.rglob("*")) == before
     for spy in spies:
         spy.assert_not_called()
 

@@ -1136,9 +1136,10 @@ The same module owns the repeatable user-mount contract:
 writable sources without provisioning: the expanded `config.code_dir`,
 `get_config_root(config) / name` for `SYNC_PATHS["credentials"]` (`claude`, `codex`,
 `opencode`, `gh`, `age`), assigned zone overlay sources, and
-the sessions directory under `Path(os.path.realpath(home)) / ".djinn" / "sessions"`
-when `home = Path.home()` is absolute; a relative home is kept unchanged and fails
-closed. One `_execution_input_check()` closure per
+the sessions directory under `Path.home() / ".djinn" / "sessions"`.
+A source whose path contains a `..` component is refused as `cannot be checked`
+without calling the overlap check; a relative home still fails closed.
+One `_execution_input_check()` closure per
 call reuses the declared/invocation inventory and `host_sealing.execution_overlap()`
 predicate, including symmetric overlap, inode aliases, symlink locations and
 missing suffixes. Relative or uninspectable sources and undeterminable inputs
@@ -1753,6 +1754,7 @@ With valid config, the read-only `Managed bind sources` row calls
 `TypeError`, `RuntimeError`) as a `Config root` FAIL with the cause. It skips the
 dependent SOPS, credential/zone-mode and zone-diagnostic rows, so a config-root
 failure does not prevent the managed row or remaining table from rendering.
+Zone diagnostics contain `OSError`/`ValueError` as a `Zone configuration` WARN.
 
 The `Post-mortem records` row calls `post_mortem.latest()` independently of config
 and Docker availability. It reads only the host filesystem, returning `PASS`

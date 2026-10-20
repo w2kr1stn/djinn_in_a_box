@@ -847,12 +847,6 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
         root = get_config_root(config)
         return [root / name for name in SYNC_PATHS["credentials"]]
 
-    def sessions_sources() -> list[Path]:
-        home = Path.home()
-        if home.is_absolute():
-            home = Path(os.path.realpath(home))
-        return [home / ".djinn" / "sessions"]
-
     families: tuple[tuple[str, str, Callable[[], list[Path]], str], ...] = (
         (
             "Workspace root",
@@ -878,7 +872,7 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
         (
             "Sessions directory",
             "~/.djinn/sessions",
-            sessions_sources,
+            lambda: [Path.home() / ".djinn" / "sessions"],
             "move that input out of ~/.djinn/sessions",
         ),
     )
@@ -892,6 +886,13 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
             )
             continue
         for source in paths:
+            if ".." in source.parts:
+                problems.append(
+                    f"{family} {source} cannot be checked against host execution inputs "
+                    "(the path contains '..', which Docker and the host resolve differently); "
+                    "set it without '..' and retry"
+                )
+                continue
             cause = check(source)
             if cause is not None:
                 problems.append(f"{family} {source} is mounted writable and {cause}; {remedy}")
