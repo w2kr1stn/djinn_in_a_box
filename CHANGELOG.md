@@ -133,6 +133,8 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Raise the default Claude Code version in the dev image to 2.1.304, the version the
+  `claude-isolated` agent was measured with (#171).
 - Keep Codex SQLite stores per host with
   `CODEX_SQLITE_HOME=/home/dev/.codex/sqlite` and a new `sqlite` local-zone default.
   Session-ID resume works across machines; picker/`--last` discovery and
