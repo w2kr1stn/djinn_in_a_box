@@ -952,7 +952,7 @@ def _manifest_relative(target_root: Path, manifest_path: Path) -> PurePosixPath:
 _MANIFEST_ORIGIN = "target-manifest"
 
 
-class _TargetReadError(OSError):
+class TargetReadError(OSError):
     def __init__(self, error: OSError, path: PurePosixPath) -> None:
         super().__init__(error.errno, error.strerror or str(error), str(path))
 
@@ -972,7 +972,7 @@ def _read_item(
             and error.drift_class is DriftClass.INVALID_OR_SEMANTIC
             and isinstance(cause, OSError)
         ):
-            raise _TargetReadError(cause, path) from error
+            raise TargetReadError(cause, path) from error
         if error.items:
             raise
         raise PublishError(
@@ -981,7 +981,12 @@ def _read_item(
             items=(DriftEntry(error.drift_class, path, origin=origin),),
         ) from error
     except OSError as error:
-        raise _TargetReadError(error, path) from error
+        if origin in {"target", _MANIFEST_ORIGIN}:
+            raise TargetReadError(error, path) from error
+        raise PublishError(
+            DriftClass.INVALID_OR_SEMANTIC,
+            items=(DriftEntry(DriftClass.INVALID_OR_SEMANTIC, path, origin=origin),),
+        ) from error
 
 
 def _file_state_of(current: _Snapshot | None) -> BackedUpState:
@@ -2561,7 +2566,7 @@ def _write_error_diagnostic(destination: Path, error: OSError, *, inspect: bool 
         {
             "destination": str(destination),
             "error": (
-                str(error) if isinstance(error, _TargetReadError) else error.strerror or "OS error"
+                str(error) if isinstance(error, TargetReadError) else error.strerror or "OS error"
             ),
             **({"operation": "inspect"} if inspect else {}),
         },

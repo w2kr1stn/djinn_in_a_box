@@ -36,6 +36,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     ManifestError,
     PublishedFile,
     PublishError,
+    TargetReadError,
     WorkflowView,
     canonical_lock,
     decode_lean_manifest,
@@ -58,7 +59,8 @@ LOCK_REMEDY = (
 )
 WRITE_PROBLEM_IDENTIFIER = "canonical-publish-failed"
 WRITE_REMEDY = (
-    "Check that the canonical workflow root and its parent directories are writable "
+    "Check that the canonical workflow root and its contents are readable, and that "
+    "it and its parent directories are writable "
     "with available space, then retry; a partial update may already be in place, so "
     "rerun `djinn config sync` and check `djinn config status`."
 )
@@ -879,6 +881,9 @@ def _lock_failure_audit(
 def _write_failure_audit(
     source: ConfigSyncSource, config_root: Path, error: OSError
 ) -> ConfigSyncAudit:
+    detail = (
+        str(error) if isinstance(error, TargetReadError) else error.strerror or type(error).__name__
+    )
     return ConfigSyncAudit(
         source,
         None,
@@ -886,7 +891,7 @@ def _write_failure_audit(
             SyncProblem(
                 WRITE_PROBLEM_IDENTIFIER,
                 f"Failed to publish the canonical workflow at {config_root}: "
-                f"{error.strerror or type(error).__name__}",
+                f"{detail}",
                 remedy=WRITE_REMEDY,
             ),
         ),
