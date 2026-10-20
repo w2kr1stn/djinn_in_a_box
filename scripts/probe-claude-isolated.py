@@ -35,6 +35,8 @@ from djinn_in_a_box.core.agent_runner import build_agent_command
 # Module values are lower-case: tests/test_docker.py reads upper-case assignments under
 # scripts/ as environment names, and none of these is one.
 run_timeout = 120
+# Exit status of `claude -p` without a login, measured with 2.1.304 and 2.1.305.
+unauthenticated_exit = 1
 claude_canary = "DJINN-PROBE-CANARY-CLAUDEMD-7319"
 agents_canary = "DJINN-PROBE-CANARY-AGENTSMD-7320"
 decoy_canary = "DJINN-PROBE-DECOY-7399"
@@ -220,14 +222,14 @@ def observe(
     *,
     authenticated: bool = True,
 ) -> Observation:
-    """Run once; a logged-in run must exit 0, an unauthenticated one with a failure status."""
+    """Run once; a logged-in run must exit 0, an unauthenticated one with the measured status."""
     try:
         completed = run_command(argv, cwd, env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Observation({}, {}, error=f"run failed ({type(exc).__name__})")
     init, result = parse_events(completed.stdout)
     found = frozenset(p.name for p in markers.iterdir()) if markers else frozenset()
-    expected_status = completed.returncode == 0 if authenticated else completed.returncode > 0
+    expected_status = completed.returncode == (0 if authenticated else unauthenticated_exit)
     if not result:
         error = "no result event"
     elif not expected_status:

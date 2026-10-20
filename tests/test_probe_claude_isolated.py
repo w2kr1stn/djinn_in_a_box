@@ -565,7 +565,7 @@ def test_logged_in_exit_status_reaches_evaluator(monkeypatch, tmp_path, returnco
 
 
 @pytest.mark.parametrize("side", [0, 1], ids=["control", "isolation"])
-@pytest.mark.parametrize("returncode", [0, 1, 23, -9])
+@pytest.mark.parametrize("returncode", [0, 1, 2, 23, 137, -9])
 def test_credential_free_exit_status(monkeypatch, tmp_path, returncode, side):
     runs = observations()
     events = [runs[side].init, runs[side].result]
@@ -576,11 +576,11 @@ def test_credential_free_exit_status(monkeypatch, tmp_path, returncode, side):
     )
     run = probe.observe(["claude"], tmp_path, {}, authenticated=False)
     runs[side] = run._replace(markers=runs[side].markers)
-    assert run.error == ("" if returncode > 0 else f"unexpected exit status {returncode}")
+    assert run.error == ("" if returncode == 1 else f"unexpected exit status {returncode}")
     failures = [line for line in probe.evaluate_phase_one(*runs) if line.startswith("FAIL ")]
     label = "control" if side == 0 else "isolation"
     assert failures == (
-        [] if returncode > 0 else [f"FAIL {label} evidence: unexpected exit status {returncode}"]
+        [] if returncode == 1 else [f"FAIL {label} evidence: unexpected exit status {returncode}"]
     )
 
 
