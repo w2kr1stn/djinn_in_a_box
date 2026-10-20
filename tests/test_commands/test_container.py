@@ -1259,6 +1259,7 @@ class TestCleanVolumesCommand:
         """Test clean volumes without flags lists volumes and sync paths."""
         with (
             patch("djinn_in_a_box.commands.container.load_config", return_value=mock_app_config),
+            patch("djinn_in_a_box.commands.container.volume_exists", return_value=False),
             patch(
                 "djinn_in_a_box.commands.container.get_existing_volumes_by_category",
                 return_value=["djinn-uv-cache"],
@@ -2386,6 +2387,45 @@ def test_clean_volumes_reports_control_guard_acquisition_failure(monkeypatch, ex
     assert result.exit_code == 1
     assert "control lock unavailable" in result.output
     assert isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("exception", [container.hostctl.HostctlError, OSError])
+def test_clean_all_reports_busy_control_guard(monkeypatch, exception):
+    @contextmanager
+    def refused():
+        raise exception("host control is busy")
+        yield
+
+    monkeypatch.setattr(container.hostctl, "control_guard", refused)
+    result = runner.invoke(app, ["clean", "all", "--force"])
+    assert result.exit_code == 1
+    assert "host control is busy" in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("exception", [container.hostctl.HostctlError, OSError])
+def test_clean_all_preserves_body_exceptions(monkeypatch, exception):
+    failure = exception("command body failed")
+
+    def failed():
+        assert container.hostctl._held.active
+        raise failure
+
+    monkeypatch.setattr(container, "_load_optional_config", failed)
+    result = runner.invoke(app, ["clean", "all", "--force"])
+    assert result.exception is failure
+    assert "command body failed" not in result.output
+    assert not container.hostctl._held.active
+
+
+def test_clean_all_confirms_before_acquiring_control_guard(monkeypatch):
+    def unexpected_guard():
+        pytest.fail("control guard acquired before confirmation")
+
+    monkeypatch.setattr(container.hostctl, "control_guard", unexpected_guard)
+    result = runner.invoke(app, ["clean", "all"], input="n\n")
+    assert result.exit_code == 0
+    assert "Aborted." in result.output
 
 
 @pytest.mark.parametrize("exception", [container.hostctl.HostctlError, OSError])

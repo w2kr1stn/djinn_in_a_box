@@ -7,6 +7,19 @@ from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import hostctl
 
 
+@pytest.fixture(autouse=True)
+def _isolate_unrelated_doctor_probes(monkeypatch, mock_home):
+    from djinn_in_a_box.commands import doctor
+    from djinn_in_a_box.core.desktop import DesktopInspection
+
+    monkeypatch.setattr(doctor, "_docker_installed", lambda: False)
+    monkeypatch.setattr(
+        doctor.docker_core,
+        "inspect_running_desktop",
+        lambda: DesktopInspection(channels=(), raw_sources=(), raw_verified=True),
+    )
+
+
 @pytest.mark.parametrize("config", [None, "empty", "valid"])
 def test_doctor_missing_data_is_unknown_and_never_starts(tmp_path, monkeypatch, config):
     if config == "empty":

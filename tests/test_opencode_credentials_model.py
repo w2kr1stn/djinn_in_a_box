@@ -1553,9 +1553,17 @@ def test_the_module_imports_only_the_standard_library() -> None:
 
 
 def test_no_exception_message_formats_a_value_variable() -> None:
-    """Every `raise` of the module's errors builds its message from literals and ids only."""
+    """Error messages use literals and IDs; ancestor refusals may also name their path."""
     allowed_names = {"where", "what", "name", "index", "identity", "entry"}
-    for node in ast.walk(module_tree()):
+    tree = module_tree()
+    path_refusals = {
+        node
+        for function in tree.body
+        if isinstance(function, ast.FunctionDef) and function.name == "_check_ancestor"
+        for node in ast.walk(function)
+        if isinstance(node, ast.Raise)
+    }
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
             continue
         for argument in node.exc.args:
@@ -1567,7 +1575,10 @@ def test_no_exception_message_formats_a_value_variable() -> None:
                     for name in ast.walk(part)
                     if isinstance(name, ast.Name)
                 }
-                assert used <= allowed_names, (node.lineno, used)
+                permitted = (
+                    allowed_names | {"path", "shlex"} if node in path_refusals else allowed_names
+                )
+                assert used <= permitted, (node.lineno, used)
 
 
 def test_empty_destination_is_not_absent(directory: tuple[Path, int]) -> None:

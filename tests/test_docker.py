@@ -3693,6 +3693,15 @@ def test_run_captured_keeps_only_passed_descriptors_open_in_the_child(tmp_path: 
         os.close(descriptor)
 
 
+def test_security_model_states_audit_agent_trust_boundary() -> None:
+    text = (Path(__file__).parents[1] / "SECURITY-MODEL.md").read_text()
+    assert (
+        "The audit agent is trusted at the level of the Docker socket and the read-write "
+        "`~/.djinn` mount; the audit-session design protects Djinn's own flows, "
+        "not against the agent."
+    ) in " ".join(text.split())
+
+
 def test_security_model_names_guarded_backup_restore_pathname_exception() -> None:
     text = (Path(__file__).parents[1] / "SECURITY-MODEL.md").read_text()
     section = text.split("## Host-side workflow publishing\n", 1)[1].split("\n## ", 1)[0]
@@ -3744,6 +3753,13 @@ def test_clear_keeps_named_top_level_entries_and_mount_placeholders(
     assert kept.read_text() == "[]"
     assert {child.name for child in root.iterdir()} == {kept.name, "mount"}
     assert not list(placeholder.iterdir())
+
+
+@pytest.mark.parametrize("kind", ["volume", "bind"])
+def test_credential_export_never_pulls_an_image(kind) -> None:
+    argv = docker_mod._export_argv("djinn-in-a-box:latest", "dummy-data", kind, "dummy-token")
+    assert argv[argv.index("--pull") + 1] == "never"
+    assert "--read-only" not in argv
 
 
 @pytest.mark.parametrize("exists", [False, True])

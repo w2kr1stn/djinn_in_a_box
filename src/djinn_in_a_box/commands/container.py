@@ -996,7 +996,12 @@ def clean_all(
             info("Aborted.")
             raise typer.Exit(0)
 
-    with hostctl.control_guard():
+    with contextlib.ExitStack() as guards:
+        try:
+            guards.enter_context(hostctl.control_guard())
+        except (hostctl.HostctlError, OSError) as exc:
+            error(str(exc))
+            raise typer.Exit(1) from exc
         config = _load_optional_config()
         categories = volume_categories(config)
         try:

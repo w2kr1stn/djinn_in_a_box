@@ -183,6 +183,9 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
         {
             "credentials.json",
             "credentials.removed.json",
+            "credentials.sync-conflict-*.json",
+            "credentials.removed.sync-conflict-*.json",
+            ".credentials*.tmp",
             "opencode.json",
             "cli.json",
             "themes",

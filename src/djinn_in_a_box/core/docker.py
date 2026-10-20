@@ -477,6 +477,8 @@ def _export_argv(image: str, source: str, kind: Literal["volume", "bind"], token
         DOCKER_EXECUTABLE,
         "run",
         "--rm",
+        "--pull",
+        "never",
         "--name",
         _CREDENTIAL_EXPORT_PREFIX + token,
         "--label",

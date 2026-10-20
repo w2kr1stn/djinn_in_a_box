@@ -574,11 +574,11 @@ def test_the_ancestor_and_private_directory_rules_check_owner_and_mode(world: Wo
     def status(uid: int, mode: int) -> os.stat_result:
         return os.stat_result((stat.S_IFDIR | mode, 1, 1, 1, uid, 0, 0, 0, 0, 0))
 
-    oc._check_ancestor(status(1000, 0o755), policy)
-    oc._check_ancestor(status(0, 0o755), policy)
+    oc._check_ancestor(status(1000, 0o755), policy, str(world.home))
+    oc._check_ancestor(status(0, 0o755), policy, str(world.home))
     for uid, mode in ((1001, 0o755), (1000, 0o775), (1000, 0o757)):
         with pytest.raises(oc.Refused):
-            oc._check_ancestor(status(uid, mode), policy)
+            oc._check_ancestor(status(uid, mode), policy, str(world.home))
     descriptor = os.open(world.home, os.O_RDONLY | os.O_DIRECTORY)
     try:
         with pytest.raises(oc.Refused):

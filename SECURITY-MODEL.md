@@ -105,6 +105,7 @@ is unsealed. Agent mode contributes no Docker cause only after the same-generati
 verification described below. Prefer no Docker access when unnecessary.
 
 The temporary audit assistant holds host Docker authority and shares `djinn-network`.
+The audit agent is trusted at the level of the Docker socket and the read-write `~/.djinn` mount; the audit-session design protects Djinn's own flows, not against the agent.
 
 `build.network = "host"` shares the host network namespace for image `RUN`
 steps, including access to loopback-only host services. It applies to the whole

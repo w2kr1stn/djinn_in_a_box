@@ -160,25 +160,30 @@ def test_claude_mcp_needs_auth_cache_is_a_known_entry(zone_config: AppConfig) ->
     assert row.detail == "none"
 
 
-def test_opencode_credential_carriers_are_known_but_leftovers_are_reported(
+def test_opencode_credential_carriers_and_transient_files_are_known_entries(
     zone_config: AppConfig,
 ) -> None:
+    from djinn_in_a_box.core import opencode_credentials as oc
+
     root = zone_config.config_root / "opencode"
     root.mkdir(parents=True)
-    known = ("credentials.json", "credentials.removed.json")
-    leftovers = (
+    known = (
+        "credentials.json",
+        "credentials.removed.json",
         "credentials.sync-conflict-20261020-120000-ABCDEFG.json",
         "credentials.removed.sync-conflict-20261020-120000-ABCDEFG.json",
-        ".credentials.json.0123456789abcdef.tmp",
+        oc._temp_name(oc.CREDENTIALS_NAME),
+        oc._temp_name(oc.TOMBSTONES_NAME),
     )
-    for name in (*known, *leftovers):
+    for name in known:
         (root / name).write_text("[]")
+    unexpected = root / "unexpected.json"
+    unexpected.write_text("[]")
     row = _check_named(doctor_mod.run_checks(zone_config), "Zone drift")
     assert row.status is doctor_mod.Status.WARN
+    assert str(unexpected) in row.detail
     for name in known:
         assert str(root / name) not in row.detail
-    for name in leftovers:
-        assert str(root / name) in row.detail
 
 
 @pytest.mark.parametrize(
@@ -260,7 +265,7 @@ def test_opencode_credential_doctor_clean_is_pass(zone_config):
     assert row.detail == "clean"
 
 
-def test_opencode_doctor_leaves_conflict_copy_reporting_to_zone_drift(zone_config):
+def test_opencode_doctor_accepts_an_identical_conflict_copy_without_zone_drift(zone_config):
     root = zone_config.config_root / "opencode"
     root.mkdir(parents=True)
     copy = root / "credentials.sync-conflict-20261020-120000-ABCDEFG.json"
@@ -270,4 +275,6 @@ def test_opencode_doctor_leaves_conflict_copy_reporting_to_zone_drift(zone_confi
     row = _check_named(checks, "OpenCode credentials")
     assert row.status is doctor_mod.Status.PASS
     assert copy.name not in row.detail
-    assert copy.name in _check_named(checks, "Zone drift").detail
+    drift = _check_named(checks, "Zone drift")
+    assert drift.status is doctor_mod.Status.PASS
+    assert copy.name not in drift.detail

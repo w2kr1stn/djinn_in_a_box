@@ -18,6 +18,7 @@ import math
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import stat
@@ -108,8 +109,8 @@ class Entry:
     integration_id: str
     label: str = field(compare=False)
     active: bool = field(compare=False)
-    value: Mapping[str, object] = field(compare=False)
-    canonical: str
+    value: Mapping[str, object] = field(compare=False, repr=False)
+    canonical: str = field(repr=False)
 
     @property
     def fingerprint(self) -> str:
@@ -494,6 +495,12 @@ class FileRead(NamedTuple):
     inode: int
     mtime_ns: int
     size: int
+
+    def __repr__(self) -> str:
+        return (
+            f"FileRead(data=<{len(self.data)} bytes>, inode={self.inode}, "
+            f"mtime_ns={self.mtime_ns}, size={self.size})"
+        )
 
 
 class _Ops:
@@ -915,8 +922,8 @@ class Step:
 
     kind: str
     identity: str
-    before: Entry | None = None
-    entry: Entry | None = None
+    before: Entry | None = field(default=None, repr=False)
+    entry: Entry | None = field(default=None, repr=False)
 
 
 class StateKeeper:
@@ -1023,6 +1030,12 @@ class ConflictCopy(NamedTuple):
     entries: tuple[Entry, ...]
     tombstones: tuple[str, ...]
 
+    def __repr__(self) -> str:
+        return (
+            f"ConflictCopy(name={self.name!r}, inode={self.inode}, data=<{len(self.data)} bytes>, "
+            f"entries=<{len(self.entries)} entries>, tombstones=<{len(self.tombstones)} IDs>)"
+        )
+
 
 class CarrierRead(NamedTuple):
     file_raw: bytes | None
@@ -1031,6 +1044,15 @@ class CarrierRead(NamedTuple):
     tombstones: list[str]
     copies: list[ConflictCopy]
     invalid: list[str]
+
+    def __repr__(self) -> str:
+        file_size = len(self.file_raw) if self.file_raw is not None else None
+        removed_size = len(self.removed_raw) if self.removed_raw is not None else None
+        return (
+            f"CarrierRead(file_raw=<{file_size} bytes>, entries=<{len(self.entries)} entries>, "
+            f"removed_raw=<{removed_size} bytes>, tombstones=<{len(self.tombstones)} IDs>, "
+            f"copies=<{len(self.copies)} copies>, invalid=<{len(self.invalid)} names>)"
+        )
 
 
 def read_carrier(dir_fd: int) -> CarrierRead:
@@ -1617,26 +1639,36 @@ class RootPolicy:
     euid: int = field(default_factory=os.geteuid)
 
 
-def _check_ancestor(status: os.stat_result, policy: RootPolicy) -> None:
+def _check_ancestor(status: os.stat_result, policy: RootPolicy, path: str) -> None:
     if status.st_uid not in {policy.euid, 0}:
         raise Refused("an ancestor belongs to another user")
     if status.st_mode & 0o022:
-        raise Refused("an ancestor is writable by group or others")
+        raise Refused(
+            f"an ancestor {path} is writable by group or others; "
+            f"run chmod g-w,o-w {shlex.quote(path)}"
+        )
 
 
-def _check_private(descriptor: int, status: os.stat_result, policy: RootPolicy) -> None:
+def _check_private(
+    descriptor: int, status: os.stat_result, policy: RootPolicy, *, repair: bool = True
+) -> None:
     if status.st_uid != policy.euid:
         raise Refused("a private directory belongs to another user")
     if status.st_mode & 0o077:
+        if not repair:
+            raise Refused("private directory permissions must be 0700")
         os.fchmod(descriptor, 0o700)
 
 
-def _open_root(root: str | os.PathLike[str], policy: RootPolicy, *, create: bool) -> int | None:
+def _open_root(
+    root: str | os.PathLike[str], policy: RootPolicy, *, create: bool, repair: bool = True
+) -> int | None:
     """Walk from the home directory to ``root`` without following a symlink.
 
     Ancestors must be the user's or root's and not group- or world-writable. From
     ``~/.local/state/djinn`` on (else from the root itself) directories are the user's, 0700.
     Returns None for a missing root when ``create`` is false.
+    With ``repair=False``, loose private directories are refused without changing modes.
     """
     home = os.path.abspath(policy.home)
     absolute = os.path.abspath(root)
@@ -1649,7 +1681,7 @@ def _open_root(root: str | os.PathLike[str], policy: RootPolicy, *, create: bool
         private_at = len(_DJINN_STATE) - 1
     descriptor = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        _check_ancestor(os.fstat(descriptor), policy)
+        _check_ancestor(os.fstat(descriptor), policy, home)
         for index, part in enumerate(parts):
             try:
                 child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
@@ -1668,9 +1700,9 @@ def _open_root(root: str | os.PathLike[str], policy: RootPolicy, *, create: bool
             descriptor = child
             status = os.fstat(descriptor)
             if index < private_at:
-                _check_ancestor(status, policy)
+                _check_ancestor(status, policy, os.path.join(home, *parts[: index + 1]))
             else:
-                _check_private(descriptor, status, policy)
+                _check_private(descriptor, status, policy, repair=repair)
     except BaseException:
         os.close(descriptor)
         raise
@@ -1776,16 +1808,27 @@ def _write_io_file(session: Session, name: str, data: bytes) -> None:
 def _remove_tree(parent_fd: int, name: str) -> None:
     """Remove ``name`` below ``parent_fd`` without following a symlink."""
     descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    stack: list[tuple[int, str, int, Iterator[str]]] = [(parent_fd, name, descriptor, iter(()))]
     try:
-        for child in os.listdir(descriptor):
-            status = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+        stack[-1] = (parent_fd, name, descriptor, iter(os.listdir(descriptor)))
+        while stack:
+            parent, current_name, current_fd, children = stack[-1]
+            child = next(children, None)
+            if child is None:
+                stack.pop()
+                os.close(current_fd)
+                os.rmdir(current_name, dir_fd=parent)
+                continue
+            status = os.stat(child, dir_fd=current_fd, follow_symlinks=False)
             if stat.S_ISDIR(status.st_mode):
-                _remove_tree(descriptor, child)
+                child_fd = os.open(child, _DIRECTORY_FLAGS, dir_fd=current_fd)
+                stack.append((current_fd, child, child_fd, iter(())))
+                stack[-1] = (current_fd, child, child_fd, iter(os.listdir(child_fd)))
             else:
-                os.unlink(child, dir_fd=descriptor)
+                os.unlink(child, dir_fd=current_fd)
     finally:
-        os.close(descriptor)
-    os.rmdir(name, dir_fd=parent_fd)
+        for _, _, descriptor, _ in reversed(stack):
+            os.close(descriptor)
 
 
 def _discard_session(root_fd: int, identity: str) -> None:
@@ -1811,6 +1854,12 @@ class _Pending(NamedTuple):
     descriptor: int
     owned: bool
     export: bytes
+
+    def __repr__(self) -> str:
+        return (
+            f"_Pending(identity={self.identity!r}, descriptor={self.descriptor}, "
+            f"owned={self.owned}, export=<{len(self.export)} bytes>)"
+        )
 
 
 def _try_lease(root_fd: int, name: str) -> int:
@@ -2157,10 +2206,12 @@ class Finding(NamedTuple):
 
 def _try_parse(dir_fd: int, name: str, entries: bool) -> tuple[list[Entry] | list[str], str | None]:
     try:
-        snapshot = read_private(dir_fd, name, FILE_LIMIT)
+        snapshot = read_private(dir_fd, name, FILE_LIMIT, tighten=False)
         if snapshot is None:
             return [], None
         parsed = parse_entries(snapshot.data) if entries else parse_tombstones(snapshot.data)
+        if os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode & 0o177:
+            return parsed, "file permissions must be 0600"
         return parsed, None
     except (CredentialsError, OSError) as error:
         return [], _unreadable(error)
@@ -2230,7 +2281,7 @@ def _carrier_findings(dir_fd: int) -> list[Finding]:
 def _session_findings(root: str | os.PathLike[str] | None, policy: RootPolicy) -> list[Finding]:
     root_text = os.fspath(root) if root is not None else default_audit_root()
     try:
-        root_fd = _open_root(root_text, policy, create=False)
+        root_fd = _open_root(root_text, policy, create=False, repair=False)
     except (OSError, CredentialsError) as error:
         reason = error.reason if isinstance(error, CredentialsError) else "root not readable"
         return [Finding("audit-root", "", reason)]
