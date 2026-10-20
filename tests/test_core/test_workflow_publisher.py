@@ -74,6 +74,8 @@ def _publish(canonical: Path, target: Path, view: WorkflowView) -> workflow_publ
 
 def _write(path: Path, content: bytes, *, executable: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and not path.stat().st_mode & stat.S_IWUSR:
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)  # a sealed runtime file
     path.write_bytes(content)
     if executable:
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -142,7 +144,7 @@ def test_unmanaged_collision_and_managed_edit_fail_closed(tmp_path: Path) -> Non
     assert _tree(target) == before_collision
     (target / "AGENTS.md").unlink()
     assert _publish(canonical, target, _view()).success
-    (target / "AGENTS.md").write_bytes(b"operator edit\n")
+    _write(target / "AGENTS.md", b"operator edit\n")
     before_edit = _tree(target)
 
     drift = _publish(canonical, target, _view(b"two\n"))
@@ -210,7 +212,7 @@ def test_runtime_state_rejects_unowned_manifest_items_without_mutation(
                 "executable": False,
             }
         )
-    manifest_path.write_text(json.dumps(manifest))
+    _write(manifest_path, json.dumps(manifest).encode())
     before = _tree(target)
 
     result = _publish(canonical, target, _view())
@@ -837,7 +839,7 @@ def test_standalone_file_only_publish_exit_codes_fragment_refusal_and_missing_ca
     _write(view / "AGENTS.md", b"cli view\n")
 
     published = _run_cli(view, canonical, target)
-    (target / "AGENTS.md").write_bytes(b"operator edit\n")
+    _write(target / "AGENTS.md", b"operator edit\n")
     drift = _run_cli(view, canonical, target)
     collision_target = tmp_path / "collision"
     collision_target.mkdir()
@@ -992,7 +994,9 @@ def test_opencode_cli_delivers_native_plugins_not_managed_by_canonical_manifest(
         assert (target / path).read_bytes() == content
 
     tracked_plugin = target / "plugins/ready-notify.js"
-    tracked_plugin.write_bytes(b"export default { id: 'fixture', setup() { return () => {}; } };\n")
+    _write(
+        tracked_plugin, b"export default { id: 'fixture', setup() { return () => {}; } };\n"
+    )
     before_drift = _tree(target)
     drift = _run_cli(seed, canonical, target, "--profile", "opencode")
 
@@ -1048,3 +1052,836 @@ def test_opencode_cli_rejects_invalid_native_plugin_before_runtime_mutation(
 
     assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
     assert _tree(target) == before
+
+
+# --- #166: named items, sealing, check-only, mutation-boundary recheck, CLI items ---
+
+_ITEMS_PREFIX = "workflow publisher drift-items: "
+_ITEM_PREFIX = "workflow publisher item: "
+_CAP = 200
+
+
+def _entry(
+    kind: DriftClass,
+    path: str,
+    key: tuple[str, ...] | None = None,
+    origin: str = "target",
+    reason: str | None = None,
+) -> workflow_publisher.DriftEntry:
+    return workflow_publisher.DriftEntry(kind, _p(path), key, origin, reason)
+
+
+def _inspect(canonical: Path, target: Path, view: WorkflowView) -> workflow_publisher.PublishResult:
+    return workflow_publisher.inspect_workflow_view(
+        view, canonical, target, target / RUNTIME_MANIFEST_NAME
+    )
+
+
+def _run(
+    mode: str, canonical: Path, target: Path, view: WorkflowView
+) -> workflow_publisher.PublishResult:
+    return (_publish if mode == "publish" else _inspect)(canonical, target, view)
+
+
+def _state(root: Path) -> list[tuple[str, str, int, bytes]]:
+    """Every entry below `root`: path, kind, mode and bytes (directory entries included)."""
+    entries: list[tuple[str, str, int, bytes]] = []
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        kind = "dir" if stat.S_ISDIR(info.st_mode) else "link" if path.is_symlink() else "file"
+        content = path.read_bytes() if kind == "file" else b""
+        entries.append(
+            (path.relative_to(root).as_posix(), kind, stat.S_IMODE(info.st_mode), content)
+        )
+    return entries
+
+
+MODES = ("publish", "inspect")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_whole_file_drift_names_the_file(tmp_path: Path, mode: str) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+    _write(target / "AGENTS.md", b"operator edit\n")
+
+    result = _run(mode, canonical, target, _view(b"two\n"))
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert result.drift_items == (_entry(DriftClass.TARGET_DRIFT, "AGENTS.md"),)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_carrier_key_drift_names_carrier_and_key_only(tmp_path: Path, mode: str) -> None:
+    canonical, target = _roots(tmp_path)
+    first = _view(
+        fragments=(
+            _fragment("settings.json", ("hooks", "Stop"), ["old"]),
+            _fragment("settings.json", ("hooks", "PreToolUse"), ["keep"]),
+        )
+    )
+    assert _publish(canonical, target, first).success
+    carrier = json.loads((target / "settings.json").read_text())
+    carrier["hooks"]["Stop"] = ["edited"]
+    carrier["operator"] = True
+    (target / "settings.json").write_text(json.dumps(carrier))
+
+    result = _run(mode, canonical, target, first)
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert result.drift_items == (
+        _entry(DriftClass.TARGET_DRIFT, "settings.json", ("hooks", "Stop")),
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_missing_and_retired_files_are_named(tmp_path: Path, mode: str) -> None:
+    canonical, target = _roots(tmp_path)
+    first = _view(files=(_file("agents/gone.md", b"gone\n"), _file("agents/kept.md", b"kept\n")))
+    assert _publish(canonical, target, first).success
+    (target / "agents/kept.md").unlink()
+    _write(target / "agents/gone.md", b"edited retired\n")
+    second = _view(files=(_file("agents/kept.md", b"kept\n"),))
+
+    result = _run(mode, canonical, target, second)
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert set(result.drift_items) == {
+        _entry(DriftClass.TARGET_DRIFT, "agents/kept.md"),
+        _entry(DriftClass.TARGET_DRIFT, "agents/gone.md"),
+    }
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_non_regular_entry_and_unmanaged_collision_are_named(tmp_path: Path, mode: str) -> None:
+    canonical, target = _roots(tmp_path)
+    (target / "AGENTS.md").mkdir()
+    _write(target / "agents/other.md", b"unmanaged\n")
+    view = _view(files=(_file("agents/other.md", b"wanted\n"),))
+
+    result = _run(mode, canonical, target, view)
+
+    assert result.drift_class is DriftClass.COLLISION
+    assert result.drift_items == (_entry(DriftClass.COLLISION, "AGENTS.md"),)
+    (target / "AGENTS.md").rmdir()
+    again = _run(mode, canonical, target, view)
+    assert again.drift_items == (_entry(DriftClass.COLLISION, "agents/other.md"),)
+
+
+def test_only_items_of_the_worst_class_are_listed(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    first = _view(files=(_file("agents/a.md", b"a\n"),))
+    assert _publish(canonical, target, first).success
+    _write(target / "agents/a.md", b"drifted\n")
+    _write(target / "agents/b.md", b"unmanaged\n")
+
+    result = _publish(
+        canonical,
+        target,
+        _view(files=(_file("agents/a.md", b"a2\n"), _file("agents/b.md", b"b\n"))),
+    )
+
+    assert result.drift_class is DriftClass.COLLISION
+    assert result.drift_items == (_entry(DriftClass.COLLISION, "agents/b.md"),)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_malformed_and_linked_manifests_name_the_manifest(tmp_path: Path, mode: str) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view()).success
+    manifest = target / RUNTIME_MANIFEST_NAME
+    _write(manifest, b"{not json")
+
+    malformed = _run(mode, canonical, target, _view())
+
+    manifest.unlink()
+    manifest.symlink_to(tmp_path / "elsewhere")
+    linked = _run(mode, canonical, target, _view())
+    assert malformed.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert malformed.drift_items == (
+        _entry(DriftClass.INVALID_OR_SEMANTIC, RUNTIME_MANIFEST_NAME, origin="target-manifest"),
+    )
+    assert linked.drift_class is DriftClass.COLLISION
+    assert linked.drift_items == (
+        _entry(DriftClass.COLLISION, RUNTIME_MANIFEST_NAME, origin="target-manifest"),
+    )
+
+
+def test_carrier_parse_failure_names_the_carrier(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(fragments=(_fragment("settings.json", ("hooks", "Stop"), ["x"]),))
+    _write(target / "settings.json", b"{broken")
+
+    result = _publish(canonical, target, view)
+
+    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert result.drift_items == (_entry(DriftClass.INVALID_OR_SEMANTIC, "settings.json"),)
+
+
+def test_publish_error_keeps_its_items_and_defaults_to_none() -> None:
+    item = _entry(DriftClass.COLLISION, "x.md")
+
+    assert PublishError(DriftClass.COLLISION, items=[item]).items == (item,)
+    assert PublishError(DriftClass.COLLISION).items == ()
+    assert workflow_publisher.PublishResult(DriftClass.CLEAN).drift_items == ()
+
+
+# --- sealing ---
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.lstat().st_mode)
+
+
+def test_runtime_files_and_manifest_are_sealed_and_carriers_keep_their_mode(
+    tmp_path: Path,
+) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(
+        files=(_file("scripts/run.sh", b"#!/bin/sh\n", executable=True),),
+        fragments=(_fragment("settings.json", ("hooks", "Stop"), ["x"]),),
+    )
+
+    assert _publish(canonical, target, view).success
+
+    assert _mode(target / "AGENTS.md") == 0o444
+    assert _mode(target / "scripts/run.sh") == 0o555
+    assert _mode(target / RUNTIME_MANIFEST_NAME) == 0o444
+    assert _mode(target / "settings.json") == 0o644
+
+
+def test_canonical_target_keeps_the_default_modes(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    view = WorkflowView(
+        "claude",
+        (
+            _file("codex/AGENTS.md", b"one\n"),
+            _file("codex/scripts/x.sh", b"#!/bin/sh\n", executable=True),
+        ),
+    )
+
+    result = publish_workflow_view(view, canonical, canonical, canonical / CANONICAL_MANIFEST_NAME)
+
+    assert result.success
+    assert _mode(canonical / "codex/AGENTS.md") == 0o644
+    assert _mode(canonical / "codex/scripts/x.sh") == 0o755
+    assert _mode(canonical / CANONICAL_MANIFEST_NAME) == 0o644
+    again = publish_workflow_view(view, canonical, canonical, canonical / CANONICAL_MANIFEST_NAME)
+    assert again.success and again.changed_paths == ()
+
+
+def test_replace_at_default_modes_are_unchanged(tmp_path: Path) -> None:
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        workflow_publisher._replace_at(descriptor, "plain", b"x", False)
+        workflow_publisher._replace_at(descriptor, "exec", b"x", True)
+        workflow_publisher._replace_at(descriptor, "private", b"x", False, mode=0o600)
+    finally:
+        os.close(descriptor)
+
+    assert (_mode(tmp_path / "plain"), _mode(tmp_path / "exec")) == (0o644, 0o755)
+    assert _mode(tmp_path / "private") == 0o600
+
+
+def test_update_goes_through_a_sealed_inode_and_stays_sealed(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+
+    result = _publish(canonical, target, _view(b"two\n"))
+
+    assert result.changed_paths == (_p("AGENTS.md"),)
+    assert (target / "AGENTS.md").read_bytes() == b"two\n"
+    assert _mode(target / "AGENTS.md") == 0o444
+
+
+@pytest.mark.parametrize("write_bits", (0o644, 0o600, 0o666, 0o464, 0o446))
+def test_clean_writable_file_and_manifest_are_resealed_and_mode_is_not_drift(
+    tmp_path: Path, write_bits: int
+) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(files=(_file("scripts/run.sh", b"#!/bin/sh\n", executable=True),))
+    assert _publish(canonical, target, view).success
+    (target / "AGENTS.md").chmod(write_bits)
+    (target / RUNTIME_MANIFEST_NAME).chmod(write_bits)
+    inode = (target / "AGENTS.md").stat().st_ino
+
+    inspected = _inspect(canonical, target, view)
+    result = _publish(canonical, target, view)
+
+    assert inspected.success
+    assert result.success
+    assert result.changed_paths == (_p("AGENTS.md"),)
+    assert _mode(target / "AGENTS.md") == 0o444
+    assert _mode(target / RUNTIME_MANIFEST_NAME) == 0o444
+    assert _mode(target / "scripts/run.sh") == 0o555
+    assert (target / "AGENTS.md").stat().st_ino != inode
+
+
+def test_sealed_clean_files_are_not_rewritten(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view()).success
+    before = [(path.stat().st_ino, path.stat().st_mtime_ns) for path in sorted(target.iterdir())]
+
+    result = _publish(canonical, target, _view())
+
+    assert result.success and result.changed_paths == ()
+    assert [
+        (path.stat().st_ino, path.stat().st_mtime_ns) for path in sorted(target.iterdir())
+    ] == before
+
+
+def test_a_write_bit_on_an_executable_only_changes_the_seal_not_the_state(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(files=(_file("scripts/run.sh", b"#!/bin/sh\n", executable=True),))
+    assert _publish(canonical, target, view).success
+    (target / "scripts/run.sh").chmod(0o755)
+
+    assert _publish(canonical, target, view).changed_paths == (_p("scripts/run.sh"),)
+    assert _mode(target / "scripts/run.sh") == 0o555
+
+
+# --- check-only ---
+
+
+def test_inspect_does_not_write_create_or_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+    _write(target / "AGENTS.md", b"drifted\n")
+    before = _state(tmp_path)
+
+    def forbidden(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("inspection must not commit, fingerprint or write")
+
+    monkeypatch.setattr(workflow_publisher, "_commit", forbidden)
+    monkeypatch.setattr(workflow_publisher, "fingerprint_source_inputs", forbidden)
+    monkeypatch.setattr(workflow_publisher, "_replace_at", forbidden)
+
+    result = workflow_publisher.inspect_workflow_view(
+        _view(b"two\n"), canonical, target, target / RUNTIME_MANIFEST_NAME
+    )
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert _state(tmp_path) == before
+
+
+@pytest.mark.parametrize("depth", ("missing-root", "missing-parents"))
+def test_inspect_of_a_missing_root_is_clean_and_creates_nothing(tmp_path: Path, depth: str) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    target = tmp_path / "target" if depth == "missing-root" else tmp_path / "a" / "b" / "target"
+    before = _state(tmp_path)
+
+    result = workflow_publisher.inspect_workflow_view(
+        _view(), canonical, target, target / RUNTIME_MANIFEST_NAME
+    )
+
+    assert result.success and result.drift_items == ()
+    assert _state(tmp_path) == before
+    assert not target.parent.exists() or depth == "missing-root"
+
+
+def test_inspect_refuses_a_canonical_alias(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    before = _state(tmp_path)
+
+    result = workflow_publisher.inspect_workflow_view(
+        _view(), canonical, canonical, canonical / CANONICAL_MANIFEST_NAME
+    )
+
+    assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert result.drift_items == ()
+    assert _state(tmp_path) == before
+
+
+def test_inspect_takes_shared_locks_and_publish_an_exclusive_target_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    real_flock = workflow_publisher.fcntl.flock
+    operations: list[tuple[str, int]] = []
+
+    def spy(descriptor: int, operation: int) -> None:
+        operations.append((os.readlink(f"/proc/self/fd/{descriptor}"), operation))
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(workflow_publisher.fcntl, "flock", spy)
+    _inspect(canonical, target, _view())
+    inspection = list(operations)
+    operations.clear()
+    _publish(canonical, target, _view())
+
+    fcntl = workflow_publisher.fcntl
+    assert (str(canonical), fcntl.LOCK_SH) in inspection
+    assert (str(target), fcntl.LOCK_SH) in inspection
+    assert all(op in {fcntl.LOCK_SH, fcntl.LOCK_UN} for _path, op in inspection)
+    assert (str(target), fcntl.LOCK_EX) in operations
+
+
+def test_inspect_reuses_a_given_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view()).success
+    with canonical_lock(canonical, exclusive=False) as lease:
+        monkeypatch.setattr(workflow_publisher, "canonical_lock", _lease_reacquired)
+        result = workflow_publisher.inspect_workflow_view(
+            _view(), canonical, target, target / RUNTIME_MANIFEST_NAME, canonical_lease=lease
+        )
+
+    assert result.success
+
+
+# --- mutation-boundary recheck ---
+
+
+def test_initially_clean_managed_file_changed_during_publish_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    kept = _file("agents/zz.md", b"kept\n")
+    assert _publish(canonical, target, _view(b"one\n", files=(kept,))).success
+    manifest = (target / RUNTIME_MANIFEST_NAME).read_bytes()
+
+    def concurrent_edit(count: int) -> None:
+        if count == 1:
+            _write(target / "agents/zz.md", b"concurrent edit\n")
+
+    monkeypatch.setattr(workflow_publisher, "_after_target_mutation", concurrent_edit)
+    result = _publish(canonical, target, _view(b"two\n", files=(kept,)))
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert result.drift_items == (
+        _entry(DriftClass.TARGET_DRIFT, "agents/zz.md", reason="changed-during-publish"),
+    )
+    assert (target / "agents/zz.md").read_bytes() == b"concurrent edit\n"
+    assert (target / RUNTIME_MANIFEST_NAME).read_bytes() == manifest
+
+
+def test_initially_clean_carrier_with_a_personal_key_changed_during_publish_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    fragment = _fragment("settings.json", ("hooks", "Stop"), ["x"])
+    assert _publish(canonical, target, _view(b"one\n", fragments=(fragment,))).success
+    carrier = json.loads((target / "settings.json").read_text())
+    carrier["personal"] = 1
+    (target / "settings.json").write_text(json.dumps(carrier))
+
+    def concurrent_edit(count: int) -> None:
+        if count == 1:
+            carrier["personal"] = 2
+            carrier["added-later"] = True
+            (target / "settings.json").write_text(json.dumps(carrier))
+
+    monkeypatch.setattr(workflow_publisher, "_after_target_mutation", concurrent_edit)
+    result = _publish(canonical, target, _view(b"two\n", fragments=(fragment,)))
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert result.drift_items == (
+        _entry(DriftClass.TARGET_DRIFT, "settings.json", reason="changed-during-publish"),
+    )
+    assert json.loads((target / "settings.json").read_text())["added-later"] is True
+
+
+def test_a_path_absent_at_preflight_must_still_be_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+
+    def concurrent_create(count: int) -> None:
+        if count == 1:
+            _write(target / "agents/new.md", b"operator file\n")
+
+    monkeypatch.setattr(workflow_publisher, "_after_target_mutation", concurrent_create)
+    result = _publish(
+        canonical, target, _view(b"two\n", files=(_file("agents/new.md", b"wanted\n"),))
+    )
+
+    assert result.drift_class is DriftClass.TARGET_DRIFT
+    assert result.drift_items == (
+        _entry(DriftClass.TARGET_DRIFT, "agents/new.md", reason="changed-during-publish"),
+    )
+    assert (target / "agents/new.md").read_bytes() == b"operator file\n"
+
+
+def test_a_retired_file_changed_before_its_unlink_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(
+        canonical, target, _view(b"one\n", files=(_file("agents/old.md", b"old\n"),))
+    ).success
+
+    def concurrent_edit(count: int) -> None:
+        if count == 1:
+            _write(target / "agents/old.md", b"concurrent edit\n")
+
+    monkeypatch.setattr(workflow_publisher, "_after_target_mutation", concurrent_edit)
+    result = _publish(canonical, target, _view(b"two\n"))
+
+    assert result.drift_items == (
+        _entry(DriftClass.TARGET_DRIFT, "agents/old.md", reason="changed-during-publish"),
+    )
+    assert (target / "agents/old.md").read_bytes() == b"concurrent edit\n"
+
+
+def test_the_manifest_changed_before_it_is_written_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+
+    def concurrent_edit(count: int) -> None:
+        if count == 1:
+            _write(target / RUNTIME_MANIFEST_NAME, b"concurrent manifest\n")
+
+    monkeypatch.setattr(workflow_publisher, "_after_target_mutation", concurrent_edit)
+    result = _publish(canonical, target, _view(b"two\n"))
+
+    assert result.drift_items == (
+        _entry(
+            DriftClass.TARGET_DRIFT,
+            RUNTIME_MANIFEST_NAME,
+            origin="target-manifest",
+            reason="changed-during-publish",
+        ),
+    )
+    assert (target / RUNTIME_MANIFEST_NAME).read_bytes() == b"concurrent manifest\n"
+
+
+def test_a_change_made_by_the_pre_commit_hook_is_caught_at_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+
+    def concurrent_edit() -> None:
+        _write(target / "AGENTS.md", b"late edit\n")
+
+    monkeypatch.setattr(workflow_publisher, "_before_target_commit", concurrent_edit)
+    result = _publish(canonical, target, _view(b"two\n"))
+
+    assert result.drift_items == (
+        _entry(DriftClass.TARGET_DRIFT, "AGENTS.md", reason="changed-during-publish"),
+    )
+    assert (target / "AGENTS.md").read_bytes() == b"late edit\n"
+
+
+def test_a_change_after_the_final_read_is_the_documented_residual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target = _roots(tmp_path)
+    assert _publish(canonical, target, _view(b"one\n")).success
+    real_replace = workflow_publisher._replace_at
+
+    def late_writer(
+        directory: int, name: str, content: bytes, executable: bool, *, mode: int | None = None
+    ) -> None:
+        if name == "AGENTS.md":
+            _write(target / "AGENTS.md", b"after the final read\n")
+        real_replace(directory, name, content, executable, mode=mode)
+
+    monkeypatch.setattr(workflow_publisher, "_replace_at", late_writer)
+    result = _publish(canonical, target, _view(b"two\n"))
+
+    # Documented: the last read-to-rename window stays open against a writer that
+    # ignores Djinn's locks; that is why discard requires a stopped container.
+    assert result.success
+    assert (target / "AGENTS.md").read_bytes() == b"two\n"
+
+
+# --- publisher CLI: drift-items line, item lines, --check ---
+
+
+def _cli_setup(tmp_path: Path, *, source: str = "opencode") -> tuple[Path, Path, Path]:
+    canonical = tmp_path / "canonical"
+    target = tmp_path / "target"
+    view = tmp_path / "view"
+    for directory in (canonical, target, view):
+        directory.mkdir()
+    _canonical_identity(canonical, source)
+    _write(view / "AGENTS.md", b"cli view\n")
+    return canonical, target, view
+
+
+def _drift_payload(stderr: str) -> dict[str, object]:
+    lines = [line for line in stderr.splitlines() if line.startswith(_ITEMS_PREFIX)]
+    assert len(lines) == 1
+    payload = json.loads(lines[0][len(_ITEMS_PREFIX) :])
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _record(
+    cls: str,
+    origin: str,
+    root: Path,
+    path: str,
+    key: list[str] | None = None,
+    reason: str | None = None,
+) -> dict[str, object]:
+    return {
+        "class": cls,
+        "origin": origin,
+        "root": str(root),
+        "path": path,
+        "key": key,
+        "reason": reason,
+    }
+
+
+@pytest.mark.parametrize("check", (False, True))
+def test_cli_target_drift_line_has_the_documented_schema(tmp_path: Path, check: bool) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    assert _run_cli(view, canonical, target).returncode == 0
+    _write(target / "AGENTS.md", b"operator edit\n")
+    _write(view / "AGENTS.md", b"cli view two\n")
+
+    result = _run_cli(view, canonical, target, *(("--check",) if check else ()))
+
+    assert result.returncode == EXIT_CODES[DriftClass.TARGET_DRIFT]
+    lines = result.stderr.splitlines()
+    assert lines[0] == "workflow publisher: target-drift"
+    assert _drift_payload(result.stderr) == {
+        "items": [_record("target-drift", "target", target, "AGENTS.md")],
+        "total": 1,
+        "truncated": False,
+    }
+    assert (
+        lines[2] == f'{_ITEM_PREFIX}target-drift "{target}/AGENTS.md"'
+    )
+    assert "operator edit" not in result.stderr
+    assert (target / "AGENTS.md").read_bytes() == b"operator edit\n"
+
+
+def test_cli_item_with_a_key_and_a_reason_renders_both(tmp_path: Path) -> None:
+    # A carrier key item as the CLI renders it; the publisher CLI itself only
+    # publishes whole files, so the lines are produced from a result directly.
+    arguments = type("Arguments", (), {"view": "/v", "canonical_root": "/c", "target": "/t"})()
+    items = (
+        _entry(
+            DriftClass.TARGET_DRIFT,
+            "settings.json",
+            ("hooks", "Stop"),
+            reason="changed-during-publish",
+        ),
+        _entry(DriftClass.SOURCE_CHANGED, "AGENTS.md", origin="seed"),
+        _entry(
+            DriftClass.INVALID_OR_SEMANTIC, CANONICAL_MANIFEST_NAME, origin="canonical-manifest"
+        ),
+    )
+
+    lines = workflow_publisher._drift_item_lines(items, arguments)  # pyright: ignore[reportArgumentType]
+
+    payload = json.loads(lines[0][len(_ITEMS_PREFIX) :])
+    assert payload["items"][0] == {
+        "class": "target-drift",
+        "origin": "target",
+        "root": "/t",
+        "path": "settings.json",
+        "key": ["hooks", "Stop"],
+        "reason": "changed-during-publish",
+    }
+    assert [(item["origin"], item["root"]) for item in payload["items"]] == [
+        ("target", "/t"),
+        ("seed", "/v"),
+        ("canonical-manifest", "/c"),
+    ]
+    assert (
+        lines[1]
+        == f'{_ITEM_PREFIX}target-drift "/t/settings.json[hooks.Stop]"'
+    )
+
+
+@pytest.mark.parametrize("check", (False, True))
+def test_cli_escapes_control_characters_in_item_names(tmp_path: Path, check: bool) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    hostile = "we\nird\x1b[31m.md"
+    _write(view / hostile, b"wanted\n")
+    _write(target / hostile, b"unmanaged\n")
+
+    result = _run_cli(view, canonical, target, *(("--check",) if check else ()))
+
+    assert result.returncode == EXIT_CODES[DriftClass.COLLISION]
+    for line in result.stderr.splitlines():
+        assert line.startswith("workflow publisher")
+        assert "\x1b" not in line
+    payload = _drift_payload(result.stderr)
+    assert payload["items"] == [_record("collision", "target", target, hostile)]
+    assert json.dumps(f"{target}/{hostile}") in result.stderr
+
+
+@pytest.mark.parametrize("check", (False, True))
+def test_cli_caps_the_listed_items_and_reports_total_and_truncated(
+    tmp_path: Path, check: bool
+) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    total = _CAP + 5
+    for index in range(total):
+        _write(view / f"agents/n{index:03}.md", b"wanted\n")
+        _write(target / f"agents/n{index:03}.md", b"unmanaged\n")
+
+    result = _run_cli(view, canonical, target, *(("--check",) if check else ()))
+
+    payload = _drift_payload(result.stderr)
+    assert len(payload["items"]) == _CAP  # type: ignore[arg-type]
+    assert (payload["total"], payload["truncated"]) == (total, True)
+    item_lines = [
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith(_ITEM_PREFIX)
+    ]
+    assert len(item_lines) == _CAP
+
+
+def test_cli_exactly_the_cap_is_not_truncated(tmp_path: Path) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    for index in range(_CAP):
+        _write(view / f"agents/n{index:03}.md", b"wanted\n")
+        _write(target / f"agents/n{index:03}.md", b"unmanaged\n")
+
+    payload = _drift_payload(_run_cli(view, canonical, target).stderr)
+
+    assert (payload["total"], payload["truncated"]) == (
+        _CAP,
+        False,
+    )
+
+
+@pytest.mark.parametrize("check", (False, True))
+def test_cli_seed_mismatch_names_the_differing_seed_paths(tmp_path: Path, check: bool) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    _canonical_identity(
+        canonical, files={"AGENTS.md": (b"canonical\n", False), "agents/gone.md": (b"x\n", False)}
+    )
+    _write(view / "AGENTS.md", b"manipulated seed\n")
+    before = _state(target)
+
+    result = _run_cli(
+        view, canonical, target, "--profile", "opencode", *(("--check",) if check else ())
+    )
+
+    assert result.returncode == EXIT_CODES[DriftClass.SOURCE_CHANGED]
+    assert result.stderr.splitlines()[0] == "workflow publisher: source-changed"
+    assert _drift_payload(result.stderr)["items"] == [
+        _record("source-changed", "seed", view, "AGENTS.md"),
+        _record("source-changed", "seed", view, "agents/gone.md"),
+    ]
+    assert _state(target) == before
+
+
+@pytest.mark.parametrize("check", (False, True))
+def test_cli_names_a_malformed_or_linked_canonical_manifest(tmp_path: Path, check: bool) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    manifest = canonical / CANONICAL_MANIFEST_NAME
+    manifest.write_text("{not json")
+
+    malformed = _run_cli(view, canonical, target, *(("--check",) if check else ()))
+
+    manifest.unlink()
+    manifest.symlink_to(tmp_path / "elsewhere")
+    linked = _run_cli(view, canonical, target, *(("--check",) if check else ()))
+    assert malformed.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert _drift_payload(malformed.stderr)["items"] == [
+        _record("invalid-or-semantic", "canonical-manifest", canonical, CANONICAL_MANIFEST_NAME)
+    ]
+    assert linked.returncode == EXIT_CODES[DriftClass.COLLISION]
+    assert _drift_payload(linked.stderr)["items"] == [
+        _record("collision", "canonical-manifest", canonical, CANONICAL_MANIFEST_NAME)
+    ]
+
+
+def test_cli_names_a_non_regular_seed_entry(tmp_path: Path) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    os.mkfifo(view / "agents-fifo.md")
+
+    result = _run_cli(view, canonical, target, "--profile", "opencode")
+
+    assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert _drift_payload(result.stderr)["items"] == [
+        _record("invalid-or-semantic", "seed", view, "agents-fifo.md")
+    ]
+
+
+def test_cli_names_a_malformed_runtime_manifest_in_the_target(tmp_path: Path) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    assert _run_cli(view, canonical, target).returncode == 0
+    _write(target / RUNTIME_MANIFEST_NAME, b"{broken")
+
+    for extra in ((), ("--check",)):
+        result = _run_cli(view, canonical, target, *extra)
+
+        assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+        assert _drift_payload(result.stderr)["items"] == [
+            _record("invalid-or-semantic", "target-manifest", target, RUNTIME_MANIFEST_NAME)
+        ]
+
+
+def test_cli_check_exit_codes_and_no_writes(tmp_path: Path) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    missing_target = tmp_path / "not" / "there"
+    before = _state(tmp_path)
+
+    missing = _run_cli(view, canonical, missing_target, "--check")
+    unpublished = _run_cli(view, canonical, target, "--check")
+
+    assert missing.returncode == 0 and missing.stderr == ""
+    assert unpublished.returncode == 0 and unpublished.stderr == ""
+    assert _state(tmp_path) == before
+    assert _run_cli(view, canonical, target).returncode == 0
+    clean = _run_cli(view, canonical, target, "--check")
+    _write(target / "AGENTS.md", b"edit\n")
+    drift = _run_cli(view, canonical, target, "--check")
+    (target / "AGENTS.md").unlink()
+    (target / "AGENTS.md").mkdir()
+    collision = _run_cli(view, canonical, target, "--check")
+    assert [clean.returncode, drift.returncode, collision.returncode] == [0, 11, 12]
+    assert clean.stderr == ""
+
+
+def test_cli_check_refuses_a_canonical_alias_without_writing(tmp_path: Path) -> None:
+    canonical, _target, view = _cli_setup(tmp_path)
+    before = _state(canonical)
+
+    result = _run_cli(view, canonical, canonical, "--check")
+
+    assert result.returncode == EXIT_CODES[DriftClass.INVALID_OR_SEMANTIC]
+    assert _state(canonical) == before
+
+
+def test_cli_keeps_lock_diagnostics_and_still_prints_an_empty_items_line(tmp_path: Path) -> None:
+    canonical, target, view = _cli_setup(tmp_path)
+    result = _run_cli(view, tmp_path / "missing-canonical", target)
+
+    lines = result.stderr.splitlines()
+    assert lines[0] == "workflow publisher: invalid-or-semantic"
+    assert lines[1].startswith(PUBLISHER_LOCK_ERROR_PREFIX)
+    assert _drift_payload(result.stderr) == {"items": [], "total": 0, "truncated": False}
+    assert not any(line.startswith(_ITEM_PREFIX) for line in lines)
+
+
+def test_a_claude_instruction_position_in_a_foreign_target_names_the_file(tmp_path: Path) -> None:
+    canonical, target = _roots(tmp_path)
+    view = _view(files=(_file("CLAUDE.md", b"bridge\n"),), target_tool="codex")
+
+    for mode in MODES:
+        result = _run(mode, canonical, target, view)
+
+        assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+        assert result.drift_items == (_entry(DriftClass.INVALID_OR_SEMANTIC, "CLAUDE.md"),)
+
+
+def test_a_seed_with_a_foreign_source_names_the_canonical_manifest() -> None:
+    manifest = workflow_publisher._Manifest("claude", {}, {})
+    view = WorkflowView("codex", ())
+
+    with pytest.raises(PublishError) as error:
+        workflow_publisher._verify_seed_against_canonical_manifest(view, manifest, "opencode")
+
+    assert error.value.drift_class is DriftClass.SOURCE_CHANGED
+    assert error.value.items == (
+        _entry(DriftClass.SOURCE_CHANGED, CANONICAL_MANIFEST_NAME, origin="canonical-manifest"),
+    )

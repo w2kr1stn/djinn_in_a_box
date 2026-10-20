@@ -1340,7 +1340,7 @@ class TestEnsureNetwork:
 class TestWorkflowImageCompatibility:
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_accepts_publisher_label(self, run: MagicMock) -> None:
-        run.return_value = MagicMock(returncode=0, stdout="1\n")
+        run.return_value = MagicMock(returncode=0, stdout="2\n")
 
         assert workflow_image_compatible() is WorkflowImageCompatibility.COMPATIBLE
         assert run.call_args.args[0] == [
@@ -1351,6 +1351,12 @@ class TestWorkflowImageCompatibility:
             "--format",
             '{{ index .Config.Labels "djinn.workflow.publisher" }}',
         ]
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_rejects_previous_publisher_label(self, run: MagicMock) -> None:
+        run.return_value = MagicMock(returncode=0, stdout="1\n")
+
+        assert workflow_image_compatible() is WorkflowImageCompatibility.INCOMPATIBLE
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_rejects_unlabelled_image_content_free(self, run: MagicMock) -> None:

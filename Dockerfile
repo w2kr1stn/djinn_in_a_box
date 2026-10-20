@@ -193,7 +193,7 @@ COPY --chown=dev:dev scripts/mcp-register.sh /home/dev/mcp-register.sh
 COPY --chown=dev:dev --chmod=755 scripts/package-replay.sh /home/dev/package-replay.sh
 RUN chmod +x ~/entrypoint.sh ~/mcp-register.sh
 
-LABEL djinn.workflow.publisher="1"
+LABEL djinn.workflow.publisher="2"
 
 ENV SHELL=/bin/zsh
 ENTRYPOINT ["/home/dev/entrypoint.sh"]

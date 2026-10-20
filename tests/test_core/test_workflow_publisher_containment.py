@@ -1033,3 +1033,30 @@ def test_refused_walk_closes_every_descriptor(tmp_path: Path, kind: str) -> None
         snapshot_file_view(source, source="claude")
 
     assert _open_descriptors() == before
+
+
+def test_linked_parent_collisions_name_the_item_at_preflight_and_at_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical, target, outside = _roots(tmp_path)
+    _link_into_outside(target, "skills", outside)
+
+    preflight = _publish(canonical, target, _view(_DEEP))
+
+    assert preflight.drift_class is DriftClass.COLLISION
+    assert preflight.drift_items == (
+        workflow_publisher.DriftEntry(DriftClass.COLLISION, PurePosixPath(_DEEP)),
+    )
+    (target / "skills").unlink()
+    (target / "skills/demo").mkdir(parents=True)
+
+    def swap() -> None:
+        _link_into_outside(target, "skills/demo", outside)
+
+    monkeypatch.setattr(workflow_publisher, "_before_target_commit", swap)
+    boundary = _publish(canonical, target, _view(_DEEP))
+
+    assert boundary.drift_class is DriftClass.COLLISION
+    assert boundary.drift_items == (
+        workflow_publisher.DriftEntry(DriftClass.COLLISION, PurePosixPath(_DEEP)),
+    )

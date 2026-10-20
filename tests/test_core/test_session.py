@@ -411,7 +411,8 @@ class TestRefreshOpenCodeWorkflow:
         ("label", "expected"),
         [
             ("", WorkflowImageCompatibility.INCOMPATIBLE),
-            ("1\n", WorkflowImageCompatibility.COMPATIBLE),
+            ("1\n", WorkflowImageCompatibility.INCOMPATIBLE),
+            ("2\n", WorkflowImageCompatibility.COMPATIBLE),
         ],
     )
     def test_container_image_label_distinguishes_compatibility(

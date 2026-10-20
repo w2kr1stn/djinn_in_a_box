@@ -74,6 +74,7 @@ COMPOSE_PROJECT = "djinn-in-a-box"
 DECLARED_VOLUME_PREFIX = "djinn-"
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
+_WORKFLOW_PUBLISHER_VERSION = "2"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 _MOUNT_ROOT = Path("/home/dev/mount")
 _WORKSPACE_PATH = Path("/home/dev/workspace")
@@ -3132,7 +3133,7 @@ def workflow_image_compatible(
         )
     return (
         WorkflowImageCompatibility.COMPATIBLE
-        if result.stdout.strip() == "1"
+        if result.stdout.strip() == _WORKFLOW_PUBLISHER_VERSION
         else WorkflowImageCompatibility.INCOMPATIBLE
     )
 
