@@ -9,6 +9,12 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Name offending workflow roots, files and carrier keys in delivery refusals.
+  `djinn config status` and doctor's `Config workflow` check now inspect start
+  runtime roots read-only; runtime drift makes status exit `1`. Plain sync
+  warns about runtime drift after a successful canonical sync (#166).
+- Check every delivery target before preflight changes workflow content, and
+  print canonical auto-sync counts even when a later step refuses (#166).
 - Require `DJINN_LIVE_DOCKER=1` before probing or running live Docker overlay
   tests; CI opts in on its test step.
 - Persist OpenCode `opencode.json`, `cli.json` and custom themes through the
@@ -60,6 +66,12 @@ Versioning before and after the first stable release.
   in `Managed bind sources`. Existing setups: move an overlapping installation,
   Python environment or PATH directory out of the root, or choose another root,
   before the next start; `djinn doctor` lists them.
+- Mount the OpenCode seed view read-only alongside the canonical view. Claude
+  workflow binds remain writable (#166).
+- Seal whole managed runtime files as `0444` (`0555` executable) and runtime
+  manifests as `0444`, resealing writable copies at delivery. Carriers and the
+  canonical tree keep their mode handling. Rename-based tools can still replace
+  files; named drift checks and backed-up discard provide recovery (#166).
 - At container creation, refuse writable declared binds and writable invocation
   `--mount`/`--here` sources that overlap host execution inputs, including
   `djinn run`'s implicit `--here`. Read-only binds, `--mount ...:ro`, and
@@ -110,6 +122,8 @@ Versioning before and after the first stable release.
   (#164).
 - Reserve `CODEX_HOME`, `CODEX_SQLITE_HOME` and the Codex daemon policy helper
   override in environment declarations (#164).
+- Require image label `djinn.workflow.publisher=2` for workflow delivery;
+  older or unlabeled images refuse with `Rebuild/recreate required.` (#166).
 - Move dev and audit OpenCode installs to npm
   [`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
   (published 2026-10-08).
@@ -144,6 +158,16 @@ Versioning before and after the first stable release.
 - Read-only `Codex daemon updater` and `Codex daemon releases` doctor rows,
   showing updater/remote-control settings and release count, size and selection
   without a fix action (#164).
+- `djinn config sync --discard-target-drift`: back up managed target edits in
+  the canonical tree and start runtime roots, then restore wanted state. It
+  requires stopped Djinn containers, holds lifecycle exclusion through the last
+  publish, and makes all backups durable before overwriting any target.
+  Private records live under the passwd home's
+  `~/.local/state/djinn/workflow-drift/<UTC>-<pid>/`, outside backup, sync zones
+  and dev mounts (#166).
+- Doctor's `OpenCode runtime` check describes the container-local delivery
+  rebuilt at each start and, for running dev, checks the image gate and inspects
+  drift read-only through the publisher (#166).
 - Host-private post-mortem records before recovery removes unexpectedly stopped
   containers, plus hostctl teardown observations. Records keep bounded log tails
   and final state under `~/.local/state/djinn/post-mortem/` (last 10 / 8 MiB);

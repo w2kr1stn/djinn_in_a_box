@@ -113,17 +113,62 @@ build-time networking, not the resulting container's runtime network.
 
 ## Host-side workflow publishing
 
+In dev, `~/.opencode/seed` and `~/.djinn-canonical` are read-only canonical views;
+writes through them fail with `EROFS`. Only the default source's `config/claude`
+workflow binds stay writable. Selecting another source leaves those Claude
+binds as writable aliases of generated targets (follow-up
+[#165](https://github.com/w2kr1stn/djinn_in_a_box/issues/165)). Selecting OpenCode
+delivers no writable source alias and has a known seed-verification mismatch
+reported as `source-changed`
+([#168](https://github.com/w2kr1stn/djinn_in_a_box/issues/168)). The read-only
+views protect only these two paths; a writable bind that would alias the same
+files through the installation, such as a workspace root that contains it, is
+refused at creation ([creation-time rule](#sealed-deployments-and-trusted-controller)).
+
+Managed whole runtime files are delivered `0444` (`0555` executable), and the
+runtime manifest `0444`; carriers and the canonical tree keep their mode
+handling. Writable managed files are resealed at the next delivery; write-mode
+changes alone are not drift. The modes stop in-place writers, including Codex
+and OpenCode edit tools and shell redirection. They are a signal, not a security
+boundary: Claude Code's Edit tool and `sed -i` can replace by rename. Drift
+detection and backed-up discard are the safety net.
+
 The host CLI reads and writes workflow trees that dev can write: the per-CLI
-config roots and the `config/claude` and `config/opencode` seeds. The workflow
-publisher and config sync anchor every access there to an opened root directory
-and follow no symlink at or below it. A symlinked or non-directory path component
-is refused as a collision, and links, FIFOs, sockets and devices are never opened
-for I/O. Ancestors of these roots are trusted. A workspace or other managed root
-that contains the installation is refused at creation, because the installation
-is a host execution input ([creation-time rule](#sealed-deployments-and-trusted-controller));
+config roots and the writable `config/claude` binds. The workflow publisher and
+config sync anchor every access there to an opened root directory and follow no
+symlink at or below it. A symlinked or non-directory path component is refused as
+a collision, and links, FIFOs, sockets and devices are never opened for I/O.
+Ancestors of these roots are trusted. A workspace or other managed root that
+contains the installation is refused at creation, because the installation is a
+host execution input ([creation-time rule](#sealed-deployments-and-trusted-controller));
 placing a config root inside a writable mount such as the workspace remains
 outside this guarantee. The publisher contains its own I/O; it does not protect a
 dev-writable tree from dev.
+Every mutation rechecks its preflight snapshot immediately before replacement
+or removal. This narrows the ordinary-publish read-to-rename window against
+writers that ignore Djinn's advisory locks; it cannot close it. Host-side
+writers that bypass Djinn, including manual file sync or Docker operations,
+remain outside this protection.
+
+`djinn config sync --discard-target-drift` requires stopped Djinn containers
+and holds the lifecycle guard from before the fail-closed running check through
+the last publish. It backs up only managed target drift, not collisions or
+invalid states; host-fallback roots are excluded. All backup bytes and the
+directory chain must be durable before the first overwrite; backup failure
+leaves targets untouched. Each overwritten item must still match its backed-up
+state, with a mutation-boundary recheck. Host writers bypassing Djinn remain a
+residual even while this guard is held.
+
+Backups use the fixed passwd-home location
+`~/.local/state/djinn/workflow-drift/<UTC>-<pid>/` (independent of `HOME` and
+`XDG_STATE_HOME`), with directories `0700` and files `0600`, created only for
+target drift. Admission and creation use a no-follow descriptor walk and refuse
+overlap with the installation, config or sync-zone roots, `code_dir`, sessions,
+or a declared bind source, including the real paths of opened descriptors.
+Drift records are outside `djinn backup`, sync zones and dev mounts. Operators
+exclude `~/.local/state/djinn` from their own sync and mounts as for post-mortem
+records.
+
 Host creates, chmods and deletes below the config, shared and local zone roots,
 sessions root and Claude seed root use the same opened-root anchoring. They never
 follow a symlink below it. Backup and restore keep pathname tar and the post-restore

@@ -457,11 +457,11 @@ Crash residue (`.djinn-settings-*`) is never restored or projected into workflow
 delivery. `djinn doctor` reports it as zone drift in config-root `claude/` and
 `opencode/`; beside the seed overlay in `config/claude/` it is unreported.
 
-The agent CLIs write into their own config root while they run, and those writes
-land in the workflow source because `config/claude/skills` and
-`config/claude/scripts` are bind-mounted read-write so you can edit skills in
-place. Two such trees are runtime state, not authored workflow, and Djinn skips
-them everywhere it reads a source:
+The agent CLIs write into their own config root while they run. With the default
+Claude source, those writes land in the workflow source because
+`config/claude/skills` and `config/claude/scripts` are bind-mounted read-write so
+you can edit skills in place. Two such trees are runtime state, not authored
+workflow, and Djinn skips them everywhere it reads a source:
 
 | Path | Written by | Treatment |
 | --- | --- | --- |
@@ -496,30 +496,77 @@ Each entry names either a file or a carrier-file key and records only its
 content hash and executable flag, plus the selected source for the manifest.
 Neighboring keys in shared JSON or TOML carriers stay operator-owned.
 
-`djinn config status` is read-only: it reports the selected source, sanitized
-locations, one drift class, and one remedy without printing workflow or settings
-bodies. Its exit status is `0` only for `clean`, and `1` for every other state.
-`djinn config sync` is the explicit full writer and exits non-zero when blocked.
+Whole managed files in runtime roots are delivered with mode `0444` (`0555`
+when executable), and the runtime manifest with `0444`. Shared carriers such as
+`settings.json`, `config.toml` and `opencode.json`, and the canonical tree keep
+their existing mode handling. A writable managed file is resealed at the next
+delivery; changing write permissions alone is not drift. These modes block
+in-place writes, including Codex and OpenCode edit tools and shell redirection.
+They do not block replacement by rename, such as Claude Code's Edit tool or
+`sed -i`; drift detection and the discard path below remain the safety net.
+
+`djinn config status` is read-only: it audits the canonical tree and the runtime
+roots delivered by `djinn start` (currently `<config-root>/codex`; Compose Claude
+uses direct mounts). Drift diagnostics name the root and item, for example
+`config/opencode/AGENTS.md` or `codex:AGENTS.md (<config-root>/codex)`, with
+`[key.path]` for a carrier key. Output is sanitized and never prints workflow or
+settings bodies. Status exits `0` only for `clean`, and `1` for every other state.
+Plain `djinn config sync` writes the canonical views and exits non-zero when
+blocked. After a successful sync it warns about runtime drift without repairing
+it or changing the successful canonical-sync exit status.
 The five states are:
 
 | State | Meaning | Remedy |
 | --- | --- | --- |
 | `clean` | The selected source and all managed views match their manifests. | None. |
 | `source-changed` | The source projection changed or was unstable during publication. | Run `djinn config sync`, then retry. |
-| `target-drift` | A manifest-managed item was edited. | Restore or move the modified item, then retry. |
-| `collision` | An unmanaged item occupies a managed path. | Move or remove the conflicting item, then retry. |
+| `target-drift` | A manifest-managed item was edited. | Keep wanted edits in the selected source `config/<source>/`, stop running Djinn containers (`djinn clean`), then run `djinn config sync --discard-target-drift` (backs up edited files first). |
+| `collision` | An unmanaged item occupies a managed path. | Move or remove the conflicting unmanaged workflow item, then retry. |
 | `invalid-or-semantic` | The source is invalid, empty, or contains a non-portable artifact. | Author or edit the artifact natively in the target tool's view, or make the source form portable. |
 
 There is no semantic-provider fallback: workflow sync never invokes a provider.
 Normal `start`, `run`, and `session` preparation repairs only deterministic
-`source-changed` projection drift; all other states stop the command before an
-agent starts. Preflight, status, config-workflow audits, and sync never seed or
-repair source roots. Only `djinn init` and `djinn doctor --fix` perform source seeding.
+`source-changed` projection drift. Preflight checks every delivery target
+read-only before changing workflow content; all other states stop the command
+before an agent starts. A canonical auto-sync prints
+`Synchronized source changes into the canonical workflow: <n> changed, <n> removed.`,
+even if a later step refuses. Preflight, status, config-workflow audits, and
+sync never seed or repair source roots. Only `djinn init` and
+`djinn doctor --fix` perform source seeding.
+
+`djinn config sync --discard-target-drift` backs up differing managed items in
+the canonical tree and start runtime roots, then restores their wanted state;
+pending source changes are synchronized too. It accepts only target drift, not
+collisions or invalid states. It requires stopped Djinn containers and holds the
+lifecycle guard from before the fail-closed running check through the last
+publish. If needed, stop them with `djinn clean` first.
+
+Backups go to `~/.local/state/djinn/workflow-drift/<UTC>-<pid>/`, under the passwd
+home regardless of `HOME` or `XDG_STATE_HOME`, with `0700` directories and `0600`
+files. A key drift copies the whole carrier; missing items are reported without
+inventing a copy. All backups and their directory chain must be durable before
+the first overwrite. The command prints each item and the backup directory;
+backup failures keep partial copies and leave all targets untouched. With no
+target drift it acts like plain sync and creates no drift backup directory.
+The location must not overlap the installation, config or sync-zone roots,
+`code_dir`, sessions, or a declared bind source. These records are outside
+`djinn backup`, sync zones and dev mounts; operators should exclude
+`~/.local/state/djinn` from their own sync and mounts, as for post-mortem records.
+
+Host-fallback roots are excluded from discard. Keep wanted edits in the selected
+source and sync it, then follow each named item's restore source or `remove`
+action for retired files or keys. Keep the runtime manifest so ownership and
+retirement stay tracked. A managed TOML key written as a multi-line value or
+table cannot be rewritten: use a single-line value or delete the named key,
+preserving neighboring personal keys, then retry.
 
 Host fallback for Claude, Codex, or OpenCode receives the selected canonical
-view through the shared publisher. The container OpenCode runtime is refreshed
-the same way from the read-only canonical mount. The workflow publisher requires
-an image marked `djinn.workflow.publisher=1`; an image without that label stops
+view through the shared publisher. The container-local OpenCode runtime at
+`~/.config/opencode` is rebuilt at every `djinn start` and refreshed before an
+OpenCode container session. A runtime drift refusal names
+`opencode-runtime:<relative>`: keep wanted edits in `config/<source>/`, then run
+`djinn clean` and `djinn start` to recreate it. The workflow publisher requires
+an image marked `djinn.workflow.publisher=2`; an older or unlabeled image stops
 preparation with `Rebuild/recreate required.` before Compose starts or a
 running-container refresh executes.
 
@@ -564,6 +611,15 @@ Two read-only rows inspect Codex's local daemon state:
   characters escaped.
 
 Neither row has a fix action. The daemon policy runs at dev-container start.
+
+The read-only `Config workflow` check audits the canonical tree and start
+runtime roots, warning with named drift items and a remedy. `OpenCode runtime`
+reports the container-local delivery, rebuilt at every start. For a running dev
+container it checks the image label first, then invokes the publisher's
+read-only check through `docker exec`. Drift is a named `WARN`; an unreachable
+container, timeout or unusable diagnostic is `check unavailable`, never clean.
+An absent or stopped container reports the rebuild lifecycle without inspecting
+its runtime files.
 
 The filesystem-only `Post-mortem records` row works without valid config or a
 Docker daemon. It reports `PASS` with `none` or the kept count and latest record
@@ -908,6 +964,17 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `./config/opencode` | `/home/dev/.opencode/seed:ro` | Read-only OpenCode workflow view for the publisher |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
+
+Writes through `~/.opencode/seed` and `~/.djinn-canonical` fail with `EROFS`.
+Only the default source's `config/claude` binds remain writable. With another
+selected source, those Claude binds remain writable aliases of generated files
+([#165](https://github.com/w2kr1stn/djinn_in_a_box/issues/165)). With OpenCode
+selected, the container has no writable source alias, and delivery has a known
+seed-verification problem reported as `source-changed`
+([#168](https://github.com/w2kr1stn/djinn_in_a_box/issues/168)). The read-only
+views protect only these two paths. A writable bind that would alias the same
+files through the Djinn installation, such as a workspace root that contains it,
+is refused at creation (see [Configuration](#configuration)).
 
 Codex's `sqlite` directory is a default local-zone overlay. Djinn sets
 `CODEX_SQLITE_HOME=/home/dev/.codex/sqlite`, so its SQLite stores (`state_*`,
