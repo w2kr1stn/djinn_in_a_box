@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import time
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -2566,6 +2567,50 @@ def test_restore_holds_the_parked_session_against_a_concurrent_recovery(
         "database-only",
     }
     assert not list(Path(oc.default_audit_root()).iterdir())
+
+
+def test_a_second_restore_is_refused_while_one_runs(credential_restore, monkeypatch, tmp_path):
+    _, _, _, archives, oc = credential_restore
+    archives(["djinn-opencode-data", "djinn-sync-opencode"])
+    lock = hostctl.state_root() / "control.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    ready = tmp_path / "first-restore-holds-the-lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "open(sys.argv[2], 'w').close()\n"
+            "time.sleep(60)\n",
+            str(lock),
+            str(ready),
+        ],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert holder.poll() is None and time.monotonic() < deadline
+            time.sleep(0.02)
+        clock = iter(range(0, 10_000, 10))
+        monkeypatch.setattr(hostctl.time, "monotonic", lambda: float(next(clock)))
+        monkeypatch.setattr(hostctl.time, "sleep", lambda _: None)
+        touched = []
+        monkeypatch.setattr(
+            backup_module, "export_opencode_data_credentials", lambda: touched.append("export")
+        )
+        monkeypatch.setattr(backup_module, "restore_volume", lambda *_: touched.append("volume"))
+        result = runner.invoke(app, ["restore"])
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.exit_code == 1
+    assert "host control is busy" in result.output
+    assert touched == []
+    root = Path(oc.default_audit_root())
+    assert not root.exists() or not list(root.iterdir())
 
 
 @pytest.mark.parametrize("failure", ["export", "park"])
