@@ -79,8 +79,8 @@ ALLOWED_DOMAINS=(
     # uv/Astral
     "astral.sh"
     
-    # OAuth endpoints (for authentication)
-    "console.anthropic.com"
+    # Sign-in token endpoints (measured: Claude Code 2.1.304, Codex 0.163.0)
+    "platform.claude.com"
     "auth.openai.com"
     
     # Add project-specific domains below:

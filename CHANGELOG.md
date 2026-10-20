@@ -23,6 +23,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `--firewall` now allows Claude's current sign-in token host
+  `platform.claude.com` instead of the unused `console.anthropic.com`, so a
+  subscription token can be refreshed under the firewall (#178).
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).

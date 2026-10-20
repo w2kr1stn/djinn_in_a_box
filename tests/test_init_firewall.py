@@ -23,3 +23,19 @@ def test_allowlist_excludes_google_and_keeps_supported_api_hosts() -> None:
 
     assert all("google" not in domain.casefold() for domain in domains)
     assert {"api.anthropic.com", "api.openai.com", "opencode.ai"}.issubset(domains)
+
+
+def test_sign_in_token_hosts_match_bundled_clis() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "init-firewall.sh"
+    ).read_text(encoding="utf-8")
+    array = re.search(r"(?ms)^ALLOWED_DOMAINS=\((.*?)^\)", script)
+    assert array is not None
+    body = array.group(1)
+    group = body.split("# Sign-in token endpoints", 1)[1].split("#", 1)[0]
+    sign_in_hosts = set(re.findall(r"[\"']([^\"']+)[\"']", group))
+    entries = "\n".join(line.split("#", 1)[0] for line in body.splitlines())
+    domains = re.findall(r"[\"']([^\"']+)[\"']", entries)
+
+    assert sign_in_hosts == {"platform.claude.com", "auth.openai.com"}
+    assert "console.anthropic.com" not in domains
