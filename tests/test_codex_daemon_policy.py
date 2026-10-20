@@ -90,6 +90,12 @@ p = home / 'packages/app-server-daemon'
 """])
     child.wait()
     sys.exit(0)
+if mode == "detached-holder":
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(6)"], start_new_session=True
+    )
+    (home / "holder.pid").write_text(str(holder.pid))
+    sys.exit(0)
 if mode == "silent-fail":
     sys.exit(7)
 if mode == "remove-current":
@@ -852,6 +858,11 @@ def test_update_timeout_signal_grace_kill_and_reap_order(home, monkeypatch, grac
 
     class Process:
         pid = 123456
+        stdout = stderr = None
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return -signal.SIGKILL
 
         def communicate(self, timeout=None):
             events.append(("communicate", timeout))
@@ -885,7 +896,7 @@ def test_update_timeout_signal_grace_kill_and_reap_order(home, monkeypatch, grac
         ("signal", signal.SIGTERM),
         ("communicate", policy.TERMINATE_GRACE),
         ("signal", signal.SIGKILL),
-        ("communicate", None),
+        ("wait", None),
     ]
 
 
@@ -939,6 +950,23 @@ def test_container_writable_names_are_escaped_in_helper_output(home, fake):
     assert "\x1b" not in output and "\x07" not in output
     assert "kept keep\\x1b]52;c;cGF5bG9hZA==\\x07" in result.stdout
     assert "stale\\x1b[31m" in result.stderr
+
+
+def test_detached_descendant_holding_the_pipes_cannot_hang_startup(home, fake):
+    # The group kill cannot reach a new session; reaping must not wait for its pipe EOF.
+    # The holder exits on its own after 6 s; returning well before proves no wait for pipe EOF.
+    select(home, release(home, "old", "0.160.0"))
+    started = time.monotonic()
+    result = run(
+        home,
+        fake,
+        overrides={"FAKE_MODE": "detached-holder"},
+        constants="UPDATE_TIMEOUT=0.5, TERMINATE_GRACE=0.1",
+    )
+    assert time.monotonic() - started < 4.5
+    assert_warning(result, releases(home).parent / "current")
+    assert "timed out" in result.stderr
+    assert (releases(home) / "old").is_dir()
 
 
 @pytest.mark.parametrize("version", ["0.160.0", "1.2.3"])

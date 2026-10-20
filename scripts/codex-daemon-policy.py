@@ -191,7 +191,11 @@ class Policy:
             finally:
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                # Reap without reading: a detached descendant may still hold the pipes open.
+                process.wait()
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
             return None
         return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 

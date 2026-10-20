@@ -30,6 +30,7 @@ from djinn_in_a_box.config.declarations import DeclarationSet
 from djinn_in_a_box.config.defaults import KNOWN_CONFIG_ROOT_ENTRIES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import (
+    ZONE_CONTAINER_TARGETS,
     ZoneAssignment,
     ZoneAssignments,
     load_zone_assignments,
@@ -524,7 +525,13 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
             )
         except OSError:
             selected_ok = False
-        if ".." in current_raw.parts or current_raw.parent.name != "releases" or not selected_ok:
+        # Relative links are `releases/<name>`; absolute ones name the container's own releases.
+        expected_parent = (
+            ZONE_CONTAINER_TARGETS["codex"] / "packages/app-server-daemon/releases"
+            if current_raw.is_absolute()
+            else Path("releases")
+        )
+        if ".." in current_raw.parts or current_raw.parent != expected_parent or not selected_ok:
             release_problem = (
                 f"invalid current selection {current_raw}; start-time pruning is skipped"
             )

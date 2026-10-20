@@ -45,7 +45,8 @@ class DaemonTree:
         (path / "codex-package.json").write_text('{"version":"0.163.0","layoutVersion":1}')
         (path / "codex").symlink_to("bin/codex")
         if selected:
-            (self.releases.parent / "current").symlink_to(path)
+            # Codex's own shapes: relative `releases/<name>` or the container's absolute path.
+            (self.releases.parent / "current").symlink_to(Path("releases") / name)
         return path
 
     def checks(self) -> list[doctor_mod.Check]:
@@ -410,6 +411,8 @@ def test_current_readlink_names_target_without_resolving(
         "releases/missing",
         "releases/not-present/../0.163.0-test",
         "elsewhere/../releases/0.163.0-test",
+        "elsewhere/releases/0.163.0-test",
+        "/other/home/packages/app-server-daemon/releases/0.163.0-test",
         "outside/0.163.0-test",
         "releases/no-manifest",
         "releases/.staging.abc",
