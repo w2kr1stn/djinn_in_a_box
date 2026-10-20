@@ -1303,6 +1303,15 @@ def _database_inode(path: str | os.PathLike[str]) -> int | None:
     return status.st_ino
 
 
+def _open_state_dir(path: str) -> int:
+    """The host-state directory. A fresh data volume may lack it; OpenCode would create it too."""
+    try:
+        return open_dir(path)
+    except FileNotFoundError:
+        os.makedirs(path, 0o700, exist_ok=True)
+        return open_dir(path)
+
+
 def _adjust(
     runner: OpenCode,
     keeper: StateKeeper,
@@ -1382,7 +1391,7 @@ def sync(
     _database_inode(database)
     carrier_fd = open_dir(carrier)
     try:
-        state_fd = open_dir(state_dir)
+        state_fd = _open_state_dir(state_dir)
         try:
             read_carrier(carrier_fd)
             state, raw = read_host_state(state_fd, state_name)

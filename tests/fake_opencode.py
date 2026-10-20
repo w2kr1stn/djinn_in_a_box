@@ -279,6 +279,8 @@ def main() -> int:
     if not hook("FAKE_NOOP_AT", number):
         if operation == "export":
             if not os.path.exists(state_path):
+                # Like OpenCode, the first export creates the data directory and the database.
+                os.makedirs(os.path.dirname(state_path), exist_ok=True)
                 write_state(state_path, state)
             do_export(state, state_path)
         elif operation == "import":

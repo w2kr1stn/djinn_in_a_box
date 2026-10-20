@@ -730,6 +730,16 @@ def test_a_first_start_imports_the_file_and_binds_the_host_state(world: World) -
     assert stat.S_IMODE(host.state_file.stat().st_mode) == 0o600
 
 
+def test_a_fresh_volume_without_the_data_directory_starts(world: World) -> None:
+    host = world.host()
+    shutil.rmtree(host.data)
+    world.write(FILE, [entry("cred_a", "prov_p", key_value("a1"))])
+    sync_ok(world, host)
+    assert stat.S_IMODE(host.data.stat().st_mode) == 0o700
+    assert host.values() == {"cred_a": key_value("a1")}
+    assert host.state().inode == host.db.stat().st_ino
+
+
 def test_database_logins_are_published_to_the_file_without_tombstones(world: World) -> None:
     host = world.host()
     host.put([entry("cred_a", "prov_p", key_value("a1"))])
