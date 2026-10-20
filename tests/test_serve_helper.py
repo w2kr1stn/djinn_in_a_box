@@ -49,6 +49,8 @@ def load_module() -> ModuleType:
 
 
 mod = load_module()
+# Teardown reads the real /proc even while a test still patches mod.proc_stat.
+REAL_PROC_STAT = mod.proc_stat
 
 
 # --------------------------------------------------------------------------- fakes
@@ -152,8 +154,8 @@ def descendants() -> list[int]:
     children: dict[int, list[int]] = {}
     for entry in os.listdir("/proc"):
         if entry.isdigit():
-            fields = mod.proc_stat(int(entry))
-            if fields is not None:
+            fields = REAL_PROC_STAT(int(entry))
+            if fields is not None and len(fields) > 1:
                 children.setdefault(int(fields[1]), []).append(int(entry))
     found: list[int] = []
     queue = [os.getpid()]
@@ -184,6 +186,11 @@ def subreaper() -> Iterator[None]:
                     os.waitpid(pid, os.WNOHANG)
             time.sleep(0.05)
         libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+
+
+def test_descendants_ignore_a_patched_proc_stat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod, "proc_stat", lambda _pid: ["Z"])
+    assert isinstance(descendants(), list)
 
 
 def wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
