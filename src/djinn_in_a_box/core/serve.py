@@ -31,6 +31,7 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.host_runtime import private_directory
 from djinn_in_a_box.core.paths import BACKUPS_DIR
+from djinn_in_a_box.core.serve_helper import STATE_DIR
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 CLAUDE: Final = "claude"
@@ -144,6 +145,32 @@ def check_opencode_port(info: ContainerInfo, port: int) -> bool:
     return info.ports == {
         f"{OPENCODE_CONTAINER_PORT}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]
     }
+
+
+def check_process_state(info: ContainerInfo) -> None:
+    for entry in info.env:
+        name = entry.partition("=")[0]
+        if name.startswith("DJINN_SERVE_TEST_"):
+            raise ServeError(
+                f"The container environment enables a serve test override ({name}); refusing."
+            )
+    unknown = "Could not inspect the container's process-state mounts; refusing."
+    mounts: object = info.mounts
+    if not isinstance(mounts, list):
+        raise ServeError(unknown)
+    for mount in cast(list[object], mounts):
+        if not isinstance(mount, dict):
+            raise ServeError(unknown)
+        destination = cast(dict[str, object], mount).get("Destination")
+        if not isinstance(destination, str) or not destination.startswith("/"):
+            raise ServeError(unknown)
+        dest = os.path.normpath("/" + destination.lstrip("/"))
+        if os.path.commonpath((dest, STATE_DIR)) in (dest, STATE_DIR):
+            raise ServeError(
+                f"A mount overlaps the serve process-state directory ({destination}); "
+                "state must stay in the container's writable layer. "
+                "Remove that mount, then recreate the container."
+            )
 
 
 def check_opencode_roots(info: ContainerInfo) -> None:

@@ -268,8 +268,116 @@ def test_mount_over_opencode_settings_refused(host, destination):
     host.inspect["Mounts"] = [{"Type": "bind", "Destination": destination}]
     result = runner.invoke(app, ["serve", "opencode"])
     assert result.exit_code == 1
-    assert "A mount covers OpenCode's service settings" in result.output
+    expected = (
+        "A mount overlaps the serve process-state directory"
+        if destination == "/"
+        else "A mount covers OpenCode's service settings"
+    )
+    assert expected in result.output
     assert not host.direct
+
+
+@pytest.mark.parametrize(
+    "names", [["claude"], ["opencode"], ["claude", "opencode"], ["opencode", "claude"]]
+)
+@pytest.mark.parametrize(
+    "destination,allowed",
+    [
+        ("/tmp", False),
+        ("/tmp/djinn-serve", False),
+        ("/tmp/djinn-serve/opencode.json", False),
+        ("/tmp/./djinn-serve/../djinn-serve/", False),
+        ("/tmp/other/..", False),
+        ("//tmp", False),
+        ("/tmp/other", True),
+        ("/tmp/djinn-serve-other", True),
+    ],
+)
+def test_process_state_mount_gate(host, names, destination, allowed):
+    host.inspect["Mounts"] = [{"Type": "volume", "Destination": destination}]
+    result = runner.invoke(app, ["serve", *names])
+    assert result.exit_code == (0 if allowed else 1), result.output
+    if not allowed:
+        assert "A mount overlaps the serve process-state directory" in result.output
+        assert "writable layer" in result.output
+        assert [argv[1] for argv, _ in host.calls] == ["inspect"]
+        assert not host.direct
+        assert not serve.password_path().exists()
+        with pytest.raises(serve.ServeError) as exc:
+            serve.check_process_state(
+                serve.ContainerInfo(serve.ContainerState.RUNNING, mounts=host.inspect["Mounts"])
+            )
+        assert exc.value.code == "gate"
+
+
+@pytest.mark.parametrize("name", ["claude", "opencode"])
+@pytest.mark.parametrize(
+    "mounts",
+    [
+        None,
+        {},
+        [None],
+        [{}],
+        [{"Destination": None}],
+        [{"Destination": 123}],
+        [{"Destination": "relative"}],
+        [{"Destination": ""}],
+    ],
+)
+def test_process_state_unknown_mounts_refused(host, name, mounts):
+    host.inspect["Mounts"] = mounts
+    result = runner.invoke(app, ["serve", name])
+    assert result.exit_code == 1
+    assert "Could not inspect the container's process-state mounts" in result.output
+    assert [argv[1] for argv, _ in host.calls] == ["inspect"]
+    assert not host.direct
+    assert not serve.password_path().exists()
+
+
+@pytest.mark.parametrize("name", ["claude", "opencode"])
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DJINN_SERVE_TEST_STATE_DIR",
+        "DJINN_SERVE_TEST_HOME",
+        "DJINN_SERVE_TEST_TIMING",
+        "DJINN_SERVE_TEST_FUTURE",
+    ],
+)
+@pytest.mark.parametrize("value", ["", "override"])
+def test_process_state_test_overrides_refused(host, name, variable, value):
+    host.inspect["Config"]["Env"].append(f"{variable}={value}")
+    result = runner.invoke(app, ["serve", name])
+    assert result.exit_code == 1
+    assert "serve test override" in result.output and variable in result.output
+    assert [argv[1] for argv, _ in host.calls] == ["inspect"]
+    assert not host.direct
+    assert not serve.password_path().exists()
+
+
+@pytest.mark.parametrize("operation", [["--status"], ["--stop"], ["--pair", "opencode"]])
+def test_process_state_gate_only_for_start(host, operation):
+    host.inspect["Mounts"] = [{"Destination": "/tmp"}]
+    host.inspect["Config"]["Env"].append("DJINN_SERVE_TEST_STATE_DIR=/tmp/override")
+    result = runner.invoke(app, ["serve", *operation])
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("state", ["absent", "unknown", "not-detached"])
+def test_process_state_gate_after_container_gates(host, monkeypatch, state):
+    container = (
+        serve.ContainerInfo(serve.ContainerState.RUNNING, CID)
+        if state == "not-detached"
+        else serve.ContainerInfo(
+            serve.ContainerState.UNKNOWN if state == "unknown" else serve.ContainerState.ABSENT
+        )
+    )
+    monkeypatch.setattr(serve, "detect_container", lambda: container)
+    gate = MagicMock()
+    monkeypatch.setattr(serve, "check_process_state", gate)
+    result = runner.invoke(app, ["serve", "claude"])
+    assert result.exit_code == 1
+    gate.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -743,7 +851,7 @@ def test_snapshot_quick_timeouts_and_optional_tailscale(host, state):
     [
         ("started", 0, "opencode: started (pid 123)"),
         ("already-running", 0, "opencode: already running (pid 123)"),
-        ("restarted", 0, "opencode: restarted with the new password (pid 123)"),
+        ("restarted", 0, "opencode: restarted (pid 123)"),
         ("exited", 1, "opencode: exited during startup"),
     ],
 )

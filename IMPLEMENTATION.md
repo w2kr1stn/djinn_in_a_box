@@ -1828,10 +1828,13 @@ Claude's supervisor uses `pty.fork()` for a child in its own session/group,
 sets a 120×40 terminal and continuously drains it without sending input. One
 inherited pipe hands the child's PID/start time to the helper within 2 s;
 the complete record is written under the lock before startup is reported.
+If record construction or publication fails, both start paths stop the freshly
+spawned groups using their in-memory identities and return `state-dir`; failed
+cleanup explicitly warns that the process may survive.
 The supervisor forwards TERM/INT, waits for its child and caps its log at
 1 MiB by truncating to a marker before continuing with fresh output. It ignores
 SIGPIPE so a broken handoff pipe triggers child-group cleanup; only exec children
-reset SIGPIPE to its default disposition.
+reset SIGPIPE and SIGXFSZ to their default dispositions.
 
 OpenCode readiness waits at most 15 s; Claude gets a 5 s grace period. Log tails
 strip ANSI/control characters and retain at most 20 lines. A mutating helper
@@ -1883,7 +1886,10 @@ service again.
 #### Exposure Gates and Tailnet Discovery
 
 Host checks run in this order: mode/names, config, container inspection,
-detached marker, then (for OpenCode start/pair) exact loopback port binding,
+detached marker, then (for every start) process-state placement: unknown mounts,
+mounts overlapping `/tmp/djinn-serve` and any `DJINN_SERVE_TEST_` container
+environment variable refuse. Status, stop and pair skip this placement gate.
+Then (for OpenCode start/pair) exact loopback port binding,
 environment roots and mounts, every attached network, Engine version and Funnel.
 All host start gates and the non-mutating `opencode-preflight` finish before
 password creation or any server start. The start loop ends on its first failure.

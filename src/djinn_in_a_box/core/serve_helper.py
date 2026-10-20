@@ -1015,6 +1015,33 @@ def _fresh_record(pid: int, handoff: tuple[int, str] | None, tag: str, port: int
     )
 
 
+def _publish_started_record(
+    dirfd: int,
+    name: str,
+    pid: int,
+    handoff: tuple[int, str] | None,
+    tag: str,
+    port: int | None,
+    deadline: Deadline,
+) -> Record:
+    groups = [(pid, raw_start(pid) or "0")]
+    if handoff is not None:
+        groups.insert(0, handoff)
+    try:
+        record = _fresh_record(pid, handoff, tag, port)
+        save_record(dirfd, name, record)
+        return record
+    except Exception as exc:
+        try:
+            stopped = stop_groups(groups, deadline)
+        except Exception:
+            stopped = False
+        message = f"could not build or publish the {name} process record"
+        if not stopped:
+            message += "; cleanup could not stop the new process groups; the process may survive"
+        raise HelperError("state-dir", message) from exc
+
+
 def _read_handoff(readfd: int, seconds: float) -> tuple[int, str] | None:
     end = time.monotonic() + seconds
     data = b""
@@ -1058,8 +1085,9 @@ def cmd_claude_start(args: list[str]) -> dict[str, object]:
         if handoff is None or not _wait_leader(pid, 1.0):
             stop_groups([(pid, raw_start(pid) or "0")], deadline)
             raise HelperError("spawn", "the Claude supervisor did not report its child")
-        record = _fresh_record(pid, handoff, "claude-remote-control", None)
-        save_record(dirfd, "claude", record)
+        record = _publish_started_record(
+            dirfd, "claude", pid, handoff, "claude-remote-control", None, deadline
+        )
         child = (record.child_pid or 0, record.child_start or "0")
 
         def died() -> bool:
@@ -1138,8 +1166,9 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
         pid = spawn(dirfd, "opencode", argv, pty_mode=False)
         if not _wait_leader(pid, 1.0):
             raise HelperError("spawn", "the OpenCode process did not become a group leader")
-        record = _fresh_record(pid, None, "opencode-serve", port)
-        save_record(dirfd, "opencode", record)
+        record = _publish_started_record(
+            dirfd, "opencode", pid, None, "opencode-serve", port, deadline
+        )
 
         def settled() -> bool:
             if group_state(pid, record.start) != "alive":

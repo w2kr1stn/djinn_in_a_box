@@ -1373,6 +1373,78 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     assert is_gone(record["pid"])
 
 
+@pytest.mark.parametrize("name", ["claude", "opencode"])
+@pytest.mark.parametrize("boundary", ["build", "save"])
+@pytest.mark.parametrize("cleanup", ["ok", "false", "raises"])
+def test_failed_new_record_cleans_spawned_groups(
+    ctx: Ctx, name: str, boundary: str, cleanup: str
+) -> None:
+    injected = """
+import errno
+real_fresh_record = _fresh_record
+real_stop_groups = stop_groups
+def remember_spawn(pid, handoff, tag, port):
+    with open(os.path.join(os.environ["FAKE_DIR"], "spawned.json"), "w") as stream:
+        json.dump({"leader": pid, "child": handoff[0] if handoff else None}, stream)
+    end = time.monotonic() + 5
+    while not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "grandchild.pid")):
+        assert time.monotonic() < end, "fake server did not start its grandchild"
+        time.sleep(0.01)
+    if os.environ["FAIL_RECORD_AT"] == "build":
+        raise OSError(errno.ENOSPC, "No space left on device")
+    return real_fresh_record(pid, handoff, tag, port)
+def fail_save(*_):
+    raise OSError(errno.ENOSPC, "No space left on device")
+def record_stop(groups, deadline):
+    with open(os.path.join(os.environ["FAKE_DIR"], "cleanup.json"), "w") as stream:
+        json.dump(groups, stream)
+    if os.environ["FAIL_CLEANUP"] == "raises":
+        raise OSError(errno.EPERM, "Operation not permitted")
+    if os.environ["FAIL_CLEANUP"] == "false":
+        return False
+    return real_stop_groups(groups, deadline)
+_fresh_record = remember_spawn
+save_record = fail_save
+stop_groups = record_stop
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    source = SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    args = (
+        ["claude-start", "--prefix", "test"]
+        if name == "claude"
+        else ["opencode-start", "--port", str(ctx.port)]
+    )
+    rc, out = ctx.run(
+        *args,
+        stdin=None if name == "claude" else '{"password":"synthetic-password"}',
+        timing="stop_wait=0.2,kill_wait=2",
+        env={
+            "FAIL_RECORD_AT": boundary,
+            "FAIL_CLEANUP": cleanup,
+            "FAKE_CLAUDE_MODE": "stubborn",
+            "FAKE_OC_MODE": "grandchild",
+        },
+        source=source,
+    )
+    assert rc == 1 and out["ok"] is False and out["code"] == "state-dir", out
+    assert f"could not build or publish the {name} process record" in out["message"]
+    spawned = json.loads((ctx.fake / "spawned.json").read_text())
+    pids = [spawned["leader"]]
+    if name == "claude":
+        pids.insert(0, spawned["child"])
+    all_pids = [*pids, int((ctx.fake / "grandchild.pid").read_text())]
+    assert not (ctx.state / f"{name}.json").exists()
+    if cleanup == "ok":
+        assert "may survive" not in out["message"]
+        assert all(not is_alive(pid) for pid in all_pids)
+    else:
+        assert "could not stop" in out["message"] and "may survive" in out["message"]
+        assert all(is_alive(pid) for pid in all_pids)
+    groups = json.loads((ctx.fake / "cleanup.json").read_text())
+    assert [group[0] for group in groups] == pids
+    assert all(group[1].isdigit() and int(group[1]) > 0 for group in groups)
+
+
 def test_broken_handoff_kills_stubborn_child_group(ctx: Ctx) -> None:
     source = (
         SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
@@ -1424,11 +1496,12 @@ def test_exec_children_reset_sigpipe(ctx: Ctx, name: str) -> None:
 import os, signal
 real_exec = os.execvp
 def record_exec(file, argv):
-    with open(os.path.join(os.environ["FAKE_DIR"], "exec-sigpipe"), "w") as stream:
-        stream.write(str(int(signal.getsignal(signal.SIGPIPE))))
+    with open(os.path.join(os.environ["FAKE_DIR"], "exec-signals"), "w") as stream:
+        json.dump([int(signal.getsignal(sig)) for sig in (signal.SIGPIPE, signal.SIGXFSZ)], stream)
     real_exec(file, argv)
 os.execvp = record_exec
 signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 """
     source = (
         SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
@@ -1447,7 +1520,7 @@ signal.signal(signal.SIGPIPE, signal.SIG_IGN)
         source=source,
     )
     assert rc == 0, out
-    assert (ctx.fake / "exec-sigpipe").read_text() == str(int(signal.SIG_DFL))
+    assert json.loads((ctx.fake / "exec-signals").read_text()) == [int(signal.SIG_DFL)] * 2
     ctx.stop(name)
 
 

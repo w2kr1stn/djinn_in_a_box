@@ -176,7 +176,7 @@ def _start_result(
     if outcome == "already-running":
         info(f"{name}: already running (pid {pid})")
     elif outcome == "restarted" and name == core.OPENCODE:
-        success(f"opencode: restarted with the new password (pid {pid})")
+        success(f"opencode: restarted (pid {pid})")
     else:
         success(f"{name}: started (pid {pid})")
     if name == core.OPENCODE:
@@ -260,6 +260,8 @@ def serve(
             if failed:
                 raise typer.Exit(1)
             return
+        if pair is None:
+            core.check_process_state(container)
         tailnet: tuple[str | None, str, bool] = (None, "not queried", False)
         if core.OPENCODE in selected or pair is not None:
             tailnet = _opencode_preflight(container, port)

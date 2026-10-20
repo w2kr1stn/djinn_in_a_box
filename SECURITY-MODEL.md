@@ -186,6 +186,10 @@ are refused on the applicable host/helper start gates. Agents running as dev
 can read these files: the password protects network access, not against code
 already executing as that user.
 
+Process state stays in the container's writable layer: every start refuses
+a mount overlapping `/tmp/djinn-serve`, uninspectable mounts or a
+`DJINN_SERVE_TEST_` container environment override.
+
 The implementation rule is password delivery through stdin and a private file,
 never server argv/environment or Djinn logs. A live leak scan is best-effort
 corroboration, not a proof of absence: oversized/unreadable files, paths outside
