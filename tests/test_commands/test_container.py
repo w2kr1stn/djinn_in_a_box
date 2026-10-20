@@ -724,6 +724,71 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(docker=True, detach=True)
 
+    @pytest.mark.parametrize(
+        ("port", "stderr", "returncode", "detach", "hint"),
+        [
+            (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, True, True),
+            (49381, "Bind for 127.0.0.1:49381 failed: port is already allocated", 1, True, True),
+            (49381, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, True, False),
+            (49380, "Bind for 0.0.0.0:49380 failed: port is already allocated", 1, True, False),
+            (49380, "Bind for 127.0.0.1:49380 failed: permission denied", 1, True, False),
+            (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 0, True, False),
+            (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, False, False),
+            (
+                49380,
+                "Error response from daemon: driver failed programming external connectivity "
+                "on endpoint djinn (abc123): failed to bind host port for "
+                "127.0.0.1:49380:172.18.0.2:4096/tcp: address already in use",
+                1, True, True,
+            ),
+            (
+                49381,
+                "Error response from daemon: driver failed programming external connectivity "
+                "on endpoint djinn (abc123): failed to bind host port for "
+                "127.0.0.1:49381:172.18.0.2:4096/tcp: address already in use",
+                1, True, True,
+            ),
+            (
+                49380,
+                "Error response from daemon: driver failed programming external connectivity "
+                "on endpoint djinn (abc123): failed to bind host port for "
+                "127.0.0.1:49380:172.18.0.2:4096/tcp: permission denied",
+                1, True, False,
+            ),
+        ],
+        ids=[
+            "default", "configured", "other-port", "other-ip", "other-error",
+            "success", "foreground",
+            "host-process-default", "host-process-configured", "host-process-permission",
+        ],
+    )
+    def test_start_port_collision_hint(
+        self, start_mocks: dict[str, Any], port: int, stderr: str,
+        returncode: int, detach: bool, hint: bool,
+    ) -> None:
+        start_mocks["config"].serve.opencode_host_port = port
+        start_mocks["detached" if detach else "run"].return_value = RunResult(
+            returncode=returncode, stderr=stderr,
+        )
+
+        with (
+            patch.object(container, "info", wraps=container.info) as mock_info,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            container.start(detach=detach)
+
+        assert exc_info.value.exit_code == returncode
+        captured = re.sub(r"\x1b\[[0-9;]*m", "", start_mocks["err_output"].getvalue())
+        output = " ".join(captured.split())
+        expected = (
+            f"Port {port} is in use; choose another with: "
+            "djinn config set serve.opencode_host_port <n>"
+        )
+        assert (expected in output) is hint
+        assert ("choose another with:" in output) is hint
+        if hint:
+            mock_info.assert_any_call(expected)
+
 
     def test_start_detached_refuses_when_a_container_already_runs(
         self, start_mocks: dict[str, Any]
@@ -2021,3 +2086,125 @@ def test_enter_does_not_inject_declarations(monkeypatch):
     assert exc.value.exit_code == 0
     assert run.call_args.args[0] == [container.DOCKER_EXECUTABLE, "exec", "-it", "djinn", "zsh"]
     forbidden.assert_not_called()
+
+
+@pytest.fixture
+def status_serve_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Isolate the advisory serve block from Docker and the other status sections."""
+    from djinn_in_a_box.core import serve as serve_core
+
+    monkeypatch.setattr(container, "load_config", lambda: AppConfig(code_dir=tmp_path))
+    monkeypatch.setattr(container.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess([], 0, stdout=""))
+    monkeypatch.setattr(container, "is_container_running", lambda _: False)
+    monkeypatch.setattr(container, "get_existing_volumes_by_category", lambda *a, **k: [])
+    monkeypatch.setattr(container, "get_existing_sync_paths_by_category", lambda *a, **k: [])
+    captured = MagicMock(return_value=RunResult(
+        1, stderr="Error response from daemon: No such container: djinn"))
+    monkeypatch.setattr(serve_core, "_run_captured", captured)
+    return serve_core, captured
+
+
+def test_status_serve_block_without_container(status_serve_host) -> None:
+    _, captured = status_serve_host
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Serve:" in result.output and "Container not running" in result.output
+    assert all(call.args[0][1] != "exec" for call in captured.call_args_list)
+
+
+def test_status_serve_block_without_config(status_serve_host, monkeypatch, tmp_path) -> None:
+    serve_core, _ = status_serve_host
+
+    def missing():
+        raise ConfigNotFoundError(tmp_path / "missing.toml")
+
+    monkeypatch.setattr(container, "load_config", missing)
+    real = serve_core.collect_snapshot
+    spy = MagicMock(wraps=real)
+    monkeypatch.setattr(serve_core, "collect_snapshot", spy)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Container not running" in result.output
+    spy.assert_called_once_with(None, quick=True)
+
+
+@pytest.mark.parametrize("stdout", ["", "{broken", "[]", "{}"])
+def test_status_serve_block_unparsable(status_serve_host, stdout) -> None:
+    _, captured = status_serve_host
+    captured.return_value = RunResult(0, stdout)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Unknown (Docker error)") == 1
+    assert all(call.args[0][1] != "exec" for call in captured.call_args_list)
+
+
+def test_status_serve_block_failure(status_serve_host, monkeypatch) -> None:
+    serve_core, _ = status_serve_host
+    monkeypatch.setattr(serve_core, "collect_snapshot", MagicMock(
+        side_effect=serve_core.ServeError("invalid helper reply")))
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert result.output.count("Unknown (Docker error)") == 1
+
+
+@pytest.mark.parametrize("state,text", [
+    ("not-detached", "Not available (container not started with --detach)"),
+    ("busy", "busy (start/stop in progress)"),
+    ("degraded", "Degraded: not registered"),
+    ("exited", "Exited: [/x]\\x1b[31m"),
+    ("stopped", "Not running"),
+    ("running", "Running - http://127.0.0.1:49380"),
+    ("unpublished", "port not published (recreate once)"),
+])
+def test_status_serve_block_states(status_serve_host, monkeypatch, state, text) -> None:
+    serve_core, _ = status_serve_host
+    info = serve_core.ContainerInfo(
+        serve_core.ContainerState.RUNNING, "a" * 64,
+        () if state == "not-detached" else ("DJINN_DETACHED=true",))
+    servers = {
+        name: {"state": state if state in serve_core.STATES else "running",
+               "reason": "not registered", "last_line": "[/x]\x1b[31m",
+               "foreign_listener": False} for name in serve_core.NAMES
+    }
+    snapshot = serve_core.Snapshot(info, 49380, state != "unpublished", state == "busy", servers)
+    monkeypatch.setattr(serve_core, "collect_snapshot", lambda *a, **k: snapshot)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert text in result.output
+    assert "\x1b" not in result.output
+
+
+def test_status_serve_funnel_foreground_warning(status_serve_host, monkeypatch) -> None:
+    serve_core, _ = status_serve_host
+    info = serve_core.ContainerInfo(serve_core.ContainerState.RUNNING, "a" * 64,
+                                   ("DJINN_DETACHED=true",))
+    servers = {name: {"state": "running", "foreign_listener": False} for name in serve_core.NAMES}
+    snapshot = serve_core.Snapshot(info, 49380, True, False, servers, funnel=True)
+    monkeypatch.setattr(serve_core, "collect_snapshot", lambda *a, **k: snapshot)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert serve_core.FUNNEL_WARNING in result.output
+
+
+@pytest.mark.parametrize("site", ["last-line", "degraded-reason"])
+@pytest.mark.parametrize(
+    "payload", ["[/x]", "[link=https://example.com]literal[/link]", "\x1b[31mred"],
+)
+def test_status_serve_untrusted_text_is_printed_literally(
+    status_serve_host, monkeypatch, site, payload,
+) -> None:
+    from djinn_in_a_box.core.console import escape_nonprintable
+
+    serve_core, _ = status_serve_host
+    info = serve_core.ContainerInfo(serve_core.ContainerState.RUNNING, "a" * 64,
+                                   ("DJINN_DETACHED=true",))
+    servers = {name: {"state": "exited" if site == "last-line" else "degraded",
+                      "reason": payload, "last_line": payload, "foreign_listener": False}
+               for name in serve_core.NAMES}
+    snapshot = serve_core.Snapshot(info, 49380, True, False, servers)
+    monkeypatch.setattr(serve_core, "collect_snapshot", lambda *a, **k: snapshot)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert escape_nonprintable(payload) in result.output
+    assert "\x1b" not in result.output

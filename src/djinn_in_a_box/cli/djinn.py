@@ -29,6 +29,7 @@ from djinn_in_a_box.commands.container import (
 )
 from djinn_in_a_box.commands.doctor import doctor
 from djinn_in_a_box.commands.hostctl import app as hostctl_app
+from djinn_in_a_box.commands.serve import serve
 from djinn_in_a_box.commands.session import session
 
 app = typer.Typer(
@@ -36,6 +37,7 @@ app = typer.Typer(
     help="Djinn in a Box CLI - Manage AI development containers",
     no_args_is_help=True,
     rich_markup_mode="rich",
+    pretty_exceptions_show_locals=False,
 )
 
 _version_callback = version_callback("djinn")
@@ -94,6 +96,7 @@ app.command()(doctor)
 app.command()(audit)
 app.command()(update)
 app.command()(enter)
+app.command()(serve)
 
 app.add_typer(clean_app, name="clean")
 

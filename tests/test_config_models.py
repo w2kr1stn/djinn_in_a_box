@@ -11,6 +11,7 @@ from djinn_in_a_box.config.models import (
     BuildNetwork,
     ConfigSyncConfig,
     ResourceLimits,
+    ServeConfig,
     ShellConfig,
     validate_memory_format,
 )
@@ -152,6 +153,35 @@ class TestAppConfig:
         assert config.workspace == (workspace or "projects")
         assert config.workspace_target == Path(f"/home/dev/{workspace or 'projects'}")
         assert "workspace_target" not in config.model_dump(mode="json")
+
+
+class TestServeConfig:
+    def test_default_port(self, tmp_path: Path) -> None:
+        first = AppConfig(code_dir=tmp_path)
+        second = AppConfig(code_dir=tmp_path)
+        assert first.serve.opencode_host_port == 49380
+        assert first.serve is not second.serve
+
+    @pytest.mark.parametrize("port", [1024, 49381, 65535])
+    def test_accepts_port_in_range(self, tmp_path: Path, port: int) -> None:
+        config = AppConfig.model_validate({
+            "code_dir": tmp_path, "serve": {"opencode_host_port": port},
+        })
+        assert config.serve.opencode_host_port == port
+
+    @pytest.mark.parametrize("port", [1023, 65536, "abc"])
+    def test_rejects_invalid_port(self, port: object) -> None:
+        with pytest.raises(ValidationError, match="opencode_host_port"):
+            ServeConfig.model_validate({"opencode_host_port": port})
+
+    def test_rejects_unknown_settings(self) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            ServeConfig.model_validate({"host_ip": "0.0.0.0"})
+
+    def test_is_frozen(self) -> None:
+        config = ServeConfig()
+        with pytest.raises(ValidationError, match="frozen"):
+            config.opencode_host_port = 49381
 
 
 class TestBuildNetwork:

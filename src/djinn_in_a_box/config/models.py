@@ -189,6 +189,15 @@ class BuildConfig(BaseModel):
     """
 
 
+class ServeConfig(BaseModel):
+    """Server endpoint settings for the detached container."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    opencode_host_port: Annotated[int, Field(ge=1024, le=65535)] = 49380
+    """Host loopback port published for OpenCode; the container port stays fixed."""
+
+
 WorkspaceMode = Literal["aios", "projects"]
 AssistantAgent = Literal["claude", "codex", "opencode"]
 
@@ -253,6 +262,9 @@ class AppConfig(BaseModel):
 
     git: GitConfig = Field(default_factory=GitConfig)
     hostctl: HostctlConfig = Field(default_factory=HostctlConfig)
+
+    serve: ServeConfig = Field(default_factory=ServeConfig)
+    """Server endpoint settings."""
 
     @model_validator(mode="after")
     def ssh_aliases(self) -> AppConfig:

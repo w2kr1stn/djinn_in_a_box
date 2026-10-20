@@ -67,6 +67,9 @@ DJINN_NETWORK: str = "djinn-network"
 BUILD_NETWORK_VAR: Final = "DJINN_BUILD_NETWORK"
 """Compose variable that sets ``build.network``; the build grants ``network.host`` from it."""
 
+OPENCODE_CONTAINER_PORT: Final = 4096
+"""Fixed OpenCode server port published by the detached dev service."""
+
 _SERVICE_CONTAINER_NAMES: dict[str, str] = {
     "dev": "djinn",
 }
@@ -1057,6 +1060,7 @@ class ResolvedDeclarations:
 
 class ComposeService(TypedDict, total=False):
     volumes: list[str | dict[str, object]]
+    ports: list[dict[str, object]]
     environment: dict[str, str | None]
     labels: dict[str, str]
     working_dir: str
@@ -2561,6 +2565,13 @@ def compose_up_detached(
     declared_service = fragment["services"][service]
     service_override["volumes"] = [*volume_specs, *declared_service.get("volumes", [])]
     service_override["environment"] = {**environment, **declared_service.get("environment", {})}
+    if service == "dev":
+        service_override["ports"] = [{
+            "target": OPENCODE_CONTAINER_PORT,
+            "published": str(config.serve.opencode_host_port),
+            "host_ip": "127.0.0.1",
+            "protocol": "tcp",
+        }]
     fragment["services"][service] = service_override
     container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
     if service == "dev" and options.docker_mode is DockerMode.AGENT:

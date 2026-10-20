@@ -1146,7 +1146,7 @@ def test_root_bind_groups_execution_inventory(ground, monkeypatch):
     assert result.causes == (
         "/ -> /delivery: host root; user home or ancestor; "
         "Docker data root/helper backing storage; "
-        f"exposed controller/journal/agent state (6 items); Docker socket {ground.socket}; "
+        f"exposed controller/journal/agent state (7 items); Docker socket {ground.socket}; "
         "writable Djinn installation and configuration (5 items); "
         "writable Python environment (17 items); "
         "writable Docker CLI and plugins (7 items); writable PATH directory (4 items)",
@@ -1160,6 +1160,7 @@ def test_root_bind_groups_execution_inventory(ground, monkeypatch):
             for name in (
                 "host controller/journal",
                 "journal",
+                "serve state",
                 "post-mortem records",
                 "private agent",
                 "private agent socket",
@@ -2239,3 +2240,15 @@ def test_postmortem_private_bind(ground, tmp_path, monkeypatch, relative):
         f.kind == "exposed controller/journal/agent state" and f.item == "post-mortem records"
         for f in assessment.cause_findings
     )
+
+
+@pytest.mark.parametrize("delivery", ["directory", "ancestor", "password"])
+def test_serve_state_is_protected(ground, monkeypatch, delivery):
+    empty_desktop(monkeypatch)
+    root = hostctl.state_root(create=False).parent / "serve"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    password = root / "opencode-password"
+    password.write_text("private-test-placeholder")
+    source = {"directory": root, "ancestor": root.parent, "password": password}[delivery]
+    result = sealing.assess(dev([bind(source)]))
+    assert any("exposed serve state" in cause for cause in result.cause_details)

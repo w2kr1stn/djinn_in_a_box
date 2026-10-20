@@ -99,6 +99,15 @@ class TestLoadConfig:
         assert config.timezone == "UTC"
         assert config.resources.cpu_limit == 4
         assert config.config_sync.source == "claude"
+        assert config.serve.opencode_host_port == 49380
+
+    @pytest.mark.parametrize("port", ["1023", "65536", '"abc"'])
+    def test_rejects_invalid_serve_port(self, valid_config_toml: Path, port: str) -> None:
+        with valid_config_toml.open("a", encoding="utf-8") as config_file:
+            config_file.write(f"\n[serve]\nopencode_host_port = {port}\n")
+
+        with pytest.raises(ConfigValidationError, match="opencode_host_port"):
+            load_config(valid_config_toml)
 
     def test_loads_selected_config_sync_source(self, valid_config_toml: Path) -> None:
         with valid_config_toml.open("a", encoding="utf-8") as config_file:
@@ -167,6 +176,20 @@ description = "Broken agent"
 
         with pytest.raises(ConfigValidationError):
             load_agents(invalid_file)
+
+
+@pytest.mark.parametrize("port", [49380, 49381])
+def test_serve_port_round_trip(tmp_path: Path, port: int) -> None:
+    path = tmp_path / "config.toml"
+    config = AppConfig.model_validate({
+        "code_dir": tmp_path, "serve": {"opencode_host_port": port},
+    })
+    save_config(config, path)
+
+    raw = tomllib.loads(path.read_text())
+    assert raw["serve"] == {"opencode_host_port": port}
+    assert "serve" not in raw["general"]
+    assert load_config(path) == config
 
 
 class TestSaveConfig:

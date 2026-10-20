@@ -3196,6 +3196,84 @@ def _call_declared_creator(kind, config, options=None, **kwargs):
     return docker.compose_run(config, options, interactive=kind == "interactive", **kwargs)
 
 
+@pytest.mark.parametrize("port", [None, 49381], ids=["default", "configured"])
+def test_detached_override_publishes_opencode_on_loopback_only(
+    monkeypatch, declared_creator, generated_overrides, port,
+):
+    config = declared_creator
+    if port is not None:
+        config = AppConfig.model_validate({
+            **config.model_dump(), "serve": {"opencode_host_port": port},
+        })
+    payloads = []
+
+    def capture(cmd, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        (override,) = generated_overrides(cmd)
+        payloads.append(json.loads(override.read_text()))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", capture)
+    result = compose_up_detached(config, ContainerOptions())
+
+    assert result.success
+    assert len(payloads) == 1
+    assert payloads[0]["services"]["dev"]["ports"] == [{
+        "target": 4096,
+        "published": str(port if port is not None else 49380),
+        "host_ip": "127.0.0.1",
+        "protocol": "tcp",
+    }]
+
+
+def test_override_for_helper_service_has_no_ports(
+    monkeypatch, declared_creator, generated_overrides,
+):
+    payloads = []
+
+    def capture(cmd, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        (override,) = generated_overrides(cmd)
+        payloads.append(json.loads(override.read_text()))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", capture)
+    result = compose_up_detached(declared_creator, ContainerOptions(), service="hostctl")
+
+    assert result.success
+    assert len(payloads) == 1
+    assert set(payloads[0]["services"]) == {"hostctl"}
+    assert "ports" not in payloads[0]["services"]["hostctl"]
+
+
+@pytest.mark.parametrize("interactive", [True, False], ids=["interactive", "headless"])
+def test_compose_run_has_no_published_ports(
+    monkeypatch, declared_creator, generated_overrides, interactive,
+):
+    commands, payloads = [], []
+
+    def capture(cmd, **kwargs):
+        if kwargs.get("capture_output"):
+            assert kwargs["stdin"] is subprocess.DEVNULL
+        commands.append(cmd)
+        (override,) = generated_overrides(cmd)
+        payloads.append(json.loads(override.read_text()))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", capture)
+    result = compose_run(declared_creator, ContainerOptions(), interactive=interactive)
+
+    assert result.success
+    assert len(payloads) == 1
+    assert all("ports" not in service for service in payloads[0]["services"].values())
+    run_args = commands[0][commands[0].index("run") + 1:]
+    assert not {"-p", "--publish", "--service-ports"}.intersection(run_args)
+    root = Path(__file__).resolve().parents[1]
+    for path in root.glob("docker-compose*.yml"):
+        services = yaml.safe_load(path.read_text())["services"]
+        assert all("ports" not in service for service in services.values())
+
+
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
 @pytest.mark.parametrize("mode", [DockerMode.NONE, DockerMode.DIRECT])
 @pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])

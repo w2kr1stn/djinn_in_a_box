@@ -87,6 +87,9 @@ opencode run -m local/primary "Reply with exactly: ready"
 opencode run --standalone --print-logs -m local/primary#high "Reply with exactly: ready"
 ```
 
+For the web UI, API, remote clients and one-time pairing, see
+[`djinn serve` usage and prerequisites](../README.md#remote-agent-servers).
+
 ## Optional native plugins
 
 Neutral seeds stay empty. Review the [reference plugins](../templates/opencode/plugins/)
