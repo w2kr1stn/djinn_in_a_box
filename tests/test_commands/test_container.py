@@ -721,10 +721,32 @@ class TestStartCommand:
             (49380, "Bind for 127.0.0.1:49380 failed: permission denied", 1, True, False),
             (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 0, True, False),
             (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, False, False),
+            (
+                49380,
+                "Error response from daemon: driver failed programming external connectivity "
+                "on endpoint djinn (abc123): failed to bind host port for "
+                "127.0.0.1:49380:172.18.0.2:4096/tcp: address already in use",
+                1, True, True,
+            ),
+            (
+                49381,
+                "Error response from daemon: driver failed programming external connectivity "
+                "on endpoint djinn (abc123): failed to bind host port for "
+                "127.0.0.1:49381:172.18.0.2:4096/tcp: address already in use",
+                1, True, True,
+            ),
+            (
+                49380,
+                "Error response from daemon: driver failed programming external connectivity "
+                "on endpoint djinn (abc123): failed to bind host port for "
+                "127.0.0.1:49380:172.18.0.2:4096/tcp: permission denied",
+                1, True, False,
+            ),
         ],
         ids=[
             "default", "configured", "other-port", "other-ip", "other-error",
             "success", "foreground",
+            "host-process-default", "host-process-configured", "host-process-permission",
         ],
     )
     def test_start_port_collision_hint(

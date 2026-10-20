@@ -313,6 +313,7 @@ class Record:
     child_pid: int | None = None
     child_start: str | None = None
     port: int | None = None
+    cors: str | None = None
 
 
 def _as_dict(value: object) -> dict[str, object] | None:
@@ -360,7 +361,10 @@ def decode_record(raw: bytes) -> Record | None:
         return None
     if data.get("port") is not None and port is None:
         return None
-    return Record(pid, start, p1, cwd, tag, at, child_pid, child_start, port)
+    cors = data.get("cors")
+    if cors is not None and (not isinstance(cors, str) or not _CORS.fullmatch(cors)):
+        return None
+    return Record(pid, start, p1, cwd, tag, at, child_pid, child_start, port, cors)
 
 
 def load_record(dirfd: int, name: str) -> Record | None:
@@ -376,7 +380,9 @@ def remove_file(dirfd: int, name: str) -> None:
 def read_nofollow(name: str, dirfd: int | None, code: str) -> bytes | None:
     """Read a small regular file without following a symlink; None when absent."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dirfd)
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd
+        )
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -1023,7 +1029,13 @@ def _prepare(dirfd: int, name: str, home: str, deadline: Deadline) -> tuple[Reco
     return None, False
 
 
-def _fresh_record(pid: int, handoff: tuple[int, str] | None, tag: str, port: int | None) -> Record:
+def _fresh_record(
+    pid: int,
+    handoff: tuple[int, str] | None,
+    tag: str,
+    port: int | None,
+    cors: str | None = None,
+) -> Record:
     start = raw_start(pid)
     if start is None or not start.isdigit():
         raise HelperError("spawn", "the started process vanished")
@@ -1037,6 +1049,7 @@ def _fresh_record(pid: int, handoff: tuple[int, str] | None, tag: str, port: int
         child_pid=handoff[0] if handoff else None,
         child_start=handoff[1] if handoff else None,
         port=port,
+        cors=cors,
     )
 
 
@@ -1049,9 +1062,10 @@ def _publish_started_record(
     port: int | None,
     *,
     ack: int | None = None,
+    cors: str | None = None,
 ) -> Record:
     try:
-        record = _fresh_record(pid, handoff, tag, port)
+        record = _fresh_record(pid, handoff, tag, port, cors)
         save_record(dirfd, name, record)
         return record
     except Exception as exc:
@@ -1175,26 +1189,33 @@ def cmd_claude_start(args: list[str]) -> dict[str, object]:
         except Exception as exc:
             if pid is None:
                 raise
+            ack, ack_write = ack_write, -1
             _fail_launch(
                 pid,
                 handoff,
                 "spawn",
                 "the Claude supervisor did not report its child",
                 exc,
-                ack=ack_write,
+                ack=ack,
             )
-        record = _publish_started_record(
-            dirfd, "claude", pid, handoff, "claude-remote-control", None, ack=ack_write
-        )
+        try:
+            record = _publish_started_record(
+                dirfd, "claude", pid, handoff, "claude-remote-control", None, ack=ack_write
+            )
+        except HelperError:
+            ack_write = -1  # The publication guard closed it before cleaning up the launch.
+            raise
         try:
             os.write(ack_write, _LAUNCH_ACK)
         except OSError as exc:
+            ack, ack_write = ack_write, -1
             _fail_launch(
-                pid, handoff, "spawn", "could not acknowledge the Claude child", exc, ack=ack_write
+                pid, handoff, "spawn", "could not acknowledge the Claude child", exc, ack=ack
             )
         finally:
-            with contextlib.suppress(OSError):
-                os.close(ack_write)
+            if ack_write >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(ack_write)
             ack_write = -1
         child = (record.child_pid or 0, record.child_start or "0")
 
@@ -1262,7 +1283,7 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
     try:
         running, restarted = _prepare(dirfd, "opencode", home, deadline)
         if running is not None:
-            if stored_password_equals(home, password):
+            if stored_password_equals(home, password) and running.cors == cors:
                 return _start_result(
                     "already-running", running, [], name="opencode", stopped_previous=False
                 )
@@ -1283,7 +1304,9 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
             _fail_launch(
                 pid, None, "spawn", "the OpenCode process did not become a group leader", exc
             )
-        record = _publish_started_record(dirfd, "opencode", pid, None, "opencode-serve", port)
+        record = _publish_started_record(
+            dirfd, "opencode", pid, None, "opencode-serve", port, cors=cors
+        )
 
         def settled() -> bool:
             if group_state(pid, record.start) != "alive":

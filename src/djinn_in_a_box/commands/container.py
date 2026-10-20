@@ -384,7 +384,10 @@ def start(
     if (
         detach
         and not result.success
-        and "port is already allocated" in result.stderr
+        and (
+            "port is already allocated" in result.stderr
+            or "address already in use" in result.stderr
+        )
         and f"127.0.0.1:{config.serve.opencode_host_port}" in result.stderr
     ):
         info(

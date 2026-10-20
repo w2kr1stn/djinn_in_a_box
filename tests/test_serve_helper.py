@@ -114,6 +114,13 @@ with open(os.path.join(fake, "claude-calls.jsonl"), "a") as fh:
 if mode == "refusal":
     print("%s" % os.environ["FAKE_CLAUDE_TEXT"], flush=True)
     sys.exit(1)
+if mode == "signal-group":
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    code = ("import os, signal, time\\n"
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN)\\n"
+            "open(%r, 'w').write(str(os.getpid()))\\nwhile True: time.sleep(0.2)" %
+            os.path.join(fake, "grandchild.pid"))
+    subprocess.Popen([sys.executable, "-c", code])
 if mode == "stubborn":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -428,6 +435,7 @@ def test_record_codec_roundtrip_and_rejections() -> None:
         child_pid=6,
         child_start="13",
         port=4096,
+        cors="https://box.example.ts.net",
     )
     assert mod.decode_record(mod.encode_record(record)) == record
     good = json.loads(mod.encode_record(record))
@@ -439,9 +447,45 @@ def test_record_codec_roundtrip_and_rejections() -> None:
         ("cwd", 1),
         ("child_start", None),
         ("port", "4096"),
+        ("cors", True),
+        ("cors", 42),
+        ("cors", []),
+        ("cors", ""),
+        ("cors", "https://box.example.ts.net/path"),
+        ("cors", "https://box.example.ts.net\n"),
     ):
         assert mod.decode_record(json.dumps({**good, key: value}).encode()) is None, key
     assert mod.decode_record(b"[1]") is None and mod.decode_record(b"\xff") is None
+    for old in ({k: v for k, v in good.items() if k != "cors"}, {**good, "cors": None}):
+        decoded = mod.decode_record(json.dumps(old).encode())
+        assert decoded is not None and decoded.cors is None
+
+
+@pytest.mark.parametrize("location", ["config", "discovery", "record"])
+def test_nofollow_fifo_returns_structured_error(ctx: Ctx, location: str) -> None:
+    source = SOURCE
+    if location == "record":
+        path = ctx.state / "claude.json"
+        command, code = "status", "state-dir"
+    elif location == "config":
+        path = ctx.service_json()
+        command, code = "opencode-preflight", "service-json"
+    else:
+        path = ctx.home / ".local/state/opencode/service.json"
+        command, code = "status", "service-json"
+        # Exercise the discovery reader through the helper's normal error encoder.
+        source = (
+            SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
+            + """
+dispatch = lambda argv, stdin: read_discovery(opencode_home())
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path, 0o600)
+    rc, out = ctx.run(command, source=source, timeout=3)
+    assert rc == 1 and out["ok"] is False and out["code"] == code, out
+    assert "not a regular file" in out["message"]
 
 
 def test_merge_password_keeps_keys_mode_and_refuses_symlink(tmp_path: Path) -> None:
@@ -755,6 +799,48 @@ def test_stop_reaches_pty_child_group(ctx: Ctx) -> None:
     assert is_gone(gpid) and is_gone(record["child_pid"]) and is_gone(record["pid"])
 
 
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["term", "int"])
+def test_supervisor_forwards_signal_to_child_group(ctx: Ctx, signum: int) -> None:
+    ctx.env["FAKE_CLAUDE_MODE"] = "signal-group"
+    rc, out = ctx.claude()
+    assert rc == 0 and out["result"] == "started", out
+    record = ctx.record("claude")
+    grandchild = ctx.fake / "grandchild.pid"
+    assert wait_for(lambda: grandchild.exists() and bool(grandchild.read_text()))
+    gpid = int(grandchild.read_text())
+    assert os.getpgid(gpid) == record["child_pid"]
+    assert record["pid"] != record["child_pid"]
+    os.kill(record["pid"], signum)  # Only the supervisor receives the test's signal.
+    assert is_gone(record["child_pid"])
+    assert is_gone(record["pid"])
+    assert is_gone(gpid)
+    assert mod.group_state(record["child_pid"], record["child_start"]) == "gone"
+
+
+@pytest.mark.parametrize("gone", ["child_pid", "pid"], ids=["child", "supervisor"])
+def test_claude_grace_exits_when_either_group_dies(ctx: Ctx, gone: str) -> None:
+    # Keep both real groups alive but present one as gone to the grace predicate.
+    injected = """
+real_group_state = group_state
+def one_group_gone(pid, start):
+    path = os.path.join(os.environ[TEST_STATE_ENV], "claude.json")
+    if os.path.exists(path):
+        with open(path) as stream:
+            record = json.load(stream)
+        if pid == record[os.environ["GONE_GROUP"]]:
+            return "gone"
+    return real_group_state(pid, start)
+group_state = one_group_gone
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    source = SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    rc, out = ctx.claude(source=source, env={"GONE_GROUP": gone})
+    assert rc == 0 and out["result"] == "exited", out
+    record = ctx.record("claude")
+    assert is_alive(record["pid"]) and is_alive(record["child_pid"])
+    ctx.stop("claude")
+
+
 def test_second_start_is_noop_same_pid(ctx: Ctx) -> None:
     _, first = ctx.claude()
     rc, second = ctx.claude()
@@ -1036,6 +1122,40 @@ def test_ready_requires_listener_of_our_pid(ctx: Ctx) -> None:
     assert is_gone(call["pid"]) and not (ctx.state / "opencode.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("previous", "requested", "outcome"),
+    [
+        (None, "https://box.example.ts.net", "restarted"),
+        ("https://box.example.ts.net", "https://other.example.ts.net", "restarted"),
+        ("https://box.example.ts.net", None, "restarted"),
+        ("https://box.example.ts.net", "https://box.example.ts.net", "already-running"),
+        (None, None, "already-running"),
+    ],
+    ids=["add", "change", "remove", "same-url", "same-none"],
+)
+def test_opencode_cors_controls_restart(
+    ctx: Ctx, previous: str | None, requested: str | None, outcome: str
+) -> None:
+    rc, first = ctx.opencode(cors=previous)
+    assert rc == 0 and first["result"] == "started", first
+    assert ctx.record("opencode")["cors"] == previous
+    rc, second = ctx.opencode(cors=requested)
+    assert rc == 0 and second["result"] == outcome, second
+    assert ctx.record("opencode")["cors"] == requested
+    restarted = outcome == "restarted"
+    assert (second["pid"] != first["pid"]) is restarted
+    assert second["stopped_previous"] is restarted
+    assert len(ctx.calls("opencode")) == (2 if restarted else 1)
+    argv = ctx.calls("opencode")[-1]["argv"]
+    if requested is None:
+        assert "--cors" not in argv
+    else:
+        assert argv[-2:] == ["--cors", requested]
+    if restarted:
+        assert is_gone(first["pid"])
+    ctx.stop("opencode")
+
+
 def test_changed_password_restarts_ours(ctx: Ctx) -> None:
     _, first = ctx.opencode("pw-one")
     assert first["result"] == "started"
@@ -1309,7 +1429,7 @@ def test_reused_zombie_leader_is_stale_and_never_signalled(ctx: Ctx) -> None:
     assert not path.exists()
 
 
-@pytest.mark.parametrize("state", ["running", "degraded"])
+@pytest.mark.parametrize("state", ["running", "degraded", "cors-change"])
 def test_failed_stop_ours_aborts_before_password_merge(
     ctx: Ctx, monkeypatch: pytest.MonkeyPatch, state: str
 ) -> None:
@@ -1335,9 +1455,14 @@ def test_failed_stop_ours_aborts_before_password_merge(
 
     monkeypatch.setattr(mod, "spawn", no_spawn)
     stdout = io.StringIO()
+    args = ["opencode-start", "--port", str(ctx.port)]
+    if state == "cors-change":
+        args += ["--cors", "https://box.example.ts.net"]
     code = mod.main(
-        ["opencode-start", "--port", str(ctx.port)],
-        stdin=io.StringIO('{"password":"new-password"}'),
+        args,
+        stdin=io.StringIO(
+            json.dumps({"password": "old-password" if state == "cors-change" else "new-password"})
+        ),
         stdout=stdout,
     )
     reply = json.loads(stdout.getvalue())
@@ -1393,7 +1518,7 @@ def remember_deadline(self, seconds):
     real_deadline_init(self, seconds)
     launch_end = self.end
 Deadline.__init__ = remember_deadline
-def remember_spawn(pid, handoff, tag, port):
+def remember_spawn(pid, handoff, tag, port, cors=None):
     with open(os.path.join(os.environ["FAKE_DIR"], "spawned.json"), "w") as stream:
         json.dump({"leader": pid, "child": handoff[0] if handoff else None}, stream)
     end = time.monotonic() + 5
@@ -1404,7 +1529,7 @@ def remember_spawn(pid, handoff, tag, port):
         time.sleep(0.01)
     if os.environ["FAIL_RECORD_AT"] == "build":
         raise OSError(errno.ENOSPC, "No space left on device")
-    return real_fresh_record(pid, handoff, tag, port)
+    return real_fresh_record(pid, handoff, tag, port, cors)
 def fail_save(*_):
     if os.environ["FAIL_RECORD_AT"] == "slow-save":
         time.sleep(max(0, launch_end - time.monotonic() - 0.01))
@@ -1617,6 +1742,57 @@ print(json.dumps({"status": status, "pid": pid, "child": handoff[0],
     assert ctx.calls("claude") == []
     assert not is_alive(out["pid"]) and is_gone(out["child"])
     assert out["elapsed"] < (1.5 if fault == "timeout" else 0.6), out
+
+
+@pytest.mark.parametrize("fault", ["handoff", "publication", "ack"])
+def test_claude_launch_guard_closes_ack_exactly_once(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    pipes, held, closes = [], [], []
+    real_pipe, real_close, real_write = os.pipe, os.close, os.write
+
+    def remember_pipe():
+        pair = real_pipe()
+        pipes.append(pair)
+        return pair
+
+    def fake_spawn(*_args, **kwargs):
+        held.append(os.dup(kwargs["ack"]))
+        return 700001
+
+    def remember_close(fd):
+        if fd < 0 or (len(pipes) == 2 and fd == pipes[1][1]):
+            closes.append(fd)
+        real_close(fd)
+
+    def fail_ack(fd, data):
+        if data == mod._LAUNCH_ACK:
+            raise BrokenPipeError("synthetic acknowledgement failure")
+        return real_write(fd, data)
+
+    def fail_save(*_):
+        raise OSError("synthetic publication failure")
+
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(mod.os, "pipe", remember_pipe)
+    monkeypatch.setattr(mod.os, "close", remember_close)
+    monkeypatch.setattr(mod.os, "write", fail_ack)
+    monkeypatch.setattr(mod, "spawn", fake_spawn)
+    monkeypatch.setattr(mod, "_read_handoff", lambda *_: (700002, "123"))
+    monkeypatch.setattr(mod, "_wait_leader", lambda *_: fault != "handoff")
+    monkeypatch.setattr(mod, "raw_start", lambda _: "123")
+    monkeypatch.setattr(mod, "group_state", lambda *_: "gone")
+    monkeypatch.setattr(mod, "_kill_failed_launch", lambda *_: None)
+    if fault == "publication":
+        monkeypatch.setattr(mod, "save_record", fail_save)
+    try:
+        with pytest.raises(mod.HelperError):
+            mod.cmd_claude_start(["--prefix", "test-host"])
+        assert closes == [pipes[1][1]]
+    finally:
+        for fd in held:
+            real_close(fd)
 
 
 @pytest.mark.parametrize("entry", ["guard", "publication"])

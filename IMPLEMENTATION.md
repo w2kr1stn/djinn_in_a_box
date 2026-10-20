@@ -1803,7 +1803,8 @@ serialize on its `lock` with `flock`; the lock wait is at most 10 s. Status
 tries the lock without waiting and sets `busy` if it is held. Records and logs
 use directory-relative access, `O_NOFOLLOW` and private files; record replacement
 is atomic. Records include leader PID/start time, Claude child PID/start time,
-PID 1 start time, working directory, argv tag, start timestamp and server port.
+PID 1 start time, working directory, argv tag, start timestamp, server port and
+OpenCode's CORS origin (or null).
 
 PID 1's changed start time detects a container restart even when `/tmp` survives.
 A reused recorded PID also makes the record stale: status reports `stopped`
@@ -1818,7 +1819,7 @@ wildcard IPv4 LISTEN socket and its discovery registration names that PID.
 A live group with a missing listener or registration is `degraded`. Claude
 requires both supervisor and child groups; losing either is `degraded`.
 Starting a degraded server stops its remains before replacing it; starting a
-healthy server is a no-op, except for OpenCode password rotation.
+healthy server is a no-op, except for OpenCode password or CORS origin changes.
 
 The launch path forks once, then the child calls `setsid()` and verifies it is
 the process-group leader. It keeps the working directory, redirects stdin to
@@ -1864,13 +1865,15 @@ record and reports the failure, allowing status and a later stop to recover it.
 OpenCode start first checks environment roots, symlink-free settings paths and
 the `service.json` allowlist (`password` only; `remote` has its own refusal
 code). It then reads the stdin password and takes the state lock. A healthy
-server with the same password returns `already-running`; a changed password or
-degraded state stops ours before merging the password. A failed stop aborts
+server with the same password and recorded CORS origin (or neither origin set)
+returns `already-running`; a changed password, changed CORS origin or degraded
+state stops ours before merging the password. A failed stop aborts
 before that merge.
 
 The host generates a stable password once in
-`${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` using a private
-temporary file, fsync and an exclusive hard-link publication. A concurrent
+`$XDG_STATE_HOME/djinn/serve/opencode-password`, using `~/.local/state` when
+`XDG_STATE_HOME` is unset; an empty value refuses. It uses a private temporary
+file, fsync and an exclusive hard-link publication. A concurrent
 creator reads the winner. Reads require a user-owned regular file, mode `0600`,
 20–256 bytes. Before creation or reading, an lstat walk refuses symlink components
 of the password path and paths inside the config root, local/shared zone roots, backups
@@ -1927,8 +1930,10 @@ For Funnel detection, any target naming the host port counts regardless of
 scheme, host or path. The HTTPS URL requires a root handler, an HTTP proxy to
 `127.0.0.1`, `localhost` or `[::1]` at that port, and `TCP[port].HTTPS: true`.
 Validated candidates are selected by sorted key; port 443 is omitted in the URL.
-Detected Funnel refuses start/pair and warns in status. Missing/unreadable
-Tailscale status leaves Funnel unknown and allows start with the printed note
+Detected Funnel refuses start/pair and warns in status, including when a later
+parse anomaly affects an unrelated element. Without confirmed evidence,
+missing/unreadable Tailscale status leaves Funnel unknown and allows start with
+the printed note
 `Funnel state unknown (<reason>)`; pairing still needs a discoverable URL.
 Parsing is fixture-tested; live host configuration is a rollout check.
 

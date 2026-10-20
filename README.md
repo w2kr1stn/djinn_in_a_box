@@ -852,8 +852,9 @@ before using the firewall with sensitive data.
 
 `djinn serve <claude|opencode ...>` starts the selected agent server modes
 inside a running detached Djinn container, using its working directory, mounts
-and sign-ins. Repeating a start leaves a healthy server running; servers are
-not automatically restarted after a crash or container restart.
+and sign-ins. Repeating a start leaves a healthy server running when its settings
+match; OpenCode restarts if its password or tailnet CORS origin changes. Servers
+are not automatically restarted after a crash or container restart.
 
 Recreate an existing container once to get the OpenCode port publication:
 
@@ -894,8 +895,9 @@ the container address is also reachable by network peers. Read the
 [inbound boundary](SECURITY-MODEL.md#remote-agent-server-access) before enabling it.
 
 The first `djinn serve opencode` generates a password at
-`${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` on the host
-(mode `0600`). Before creating or reading it, Djinn refuses symlinks in that path,
+`$XDG_STATE_HOME/djinn/serve/opencode-password` on the host (mode `0600`), using
+`~/.local/state` when `XDG_STATE_HOME` is unset; an empty value refuses.
+Before creating or reading it, Djinn refuses symlinks in that path,
 locations inside the config root, zone sources, Djinn backups or running-container
 bind sources or volume host storage, including local-driver bind aliases (each at
 its resolved location), and locations whose safety it cannot

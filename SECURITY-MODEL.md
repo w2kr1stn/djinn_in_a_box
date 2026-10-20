@@ -163,13 +163,18 @@ device and would be included by an account-wide grant. Keep it outside that
 grant; the password remains a second barrier.
 Funnel would expose the service to the public internet, so detected Funnel
 refuses both start and pair and warns in status. Detection covers root and
-`Foreground` configurations with the union of their Funnel flags. Missing or
+`Foreground` configurations with the union of their Funnel flags, for Serve
+entries targeting the configured host port. Entries targeting the container
+address and container port (4096) are outside this detection; the host administrator
+must review those separately. Confirmed Funnel evidence for the host port remains
+a refusal if parsing an unrelated element fails. Without that evidence, missing or
 unreadable Tailscale status allows start with an unknown-Funnel note; it is not
 proof that Funnel is off. Pairing refuses without a known tailnet URL.
 
 The password is generated once on the host at
-`${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password`, mode `0600`
-under a private directory. Before creation or reading, Djinn checks every component
+`$XDG_STATE_HOME/djinn/serve/opencode-password`, mode `0600` under a private
+directory, using `~/.local/state` when `XDG_STATE_HOME` is unset; an empty value
+refuses. Before creation or reading, Djinn checks every component
 of the password path without following symlinks and refuses locations inside the
 config root, zone sources, Djinn backups or any running-container bind source or
 volume host storage, including local-driver bind aliases, each taken at its
@@ -391,8 +396,9 @@ cannot reopen a generation. Host observer loss does not remove this timer.
 it cannot resurrect an expired or closed window.
 
 The owner-only host journal is
-`${XDG_STATE_HOME:-~/.local/state}/djinn/hostctl/journal.jsonl`, outside public
-SSH delivery. It records on/off/limit attempts and outcomes, overrides, readiness
+`$XDG_STATE_HOME/djinn/hostctl/journal.jsonl`, using `~/.local/state` when
+`XDG_STATE_HOME` is unset; an empty value refuses. It stays outside public SSH
+delivery and records on/off/limit attempts and outcomes, overrides, readiness
 and observed helper expiry, with rotation. Admission requires successful journal
 writes; a later host journal failure requests closure. New journal entries group
 bind-related causes and unknowns, including reasons built from them; standalone

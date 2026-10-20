@@ -194,7 +194,7 @@ def check_opencode_roots(info: ContainerInfo) -> None:
         destination = cast(dict[str, object], mount).get("Destination")
         if not isinstance(destination, str) or not destination.startswith("/"):
             raise ServeError("Could not inspect OpenCode's settings mounts; refusing.")
-        dest = os.path.normpath(destination)
+        dest = os.path.normpath("/" + destination.lstrip("/"))
         if any(os.path.commonpath((dest, root)) in (dest, root) for root in roots):
             raise ServeError(
                 f"A mount covers OpenCode's service settings ({destination}); the server password "
@@ -536,11 +536,10 @@ def exec_helper(
         raise ServeError("helper failed", code="protocol", detail=result.stderr[:200]) from None
 
 
-def _layers(root: dict[str, Any]) -> list[dict[str, Any]]:
-    layers = [root]
+def _layers(root: dict[str, Any], layers: list[dict[str, Any]]) -> None:
+    layers.append(root)
     for value in _object(root.get("Foreground", {})).values():
-        layers.extend(_layers(_object(value)))
-    return layers
+        _layers(_object(value), layers)
 
 
 def _target_port(target: str) -> int | None:
@@ -554,18 +553,24 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
     binary = shutil.which("tailscale")
     if binary is None:
         return None, "tailscale not found on PATH", False
+    funnel_keys: set[str] = set()
+    matching: set[str] = set()
     try:
         result = _run_captured([binary, "serve", "status", "--json"], timeout=timeout)
         if not result.success:
             return None, f"tailscale serve status failed (exit {result.returncode})", False
-        layers = _layers(_object(json.loads(result.stdout)))
-        funnel_keys: set[str] = set()
+        layers: list[dict[str, Any]] = []
+        unreadable = False
+        try:
+            _layers(_object(json.loads(result.stdout)), layers)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            # Keep readable layers so a malformed remainder cannot erase Funnel evidence.
+            unreadable = True
         for layer in layers:
             funnel_keys.update(
                 k for k, v in _object(layer.get("AllowFunnel", {})).items() if v is True
             )
         candidates: list[tuple[str, str]] = []
-        matching: set[str] = set()
         for layer in layers:
             tcp = _object(layer.get("TCP", {}))
             for key, value in _object(layer.get("Web", {})).items():
@@ -605,11 +610,13 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
                         key for key in funnel_keys if key.rpartition(":")[2] == tcp_port
                     )
         funnel = bool(funnel_keys & matching)
+        if unreadable:
+            return None, "unreadable output", funnel
         if candidates:
             return sorted(candidates)[0][1], "", funnel
         return None, f"no Serve entry for http://127.0.0.1:{port}", funnel
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
-        return None, "unreadable output", False
+        return None, "unreadable output", bool(funnel_keys & matching)
 
 
 def claude_prefix_slug() -> str:

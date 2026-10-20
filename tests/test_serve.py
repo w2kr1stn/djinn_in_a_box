@@ -306,10 +306,20 @@ def test_refuses_wrong_port_binding(host, ports):
         "/",
         "/home/dev/.config/opencode/subdir",
         "/home/dev/.local/state/opencode",
+        "//home/dev/.config",
+        "//home/dev/.local/state/opencode",
+        "//home/dev",
+        "/home/dev/./.config/opencode/",
     ],
 )
 def test_mount_over_opencode_settings_refused(host, destination):
-    host.inspect["Mounts"] = [{"Type": "bind", "Destination": destination}]
+    host.inspect["Mounts"] = [
+        {
+            "Type": "bind",
+            "Source": str(host.config.code_dir / "mount"),
+            "Destination": destination,
+        }
+    ]
     result = runner.invoke(app, ["serve", "opencode"])
     assert result.exit_code == 1
     expected = (
@@ -319,6 +329,13 @@ def test_mount_over_opencode_settings_refused(host, destination):
     )
     assert expected in result.output
     assert not host.direct
+
+
+def test_opencode_settings_allow_unrelated_double_slash_mount(host):
+    host.inspect["Mounts"][0]["Destination"] = "//tmp/other"
+    result = runner.invoke(app, ["serve", "opencode"])
+    assert result.exit_code == 0, result.output
+    assert host.direct
 
 
 @pytest.mark.parametrize(
@@ -845,6 +862,33 @@ def test_funnel_tcp_forward_and_nested_foreground(host):
     }
     assert serve.tailnet_state(PORT)[2] is True
     assert runner.invoke(app, ["serve", "opencode"]).exit_code == 1
+
+
+@pytest.mark.parametrize("anomaly", ["web-key", "handler", "foreground"])
+@pytest.mark.parametrize("evidence", [True, False], ids=["confirmed", "unknown"])
+def test_funnel_evidence_survives_unrelated_parse_anomaly(host, anomaly, evidence):
+    # A flag alone is not positive evidence: its handler must target the OpenCode port.
+    host.tailnet = tailscale_config(
+        target=f"http://127.0.0.1:{PORT if evidence else PORT + 1}", funnel=True
+    )
+    if anomaly == "web-key":
+        host.tailnet["Web"]["weird"] = {}
+    elif anomaly == "handler":
+        host.tailnet["Web"]["other.example.ts.net:443"] = {"Handlers": {"/": "unexpected"}}
+    else:
+        host.tailnet["Foreground"] = None
+    assert serve.tailnet_state(PORT) == (None, "unreadable output", evidence)
+    for mode in (["opencode"], ["--pair", "opencode"]):
+        result = runner.invoke(app, ["serve", *mode])
+        if evidence:
+            assert result.exit_code == 1
+            assert "Tailscale Funnel is enabled" in result.output
+        elif mode == ["opencode"]:
+            assert result.exit_code == 0, result.output
+            assert "Funnel state unknown (unreadable output)" in result.output
+        else:
+            assert result.exit_code == 1
+            assert "No tailnet URL" in result.output
 
 
 @pytest.mark.parametrize(
