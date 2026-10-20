@@ -54,7 +54,7 @@ mod = load_module()
 # --------------------------------------------------------------------------- fakes
 
 FAKE_OPENCODE = """#!/usr/bin/python3
-import json, os, socket, subprocess, sys, time
+import json, os, signal, socket, subprocess, sys, time
 fake = os.environ["FAKE_DIR"]
 args = sys.argv[1:]
 with open(os.path.join(fake, "opencode-calls.jsonl"), "a") as fh:
@@ -85,7 +85,10 @@ os.makedirs(state, exist_ok=True)
 with open(os.path.join(state, "service.json"), "w") as fh:
     json.dump({"pid": disc, "url": "http://127.0.0.1:%d" % port}, fh)
 if mode == "grandchild":
-    child = subprocess.Popen([sys.executable, "-c", "import time\\nwhile True: time.sleep(0.2)"])
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    child = subprocess.Popen([sys.executable, "-c",
+        "import signal, time\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+        "while True: time.sleep(0.2)"])
     with open(os.path.join(fake, "grandchild.pid"), "w") as fh:
         fh.write(str(child.pid))
 ctl = os.path.join(fake, "oc-ctl")
@@ -1374,7 +1377,7 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
 
 
 @pytest.mark.parametrize("name", ["claude", "opencode"])
-@pytest.mark.parametrize("boundary", ["build", "save"])
+@pytest.mark.parametrize("boundary", ["build", "save", "slow-save"])
 @pytest.mark.parametrize("cleanup", ["ok", "false", "raises"])
 def test_failed_new_record_cleans_spawned_groups(
     ctx: Ctx, name: str, boundary: str, cleanup: str
@@ -1382,30 +1385,42 @@ def test_failed_new_record_cleans_spawned_groups(
     injected = """
 import errno
 real_fresh_record = _fresh_record
-real_stop_groups = stop_groups
+real_kill_failed_launch = _kill_failed_launch
+real_deadline_init = Deadline.__init__
+launch_end = 0
+def remember_deadline(self, seconds):
+    global launch_end
+    real_deadline_init(self, seconds)
+    launch_end = self.end
+Deadline.__init__ = remember_deadline
 def remember_spawn(pid, handoff, tag, port):
     with open(os.path.join(os.environ["FAKE_DIR"], "spawned.json"), "w") as stream:
         json.dump({"leader": pid, "child": handoff[0] if handoff else None}, stream)
     end = time.monotonic() + 5
-    while not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "grandchild.pid")):
+    while handoff is None and not os.path.exists(
+        os.path.join(os.environ["FAKE_DIR"], "grandchild.pid")
+    ):
         assert time.monotonic() < end, "fake server did not start its grandchild"
         time.sleep(0.01)
     if os.environ["FAIL_RECORD_AT"] == "build":
         raise OSError(errno.ENOSPC, "No space left on device")
     return real_fresh_record(pid, handoff, tag, port)
 def fail_save(*_):
+    if os.environ["FAIL_RECORD_AT"] == "slow-save":
+        time.sleep(max(0, launch_end - time.monotonic() - 0.01))
     raise OSError(errno.ENOSPC, "No space left on device")
-def record_stop(groups, deadline):
+def record_cleanup(pid, handoff, end):
+    groups = ([handoff] if handoff else []) + [(pid, raw_start(pid) or "0")]
     with open(os.path.join(os.environ["FAKE_DIR"], "cleanup.json"), "w") as stream:
         json.dump(groups, stream)
     if os.environ["FAIL_CLEANUP"] == "raises":
         raise OSError(errno.EPERM, "Operation not permitted")
     if os.environ["FAIL_CLEANUP"] == "false":
         return False
-    return real_stop_groups(groups, deadline)
+    return real_kill_failed_launch(pid, handoff, end)
 _fresh_record = remember_spawn
 save_record = fail_save
-stop_groups = record_stop
+_kill_failed_launch = record_cleanup
 sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
 """
     source = SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected
@@ -1417,7 +1432,7 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     rc, out = ctx.run(
         *args,
         stdin=None if name == "claude" else '{"password":"synthetic-password"}',
-        timing="stop_wait=0.2,kill_wait=2",
+        timing="deadline=0.8,launch_cleanup=0.5",
         env={
             "FAIL_RECORD_AT": boundary,
             "FAIL_CLEANUP": cleanup,
@@ -1432,9 +1447,14 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     pids = [spawned["leader"]]
     if name == "claude":
         pids.insert(0, spawned["child"])
-    all_pids = [*pids, int((ctx.fake / "grandchild.pid").read_text())]
+    all_pids = list(pids)
+    grandchild = ctx.fake / "grandchild.pid"
+    if name == "claude":
+        assert ctx.calls("claude") == [] and not grandchild.exists()
+    else:
+        all_pids.append(int(grandchild.read_text()))
     assert not (ctx.state / f"{name}.json").exists()
-    if cleanup == "ok":
+    if cleanup == "ok" or name == "claude":
         assert "may survive" not in out["message"]
         assert all(not is_alive(pid) for pid in all_pids)
     else:
@@ -1445,27 +1465,354 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     assert all(group[1].isdigit() and int(group[1]) > 0 for group in groups)
 
 
+@pytest.mark.parametrize("name,delay", [("opencode", 1.4), ("claude", 0.8)])
+def test_failed_handshake_kills_child_before_late_setsid(ctx: Ctx, name: str, delay: float) -> None:
+    # Delay only the forked child's setsid; all handshake/cleanup code is production code.
+    source = SOURCE.replace(
+        "        os.setsid()", f"        time.sleep({delay})\n        os.setsid()"
+    )
+    injected = """
+real_spawn = spawn
+def remember_spawn(*args, **kwargs):
+    pid = real_spawn(*args, **kwargs)
+    with open(os.path.join(os.environ["FAKE_DIR"], "spawned.pid"), "w") as stream:
+        stream.write(str(pid))
+    return pid
+spawn = remember_spawn
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    source = source.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    args = (
+        ["claude-start", "--prefix", "test"]
+        if name == "claude"
+        else ["opencode-start", "--port", str(ctx.port)]
+    )
+    before = time.monotonic()
+    rc, out = ctx.run(
+        *args,
+        stdin='{"password":"synthetic-password"}',
+        source=source,
+        timing="handoff_wait=0.1,launch_cleanup=0.5",
+    )
+    elapsed = time.monotonic() - before
+    pid = int((ctx.fake / "spawned.pid").read_text())
+    assert rc == 1 and out["ok"] is False and out["code"] == "spawn", out
+    assert "may survive" not in out["message"]
+    assert elapsed < delay, "cleanup must KILL immediately, before the child can finish setsid"
+    assert not is_alive(pid)
+    time.sleep(delay)
+    assert not is_alive(pid) and ctx.calls(name) == []
+    assert not (ctx.state / f"{name}.json").exists()
+
+
+def test_claude_missing_handoff_cleans_unreported_child(ctx: Ctx) -> None:
+    # Model descheduling after pty.fork(), before the child identity is handed over.
+    source = SOURCE.replace(
+        '        payload = f"{child}',
+        '        open(os.path.join(os.environ["FAKE_DIR"], "child.pid"), "w").write(str(child))\n'
+        '        time.sleep(0.6)\n        payload = f"{child}',
+    )
+    rc, out = ctx.claude(
+        source=source,
+        timing="handoff_wait=0.3,launch_cleanup=0.5",
+        env={"FAKE_CLAUDE_MODE": "stubborn"},
+    )
+    assert rc == 1 and out["code"] == "spawn", out
+    assert not (ctx.state / "claude.json").exists()
+    assert ctx.calls("claude") == []
+    assert is_gone(int((ctx.fake / "child.pid").read_text()))
+    assert not (ctx.fake / "grandchild.pid").exists()
+
+
+def test_claude_exec_waits_for_published_identity_and_ack(ctx: Ctx) -> None:
+    injected = """
+helper_pid = os.getpid()
+real_save = save_record
+real_write = os.write
+real_exec = os.execvp
+def delayed_save(dirfd, name, record):
+    time.sleep(0.25)
+    assert not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "claude-calls.jsonl"))
+    return real_save(dirfd, name, record)
+def delayed_ack(fd, data):
+    if os.getpid() == helper_pid and data == _LAUNCH_ACK:
+        assert os.path.exists(os.path.join(os.environ[TEST_STATE_ENV], "claude.json"))
+        time.sleep(0.25)
+        assert not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "claude-calls.jsonl"))
+    return real_write(fd, data)
+def checked_exec(file, argv):
+    assert os.path.exists(os.path.join(os.environ[TEST_STATE_ENV], "claude.json"))
+    return real_exec(file, argv)
+save_record = delayed_save
+os.write = delayed_ack
+os.execvp = checked_exec
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    source = SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    rc, out = ctx.claude(source=source)
+    assert rc == 0 and out["result"] == "started", out
+    assert len(ctx.calls("claude")) == 1
+    assert is_alive(ctx.record("claude")["child_pid"])
+    assert ctx.stop("claude")[0] == 0
+
+
+@pytest.mark.parametrize(
+    "fault", ["closed", "wrong-ack", "timeout", "wrong-go", "empty-go", "ack-error", "gate-error"]
+)
+def test_unacked_or_invalid_gate_never_execs_and_exits(ctx: Ctx, fault: str) -> None:
+    source = SOURCE
+    if fault == "wrong-go":
+        source = source.replace(
+            "os.write(gate_write, _LAUNCH_GO)", 'os.write(gate_write, b"wrong")'
+        )
+    elif fault == "empty-go":
+        source = source.replace("os.write(gate_write, _LAUNCH_GO)", 'os.write(gate_write, b"")')
+    elif fault == "ack-error":
+        source = source.replace(
+            '        ready = select.select([ack], [], [], timing("deadline"))[0]',
+            '        raise OSError("synthetic acknowledgement read error")',
+        )
+    elif fault == "gate-error":
+        source = source.replace(
+            "            go = os.read(gate_read, len(_LAUNCH_GO) + 1)",
+            '            raise OSError("synthetic gate read error")',
+        )
+    injected = """
+reader, writer = os.pipe()
+ack_read, ack_write = os.pipe()
+fd = open_state_dir()
+before = time.monotonic()
+pid = spawn(fd, "claude", ["claude", "remote-control"], pty_mode=True,
+            handoff=writer, ack=ack_read)
+os.close(writer)
+os.close(ack_read)
+handoff = _read_handoff(reader, 1)
+os.close(reader)
+assert handoff is not None
+fault = os.environ["GATE_FAULT"]
+if fault == "wrong-ack":
+    os.write(ack_write, b"wrong")
+elif fault in ("wrong-go", "empty-go", "gate-error"):
+    os.write(ack_write, _LAUNCH_ACK)
+if fault != "timeout":
+    os.close(ack_write)
+_, status = os.waitpid(pid, 0)
+print(json.dumps({"status": status, "pid": pid, "child": handoff[0],
+                  "elapsed": time.monotonic() - before}))
+"""
+    source = source.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", source],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        cwd=ctx.work,
+        env={**ctx.env, "GATE_FAULT": fault, "DJINN_SERVE_TEST_TIMING": "deadline=0.7"},
+        timeout=3,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert os.WIFEXITED(out["status"]) and os.WEXITSTATUS(out["status"]) == 0, out
+    assert ctx.calls("claude") == []
+    assert not is_alive(out["pid"]) and is_gone(out["child"])
+    assert out["elapsed"] < (1.5 if fault == "timeout" else 0.6), out
+
+
+@pytest.mark.parametrize("entry", ["guard", "publication"])
+def test_launch_guard_closes_ack_without_acking_before_kill(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    reader, writer = os.pipe()
+    observed = []
+    monkeypatch.setattr(mod, "raw_start", lambda _: "123")
+    monkeypatch.setattr(mod, "group_state", lambda *_: "gone")
+
+    def remember_kill(*_):
+        ready = mod.select.select([reader], [], [], 0)[0]
+        observed.append(os.read(reader, 32) if ready else None)
+
+    def fail_record(*_):
+        raise OSError("synthetic publication failure")
+
+    monkeypatch.setattr(mod, "_kill_failed_launch", remember_kill)
+    monkeypatch.setattr(mod, "_fresh_record", fail_record)
+    try:
+        with pytest.raises(mod.HelperError):
+            if entry == "guard":
+                mod._fail_launch(700001, None, "spawn", "failed", OSError(), ack=writer)
+            else:
+                mod._publish_started_record(-1, "claude", 700001, None, "tag", None, ack=writer)
+        assert observed == [b""]
+    finally:
+        os.close(reader)
+        with contextlib.suppress(OSError):
+            os.close(writer)
+
+
+def test_claude_failed_leader_handshake_cleans_handoff_groups(ctx: Ctx) -> None:
+    injected = """
+helper_pid = os.getpid()
+real_wait_leader = _wait_leader
+real_read_handoff = _read_handoff
+def remember_handoff(fd, seconds):
+    handoff = real_read_handoff(fd, seconds)
+    with open(os.path.join(os.environ["FAKE_DIR"], "child.json"), "w") as stream:
+        json.dump(handoff, stream)
+    return handoff
+def fail_supervisor_leader(pid, seconds):
+    if os.getpid() != helper_pid:
+        return real_wait_leader(pid, seconds)
+    with open(os.path.join(os.environ["FAKE_DIR"], "spawned.pid"), "w") as stream:
+        stream.write(str(pid))
+    return False
+_read_handoff = remember_handoff
+_wait_leader = fail_supervisor_leader
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    source = SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    rc, out = ctx.claude(source=source, env={"FAKE_CLAUDE_MODE": "stubborn"})
+    assert rc == 1 and out["code"] == "spawn", out
+    assert "may survive" not in out["message"]
+    child = json.loads((ctx.fake / "child.json").read_text())[0]
+    assert not is_alive(child)
+    assert not is_alive(int((ctx.fake / "spawned.pid").read_text()))
+    assert ctx.calls("claude") == []
+    assert not (ctx.state / "claude.json").exists()
+
+
+def test_launch_guard_kills_child_and_group_before_reaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    pid, child = 700001, 700002
+    monkeypatch.setattr(mod.os, "kill", lambda *args: calls.append(("kill", *args)))
+    monkeypatch.setattr(mod.os, "killpg", lambda *args: calls.append(("killpg", *args)))
+    reaps = iter([0, pid])
+
+    def reap(*args):
+        calls.append(("waitpid", *args))
+        return next(reaps), 0
+
+    monkeypatch.setattr(mod.os, "waitpid", reap)
+    monkeypatch.setattr(mod, "group_state", lambda *_: "alive")
+    mod._kill_failed_launch(pid, (child, "123"), time.monotonic() + 0.5)
+    # The group KILL precedes the reap: the unreaped zombie keeps its PID from being reused.
+    assert calls == [
+        ("kill", pid, signal.SIGKILL),
+        ("killpg", pid, signal.SIGKILL),
+        ("waitpid", pid, os.WNOHANG),
+        ("waitpid", pid, os.WNOHANG),
+        ("killpg", child, signal.SIGKILL),
+    ]
+
+
+def test_launch_guard_reap_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = []
+    monkeypatch.setattr(mod.os, "kill", lambda *_: None)
+    monkeypatch.setattr(mod.os, "killpg", lambda *args: sent.append(args))
+    monkeypatch.setattr(mod.os, "waitpid", lambda *_: (0, 0))
+    ticks = iter([10.0, 10.02])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(mod.time, "sleep", lambda _: None)
+    mod._kill_failed_launch(700001, None, 10.01)
+    assert sent == [(700001, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize("pid", [-1, 0, 1, os.getpid(), os.getpgrp()])
+def test_launch_guard_signal_floor(monkeypatch: pytest.MonkeyPatch, pid: int) -> None:
+    sent = []
+    monkeypatch.setattr(mod.os, "kill", lambda *args: sent.append(args))
+    monkeypatch.setattr(mod.os, "killpg", lambda *args: sent.append(args))
+    monkeypatch.setattr(mod.os, "waitpid", lambda *_: (pid, 0))
+    with pytest.raises(mod.HelperError, match="protected"):
+        mod._kill_failed_launch(pid, None, time.monotonic() + 0.1)
+    assert sent == []
+
+
+@pytest.mark.parametrize("child", [0, 1, os.getpgrp()])
+def test_launch_guard_handoff_signal_floor(monkeypatch: pytest.MonkeyPatch, child: int) -> None:
+    sent = []
+    monkeypatch.setattr(mod.os, "kill", lambda *_: None)
+    monkeypatch.setattr(mod.os, "killpg", lambda *args: sent.append(args))
+    monkeypatch.setattr(mod.os, "waitpid", lambda *_: (700001, 0))
+    monkeypatch.setattr(mod, "group_state", lambda *_: "alive")
+    mod._kill_failed_launch(700001, (child, "123"), time.monotonic() + 0.1)
+    assert sent == [(700001, signal.SIGKILL)]
+
+
+def test_launch_guard_skips_mismatched_handoff_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = []
+    monkeypatch.setattr(mod.os, "kill", lambda *_: None)
+    monkeypatch.setattr(mod.os, "killpg", lambda *args: sent.append(args))
+    monkeypatch.setattr(mod.os, "waitpid", lambda *_: (700001, 0))
+    # Keep the real group_state check, with a live PID carrying a different start time.
+    fields = ["S"] + ["0"] * 18 + ["456"]
+    monkeypatch.setattr(mod, "proc_stat", lambda _: fields)
+    mod._kill_failed_launch(700001, (700002, "123"), time.monotonic() + 0.1)
+    assert sent == [(700001, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize("cleanup", ["false", "raises"])
+def test_launch_guard_does_not_warn_without_proven_survivors(
+    monkeypatch: pytest.MonkeyPatch, cleanup: str
+) -> None:
+    def fail_cleanup(*_):
+        if cleanup == "raises":
+            raise OSError("synthetic cleanup failure")
+        return False
+
+    monkeypatch.setattr(mod, "_kill_failed_launch", fail_cleanup)
+    monkeypatch.setattr(mod, "raw_start", lambda _: "123")
+    monkeypatch.setattr(mod, "group_state", lambda *_: "stale")
+    with pytest.raises(mod.HelperError) as caught:
+        mod._fail_launch(700001, (700002, "123"), "spawn", "handshake failed", OSError())
+    assert caught.value.code == "spawn"
+    assert "may survive" not in caught.value.message
+
+
+def test_launch_cleanup_budget_fits_host_timeout() -> None:
+    assert 0 < mod._TIMING["launch_cleanup"] <= 3
+    assert mod._TIMING["deadline"] + mod._TIMING["launch_cleanup"] < 60
+
+
+def test_launch_guard_uses_its_own_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+    ends = []
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setenv(mod.TEST_TIMING_ENV, "deadline=0.01,launch_cleanup=0.3")
+    monkeypatch.setattr(mod, "raw_start", lambda _: "123")
+    monkeypatch.setattr(mod, "_kill_failed_launch", lambda _pid, _handoff, end: ends.append(end))
+    monkeypatch.setattr(mod, "group_state", lambda *_: "alive" if clock[0] < 100.2 else "gone")
+    with pytest.raises(mod.HelperError) as caught:
+        mod._fail_launch(700001, None, "state-dir", "record failed", OSError())
+    assert ends == [100.3]
+    assert 100.2 <= clock[0] < 100.3
+    assert "may survive" not in caught.value.message
+
+
 def test_broken_handoff_kills_stubborn_child_group(ctx: Ctx) -> None:
     source = (
         SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
         + """
-# Delay handoff until both stubborn descendants installed their signal handlers.
 wait_leader = _wait_leader
-def ready_child(pid, seconds):
+def remember_child(pid, seconds):
     ready = wait_leader(pid, seconds)
-    end = time.monotonic() + 5
-    while not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "grandchild.pid")):
-        if time.monotonic() >= end:
-            raise RuntimeError("synthetic child did not become ready")
-        time.sleep(0.01)
+    with open(os.path.join(os.environ["FAKE_DIR"], "child.pid"), "w") as stream:
+        stream.write(str(pid))
     return ready
-_wait_leader = ready_child
+_wait_leader = remember_child
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 reader, writer = os.pipe()
+ack_read, ack_write = os.pipe()
 os.close(reader)
 fd = open_state_dir()
-pid = spawn(fd, "claude", ["claude", "remote-control"], pty_mode=True, handoff=writer)
+pid = spawn(fd, "claude", ["claude", "remote-control"], pty_mode=True,
+            handoff=writer, ack=ack_read)
 os.close(writer)
+os.close(ack_read)
+os.close(ack_write)
 os.close(fd)
 _, status = os.waitpid(pid, 0)
 print(json.dumps({"status": status, "pid": pid}))
@@ -1484,9 +1831,8 @@ print(json.dumps({"status": status, "pid": pid}))
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert os.WIFEXITED(out["status"]) and os.WEXITSTATUS(out["status"]) == 0, out
-    child = ctx.calls("claude")[0]["pid"]
-    grandchild = int((ctx.fake / "grandchild.pid").read_text())
-    assert is_gone(child) and is_gone(grandchild)
+    child = int((ctx.fake / "child.pid").read_text())
+    assert is_gone(child) and ctx.calls("claude") == []
     assert not (ctx.state / "claude.json").exists()
 
 

@@ -1828,9 +1828,22 @@ Claude's supervisor uses `pty.fork()` for a child in its own session/group,
 sets a 120×40 terminal and continuously drains it without sending input. One
 inherited pipe hands the child's PID/start time to the helper within 2 s;
 the complete record is written under the lock before startup is reported.
-If record construction or publication fails, both start paths stop the freshly
-spawned groups using their in-memory identities and return `state-dir`; failed
-cleanup explicitly warns that the process may survive.
+The PTY child blocks before exec on a private gate pipe whose sole writer is the
+supervisor. Only after publishing the record does the helper acknowledge it on
+a second pipe. The supervisor waits at most 50 s; on a valid acknowledgement it
+sends the exact go token to the child. EOF, an error or a wrong token prevents
+exec. Only the required descriptors survive each fork; the acknowledgement's
+write end stays with the helper, and supervisor death closes the child's gate.
+Every failure after spawning and before record publication uses one launch guard,
+including the leader/handoff handshakes (`spawn`) and record construction or
+publication (`state-dir`). It immediately KILLs the unreaped direct child and its
+process group (including a group created late) while the zombie still reserves the
+PID, then reaps it within a separate 3 s cleanup budget. Claude's PTY child group is also KILLed after checking its
+start-time identity. The guard closes acknowledgement without sending it before
+killing. No TERM grace is given to an unpublished launch; a warning
+says the process may survive only when a proven member remains alive after that
+budget. The helper's 50 s deadline plus this 3 s reserve stays below the host's
+60 s execution timeout.
 The supervisor forwards TERM/INT, waits for its child and caps its log at
 1 MiB by truncating to a marker before continuing with fresh output. It ignores
 SIGPIPE so a broken handoff pipe triggers child-group cleanup; only exec children

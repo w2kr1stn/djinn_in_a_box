@@ -31,12 +31,12 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.host_runtime import private_directory
 from djinn_in_a_box.core.paths import BACKUPS_DIR
-from djinn_in_a_box.core.serve_helper import STATE_DIR
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 CLAUDE: Final = "claude"
 OPENCODE: Final = "opencode"
 # Frozen copies; test_protocol_enums_match_helper compares the helper loaded by file path.
+STATE_DIR: Final = "/tmp/djinn-serve"  # nosec B108 - container path, checked before use
 NAMES: Final = (CLAUDE, OPENCODE)
 STATES: Final = ("running", "degraded", "exited", "stopped")
 START_RESULTS: Final = ("started", "already-running", "restarted", "exited")

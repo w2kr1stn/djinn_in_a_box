@@ -85,6 +85,7 @@ _TIMING: Final = {
     "opencode_ready": 15.0,
     "claude_grace": 5.0,
     "handoff_wait": 2.0,
+    "launch_cleanup": 3.0,
 }
 
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b")
@@ -95,6 +96,8 @@ _CORS = re.compile(r"https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?")
 _KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _URL_PORT = re.compile(r"https?://[^/:]+:([0-9]{1,5})(?:/|$)")
 _TRUNCATED: Final = b"[djinn serve: log truncated]\n"
+_LAUNCH_ACK: Final = b"ack\n"
+_LAUNCH_GO: Final = b"go\n"
 
 
 class HelperError(Exception):
@@ -698,11 +701,11 @@ def _reset_signals() -> None:
     signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
 
 
-def _close_other_fds(keep: int | None) -> None:
+def _close_other_fds(*keep: int | None) -> None:
     """Explicitly close every descriptor above 2 except ``keep`` (no reliance on CLOEXEC)."""
     for entry in os.listdir("/proc/self/fd"):
         fd = int(entry)
-        if fd > 2 and fd != keep:
+        if fd > 2 and fd not in keep:
             with contextlib.suppress(OSError):
                 os.close(fd)
 
@@ -729,7 +732,7 @@ def _wait_leader(pid: int, seconds: float) -> bool:
     return False
 
 
-def supervise_pty(argv: list[str], handoff: int) -> NoReturn:
+def supervise_pty(argv: list[str], handoff: int, ack: int) -> NoReturn:
     """Run ``argv`` under a PTY; keeps reading it, caps the log, forwards TERM/INT."""
     pending: list[int] = []
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
@@ -739,10 +742,18 @@ def supervise_pty(argv: list[str], handoff: int) -> NoReturn:
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
+    gate_read, gate_write = os.pipe()
     child, master = pty.fork()
     if child == 0:
         try:
+            os.close(gate_write)
             os.close(handoff)
+            os.close(ack)
+            _close_other_fds(gate_read)
+            go = os.read(gate_read, len(_LAUNCH_GO) + 1)
+            os.close(gate_read)
+            if go != _LAUNCH_GO:
+                os._exit(125)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             _reset_signals()
@@ -751,16 +762,22 @@ def supervise_pty(argv: list[str], handoff: int) -> NoReturn:
         except BaseException as exc:
             os.write(2, f"djinn serve: cannot run {argv[0]}: {exc}\n".encode("utf-8", "replace"))
             os._exit(127)
+    os.close(gate_read)
     leader = _wait_leader(child, 2.0)
     with contextlib.suppress(OSError):
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", WINSIZE[0], WINSIZE[1], 0, 0))
     try:
         payload = f"{child} {raw_start(child) or ''}\n".encode()
         os.write(handoff, payload)
-    except BrokenPipeError:
+        ready = select.select([ack], [], [], timing("deadline"))[0]
+        if ready and os.read(ack, len(_LAUNCH_ACK) + 1) == _LAUNCH_ACK:
+            os.write(gate_write, _LAUNCH_GO)
+    except OSError:
         pending.append(signal.SIGKILL)
     finally:
         os.close(handoff)
+        os.close(ack)
+        os.close(gate_write)
     size = 0
     exited = False
     eof = False
@@ -790,7 +807,13 @@ def supervise_pty(argv: list[str], handoff: int) -> NoReturn:
 
 
 def spawn(
-    dirfd: int, name: str, argv: list[str], *, pty_mode: bool, handoff: int | None = None
+    dirfd: int,
+    name: str,
+    argv: list[str],
+    *,
+    pty_mode: bool,
+    handoff: int | None = None,
+    ack: int | None = None,
 ) -> int:
     """Fork once: the child leads its own session/group, stdio goes to the log, then it execs.
 
@@ -815,9 +838,11 @@ def spawn(
         os.dup2(devnull, 0)
         os.dup2(logfd, 1)
         os.dup2(logfd, 2)
-        _close_other_fds(handoff)
-        if pty_mode and handoff is not None:
-            supervise_pty(argv, handoff)
+        _close_other_fds(handoff, ack)
+        if pty_mode:
+            if handoff is None or ack is None:
+                os._exit(126)
+            supervise_pty(argv, handoff, ack)
         _reset_signals()
         os.execvp(argv[0], argv)  # nosec B606 - fixed argv, no shell
     except BaseException as exc:
@@ -1022,24 +1047,80 @@ def _publish_started_record(
     handoff: tuple[int, str] | None,
     tag: str,
     port: int | None,
-    deadline: Deadline,
+    *,
+    ack: int | None = None,
 ) -> Record:
-    groups = [(pid, raw_start(pid) or "0")]
-    if handoff is not None:
-        groups.insert(0, handoff)
     try:
         record = _fresh_record(pid, handoff, tag, port)
         save_record(dirfd, name, record)
         return record
     except Exception as exc:
+        _fail_launch(
+            pid,
+            handoff,
+            "state-dir",
+            f"could not build or publish the {name} process record",
+            exc,
+            ack=ack,
+        )
+
+
+def _kill_failed_launch(pid: int, handoff: tuple[int, str] | None, end: float) -> None:
+    """KILL the unreaped direct child and its possible late-created group, then reap it."""
+    if pid <= 1 or pid in (os.getpid(), os.getpgrp()):
+        raise HelperError("state-dir", "refusing to signal a protected launch process")
+    # Unlike signal_pid, this permits our child before setsid(), in our group. The
+    # unreaped child is the identity anchor; only the PID receives this first signal.
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGKILL)
+    # The unreaped zombie still reserves the PID as a group ID; reaping first would free it.
+    with contextlib.suppress(OSError, HelperError):
+        signal_group(pid, signal.SIGKILL)
+    while True:
         try:
-            stopped = stop_groups(groups, deadline)
-        except Exception:
-            stopped = False
-        message = f"could not build or publish the {name} process record"
-        if not stopped:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                break
+        except ChildProcessError:
+            break
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(0.01, left))
+    if handoff is not None and group_state(*handoff) == "alive":
+        with contextlib.suppress(OSError, HelperError):
+            signal_group(handoff[0], signal.SIGKILL)
+
+
+def _fail_launch(
+    pid: int,
+    handoff: tuple[int, str] | None,
+    code: str,
+    message: str,
+    cause: Exception,
+    *,
+    ack: int | None = None,
+) -> NoReturn:
+    """One guard for all post-spawn failures before publication, independent of Deadline.
+
+    The 50 s helper deadline plus this 3 s reserve stays below the host's 60 s timeout.
+    A never-published launch gets no TERM grace. Warn only for proven surviving members.
+    """
+    end = time.monotonic() + timing("launch_cleanup")
+    if ack is not None:
+        with contextlib.suppress(OSError):
+            os.close(ack)
+    groups = [(pid, raw_start(pid) or "0")]
+    if handoff is not None:
+        groups.append(handoff)
+    with contextlib.suppress(Exception):
+        _kill_failed_launch(pid, handoff, end)
+    while any(group_state(*group) == "alive" for group in groups):
+        left = end - time.monotonic()
+        if left <= 0:
             message += "; cleanup could not stop the new process groups; the process may survive"
-        raise HelperError("state-dir", message) from exc
+            break
+        time.sleep(min(0.01, left))
+    raise HelperError(code, message) from cause
 
 
 def _read_handoff(readfd: int, seconds: float) -> tuple[int, str] | None:
@@ -1067,27 +1148,54 @@ def cmd_claude_start(args: list[str]) -> dict[str, object]:
     home = opencode_home()
     dirfd = open_state_dir()
     lockfd = acquire_lock(dirfd, deadline)
+    ack_read = ack_write = -1
     try:
         running, restarted = _prepare(dirfd, "claude", home, deadline)
         if running is not None:
             return _start_result("already-running", running, [], name="claude")
         argv = ["claude", "remote-control", "--remote-control-session-name-prefix", prefix]
         readfd, writefd = os.pipe()
+        ack_read, ack_write = os.pipe()
+        pid = None
+        handoff = None
         try:
-            pid = spawn(dirfd, "claude", argv, pty_mode=True, handoff=writefd)
-            os.close(writefd)
-            writefd = -1
-            handoff = _read_handoff(readfd, timing("handoff_wait"))
-        finally:
-            os.close(readfd)
-            if writefd >= 0:
+            try:
+                pid = spawn(dirfd, "claude", argv, pty_mode=True, handoff=writefd, ack=ack_read)
+                os.close(ack_read)
+                ack_read = -1
                 os.close(writefd)
-        if handoff is None or not _wait_leader(pid, 1.0):
-            stop_groups([(pid, raw_start(pid) or "0")], deadline)
-            raise HelperError("spawn", "the Claude supervisor did not report its child")
+                writefd = -1
+                handoff = _read_handoff(readfd, timing("handoff_wait"))
+            finally:
+                os.close(readfd)
+                if writefd >= 0:
+                    os.close(writefd)
+            if handoff is None or not _wait_leader(pid, 1.0):
+                raise HelperError("spawn", "the Claude supervisor did not report its child")
+        except Exception as exc:
+            if pid is None:
+                raise
+            _fail_launch(
+                pid,
+                handoff,
+                "spawn",
+                "the Claude supervisor did not report its child",
+                exc,
+                ack=ack_write,
+            )
         record = _publish_started_record(
-            dirfd, "claude", pid, handoff, "claude-remote-control", None, deadline
+            dirfd, "claude", pid, handoff, "claude-remote-control", None, ack=ack_write
         )
+        try:
+            os.write(ack_write, _LAUNCH_ACK)
+        except OSError as exc:
+            _fail_launch(
+                pid, handoff, "spawn", "could not acknowledge the Claude child", exc, ack=ack_write
+            )
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(ack_write)
+            ack_write = -1
         child = (record.child_pid or 0, record.child_start or "0")
 
         def died() -> bool:
@@ -1100,6 +1208,10 @@ def cmd_claude_start(args: list[str]) -> dict[str, object]:
             )
         return _start_result("restarted" if restarted else "started", record, [], name="claude")
     finally:
+        for fd in (ack_read, ack_write):
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         if lockfd is not None:
             os.close(lockfd)
         os.close(dirfd)
@@ -1164,11 +1276,14 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
         if cors is not None:
             argv += ["--cors", cors]
         pid = spawn(dirfd, "opencode", argv, pty_mode=False)
-        if not _wait_leader(pid, 1.0):
-            raise HelperError("spawn", "the OpenCode process did not become a group leader")
-        record = _publish_started_record(
-            dirfd, "opencode", pid, None, "opencode-serve", port, deadline
-        )
+        try:
+            if not _wait_leader(pid, 1.0):
+                raise HelperError("spawn", "the OpenCode process did not become a group leader")
+        except Exception as exc:
+            _fail_launch(
+                pid, None, "spawn", "the OpenCode process did not become a group leader", exc
+            )
+        record = _publish_started_record(dirfd, "opencode", pid, None, "opencode-serve", port)
 
         def settled() -> bool:
             if group_state(pid, record.start) != "alive":

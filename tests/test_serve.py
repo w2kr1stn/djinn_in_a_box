@@ -161,10 +161,35 @@ def test_protocol_enums_match_helper():
     sys.modules[spec.name] = helper
     try:
         spec.loader.exec_module(helper)
-        for name in ("NAMES", "STATES", "START_RESULTS", "STOP_RESULTS", "ERROR_CODES"):
+        for name in (
+            "STATE_DIR",
+            "NAMES",
+            "STATES",
+            "START_RESULTS",
+            "STOP_RESULTS",
+            "ERROR_CODES",
+        ):
             assert getattr(serve, name) == getattr(helper, name)
     finally:
         del sys.modules[spec.name]
+
+
+def test_fresh_cli_import_does_not_import_container_helper():
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys; import djinn_in_a_box.cli.djinn; "
+            "assert 'djinn_in_a_box.core.serve_helper' not in sys.modules",
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 @pytest.mark.parametrize(
