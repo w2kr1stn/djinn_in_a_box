@@ -1077,8 +1077,9 @@ of generated targets (follow-up
 source, no writable source alias is delivered and its seed verification has a
 known mismatch reported as `source-changed`
 ([#168](https://github.com/w2kr1stn/djinn_in_a_box/issues/168)). The publisher
-checks that seed first, so a mismatch can mask runtime drift. Read-only views
-do not cover aliases through a writable workspace containing the installation.
+checks that seed first, so a mismatch can mask runtime drift. A writable
+workspace or other bind containing the installation, which would alias these
+views, is refused at creation.
 OpenCode's `~/.config/opencode` runtime stays in the container layer and is
 rebuilt at every start. The image gate requires `djinn.workflow.publisher=2`;
 older or unlabeled images refuse with `Rebuild/recreate required.` before
