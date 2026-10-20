@@ -711,6 +711,49 @@ class TestStartCommand:
         with pytest.raises(typer.Exit):
             container.start(docker=True, detach=True)
 
+    @pytest.mark.parametrize(
+        ("port", "stderr", "returncode", "detach", "hint"),
+        [
+            (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, True, True),
+            (49381, "Bind for 127.0.0.1:49381 failed: port is already allocated", 1, True, True),
+            (49381, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, True, False),
+            (49380, "Bind for 0.0.0.0:49380 failed: port is already allocated", 1, True, False),
+            (49380, "Bind for 127.0.0.1:49380 failed: permission denied", 1, True, False),
+            (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 0, True, False),
+            (49380, "Bind for 127.0.0.1:49380 failed: port is already allocated", 1, False, False),
+        ],
+        ids=[
+            "default", "configured", "other-port", "other-ip", "other-error",
+            "success", "foreground",
+        ],
+    )
+    def test_start_port_collision_hint(
+        self, start_mocks: dict[str, Any], port: int, stderr: str,
+        returncode: int, detach: bool, hint: bool,
+    ) -> None:
+        start_mocks["config"].serve.opencode_host_port = port
+        start_mocks["detached" if detach else "run"].return_value = RunResult(
+            returncode=returncode, stderr=stderr,
+        )
+
+        with (
+            patch.object(container, "info", wraps=container.info) as mock_info,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            container.start(detach=detach)
+
+        assert exc_info.value.exit_code == returncode
+        captured = re.sub(r"\x1b\[[0-9;]*m", "", start_mocks["err_output"].getvalue())
+        output = " ".join(captured.split())
+        expected = (
+            f"Port {port} is in use; choose another with: "
+            "djinn config set serve.opencode_host_port <n>"
+        )
+        assert (expected in output) is hint
+        assert ("choose another with:" in output) is hint
+        if hint:
+            mock_info.assert_any_call(expected)
+
 
     def test_start_detached_refuses_when_a_container_already_runs(
         self, start_mocks: dict[str, Any]

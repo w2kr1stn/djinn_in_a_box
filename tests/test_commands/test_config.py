@@ -1,9 +1,12 @@
-"""Tests for `djinn config set/get` handling of build settings."""
+"""Tests for `djinn config set/show` handling of build and serve settings."""
 
+import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands.config import (
     ALLOWED_CONFIG_KEYS,
     _format_config_value,
@@ -50,6 +53,59 @@ class TestBuildNetworkKey:
         assert after.workspace == "aios"
 
 
+class TestServePortKey:
+    @pytest.fixture
+    def saved_config(
+        self, config: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> Path:
+        from djinn_in_a_box.config import loader
+
+        path = tmp_path / "config.toml"
+        loader.save_config(config, path)
+        monkeypatch.setattr(loader, "CONFIG_FILE", path)
+        return path
+
+    def test_key_is_settable(self) -> None:
+        assert "serve.opencode_host_port" in ALLOWED_CONFIG_KEYS
+
+    def test_default_is_formatted(self, config: AppConfig) -> None:
+        assert _format_config_value(config, "serve.opencode_host_port") == "49380"
+
+    def test_set_then_read_back(self, config: AppConfig) -> None:
+        updated = _set_config_value(config, "serve.opencode_host_port", "49381")
+        assert updated.serve.opencode_host_port == 49381
+        assert _format_config_value(updated, "serve.opencode_host_port") == "49381"
+        after = _set_config_value(updated, "general.timezone", "Europe/Berlin")
+        assert after.serve == updated.serve
+
+    @pytest.mark.parametrize("port", [1024, 49380, 49381, 65535])
+    def test_set_show_round_trip(self, saved_config: Path, port: int) -> None:
+        from djinn_in_a_box.config.loader import load_config
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["config", "set", "serve.opencode_host_port", str(port)])
+        assert result.exit_code == 0, result.output
+        assert f"serve.opencode_host_port = {port}" in result.output
+        assert load_config(saved_config).serve.opencode_host_port == port
+
+        shown = runner.invoke(app, ["config", "show"])
+        assert shown.exit_code == 0, shown.output
+        assert "Serve" in shown.output
+        assert "opencode_host_port" in shown.output
+        assert str(port) in shown.output
+        shown_json = runner.invoke(app, ["config", "show", "--json"])
+        assert shown_json.exit_code == 0, shown_json.output
+        assert json.loads(shown_json.stdout)["serve"] == {"opencode_host_port": port}
+
+    @pytest.mark.parametrize("value", ["1023", "65536", "abc"])
+    def test_invalid_port_is_refused(self, saved_config: Path, value: str) -> None:
+        before = saved_config.read_bytes()
+        result = CliRunner().invoke(app, ["config", "set", "serve.opencode_host_port", value])
+        assert result.exit_code == 1, result.output
+        assert "integer" in result.output or "equal to" in result.output
+        assert saved_config.read_bytes() == before
+
+
 @pytest.mark.parametrize("key", ALLOWED_CONFIG_KEYS)
 def test_every_scalar_set_preserves_declarations(tmp_path, key):
     from djinn_in_a_box.config.loader import load_config, save_config
@@ -70,6 +126,7 @@ def test_every_scalar_set_preserves_declarations(tmp_path, key):
         "shell.omp_theme_path": str(tmp_path / "theme"),
         "config_sync.source": "codex",
         "build.network": "host",
+        "serve.opencode_host_port": "49381",
         "assistant.agent": "codex",
         "git.signing_identity": "none",
         "git.allowed_signers_file": str(tmp_path / "allowed_signers"),

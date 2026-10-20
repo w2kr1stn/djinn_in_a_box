@@ -381,6 +381,17 @@ def start(
         # exactly the part that locates a failing build step.
         print_captured(result.stderr)
 
+    if (
+        detach
+        and not result.success
+        and "port is already allocated" in result.stderr
+        and f"127.0.0.1:{config.serve.opencode_host_port}" in result.stderr
+    ):
+        info(
+            f"Port {config.serve.opencode_host_port} is in use; choose another with: "
+            "djinn config set serve.opencode_host_port <n>"
+        )
+
     if detach and result.success:
         # `up -d` exits 0 the moment the container is created and observes nothing
         # afterwards; the dev service has no healthcheck. This catches a container

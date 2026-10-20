@@ -22,6 +22,7 @@ from djinn_in_a_box.config.models import (
     BuildConfig,
     ConfigSyncConfig,
     ResourceLimits,
+    ServeConfig,
     ShellConfig,
     WorkspaceMode,
 )
@@ -69,6 +70,7 @@ ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "shell.omp_theme_path",
     "config_sync.source",
     "build.network",
+    "serve.opencode_host_port",
     "assistant.agent",
     "git.signing_identity",
     "git.allowed_signers_file",
@@ -343,6 +345,11 @@ def _build_config(
 
 
 def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
+    if key == "serve.opencode_host_port":
+        serve = ServeConfig.model_validate(
+            {"opencode_host_port": _parse_int_config_value(key, value)}
+        )
+        return AppConfig.model_validate({**config.model_dump(), "serve": serve})
     if key == "assistant.agent":
         assistant = AssistantConfig.model_validate({"agent": value})
         return AppConfig.model_validate({**config.model_dump(), "assistant": assistant})
@@ -464,6 +471,8 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
 
 
 def _format_config_value(config: AppConfig, key: str) -> str:
+    if key == "serve.opencode_host_port":
+        return str(config.serve.opencode_host_port)
     if key == "assistant.agent":
         return config.assistant.agent
     if key == "git.signing_identity":
@@ -654,6 +663,7 @@ def config_show(
         console.print()
 
         _print_config_table("Build", [("network", config.build.network)])
+        _print_config_table("Serve", [("opencode_host_port", config.serve.opencode_host_port)])
         _print_config_table("Assistant", [("agent", config.assistant.agent)])
 
         _print_config_table("Git", [
