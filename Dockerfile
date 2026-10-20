@@ -103,9 +103,11 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
 # Upstream CLI agent defaults - maintainers bump with: ./scripts/update-agents.sh
 # djinn update records local versions; builds pass higher versions as ARG overrides.
+# After bumping any default, build once with the defaults alone (no local
+# agent-versions.toml record) and commit the bump only after that build succeeds.
 ARG CLAUDE_CODE_VERSION=2.1.288
 ARG CODEX_VERSION=0.160.0
-ARG OPENCODE_VERSION=2.0.26
+ARG OPENCODE_VERSION=2.1.1
 
 # Claude Code via native installer (no npm/Node.js dependency)
 # Installs to ~/.local/bin/claude (already in the image PATH)

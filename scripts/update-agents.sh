@@ -154,7 +154,7 @@ if [[ "$updates_made" == "true" ]]; then
     git diff --no-color "$DOCKERFILE" | head -30
     echo ""
     echo "Next steps:"
-    printf '  1. %bdjinn build%b   # Rebuild image with new versions\n' \
+    printf '  1. %bdjinn build%b   # Build the new defaults alone: move a local agent-versions.toml aside first; commit only after this succeeds\n' \
         "$(color_start "$UI_COLOR_INFO")" \
         "$(color_reset)"
     printf '  2. %bdjinn start%b   # Start container\n' \

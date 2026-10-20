@@ -142,6 +142,7 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
             "daemon.status.json",
             "stats-cache.json",
             "gh-pr-status-cache.json",
+            "mcp-needs-auth-cache.json",
             ".last-cleanup",
             ".last-update-result.json",
             "plugin-catalog-cache.json",

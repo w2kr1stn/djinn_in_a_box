@@ -165,6 +165,7 @@ def test_maintainer_mode_updates_temp_dockerfile(script_env):
     assert "Dockerfile updated!" in result.stdout
     assert "diff --git" in result.stdout
     assert "djinn build" in result.stdout and "djinn start" in result.stdout
+    assert "agent-versions.toml aside" in result.stdout
     before = snapshot(project)
     result = run_script(project, env)
     assert result.returncode == 0
