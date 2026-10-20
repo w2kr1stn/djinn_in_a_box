@@ -103,6 +103,7 @@ def test_codex_daemon_step_guard_order_arguments_and_failure_continue(tmp_path, 
         "import sys\n"
         + f"assert sys.argv[1:] == ['--codex-home', {str(tmp_path / '.codex')!r}]\n"
         + "print('POLICY_RAN')\n"
+        + "print('POLICY_REASON on stderr', file=sys.stderr)\n"
         + ("sys.exit(1)\n" if failure else "")
     )
     replay = tmp_path / "replay.sh"
@@ -132,6 +133,8 @@ def test_codex_daemon_step_guard_order_arguments_and_failure_continue(tmp_path, 
     assert result.stdout == "FOLLOWING_STARTUP_STEP\n"
     assert_plain_startup_output(result.stderr)
     assert ("POLICY_RAN" in result.stderr) is not command
+    # The helper's own reason must reach the startup log, not only the generic warning.
+    assert ("POLICY_REASON on stderr" in result.stderr) is not command
     assert ("SECTION Codex daemon" in result.stderr) is not command
     assert result.stderr.count("WARN ") == int(failure and not command)
     if not command:
