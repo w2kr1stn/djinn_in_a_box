@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
@@ -22,32 +23,68 @@ _ALLOWED_RW = frozenset(
 )
 
 
-def _string_volumes() -> list[str]:
-    compose = yaml.safe_load((_ROOT / "docker-compose.yml").read_text())
-    entries = list(compose.get("x-common-volumes") or [])
-    for service in (compose.get("services") or {}).values():
+def _compose() -> dict[str, Any]:
+    return yaml.safe_load((_ROOT / "docker-compose.yml").read_text())
+
+
+def _binds(compose: dict[str, Any]) -> list[tuple[str, str, bool]]:
+    """Every bind as (source, target, read_only), from short and long volume syntax."""
+    entries: list[object] = list(compose.get("x-common-volumes") or [])
+    services = cast(dict[str, dict[str, Any] | None], compose.get("services") or {})
+    for service in services.values():
         entries.extend((service or {}).get("volumes") or [])
-    return [entry for entry in entries if isinstance(entry, str)]
+    binds: list[tuple[str, str, bool]] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            source, target, *mode = entry.split(":")
+            binds.append((source, target, mode == ["ro"]))
+        elif isinstance(entry, dict):
+            mount = cast(dict[str, object], entry)
+            if mount.get("type") == "bind":
+                binds.append(
+                    (str(mount["source"]), str(mount["target"]), bool(mount.get("read_only")))
+                )
+    return binds
+
+
+def _writable_config_binds(compose: dict[str, Any]) -> list[str]:
+    return [
+        f"{source}:{target}"
+        for source, target, read_only in _binds(compose)
+        if (source == "./config" or source.startswith("./config/"))
+        and not read_only
+        and f"{source}:{target}" not in _ALLOWED_RW
+    ]
 
 
 def test_config_binds_are_read_only_except_the_default_source() -> None:
-    checked = 0
-    for entry in _string_volumes():
-        source = entry.split(":", 1)[0]
-        if source != "./config" and not source.startswith("./config/"):
-            continue
-        if entry in _ALLOWED_RW:
-            continue
-        checked += 1
-        assert entry.endswith(":ro"), entry
-    assert checked >= 1
+    compose = _compose()
+    checked = [
+        source
+        for source, _, read_only in _binds(compose)
+        if (source == "./config" or source.startswith("./config/")) and read_only
+    ]
+    assert checked
+    assert _writable_config_binds(compose) == []
+
+
+def test_long_syntax_writable_config_bind_is_refused() -> None:
+    compose = _compose()
+    compose["services"]["dev"]["volumes"] = [
+        *compose["services"]["dev"]["volumes"],
+        {"type": "bind", "source": "./config/codex", "target": "/home/dev/.codex_seed"},
+    ]
+
+    assert _writable_config_binds(compose) == ["./config/codex:/home/dev/.codex_seed"]
 
 
 def test_allowed_rw_binds_exist_verbatim() -> None:
-    entries = _string_volumes()
+    entries = {
+        f"{source}:{target}" for source, target, read_only in _binds(_compose()) if not read_only
+    }
     for entry in sorted(_ALLOWED_RW):
         assert entry in entries
 
 
 def test_opencode_seed_view_is_read_only() -> None:
-    assert "./config/opencode:/home/dev/.opencode/seed:ro" in _string_volumes()
+    assert ("./config/opencode", "/home/dev/.opencode/seed", True) in _binds(_compose())
