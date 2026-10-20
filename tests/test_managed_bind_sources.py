@@ -629,6 +629,37 @@ def test_doctor_nul_zone_renders_both_rows(ground, quiet_doctor, monkeypatch):
     assert sorted(config.code_dir.parent.rglob("*")) == before
 
 
+def test_doctor_deep_zone_toml_renders_both_rows(ground, quiet_doctor, monkeypatch):
+    config, _, _ = ground
+    zones.ZONES_FILE.write_text(
+        "[zones.claude]\nlocal = " + "[" * 1000 + '"entry"' + "]" * 1000 + "\n"
+    )
+    problems = docker.managed_bind_problems(config)
+    assert len(problems) == 1
+    assert "Zone overlay source" in problems[0]
+    assert "cannot be checked" in problems[0]
+    assert "recursion" in problems[0]
+    before = sorted(config.code_dir.parent.rglob("*"))
+    rows = doctor.run_checks(config)
+    managed = next(r for r in rows if r.name == "Managed bind sources")
+    assert managed.status is doctor.Status.FAIL
+    assert managed.detail == problems[0]
+    zone = next(r for r in rows if r.name == "Zone configuration")
+    assert zone.status is doctor.Status.WARN
+    assert "recursion" in zone.detail
+    monkeypatch.setattr(loader, "load_config", lambda: config)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert any(
+        "Managed bind sources" in line and "FAIL" in line for line in result.output.splitlines()
+    )
+    assert "Zone configuration" in result.output
+    assert "recursion" in result.output
+    assert "Fix the zone roots or zones.toml" in result.output
+    assert sorted(config.code_dir.parent.rglob("*")) == before
+
+
 def test_doctor_invalid_utf8_zones_renders_both_rows(ground, quiet_doctor, monkeypatch):
     config, _, _ = ground
     zones.ZONES_FILE.write_bytes(b"\xff")

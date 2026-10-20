@@ -869,7 +869,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
                     )
                 )
                 checks.extend(_zone_diagnostic_checks(config, assignments))
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
                 checks.append(
                     Check(
                         "Zone configuration",
