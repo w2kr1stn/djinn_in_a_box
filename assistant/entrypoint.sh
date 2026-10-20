@@ -73,7 +73,8 @@ import_opencode() {
 export_opencode() {
     local temporary
     temporary=$(mktemp "$store/.final.XXXXXX") || return 1
-    if opencode_credentials export > "$temporary" && mv -f "$temporary" "$store/final.json"; then
+    # -T: final.json is the exact destination; a planted directory link must not receive the export.
+    if opencode_credentials export > "$temporary" && mv -fT -- "$temporary" "$store/final.json"; then
         return 0
     fi
     rm -f "$temporary"

@@ -2538,6 +2538,36 @@ def test_restore_interruption_keeps_session_for_later_recovery(credential_restor
     assert config.config_root == carrier.parent
 
 
+def test_restore_holds_the_parked_session_against_a_concurrent_recovery(
+    credential_restore, monkeypatch
+):
+    _, carrier, _, archives, oc = credential_restore
+    archives(["djinn-opencode-data", "djinn-sync-opencode"])
+    concurrent = []
+
+    def volume(*_):
+        # an audit or start recovers while the restore has not reached the carrier yet
+        report = oc.recover_audit_sessions(None, carrier, lambda _: b"[]", lambda _: False)
+        concurrent.append(report)
+        return RunResult(0)
+
+    def carrier_from_backup(*_):
+        (carrier / "credentials.json").write_text("[]\n")
+        return SyncRestoreResult(0, extraction_admitted=True)
+
+    monkeypatch.setattr(backup_module, "restore_volume", volume)
+    monkeypatch.setattr(backup_module, "restore_sync_path", carrier_from_backup)
+    result = runner.invoke(app, ["restore"])
+    assert result.exit_code == 0, result.output
+    assert [len(report.recovered) for report in concurrent] == [0]
+    assert [reason for _, reason in concurrent[0].kept] == ["in use"]
+    assert {item["id"] for item in json.loads((carrier / "credentials.json").read_text())} == {
+        "after-backup",
+        "database-only",
+    }
+    assert not list(Path(oc.default_audit_root()).iterdir())
+
+
 @pytest.mark.parametrize("failure", ["export", "park"])
 @pytest.mark.parametrize("discard", [False, True])
 def test_restore_preservation_failure_refuses_or_discards(

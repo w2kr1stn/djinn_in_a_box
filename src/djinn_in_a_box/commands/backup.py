@@ -378,6 +378,8 @@ def restore(
 
     staging_dir = Path(tempfile.mkdtemp(prefix="djinn-restore-"))
     decrypt_dir: Path | None = None
+    # Held until the archives are restored, so a concurrent recovery cannot merge it early.
+    parked: opencode_credentials.Session | None = None
 
     try:
         archive_to_extract = backup_file
@@ -431,7 +433,7 @@ def restore(
                 exported = export_opencode_data_credentials()
                 carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with opencode_credentials.carrier_lock(carrier) as lease:
-                    opencode_credentials.park_for_restore(None, carrier, exported, lease)
+                    parked = opencode_credentials.park_for_restore(None, carrier, exported, lease)
             except (CredentialExportError, opencode_credentials.CredentialsError, OSError) as exc:
                 reason = credential_error_reason(exc)
                 if not discard_unexported_credentials:
@@ -447,7 +449,7 @@ def restore(
                 try:
                     carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
                     with opencode_credentials.carrier_lock(carrier) as lease:
-                        opencode_credentials.park_for_restore(None, carrier, b"[]", lease)
+                        parked = opencode_credentials.park_for_restore(None, carrier, b"[]", lease)
                 except (opencode_credentials.CredentialsError, OSError) as park_error:
                     warning(
                         "OpenCode carrier could not be parked: "
@@ -512,7 +514,7 @@ def restore(
                 failed = True
 
         if preserve_opencode:
-            recover_leftover_sessions(get_project_root(), config)
+            recover_leftover_sessions(get_project_root(), config, parked)
 
         blank()
         if failed:
@@ -521,6 +523,8 @@ def restore(
         success(f"Restore complete: {len(inner_archives)} item(s)")
 
     finally:
+        if parked is not None:
+            parked.close()
         if decrypt_dir is not None:
             try:
                 shutil.rmtree(decrypt_dir)

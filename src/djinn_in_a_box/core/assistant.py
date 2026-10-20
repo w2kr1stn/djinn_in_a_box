@@ -517,3 +517,7 @@ def run_audit(occasion: str | None, selected: str | None = None) -> int:
     finally:
         if session is not None:
             finish_session(session.container_name, session, project, config, launched=launched)
+        else:
+            # Any audit ends with a recovery, so leftovers whose lease or carrier recovered in the
+            # meantime are merged now rather than at the next audit or start.
+            recover_leftover_sessions(project, config)

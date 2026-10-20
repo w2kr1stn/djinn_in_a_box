@@ -2046,12 +2046,14 @@ def park_for_restore(
     lease: Lease,
     *,
     policy: RootPolicy | None = None,
-) -> str:
+) -> Session:
     """Write volume export plus current carrier entries as ``io/final.json`` of a new session.
 
     Runs before the first destructive step of a restore. Tombstones in effect are respected, so
-    a login that was reported removed is not parked. The lease on the session is released again:
-    ``recover_audit_sessions`` merges and deletes it later. Returns the session ID.
+    a login that was reported removed is not parked. The returned session keeps its lease, so a
+    concurrent recovery cannot merge the parked copy into the carrier that the restore is about to
+    overwrite. The caller passes it as ``own_session`` to ``recover_audit_sessions`` after the
+    last destructive step and closes it; if the caller dies, the next recovery merges it.
     """
     dir_fd = _check_lease(carrier_dir, lease)
     incoming = parse_entries(volume_export, EXPORT_LIMIT)
@@ -2070,9 +2072,7 @@ def park_for_restore(
             _abandon(session, policy)
         session.close()
         raise
-    identity = session.id
-    session.close()
-    return identity
+    return session
 
 
 def _abandon(session: Session, policy: RootPolicy | None) -> None:

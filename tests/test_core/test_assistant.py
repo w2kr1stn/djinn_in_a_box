@@ -976,6 +976,27 @@ def test_finalization_order_stop_cleanup_recovery(installation, monkeypatch, sta
     assert list(audit_root(f).iterdir()) == []
 
 
+@pytest.mark.parametrize("agent", ("claude", "codex"))
+@pytest.mark.parametrize("status", (0, 130))
+def test_every_audit_ends_with_a_recovery(installation, monkeypatch, agent, status):
+    f = installation
+    events = Events(f, monkeypatch)
+    f.docker.keep = True
+    f.docker.interrupt = status == 130
+    assert a.run_audit(None, agent) == status
+    assert events.order() == ["RECOVER", "rm", "RECOVER"]
+    assert all(call[0][4] is None for call in events.recoveries)
+
+
+def test_the_end_recovery_runs_even_when_the_cleanup_fails(installation, monkeypatch):
+    f = installation
+    events = Events(f, monkeypatch)
+    f.docker.keep = f.docker.fail_remove = True
+    with pytest.raises(a.AssistantError, match="removal failed"):
+        a.run_audit(None, "claude")
+    assert events.order() == ["RECOVER", "rm", "RECOVER"]
+
+
 def test_finalization_runs_after_a_failed_stop(installation, monkeypatch, warnings_seen):
     f = installation
     events = Events(f, monkeypatch)

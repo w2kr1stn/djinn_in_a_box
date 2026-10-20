@@ -930,10 +930,10 @@ DRIVER_SOURCE = textwrap.dedent(
         with open(config["export"], "rb") as handle:
             volume = handle.read()
         with oc.carrier_lock(config["carrier"]) as lease:
-            identity = oc.park_for_restore(
+            parked = oc.park_for_restore(
                 config["root"], config["carrier"], volume, lease, policy=policy
             )
-        note("parked " + identity)
+        note("parked " + parked.id)
         if kill == "after-park":
             die()
         sys.exit(0)
@@ -1100,7 +1100,7 @@ def test_sigkill_at_each_step_is_completed_by_the_next_recovery(
 # ---------------------------------------------------------------------------------------------
 
 
-def test_parking_writes_the_union_before_returning_and_releases_the_lease(
+def test_parking_writes_the_union_before_returning_and_keeps_the_lease(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world.put(FILE, [entry("cred_now", "prov_n", active=True), entry("cred_dead", "prov_d")])
@@ -1111,34 +1111,52 @@ def test_parking_writes_the_union_before_returning_and_releases_the_lease(
     monkeypatch.setattr(oc.ops, "fsync_file", lambda fd: (events.append("file"), real_file(fd)))
     monkeypatch.setattr(oc.ops, "fsync_dir", lambda fd: (events.append("dir"), real_dir(fd)))
     with locked(world) as lease:
-        identity = oc.park_for_restore(
-            world.root, world.carrier, volume, lease, policy=world.policy
-        )
+        session = oc.park_for_restore(world.root, world.carrier, volume, lease, policy=world.policy)
     assert events[-2:] == ["file", "dir"]
-    assert re.fullmatch(r"[0-9a-f]{32}", identity)
-    final = world.root / identity / "io" / "final.json"
+    assert re.fullmatch(r"[0-9a-f]{32}", session.id)
+    final = world.root / session.id / "io" / "final.json"
     assert mode_of(final) == 0o600
     parked = json.loads(final.read_text())
     assert [(item["id"], item["active"]) for item in parked] == [
         ("cred_now", True),
         ("cred_vol", False),
     ]
-    probe = os.open(world.root / identity, os.O_RDONLY | os.O_DIRECTORY)
-    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    os.close(probe)
+    probe = os.open(world.root / session.id, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        session.close()
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe)
 
 
 def test_a_restore_keeps_logins_made_after_the_backup(world: World) -> None:
     world.put(FILE, [entry("cred_old", "prov_o"), entry("cred_new", "prov_n")])
     volume = export_of(entry("cred_vol", "prov_v"))
     with locked(world) as lease:
-        oc.park_for_restore(world.root, world.carrier, volume, lease, policy=world.policy)
+        parked = oc.park_for_restore(world.root, world.carrier, volume, lease, policy=world.policy)
     # the restore: the carrier is replaced by the backup, the volume by the backup volume
     world.put(FILE, [entry("cred_old", "prov_o")])
-    report = world.recover(export_db=lambda _: b"[]")
+    with parked:
+        report = world.recover(export_db=lambda _: b"[]", own_session=parked)
     assert len(report.recovered) == 1
     assert world.ids() == ["cred_new", "cred_old", "cred_vol"]
     assert world.sessions() == []
+
+
+def test_a_recovery_during_the_restore_leaves_the_parked_copy_alone(world: World) -> None:
+    world.put(FILE, [entry("cred_old", "prov_o"), entry("cred_new", "prov_n")])
+    with locked(world) as lease:
+        parked = oc.park_for_restore(world.root, world.carrier, b"[]", lease, policy=world.policy)
+    with parked:
+        # an audit or start recovers while the restore has not overwritten the carrier yet
+        concurrent = world.recover(export_db=lambda _: b"[]")
+        assert concurrent.recovered == [] and concurrent.kept == [(parked.id, "in use")]
+        world.put(FILE, [entry("cred_old", "prov_o")])
+        report = world.recover(export_db=lambda _: b"[]", own_session=parked)
+    assert len(report.recovered) == 1
+    assert world.ids() == ["cred_new", "cred_old"]
 
 
 def test_a_kill_between_parking_and_the_restore_loses_nothing(world: World, driver: Driver) -> None:

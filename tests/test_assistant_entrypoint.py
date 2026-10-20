@@ -288,3 +288,26 @@ def test_opencode_export_never_writes_through_a_planted_name(tmp_path):
     assert r.returncode == 0, r.stderr
     assert victim.read_text() == "untouched"
     assert json.loads((store / "final.json").read_text()) == []
+
+
+def test_opencode_export_never_lands_in_a_directory_planted_as_final(tmp_path):
+    entry, env, store, _, _ = prepare_opencode(tmp_path, [credential("cred_one")])
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (store / "final.json").symlink_to(elsewhere)
+    r = run_entry(entry, env, "exit 0")
+    assert r.returncode == 0, r.stderr
+    assert list(elsewhere.iterdir()) == []
+    final = store / "final.json"
+    assert not final.is_symlink() and final.is_file()
+    assert [item["id"] for item in json.loads(final.read_text())] == ["cred_one"]
+
+
+def test_opencode_export_fails_on_a_real_directory_named_final(tmp_path):
+    entry, env, store, _, _ = prepare_opencode(tmp_path, [credential("cred_one")])
+    (store / "final.json").mkdir()
+    r = run_entry(entry, env, "exit 0")
+    assert r.returncode == 1
+    assert "Could not export" in r.stderr
+    assert list((store / "final.json").iterdir()) == []
+    assert sorted(path.name for path in store.iterdir() if path.name.startswith(".")) == []
