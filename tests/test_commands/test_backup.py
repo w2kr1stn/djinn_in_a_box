@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -29,6 +30,18 @@ from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_opencode_restore(monkeypatch: pytest.MonkeyPatch, mock_home: Path) -> None:
+    from djinn_in_a_box.core import assistant
+    from djinn_in_a_box.core import opencode_credentials as oc
+
+    monkeypatch.setattr(assistant, "container_exists", lambda _: False)
+    monkeypatch.setattr(
+        oc, "default_audit_root", lambda: str(mock_home / ".local/state/djinn/opencode-audit")
+    )
+    monkeypatch.setattr(backup_module, "export_opencode_data_credentials", lambda: b"[]")
 
 
 @pytest.fixture(autouse=True)
@@ -2382,3 +2395,243 @@ def test_default_backup_excludes_postmortem_records(tmp_path, monkeypatch):
         config_root / name for category in ("credentials", "repo-dotfiles", "data")
         for name in SYNC_PATHS.get(category, [])
     }
+
+
+@pytest.fixture
+def credential_restore(tmp_path, mock_app_config, monkeypatch):
+    from djinn_in_a_box.core import opencode_credentials as oc
+
+    config = mock_app_config
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    monkeypatch.setattr(_lifecycle, "get_running_containers", lambda **_: [])
+    monkeypatch.setattr(backup_module, "load_config", lambda: config)
+    monkeypatch.setattr(backup_module.typer, "confirm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(backup_module, "_harden_restored_sync_directories", lambda _: None)
+    carrier = config.config_root / "opencode"
+    carrier.mkdir(parents=True, mode=0o700)
+
+    def entry(identity):
+        return {
+            "id": identity,
+            "integrationID": "provider",
+            "label": os.urandom(8).hex(),
+            "active": True,
+            "value": {"type": "key", "key": os.urandom(24).hex()},
+        }
+
+    current = json.dumps([entry("after-backup")]).encode()
+    exported = json.dumps([entry("database-only")]).encode()
+    (carrier / "credentials.json").write_bytes(current)
+    (carrier / "credentials.json").chmod(0o600)
+    monkeypatch.setattr(backup_module, "export_opencode_data_credentials", lambda: exported)
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    monkeypatch.setattr(backup_module, "BACKUPS_DIR", backups)
+
+    def archives(names):
+        with tarfile.open(backups / "djinn-backup-2026-10-20.tar.gz", "w:gz") as outer:
+            for name in names:
+                archive = tmp_path / f"{name}.tar.gz"
+                with tarfile.open(archive, "w:gz"):
+                    pass
+                outer.add(archive, arcname=archive.name)
+
+    return config, carrier, exported, archives, oc
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["djinn-opencode-data", "djinn-sync-opencode"],
+        ["djinn-opencode-data"],
+        ["djinn-sync-opencode"],
+    ],
+)
+def test_restore_parks_before_destruction_and_recovers_after_archives(
+    credential_restore, monkeypatch, names
+):
+    _, carrier, _, archives, oc = credential_restore
+    archives(names)
+    calls = []
+    park = oc.park_for_restore
+    original_lock = oc.carrier_lock
+    inside = False
+
+    @contextmanager
+    def locked(path, *args, **kwargs):
+        nonlocal inside
+        with original_lock(path, *args, **kwargs) as lease:
+            inside = True
+            try:
+                yield lease
+            finally:
+                inside = False
+
+    def export():
+        assert not inside
+        return credential_restore[2]
+
+    recover = backup_module.recover_leftover_sessions
+
+    def parked(*args):
+        assert inside
+        calls.append("park")
+        return park(*args)
+
+    def restored(name, *_):
+        assert calls[0] == "park"
+        calls.append(name)
+        if name == "opencode":
+            for child in carrier.iterdir():
+                child.unlink()
+        return SyncRestoreResult(0, extraction_admitted=True)
+
+    def recovered(*args):
+        assert calls[1:] == ["djinn-opencode-data"] * ("djinn-opencode-data" in names) + [
+            "opencode"
+        ] * ("djinn-sync-opencode" in names)
+        calls.append("recover")
+        return recover(*args)
+
+    monkeypatch.setattr(oc, "carrier_lock", locked)
+    monkeypatch.setattr(backup_module, "export_opencode_data_credentials", export)
+    monkeypatch.setattr(oc, "park_for_restore", parked)
+    monkeypatch.setattr(backup_module, "restore_volume", restored)
+    monkeypatch.setattr(backup_module, "restore_sync_path", restored)
+    monkeypatch.setattr(backup_module, "recover_leftover_sessions", recovered)
+    result = runner.invoke(app, ["restore"])
+    assert result.exit_code == 0, result.output
+    assert calls[-1] == "recover"
+    assert {item["id"] for item in json.loads((carrier / "credentials.json").read_text())} == {
+        "after-backup",
+        "database-only",
+    }
+    assert not list(Path(oc.default_audit_root()).iterdir())
+
+
+def test_restore_interruption_keeps_session_for_later_recovery(credential_restore, monkeypatch):
+    config, carrier, _, archives, oc = credential_restore
+    archives(["djinn-opencode-data", "djinn-sync-opencode"])
+
+    def volume(*_):
+        return RunResult(0)
+
+    def interrupted(*_):
+        # Simulate interruption after the destructive clear and before carrier extraction.
+        (carrier / "credentials.json").unlink()
+        raise RuntimeError("restore interrupted")
+
+    monkeypatch.setattr(backup_module, "restore_volume", volume)
+    monkeypatch.setattr(backup_module, "restore_sync_path", interrupted)
+    result = runner.invoke(app, ["restore"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, RuntimeError)
+    root = Path(oc.default_audit_root())
+    assert len(list(root.iterdir())) == 1
+    report = oc.recover_audit_sessions(None, carrier, lambda _: b"[]", lambda _: False)
+    assert len(report.recovered) == 1
+    assert not report.kept
+    assert {item["id"] for item in json.loads((carrier / "credentials.json").read_text())} == {
+        "after-backup",
+        "database-only",
+    }
+    assert config.config_root == carrier.parent
+
+
+@pytest.mark.parametrize("failure", ["export", "park"])
+@pytest.mark.parametrize("discard", [False, True])
+def test_restore_preservation_failure_refuses_or_discards(
+    credential_restore, monkeypatch, failure, discard
+):
+    _, carrier, exported, archives, oc = credential_restore
+    archives(["djinn-opencode-data", "djinn-sync-opencode"])
+    calls = []
+    original = oc.park_for_restore
+
+    def export():
+        if failure == "export":
+            raise backup_module.CredentialExportError("image unavailable")
+        return exported
+
+    def park(root, path, data, lease):
+        if failure == "park" and data != b"[]":
+            raise oc.NotUnderstood("parking failed")
+        calls.append("park")
+        return original(root, path, data, lease)
+
+    def destructive(*_):
+        calls.append("destroy")
+        return SyncRestoreResult(0, extraction_admitted=True)
+
+    monkeypatch.setattr(backup_module, "export_opencode_data_credentials", export)
+    monkeypatch.setattr(oc, "park_for_restore", park)
+    monkeypatch.setattr(backup_module, "restore_volume", destructive)
+    monkeypatch.setattr(backup_module, "restore_sync_path", destructive)
+    args = ["restore"] + (["--discard-unexported-credentials"] if discard else [])
+    result = runner.invoke(app, args)
+    assert result.exit_code == (0 if discard else 1), result.output
+    assert ("destroy" in calls) == discard
+    if discard:
+        assert calls[0] == "park"
+        assert "unexported logins are lost" in result.output
+        assert "after-backup" in {
+            item["id"] for item in json.loads((carrier / "credentials.json").read_text())
+        }
+    else:
+        assert "--discard-unexported-credentials" in result.output
+        assert ("image unavailable" if failure == "export" else "parking failed") in result.output
+        assert not calls
+
+
+def test_restore_recovery_failure_only_warns_and_retains_session(credential_restore, monkeypatch):
+    _, _, _, archives, oc = credential_restore
+    archives(["djinn-opencode-data"])
+    monkeypatch.setattr(backup_module, "restore_volume", lambda *_: RunResult(0))
+
+    def failed(*args, **kwargs):
+        raise oc.NotUnderstood("recovery failed")
+
+    monkeypatch.setattr(oc, "recover_audit_sessions", failed)
+    result = runner.invoke(app, ["restore"])
+    assert result.exit_code == 0, result.output
+    assert "recovery failed" in result.output
+    assert len(list(Path(oc.default_audit_root()).iterdir())) == 1
+
+
+def test_restore_other_archives_skip_opencode_preservation(credential_restore, monkeypatch):
+    _, _, _, archives, _ = credential_restore
+    archives(["djinn-packages"])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unrelated archives must not touch OpenCode credentials")
+
+    monkeypatch.setattr(backup_module, "export_opencode_data_credentials", forbidden)
+    monkeypatch.setattr(backup_module, "recover_leftover_sessions", forbidden)
+    monkeypatch.setattr(backup_module, "restore_volume", lambda *_: RunResult(0))
+    assert runner.invoke(app, ["restore"]).exit_code == 0
+
+
+@pytest.mark.parametrize("discard", [False, True])
+def test_restore_unparkable_carrier_refuses_unless_discarded(
+    credential_restore, monkeypatch, discard
+):
+    _, carrier, _, archives, _ = credential_restore
+    archives(["djinn-opencode-data"])
+    (carrier / "credentials.json").write_text("{}")
+    calls = []
+
+    def destructive(*_):
+        calls.append("destroy")
+        return RunResult(0)
+
+    monkeypatch.setattr(backup_module, "restore_volume", destructive)
+    result = runner.invoke(
+        app, ["restore"] + (["--discard-unexported-credentials"] if discard else [])
+    )
+    assert result.exit_code == (0 if discard else 1), result.output
+    assert bool(calls) == discard
+    if discard:
+        assert "OpenCode carrier could not be parked" in result.output
+        assert "unexported logins are lost" in result.output
+    else:
+        assert "--discard-unexported-credentials" in result.output

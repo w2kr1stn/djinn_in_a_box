@@ -618,6 +618,18 @@ def export_opencode_credentials(
     return bytes(output)
 
 
+def export_opencode_data_credentials() -> bytes:
+    """Export the existing dev data volume through the one-off adapter; absent means empty."""
+    volumes = _run_captured([DOCKER_EXECUTABLE, "volume", "ls", "--format", "{{.Name}}"], timeout=5)
+    if not volumes.success:
+        raise CredentialExportError("OpenCode data volume existence could not be verified")
+    if "djinn-opencode-data" not in volumes.stdout.splitlines():
+        return b"[]"
+    return export_opencode_credentials(
+        image="djinn-in-a-box:latest", source="djinn-opencode-data", kind="volume"
+    )
+
+
 def _decode_timeout_output(
     exc: subprocess.TimeoutExpired,
     timeout: int,
@@ -3516,10 +3528,13 @@ def restore_sync_path(
     )
 
 
-def clear_sync_path(path: Path) -> bool:
-    """Remove the contents of a sync path (directory itself is preserved)."""
+def clear_sync_path(path: Path, keep: frozenset[str] = frozenset()) -> bool:
+    """Clear a sync directory, preserving its root and named top-level entries."""
     try:
-        clear_directory(path)
+        if keep:
+            clear_directory(path, keep=keep)
+        else:
+            clear_directory(path)
     except (PathContainmentError, OSError) as e:
         warning(f"Failed to clear sync path '{path}': {e}")
         if isinstance(e, PathContainmentError):

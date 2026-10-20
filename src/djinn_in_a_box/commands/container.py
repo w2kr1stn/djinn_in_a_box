@@ -6,6 +6,7 @@ import contextlib
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,7 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, host_runtime, hostctl, paths
+from djinn_in_a_box.core import agent_docker, host_runtime, hostctl, opencode_credentials, paths
 from djinn_in_a_box.core.agent_versions import (
     KNOWN_AGENT_ARGS,
     AgentVersionError,
@@ -34,7 +35,11 @@ from djinn_in_a_box.core.agent_versions import (
     load_versions,
     save_versions,
 )
-from djinn_in_a_box.core.assistant import recover_leftover_sessions
+from djinn_in_a_box.core.assistant import (
+    credential_error_reason,
+    opencode_carrier,
+    recover_leftover_sessions,
+)
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     prepare_config_workflow,
@@ -57,6 +62,7 @@ from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     ContainerOptions,
+    CredentialExportError,
     MountCollisionError,
     clear_sync_path,
     compose_build,
@@ -67,6 +73,7 @@ from djinn_in_a_box.core.docker import (
     delete_volume,
     delete_volumes,
     ensure_network,
+    export_opencode_data_credentials,
     get_config_root,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
@@ -674,6 +681,89 @@ def clean_default(ctx: typer.Context) -> None:
             raise typer.Exit(result.returncode)
 
 
+def _validate_opencode_carrier(config: AppConfig | None) -> None:
+    """Refuse invalid carrier files before recovery or clearing any other credentials."""
+    try:
+        descriptor = opencode_credentials.open_dir(opencode_carrier(config))
+    except FileNotFoundError:
+        return
+    try:
+        # The ordinary credential reader also tightens modes; refusal must leave them alone.
+        for name in (opencode_credentials.CREDENTIALS_NAME, opencode_credentials.TOMBSTONES_NAME):
+            try:
+                file_descriptor = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                continue
+            try:
+                status = os.fstat(file_descriptor)
+                if not stat.S_ISREG(status.st_mode):
+                    raise opencode_credentials.Refused("entry is not a regular file")
+                if status.st_uid != os.geteuid():
+                    raise opencode_credentials.Refused("entry belongs to another user")
+                with os.fdopen(file_descriptor, "rb", closefd=False) as handle:
+                    raw = handle.read(opencode_credentials.FILE_LIMIT + 1)
+            finally:
+                os.close(file_descriptor)
+            if name == opencode_credentials.CREDENTIALS_NAME:
+                opencode_credentials.parse_entries(raw)
+            else:
+                opencode_credentials.parse_tombstones(raw)
+    finally:
+        os.close(descriptor)
+
+
+def _logout_opencode(config: AppConfig | None) -> None:
+    """Recover and export outside the single lease, then tombstone and clear under it."""
+    recover_leftover_sessions(get_project_root(), config)
+    exported = b"[]"
+    try:
+        exported = export_opencode_data_credentials()
+        extra_ids = [
+            entry.id
+            for entry in opencode_credentials.parse_entries(
+                exported, opencode_credentials.EXPORT_LIMIT
+            )
+        ]
+    except (CredentialExportError, opencode_credentials.CredentialsError, OSError) as exc:
+        warning(
+            f"OpenCode credential export failed: {credential_error_reason(exc)}; "
+            "logins only in the database are not covered."
+        )
+        exported, extra_ids = b"[]", []
+    carrier = opencode_carrier(config)
+    if not carrier.exists() and not extra_ids:
+        return
+    carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with opencode_credentials.carrier_lock(carrier) as lease:
+        opencode_credentials.merge_back(carrier, exported, lease)
+        opencode_credentials.tombstone_all(carrier, extra_ids, lease)
+        opencode_credentials.clear_carrier_except_tombstones(carrier, lease)
+        if not clear_sync_path(carrier, keep=frozenset({"credentials.removed.json"})):
+            raise opencode_credentials.CredentialsError("could not clear the OpenCode carrier")
+
+
+def _protect_opencode_volume(config: AppConfig | None, discard: bool) -> None:
+    try:
+        exported = export_opencode_data_credentials()
+        carrier = opencode_carrier(config)
+        carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with opencode_credentials.carrier_lock(carrier) as lease:
+            opencode_credentials.merge_back(carrier, exported, lease)
+    except (CredentialExportError, opencode_credentials.CredentialsError, OSError) as exc:
+        reason = credential_error_reason(exc)
+        if not discard:
+            error(
+                f"OpenCode data volume preserved: {reason}. "
+                "Use --discard-unexported-credentials to delete it anyway."
+            )
+            raise typer.Exit(1) from None
+        warning(f"OpenCode credential preservation failed: {reason}; unexported logins are lost.")
+
+
 @clean_app.command("volumes")
 @handle_config_errors
 def clean_volumes(
@@ -682,6 +772,29 @@ def clean_volumes(
         typer.Option(
             "--credentials",
             help="Clear credential sync paths (claude, codex, opencode, gh, age)",
+        ),
+    ] = False,
+    opencode_id: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--opencode-id",
+            help=(
+                "Log out these IDs on every host (repeatable; requires --credentials). "
+                "Find IDs with opencode auth list --format json in the dev container. "
+                "For orphaned or cold MCP entries: "
+                "jq -r '.[] | \"\\(.id) \\(.integrationID) \\(.label)\"' "
+                "<config-root>/opencode/credentials.json"
+            ),
+        ),
+    ] = None,
+    discard_unexported_credentials: Annotated[
+        bool,
+        typer.Option(
+            "--discard-unexported-credentials",
+            help=(
+                "Delete the OpenCode data volume even if preservation fails; "
+                "unexported logins are lost"
+            ),
         ),
     ] = False,
     repo_dotfiles: Annotated[
@@ -721,6 +834,32 @@ def clean_volumes(
         djinn clean volumes --cache            # Delete cache volumes
         djinn clean volumes djinn-uv-cache     # Delete specific volume
     """
+    if opencode_id:
+        if not credentials:
+            raise typer.BadParameter("--opencode-id requires --credentials")
+        if not all(re.fullmatch(r"[A-Za-z0-9._:@/-]{1,200}", identity) for identity in opencode_id):
+            error("OpenCode credential id is not valid")
+            raise typer.Exit(1)
+        config = _load_optional_config()
+        try:
+            _validate_opencode_carrier(config)
+            if not force:
+                typer.confirm(
+                    "These OpenCode IDs will be logged out on every host. Continue?", abort=True
+                )
+            carrier = opencode_carrier(config)
+            carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with opencode_credentials.carrier_lock(carrier) as lease:
+                report = opencode_credentials.tombstone_ids(carrier, opencode_id, lease)
+            for identity in report.unknown:
+                warning(
+                    f"Unknown OpenCode credential ID {identity}; recorded as logged out everywhere."
+                )
+        except (opencode_credentials.CredentialsError, OSError) as exc:
+            error(f"OpenCode credentials refused: {credential_error_reason(exc)}")
+            raise typer.Exit(1) from None
+        return
+
     if name:
         if name in PROTECTED_INTERNAL_VOLUMES:
             error("Hostctl identity is protected; only djinn clean all deletes it")
@@ -729,6 +868,8 @@ def clean_volumes(
             error(f"Refusing to delete volume '{name}': only djinn-* volumes are managed")
             raise typer.Exit(1)
         if volume_exists(name):
+            if name == "djinn-opencode-data":
+                _protect_opencode_volume(_load_optional_config(), discard_unexported_credentials)
             info(f"Deleting volume: {name}")
             if delete_volume(name):
                 success(f"Volume '{name}' deleted.")
@@ -773,6 +914,12 @@ def clean_volumes(
         return
 
     config = _load_optional_config()
+    if credentials:
+        try:
+            _validate_opencode_carrier(config)
+        except (opencode_credentials.CredentialsError, OSError) as exc:
+            error(f"OpenCode credentials refused: {credential_error_reason(exc)}")
+            raise typer.Exit(1) from None
     sync_selected = [c for c in selected if c in SYNC_PATHS]
     if sync_selected and not force:
         warning(
@@ -784,6 +931,12 @@ def clean_volumes(
             abort=True,
         )
 
+    if credentials:
+        try:
+            _logout_opencode(config)
+        except (opencode_credentials.CredentialsError, OSError) as exc:
+            error(f"OpenCode credentials refused: {credential_error_reason(exc)}")
+            raise typer.Exit(1) from None
     categories = volume_categories(config)
     sync_clear_failed = False
     for category in selected:
@@ -793,6 +946,8 @@ def clean_volumes(
                 warning(f"No existing volumes in category '{category}'")
                 continue
             info(f"Deleting {category} volumes...")
+            if "djinn-opencode-data" in volumes:
+                _protect_opencode_volume(config, discard_unexported_credentials)
             results = delete_volumes(volumes)
             for vol, deleted in results.items():
                 if deleted:
@@ -806,6 +961,8 @@ def clean_volumes(
                 continue
             info(f"Clearing {category} sync paths...")
             for path in paths:
+                if category == "credentials" and path.name == "opencode":
+                    continue
                 if clear_sync_path(path):
                     success(f"  Cleared: {path}")
                 else:
@@ -848,6 +1005,11 @@ def clean_all(
     with hostctl.control_guard():
         config = _load_optional_config()
         categories = volume_categories(config)
+        try:
+            _validate_opencode_carrier(config)
+        except (opencode_credentials.CredentialsError, OSError) as exc:
+            error(f"OpenCode credentials refused: {credential_error_reason(exc)}")
+            raise typer.Exit(1) from None
 
         info("Stopping and removing containers...")
         down_result = compose_down()
@@ -862,6 +1024,7 @@ def clean_all(
                     raise RuntimeMountSpecificationError(
                         "A replacement dev owns the runtime; retry clean"
                     )
+                _logout_opencode(config)
                 hostctl.delete_state_locked()
                 info("Deleting all volumes...")
                 all_volumes = [v for vols in categories.values() for v in vols
@@ -877,6 +1040,9 @@ def clean_all(
                 info("Clearing all sync paths...")
                 for category in SYNC_PATHS:
                     for path in get_sync_paths_to_clear_by_category(category, config):
+                        # OpenCode was already cleared under its lease before deleting volumes.
+                        if path.name == "opencode":
+                            continue
                         if clear_sync_path(path):
                             success(f"  Cleared: {path}")
                         else:
@@ -892,7 +1058,12 @@ def clean_all(
                 else:
                     err_console.print(f"  {DJINN_NETWORK} does not exist")
 
-        except (RuntimeMountSpecificationError, OSError, subprocess.SubprocessError) as exc:
+        except (
+            RuntimeMountSpecificationError,
+            opencode_credentials.CredentialsError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
             error(f"Cleanup preserved resources: {exc}")
             raise typer.Exit(1) from None
 

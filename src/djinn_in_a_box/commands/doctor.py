@@ -36,7 +36,7 @@ from djinn_in_a_box.config.zones import (
     load_zone_assignments,
 )
 from djinn_in_a_box.core import docker as docker_core
-from djinn_in_a_box.core import post_mortem
+from djinn_in_a_box.core import opencode_credentials, post_mortem
 from djinn_in_a_box.core import session as session_core
 from djinn_in_a_box.core.config_sync import (
     audit_config_sync as audit_workflow_config,
@@ -459,6 +459,35 @@ def _path_size_bytes(path: Path) -> int:
     for child in children:
         total += _path_size_bytes(child)
     return total
+
+
+def _opencode_credentials_check(config: AppConfig | None) -> Check:
+    findings = [
+        finding
+        for finding in opencode_credentials.carrier_findings(get_config_root(config) / "opencode")
+        if finding.kind != "conflict-copy"
+    ]
+    remedies: list[str] = []
+    kinds = {finding.kind for finding in findings}
+    if "audit-session" in kinds or "audit-root" in kinds:
+        remedies.append(
+            "The next `djinn audit` or `djinn start` recovers them; a session without a database "
+            "stays and can be removed by hand after inspection."
+        )
+    if "differing-value" in kinds:
+        remedies.append("The next dev start merges them.")
+    if "invalid-file" in kinds:
+        remedies.append("Inspect and repair the invalid credential files, then retry.")
+    if "stale-temp" in kinds:
+        remedies.append("The next credential writer removes stale temporary files.")
+    return Check(
+        "OpenCode credentials",
+        Status.WARN if findings else Status.PASS,
+        "; ".join(f"{item.kind}: {item.subject} {item.detail}".rstrip() for item in findings)
+        if findings
+        else "clean",
+        " ".join(remedies),
+    )
 
 
 def _zone_drift_entries(config: AppConfig, assignments: ZoneAssignments) -> tuple[Path, ...]:
@@ -1223,6 +1252,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
 
     checks.append(_config_workflow_check(config))
     checks.append(_opencode_runtime_check(config, daemon=daemon))
+    checks.append(_opencode_credentials_check(config))
 
     if config is not None:
         code_ok = config.code_dir.is_dir()

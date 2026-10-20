@@ -294,13 +294,14 @@ def remove_entry(parent_fd: int, name: str) -> bool:
                 os.close(frame.directory)
 
 
-def clear_directory(root: Path) -> None:
+def clear_directory(root: Path, keep: frozenset[str] = frozenset()) -> None:
     descriptor = open_root(root)
     try:
         with _os_errors(root):
             names = sorted(os.listdir(descriptor))
         for name in names:
-            remove_entry(descriptor, name)
+            if name not in keep:
+                remove_entry(descriptor, name)
     finally:
         with _os_errors(root):
             os.close(descriptor)

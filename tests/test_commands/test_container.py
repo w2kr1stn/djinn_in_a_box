@@ -1,10 +1,15 @@
 """Tests for container lifecycle commands."""
 
 import io
+import json
 import os
 import re
+import shutil
+import stat
 import subprocess
+import sys
 from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -40,6 +45,21 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.theme import DJINN_THEME
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_opencode_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_home: Path
+) -> None:
+    from djinn_in_a_box.core import assistant
+    from djinn_in_a_box.core import opencode_credentials as oc
+
+    monkeypatch.setattr(assistant, "container_exists", lambda _: False)
+    monkeypatch.setattr(container, "recover_leftover_sessions", assistant.recover_leftover_sessions)
+    monkeypatch.setattr(
+        oc, "default_audit_root", lambda: str(mock_home / ".local/state/djinn/opencode-audit")
+    )
+    monkeypatch.setattr(container, "export_opencode_data_credentials", lambda: b"[]")
 
 
 @pytest.mark.parametrize("command", ["volumes", "all"])
@@ -147,7 +167,7 @@ def test_clean_volumes_discovery_permission_failure_is_reported(
             result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
         assert result.exit_code == 1, result.output
         assert isinstance(result.exception, SystemExit)
-        assert f"Failed: {root / 'claude'}" in result.output.replace("\n", "")
+        assert "OpenCode credentials refused" in result.output
         assert "Cleanup complete." not in result.output
     finally:
         root.chmod(0o700)
@@ -2262,3 +2282,494 @@ def test_status_serve_untrusted_text_is_printed_literally(
     assert result.exit_code == 0
     assert escape_nonprintable(payload) in result.output
     assert "\x1b" not in result.output
+
+
+@pytest.fixture
+def credential_cleanup(mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch):
+    from djinn_in_a_box.core import opencode_credentials as oc
+
+    config = mock_app_config
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    monkeypatch.setattr(container, "load_config", lambda: config)
+    monkeypatch.setattr(container, "compose_down", lambda: RunResult(0))
+    monkeypatch.setattr(container, "network_exists", lambda _: False)
+    carrier = config.config_root / "opencode"
+    carrier.mkdir(parents=True, mode=0o700)
+
+    def entry(identity):
+        return {
+            "id": identity,
+            "integrationID": "provider",
+            "label": os.urandom(8).hex(),
+            "active": True,
+            "value": {"type": "key", "key": os.urandom(24).hex()},
+        }
+
+    for name, document in (
+        ("credentials.json", [entry("file")]),
+        ("credentials.sync-conflict-20261020-120000-ABCDEFG.json", [entry("copy")]),
+        ("credentials.removed.json", ["older"]),
+        ("credentials.removed.sync-conflict-20261020-120000-ABCDEFG.json", ["copy-removed"]),
+    ):
+        (carrier / name).write_text(json.dumps(document))
+        (carrier / name).chmod(0o600)
+    (carrier / "settings").mkdir()
+    (carrier / "settings" / "config").touch()
+    for name in ("claude", "codex", "gh", "age"):
+        other = config.config_root / name
+        other.mkdir()
+        (other / "keep-until-cleaned").touch()
+    exported = json.dumps([entry("database")]).encode()
+    monkeypatch.setattr(container, "export_opencode_data_credentials", lambda: exported)
+    return config, carrier, exported, oc
+
+
+def test_credentials_logout_orders_recovery_export_and_single_lease(
+    credential_cleanup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, carrier, exported, oc = credential_cleanup
+    calls = []
+    lock = oc.carrier_lock
+    original_recovery = container.recover_leftover_sessions
+    merge_back, tombstone, clear = oc.merge_back, oc.tombstone_all, container.clear_sync_path
+
+    def recover(*_):
+        calls.append("recover")
+        session = oc.create_audit_session()
+        oc.write_seed(session, b"[]")
+        final = Path(session.io_path) / "final.json"
+        final.write_bytes(exported.replace(b'"database"', b'"recovered"'))
+        final.chmod(0o600)
+        session.close()
+        original_recovery(container.get_project_root(), config)
+        assert not (Path(session.root) / session.id).exists()
+
+    def export():
+        calls.append("export")
+        return exported
+
+    @contextmanager
+    def locked(path):
+        calls.append("lock")
+        with lock(path) as lease:
+            yield lease
+        calls.append("unlock")
+
+    def merge(path, data, lease):
+        assert lease.held
+        calls.append("merge")
+        return merge_back(path, data, lease)
+
+    def tombstones(path, ids, lease):
+        assert lease.held
+        calls.append("tombstones")
+        return tombstone(path, ids, lease)
+
+    def clearing(path, **kwargs):
+        if path.name == "opencode":
+            assert calls[-1] == "tombstones"
+            calls.append("clear")
+        else:
+            assert "unlock" in calls
+        return clear(path, **kwargs)
+
+    # Recovery owns its own leases; instrument only the cleanup lease after it returns.
+    def recovering(*args):
+        recover(*args)
+        monkeypatch.setattr(oc, "carrier_lock", locked)
+        monkeypatch.setattr(oc, "merge_back", merge)
+
+    monkeypatch.setattr(container, "recover_leftover_sessions", recovering)
+    monkeypatch.setattr(container, "export_opencode_data_credentials", export)
+    monkeypatch.setattr(oc, "tombstone_all", tombstones)
+    monkeypatch.setattr(container, "clear_sync_path", clearing)
+    result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["recover", "export", "lock", "merge", "tombstones", "clear", "unlock"]
+    assert {p.name for p in carrier.iterdir()} == {"credentials.removed.json"}
+    assert set(json.loads((carrier / "credentials.removed.json").read_text())) == {
+        "file",
+        "copy",
+        "database",
+        "recovered",
+        "older",
+        "copy-removed",
+    }
+    assert all(
+        not list((config.config_root / name).iterdir()) for name in ("claude", "codex", "gh", "age")
+    )
+
+
+@pytest.mark.parametrize("filename", ["credentials.json", "credentials.removed.json"])
+@pytest.mark.parametrize("kind", ["invalid", "symlink", "directory"])
+@pytest.mark.parametrize("loose", [False, True])
+@pytest.mark.parametrize("command", ["volumes", "all"])
+def test_invalid_credentials_refuse_before_any_changes(
+    credential_cleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    kind: str,
+    loose: bool,
+    command: str,
+) -> None:
+    import hashlib
+
+    config, carrier, _, _ = credential_cleanup
+    target = carrier / filename
+    if kind == "invalid":
+        target.write_text("{}")
+    else:
+        target.unlink()
+        if kind == "symlink":
+            target.symlink_to(carrier / "missing")
+        else:
+            target.mkdir()
+    if loose:
+        for path in carrier.iterdir():
+            if path.is_file() and not path.is_symlink():
+                path.chmod(0o644)
+
+    def snapshot():
+        return {
+            str(p): (p.stat().st_mode, hashlib.sha256(p.read_bytes()).digest())
+            for p in config.config_root.rglob("*")
+            if p.is_file()
+        }
+
+    before = snapshot()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("validation must precede recovery, export and deletion")
+
+    for name in (
+        "recover_leftover_sessions",
+        "export_opencode_data_credentials",
+        "delete_volumes",
+        "compose_down",
+    ):
+        monkeypatch.setattr(container, name, forbidden)
+    args = ["clean", command, "--force"] + (["--credentials"] if command == "volumes" else [])
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert "OpenCode credentials refused" in result.output
+    assert snapshot() == before
+
+
+def test_credentials_export_failure_warns_and_clears_rest(credential_cleanup, monkeypatch):
+    config, carrier, _, _ = credential_cleanup
+
+    def failed():
+        raise container.CredentialExportError("image unavailable")
+
+    monkeypatch.setattr(container, "export_opencode_data_credentials", failed)
+    result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+    assert result.exit_code == 0, result.output
+    assert "image unavailable" in result.output
+    assert "logins only in the database are not covered" in result.output
+    assert {p.name for p in carrier.iterdir()} == {"credentials.removed.json"}
+    assert set(json.loads((carrier / "credentials.removed.json").read_text())) == {
+        "file",
+        "copy",
+        "older",
+        "copy-removed",
+    }
+    assert not list((config.config_root / "claude").iterdir())
+
+
+@pytest.mark.parametrize("ids", [["file"], ["file", "copy"], ["unknown"]])
+def test_selected_ids_only_add_tombstones(credential_cleanup, monkeypatch, ids):
+    import hashlib
+
+    config, carrier, _, _ = credential_cleanup
+
+    def snapshot():
+        return {
+            str(p): hashlib.sha256(p.read_bytes()).digest()
+            for p in config.config_root.rglob("*")
+            if p.is_file() and p.name != "credentials.removed.json"
+        }
+
+    before = snapshot()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("selective logout must only record tombstones")
+
+    for name in (
+        "clear_sync_path",
+        "export_opencode_data_credentials",
+        "recover_leftover_sessions",
+        "delete_volume",
+        "delete_volumes",
+    ):
+        monkeypatch.setattr(container, name, forbidden)
+    args = ["clean", "volumes", "--credentials", "--data", "--force"]
+    for identity in ids:
+        args.extend(["--opencode-id", identity])
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert snapshot() == before
+    assert set(json.loads((carrier / "credentials.removed.json").read_text())) == {
+        *ids,
+        "older",
+        "copy-removed",
+    }
+    assert ("Unknown OpenCode credential ID unknown" in result.output) == (ids == ["unknown"])
+
+
+@pytest.mark.parametrize(
+    "args,code",
+    [
+        (["--opencode-id", "file"], 2),
+        (["--credentials", "--opencode-id", "file", "--opencode-id", "bad id"], 1),
+        (["--credentials", "--opencode-id", ""], 1),
+        (["--credentials", "--opencode-id", "x" * 201], 1),
+        (["--credentials", "--opencode-id", "bad\nline"], 1),
+    ],
+)
+def test_selected_ids_require_credentials_and_valid_charset(
+    credential_cleanup, monkeypatch, args, code
+):
+    _, carrier, _, oc = credential_cleanup
+    if code == 1:
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("invalid IDs must be rejected before locking or changing the carrier")
+
+        monkeypatch.setattr(oc, "carrier_lock", forbidden)
+    before = (carrier / "credentials.removed.json").read_text()
+    result = runner.invoke(app, ["clean", "volumes", "--force", *args])
+    assert result.exit_code == code
+    assert (carrier / "credentials.removed.json").read_text() == before
+    assert (
+        "requires --credentials" in result.output
+        if code == 2
+        else "id is not valid" in result.output
+    )
+
+
+def test_selected_ids_confirmation_and_help(credential_cleanup, monkeypatch):
+    import typer.rich_utils
+
+    monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", 1000)
+    _, carrier, _, _ = credential_cleanup
+    result = runner.invoke(
+        app, ["clean", "volumes", "--credentials", "--opencode-id", "file"], input="n\n"
+    )
+    assert result.exit_code == 1
+    assert "every host" in result.output
+    assert "file" not in json.loads((carrier / "credentials.removed.json").read_text())
+    help_text = runner.invoke(app, ["clean", "volumes", "--help"]).output
+    for text in ("opencode auth list --format json", "jq -r", "integrationID", "credentials.json"):
+        assert text in help_text
+
+
+def test_logout_tombstones_are_applied_by_real_dev_sync(credential_cleanup, tmp_path, monkeypatch):
+    _, carrier, exported, oc = credential_cleanup
+    result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+    assert result.exit_code == 0, result.output
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    fake = Path(__file__).parents[1] / "fake_opencode.py"
+    shutil.copyfile(fake, binary / "opencode")
+    (binary / "opencode").chmod(0o700)
+    database = tmp_path / "opencode.db"
+    database.write_text(json.dumps({"entries": json.loads(exported), "selection": {}}))
+    env = {
+        key: val
+        for key, val in os.environ.items()
+        if not key.startswith(("OPENCODE", "XDG_", "FAKE_"))
+    }
+    env.update(
+        PATH=f"{binary}:{os.environ['PATH']}",
+        FAKE_OPENCODE_STATE=str(database),
+        TMPDIR=str(tmp_path),
+    )
+    sync = subprocess.run(
+        [
+            sys.executable,
+            str(Path(oc.__file__)),
+            "sync",
+            "--carrier",
+            str(carrier),
+            "--database",
+            str(database),
+            "--host-state",
+            str(tmp_path / "host.json"),
+            "--conflict-backup",
+            str(tmp_path / "conflicts"),
+            "--mode",
+            "start",
+        ],
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    assert sync.returncode == 0
+    assert len(json.loads(database.read_text())["entries"]) == 0
+
+
+@pytest.mark.parametrize("selection", ["data", "name"])
+@pytest.mark.parametrize("failure", [None, "export", "merge"])
+@pytest.mark.parametrize("discard", [False, True])
+def test_opencode_volume_protection(credential_cleanup, monkeypatch, selection, failure, discard):
+    _, carrier, exported, oc = credential_cleanup
+    calls = []
+
+    def export():
+        calls.append("export")
+        if failure == "export":
+            raise container.CredentialExportError("image unavailable")
+        return exported
+
+    real_merge = oc.merge_back
+
+    def merge(*args):
+        calls.append("merge")
+        if failure == "merge":
+            raise oc.NotUnderstood("publication failed")
+        return real_merge(*args)
+
+    def delete(names):
+        calls.append("delete")
+        if failure is None:
+            assert "database" in {
+                e["id"] for e in json.loads((carrier / "credentials.json").read_text())
+            }
+        return dict.fromkeys(names, True)
+
+    monkeypatch.setattr(container, "export_opencode_data_credentials", export)
+    monkeypatch.setattr(oc, "merge_back", merge)
+    monkeypatch.setattr(container, "volume_exists", lambda _: True)
+    monkeypatch.setattr(
+        container,
+        "get_existing_volumes_by_category",
+        lambda *_: ["djinn-opencode-data", "djinn-packages"],
+    )
+    monkeypatch.setattr(container, "delete_volumes", delete)
+    monkeypatch.setattr(container, "delete_volume", lambda name: delete([name])[name])
+    args = ["clean", "volumes", "--data" if selection == "data" else "djinn-opencode-data"]
+    if discard:
+        args.append("--discard-unexported-credentials")
+    result = runner.invoke(app, args)
+    refused = failure is not None and not discard
+    assert result.exit_code == (1 if refused else 0), result.output
+    assert ("delete" in calls) != refused
+    assert calls[:2] == (
+        ["export", "merge"] if failure != "export" else ["export"] + ([] if refused else ["delete"])
+    )
+    if refused:
+        assert "--discard-unexported-credentials" in result.output
+        assert (
+            "image unavailable" if failure == "export" else "publication failed"
+        ) in result.output
+    elif failure:
+        assert "unexported logins are lost" in result.output
+
+
+def test_other_volume_deletion_does_not_export_credentials(monkeypatch):
+    monkeypatch.setattr(container, "volume_exists", lambda _: True)
+    monkeypatch.setattr(container, "delete_volume", lambda _: True)
+
+    def forbidden():
+        pytest.fail("other volumes must not export OpenCode credentials")
+
+    monkeypatch.setattr(container, "export_opencode_data_credentials", forbidden)
+    assert runner.invoke(app, ["clean", "volumes", "djinn-other"]).exit_code == 0
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_clean_all_exports_before_delete_and_keeps_tombstones(
+    credential_cleanup, monkeypatch, failed
+):
+    _, carrier, exported, _ = credential_cleanup
+    calls = []
+
+    def export():
+        calls.append("export")
+        if failed:
+            raise container.CredentialExportError("image unavailable")
+        return exported
+
+    def delete(names):
+        calls.append("delete")
+        ids = set(json.loads((carrier / "credentials.removed.json").read_text()))
+        assert {"file", "copy", "older", "copy-removed"} <= ids
+        assert ("database" in ids) != failed
+        return dict.fromkeys(names, True)
+
+    monkeypatch.setattr(container, "export_opencode_data_credentials", export)
+    monkeypatch.setattr(container, "delete_volumes", delete)
+    result = runner.invoke(app, ["clean", "all", "--force"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["export", "delete"]
+    assert {p.name for p in carrier.iterdir()} == {"credentials.removed.json"}
+    assert ("logins only in the database are not covered" in result.output) == failed
+
+
+def test_credentials_cleanup_warns_for_each_kept_audit_session(credential_cleanup):
+    _, _, _, oc = credential_cleanup
+    first = oc.create_audit_session()
+    second = oc.create_audit_session()
+    try:
+        result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+        assert result.exit_code == 0, result.output
+        for session in (first, second):
+            assert f"session {session.id} was kept: in use" in result.output
+    finally:
+        first.close()
+        second.close()
+
+
+def test_credentials_revalidate_before_clearing(credential_cleanup, monkeypatch):
+    config, carrier, _, oc = credential_cleanup
+    original = oc.tombstone_all
+
+    def changed(*args):
+        result = original(*args)
+        (carrier / "credentials.json").write_text("{}")
+        return result
+
+    monkeypatch.setattr(oc, "tombstone_all", changed)
+    result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+    assert result.exit_code == 1
+    assert "credentials are not an array" in result.output
+    assert (carrier / "credentials.json").read_text() == "{}"
+    assert (config.config_root / "claude/keep-until-cleaned").exists()
+
+
+@pytest.mark.parametrize("kind", ["foreign-owner", "oversized", "directory"])
+def test_credentials_preflight_refuses_without_recovery(credential_cleanup, monkeypatch, kind):
+    _, carrier, _, oc = credential_cleanup
+    target = carrier / "credentials.json"
+    if kind == "foreign-owner":
+        original = os.fstat
+
+        def foreign(descriptor):
+            result = original(descriptor)
+            if os.readlink(f"/proc/self/fd/{descriptor}") == str(target):
+                fields = list(result)
+                fields[4] = os.geteuid() + 1
+                return os.stat_result(fields)
+            return result
+
+        monkeypatch.setattr(os, "fstat", foreign)
+        reason = "entry belongs to another user"
+    elif kind == "oversized":
+        target.write_bytes(b"[]" + b" " * (oc.FILE_LIMIT - 1))
+        reason = "size limit"
+    else:
+        target.unlink()
+        target.mkdir()
+        reason = "entry is not a regular file"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("preflight must refuse before recovery or exporting")
+
+    monkeypatch.setattr(container, "recover_leftover_sessions", forbidden)
+    monkeypatch.setattr(container, "export_opencode_data_credentials", forbidden)
+    result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+    assert result.exit_code == 1
+    assert reason in result.output
+    assert target.exists()
+    assert target.is_dir() if kind == "directory" else stat.S_ISREG(target.stat().st_mode)

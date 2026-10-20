@@ -3692,3 +3692,71 @@ def test_running_discovery_has_prefix_deadline_and_closed_stdin(monkeypatch):
     monkeypatch.setattr(docker_mod.subprocess, "run", timed_out)
     assert docker_mod.get_running_containers("djinn-discard-test", timeout=0.25) is None
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("through_sync", [False, True])
+@pytest.mark.parametrize("denied_errno", [errno.EACCES, errno.EBUSY, errno.EPERM])
+def test_clear_keeps_named_top_level_entries_and_mount_placeholders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    through_sync: bool,
+    denied_errno: int,
+) -> None:
+    root = tmp_path / "carrier"
+    root.mkdir()
+    kept = root / "credentials.removed.json"
+    kept.write_text("[]")
+    placeholder = root / "mount"
+    placeholder.mkdir()
+    _deny_empty_placeholder_removal(monkeypatch, placeholder, denied_errno)
+    (root / "nested").mkdir()
+    (root / "nested" / kept.name).touch()
+    (root / "discard").touch()
+    keep = frozenset({kept.name})
+    if through_sync:
+        assert clear_sync_path(root, keep=keep)
+    else:
+        contained_paths.clear_directory(root, keep=keep)
+    assert kept.read_text() == "[]"
+    assert {child.name for child in root.iterdir()} == {kept.name, "mount"}
+    assert not list(placeholder.iterdir())
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_export_existing_opencode_data_reuses_adapter(exists: bool) -> None:
+    with (
+        patch.object(
+            docker_mod,
+            "_run_captured",
+            return_value=docker_mod.RunResult(
+                0, stdout="djinn-opencode-data\n" if exists else "djinn-other\n"
+            ),
+        ) as probe,
+        patch.object(docker_mod, "export_opencode_credentials", return_value=b"[]") as export,
+    ):
+        assert docker_mod.export_opencode_data_credentials() == b"[]"
+    probe.assert_called_once_with(
+        [docker_mod.DOCKER_EXECUTABLE, "volume", "ls", "--format", "{{.Name}}"], timeout=5
+    )
+    if exists:
+        export.assert_called_once_with(
+            image="djinn-in-a-box:latest", source="djinn-opencode-data", kind="volume"
+        )
+    else:
+        export.assert_not_called()
+
+
+def test_opencode_export_refuses_an_unverified_volume_lookup() -> None:
+    sentinel = os.urandom(32).hex()
+    result = docker_mod.RunResult(1, stdout=sentinel, stderr=sentinel)
+    assert sentinel in result.stdout and sentinel in result.stderr
+    with (
+        patch.object(docker_mod, "_run_captured", return_value=result),
+        patch.object(docker_mod, "export_opencode_credentials") as export,
+        pytest.raises(
+            docker_mod.CredentialExportError, match="existence could not be verified"
+        ) as exc,
+    ):
+        docker_mod.export_opencode_data_credentials()
+    assert sentinel not in str(exc.value)
+    export.assert_not_called()

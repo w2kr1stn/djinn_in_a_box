@@ -28,11 +28,19 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
+from djinn_in_a_box.core import opencode_credentials
+from djinn_in_a_box.core.assistant import (
+    credential_error_reason,
+    opencode_carrier,
+    recover_leftover_sessions,
+)
 from djinn_in_a_box.core.console import blank, error, info, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
+    CredentialExportError,
     backup_sync_path,
     backup_volume,
+    export_opencode_data_credentials,
     extract_sync_path_name,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
@@ -42,7 +50,7 @@ from djinn_in_a_box.core.docker import (
     restore_volume,
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
-from djinn_in_a_box.core.paths import BACKUPS_DIR
+from djinn_in_a_box.core.paths import BACKUPS_DIR, get_project_root
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
 DEFAULT_CATEGORIES: list[str] = ["credentials", "repo-dotfiles", "data"]
@@ -314,7 +322,15 @@ def backup(
 
 @handle_config_errors
 @_with_lifecycle_guard
-def restore() -> None:
+def restore(
+    discard_unexported_credentials: Annotated[
+        bool,
+        typer.Option(
+            "--discard-unexported-credentials",
+            help="Restore even if OpenCode preservation fails; unexported logins are lost",
+        ),
+    ] = False,
+) -> None:
     """Restore Docker volumes and sync paths from a backup archive.
 
     Finds the backup archive in ~/.djinn/backups/ and restores all contained
@@ -404,6 +420,40 @@ def restore() -> None:
             error("Backup archive contains no volume archives")
             raise typer.Exit(1)
 
+        preserve_opencode = any(
+            archive.name in {"djinn-opencode-data.tar.gz", "djinn-sync-opencode.tar.gz"}
+            and archive.parent != declared_dir
+            for archive in inner_archives
+        )
+        if preserve_opencode:
+            carrier = opencode_carrier(config)
+            try:
+                exported = export_opencode_data_credentials()
+                carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with opencode_credentials.carrier_lock(carrier) as lease:
+                    opencode_credentials.park_for_restore(None, carrier, exported, lease)
+            except (CredentialExportError, opencode_credentials.CredentialsError, OSError) as exc:
+                reason = credential_error_reason(exc)
+                if not discard_unexported_credentials:
+                    error(
+                        f"Restore refused: OpenCode credentials could not be preserved: {reason}. "
+                        "Use --discard-unexported-credentials to overwrite them anyway."
+                    )
+                    raise typer.Exit(1) from None
+                warning(
+                    f"OpenCode credential preservation failed: {reason}; "
+                    "unexported logins are lost."
+                )
+                try:
+                    carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    with opencode_credentials.carrier_lock(carrier) as lease:
+                        opencode_credentials.park_for_restore(None, carrier, b"[]", lease)
+                except (opencode_credentials.CredentialsError, OSError) as park_error:
+                    warning(
+                        "OpenCode carrier could not be parked: "
+                        f"{credential_error_reason(park_error)}"
+                    )
+
         failed = False
         for archive in inner_archives:
             if archive.name.removesuffix(".tar.gz") in PROTECTED_INTERNAL_VOLUMES:
@@ -460,6 +510,9 @@ def restore() -> None:
                     detail = f"{detail}; {hardened_detail}" if detail else hardened_detail
                 error(f"  {label}: {detail}")
                 failed = True
+
+        if preserve_opencode:
+            recover_leftover_sessions(get_project_root(), config)
 
         blank()
         if failed:

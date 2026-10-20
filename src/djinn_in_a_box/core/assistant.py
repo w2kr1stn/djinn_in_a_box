@@ -27,6 +27,7 @@ from djinn_in_a_box.core.agent_versions import (
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
+    CredentialExportError,
     _run_captured,  # pyright: ignore[reportPrivateUsage]
     _run_streamed,  # pyright: ignore[reportPrivateUsage]
     ensure_network,
@@ -330,6 +331,11 @@ def _reason(error: Exception) -> str:
     if isinstance(error, OSError) and error.strerror:
         return error.strerror
     return type(error).__name__
+
+
+def credential_error_reason(error: Exception) -> str:
+    """Reuse the audit error renderer, including the value-free export adapter reason."""
+    return str(error) if isinstance(error, CredentialExportError) else _reason(error)
 
 
 def stop_container(name: str) -> None:
