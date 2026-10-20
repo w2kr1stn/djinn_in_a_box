@@ -160,7 +160,7 @@ class TestLoadAgents:
 
         agents = load_agents()
 
-        assert set(agents) == {"claude", "codex", "opencode"}
+        assert set(agents) == {"claude", "codex", "opencode", "claude-isolated"}
         assert agents["codex"].read_only_flags == ["--sandbox", "read-only"]
 
     def test_raises_validation_error_for_invalid_agents(self, tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -310,11 +311,8 @@ def agents(
     agent_configs = load_agents()
 
     if json_output:
-        data = {
-            name: cfg.model_dump(exclude={"prompt_template"})
-            for name, cfg in sorted(agent_configs.items())
-        }
-        console.print(json.dumps(data, indent=2))
+        data = {name: cfg.model_dump() for name, cfg in agent_configs.items()}
+        sys.stdout.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
         return
 
     if verbose:
