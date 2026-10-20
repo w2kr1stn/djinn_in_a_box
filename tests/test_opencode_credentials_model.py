@@ -1055,7 +1055,15 @@ def test_write_atomic_stalled_write_fails_and_cleans(
     directory: tuple[Path, int], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path, fd = directory
-    monkeypatch.setattr(oc.ops, "write", lambda descriptor, data: 0)
+    calls: list[int] = []
+
+    def stalled(descriptor: int, data: memoryview) -> int:
+        calls.append(descriptor)
+        if len(calls) > 100:
+            raise AssertionError("the write loop does not stop on a stalled write")
+        return 0
+
+    monkeypatch.setattr(oc.ops, "write", stalled)
     with pytest.raises(OSError):
         oc.write_atomic(fd, "file.json", b"data", None)
     assert listing(path) == []

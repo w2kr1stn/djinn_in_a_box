@@ -9,6 +9,7 @@ operation, a count or an ID, never a label or a value.
 
 from __future__ import annotations
 
+import argparse
 import errno
 import fcntl
 import hashlib
@@ -16,17 +17,29 @@ import json
 import math
 import os
 import re
+import select
+import shutil
+import signal
 import stat
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from typing import NamedTuple, cast
+from typing import NamedTuple, NoReturn, cast
 
 FILE_LIMIT = 1024 * 1024
 EXPORT_LIMIT = 16 * 1024 * 1024
 LOCK_TIMEOUT_SECONDS = 30.0
+COMMAND_TIMEOUT_SECONDS = 60.0
+STALE_TEMP_SECONDS = 60.0
+PUBLISH_ATTEMPTS = 3
+CREDENTIALS_NAME = "credentials.json"
+TOMBSTONES_NAME = "credentials.removed.json"
+MODES = ("start", "checkpoint", "final")
 
 _ID_PATTERN = re.compile(r"[A-Za-z0-9._:@/-]{1,200}")
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -72,6 +85,14 @@ class LockTimeout(CredentialsError):  # noqa: N818
 
 class LockReentered(CredentialsError):  # noqa: N818
     """The carrier lock is not re-entrant; this process already holds it for that inode."""
+
+
+class OpenCodeFailed(CredentialsError):  # noqa: N818
+    """An OpenCode command failed, timed out or could not start (helper exit 1)."""
+
+
+class ApplyFailed(CredentialsError):  # noqa: N818
+    """A postcondition of the database adjustment was missed (helper exit 1)."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -707,3 +728,732 @@ def carrier_lock(
             with _held_guard:
                 _held.discard(key)
         os.close(descriptor)
+
+
+# ---------------------------------------------------------------------------------------------
+# OpenCode runner
+# ---------------------------------------------------------------------------------------------
+
+_DISABLE_ENVIRONMENT = {
+    "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+    "OPENCODE_DISABLE_AUTOUPDATE": "true",
+    "OPENCODE_DISABLE_MODELS_FETCH": "true",
+    "DO_NOT_TRACK": "1",
+}
+_FORBIDDEN_ENVIRONMENT = ("OPENCODE_DB", "XDG_DATA_HOME")
+_READ_CHUNK = 65536
+
+
+def check_environment() -> None:
+    """Refuse an environment that moves the database away from the data volume's default path."""
+    for name in _FORBIDDEN_ENVIRONMENT:
+        if name in os.environ:
+            raise NotUnderstood(f"{name} is set")
+
+
+def isolated_environment(config_home: str) -> dict[str, str]:
+    """The inherited base without ``OPENCODE_CONFIG*``, plus the private config home."""
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("OPENCODE_CONFIG")
+    }
+    environment["XDG_CONFIG_HOME"] = config_home
+    environment.update(_DISABLE_ENVIRONMENT)
+    return environment
+
+
+def _failed(operation: str, code: int) -> OpenCodeFailed:
+    return OpenCodeFailed(f"{operation} failed (rc {code})")
+
+
+def _timed_out(operation: str) -> OpenCodeFailed:
+    return OpenCodeFailed(f"{operation} timed out")
+
+
+def _not_started(operation: str) -> OpenCodeFailed:
+    return OpenCodeFailed(f"{operation} could not start")
+
+
+def _kill(process: subprocess.Popen[bytes]) -> None:
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with suppress(ProcessLookupError, PermissionError):
+        process.kill()
+    process.wait()
+
+
+class OpenCode:
+    """Runs ``opencode`` from PATH, isolated: no plugins, no MCP connections, no project config.
+
+    argv carries the command, flags and credential IDs only; stdin carries import JSON.
+    OpenCode's stderr is discarded, so a failure names the operation and the return code.
+    """
+
+    def __init__(
+        self, timeout: float = COMMAND_TIMEOUT_SECONDS, executable: str = "opencode"
+    ) -> None:
+        self.timeout = timeout
+        self.executable = executable
+
+    def run(
+        self,
+        operation: str,
+        argv: Sequence[str],
+        *,
+        stdin: bytes | None = None,
+        capture: bool = False,
+    ) -> bytes:
+        # /tmp is only the parent: mkdtemp creates a fresh 0700 directory under a random name.
+        parent = os.environ.get("TMPDIR") or "/tmp"  # nosec B108
+        config_home = tempfile.mkdtemp(prefix="djinn-opencode-", dir=parent)
+        try:
+            return self._run(operation, argv, stdin, capture, config_home)
+        finally:
+            shutil.rmtree(config_home, ignore_errors=True)
+
+    def _run(
+        self,
+        operation: str,
+        argv: Sequence[str],
+        stdin: bytes | None,
+        capture: bool,
+        config_home: str,
+    ) -> bytes:
+        try:
+            process = subprocess.Popen(
+                [self.executable, *argv],
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=config_home,
+                env=isolated_environment(config_home),
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError:
+            raise _not_started(operation) from None
+        deadline = time.monotonic() + self.timeout
+        output = bytearray()
+        try:
+            self._pump(process, operation, stdin, capture, deadline, output)
+            try:
+                code = process.wait(timeout=max(deadline - time.monotonic(), 0.01))
+            except subprocess.TimeoutExpired:
+                raise _timed_out(operation) from None
+        except BaseException:
+            _kill(process)
+            raise
+        if code != 0:
+            raise _failed(operation, code)
+        return bytes(output)
+
+    @staticmethod
+    def _pump(
+        process: subprocess.Popen[bytes],
+        operation: str,
+        stdin: bytes | None,
+        capture: bool,
+        deadline: float,
+        output: bytearray,
+    ) -> None:
+        sink = process.stdin
+        source = process.stdout if capture else None
+        pending = memoryview(stdin) if stdin is not None else None
+        if sink is not None:
+            os.set_blocking(sink.fileno(), False)
+            if not pending:
+                sink.close()
+                sink = None
+        if source is not None:
+            os.set_blocking(source.fileno(), False)
+        while sink is not None or source is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timed_out(operation)
+            readable = [source] if source is not None else []
+            writable = [sink] if sink is not None else []
+            ready_read, ready_write, _ = select.select(readable, writable, [], min(remaining, 1.0))
+            if sink is not None and ready_write and pending is not None:
+                try:
+                    written = os.write(sink.fileno(), pending[:_READ_CHUNK])
+                except BlockingIOError:
+                    written = 0
+                except BrokenPipeError:
+                    written = len(pending)
+                pending = pending[written:]
+                if not pending:
+                    sink.close()
+                    sink = None
+            if source is not None and ready_read:
+                try:
+                    chunk = os.read(source.fileno(), _READ_CHUNK)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    source.close()
+                    source = None
+                    continue
+                output += chunk
+                if len(output) > EXPORT_LIMIT:
+                    raise NotUnderstood("export exceeds the size limit")
+
+    def export(self) -> list[Entry]:
+        raw = self.run("export", ["auth", "export", "--standalone"], capture=True)
+        return parse_entries(raw, EXPORT_LIMIT)
+
+
+# ---------------------------------------------------------------------------------------------
+# The single apply path
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Step:
+    """One database change: remove, update (``before`` to ``entry``), add or activate."""
+
+    kind: str
+    identity: str
+    before: Entry | None = None
+    entry: Entry | None = None
+
+
+class StateKeeper:
+    """The host state with its raw bytes, so every write is compare-before-rename."""
+
+    def __init__(self, dir_fd: int, name: str, state: HostState, raw: bytes | None) -> None:
+        self.dir_fd = dir_fd
+        self.name = name
+        self.state = state
+        self.raw = raw
+
+    def save(self, state: HostState) -> None:
+        self.raw = write_host_state(self.dir_fd, self.name, state, self.raw)
+        self.state = state
+
+
+def _find(export: Iterable[Entry], identity: str) -> Entry | None:
+    for entry in export:
+        if entry.id == identity:
+            return entry
+    return None
+
+
+def _missed(operation: str, identity: str) -> ApplyFailed:
+    return ApplyFailed(f"{operation} postcondition missed for {identity}")
+
+
+def _invalid_step() -> NoReturn:
+    raise ApplyFailed("unknown or incomplete step")
+
+
+def _apply_step(
+    runner: OpenCode, keeper: StateKeeper, step: Step, export: Sequence[Entry]
+) -> list[Entry]:
+    """The only place that changes the OpenCode database; returns the verified new export.
+
+    Each command is followed by a fresh export and a postcondition on the fingerprint without
+    ``active`` (for activate: the ID is active). rc 0 with a missed postcondition is a failure.
+    """
+    identity = step.identity
+    if step.kind == "activate":
+        runner.run(
+            "activate",
+            ["api", "--standalone", "credential.activate", "--param", f"credentialID={identity}"],
+        )
+        after = runner.export()
+        activated = _find(after, identity)
+        if activated is None or not activated.active:
+            raise _missed("activate", identity)
+        return after
+    if step.kind == "remove":
+        runner.run(
+            "remove",
+            ["api", "--standalone", "credential.remove", "--param", f"credentialID={identity}"],
+        )
+        after = runner.export()
+        if _find(after, identity) is not None:
+            raise _missed("remove", identity)
+        return after
+    winner = step.entry
+    if step.kind not in {"update", "add"} or winner is None:
+        _invalid_step()
+    current_export = list(export)
+    if step.kind == "update":
+        expected = step.before
+        current = _find(current_export, identity)
+        if expected is None or current is None or current.fingerprint != expected.fingerprint:
+            raise _missed("update", identity)
+        if current.active:
+            keeper.save(set_reactivate(keeper.state, current.integration_id, identity))
+        runner.run(
+            "remove",
+            ["api", "--standalone", "credential.remove", "--param", f"credentialID={identity}"],
+        )
+        current_export = runner.export()
+        if _find(current_export, identity) is not None:
+            raise _missed("remove", identity)
+    alone = all(item.integration_id != winner.integration_id for item in current_export)
+    payload = materialize_entries([winner], {winner.integration_id: identity} if alone else {})
+    runner.run("import", ["auth", "import", "--standalone"], stdin=payload)
+    after = runner.export()
+    imported = _find(after, identity)
+    if imported is None or imported.fingerprint != winner.fingerprint:
+        raise _missed(step.kind, identity)
+    return after
+
+
+# ---------------------------------------------------------------------------------------------
+# Carrier reading and publication
+# ---------------------------------------------------------------------------------------------
+
+_COPY_STAMP = r"[0-9]{8}-[0-9]{6}-[A-Z2-7]{0,7}"
+_ENTRIES_COPY = re.compile(rf"credentials\.sync-conflict-{_COPY_STAMP}\.json")
+_TOMBSTONES_COPY = re.compile(rf"credentials\.removed\.sync-conflict-{_COPY_STAMP}\.json")
+
+
+class ConflictCopy(NamedTuple):
+    name: str
+    inode: int
+    data: bytes
+    entries: tuple[Entry, ...]
+    tombstones: tuple[str, ...]
+
+
+class CarrierRead(NamedTuple):
+    file_raw: bytes | None
+    entries: list[Entry]
+    removed_raw: bytes | None
+    tombstones: list[str]
+    copies: list[ConflictCopy]
+    invalid: list[str]
+
+
+def read_carrier(dir_fd: int) -> CarrierRead:
+    """Both files plus their valid conflict copies. An invalid copy is reported, not fatal."""
+    file_snapshot = read_private(dir_fd, CREDENTIALS_NAME, FILE_LIMIT)
+    removed_snapshot = read_private(dir_fd, TOMBSTONES_NAME, FILE_LIMIT)
+    entries = parse_entries(file_snapshot.data) if file_snapshot is not None else []
+    tombstones = parse_tombstones(removed_snapshot.data) if removed_snapshot is not None else []
+    copies: list[ConflictCopy] = []
+    invalid: list[str] = []
+    for name in _list_dir(dir_fd):
+        holds_entries = _ENTRIES_COPY.fullmatch(name) is not None
+        if not holds_entries and _TOMBSTONES_COPY.fullmatch(name) is None:
+            continue
+        try:
+            snapshot = read_private(dir_fd, name, FILE_LIMIT)
+            if snapshot is None:
+                continue
+            copies.append(
+                ConflictCopy(
+                    name,
+                    snapshot.inode,
+                    snapshot.data,
+                    tuple(parse_entries(snapshot.data)) if holds_entries else (),
+                    () if holds_entries else tuple(parse_tombstones(snapshot.data)),
+                )
+            )
+        except CredentialsError:
+            invalid.append(name)
+    return CarrierRead(
+        file_snapshot.data if file_snapshot is not None else None,
+        entries,
+        removed_snapshot.data if removed_snapshot is not None else None,
+        tombstones,
+        copies,
+        invalid,
+    )
+
+
+class Published(NamedTuple):
+    result: MergeResult
+    read: CarrierRead
+    wrote_tombstones: bool
+    wrote_entries: bool
+
+
+def _fingerprints(entries: Iterable[Entry]) -> dict[str, str]:
+    return {entry.id: entry.fingerprint for entry in entries}
+
+
+def publish(dir_fd: int, export: Sequence[Entry]) -> Published:
+    """Merge the export, the file and the valid copies, then make the result durable.
+
+    Tombstones first, then entries, each only on a change outside ``active``. A destination that
+    changed under us (a mirror that ignores the lock) is re-read and re-merged, at most 3 times.
+    """
+    selection = {entry.integration_id: entry.id for entry in export if entry.active}
+    for _ in range(PUBLISH_ATTEMPTS):
+        read = read_carrier(dir_fd)
+        result = merge(
+            [
+                list(export),
+                read.entries,
+                *[list(copy.entries) for copy in read.copies],
+            ],
+            [read.tombstones, *[copy.tombstones for copy in read.copies]],
+        )
+        tombstone_data = materialize_tombstones(result.tombstones)
+        entry_data = materialize_entries(result.entries.values(), selection)
+        write_tombstones = set(read.tombstones) != set(result.tombstones)
+        write_entries = _fingerprints(read.entries) != _fingerprints(result.entries.values())
+        try:
+            if write_tombstones:
+                write_atomic(dir_fd, TOMBSTONES_NAME, tombstone_data, read.removed_raw)
+            if write_entries:
+                write_atomic(dir_fd, CREDENTIALS_NAME, entry_data, read.file_raw)
+        except ChangedOnDisk:
+            continue
+        return Published(result, read, write_tombstones, write_entries)
+    raise ChangedOnDisk("carrier changed during publication in every attempt")
+
+
+# ---------------------------------------------------------------------------------------------
+# Plan and selection
+# ---------------------------------------------------------------------------------------------
+
+
+def plan(result: MergeResult, export: Sequence[Entry], state: HostState) -> list[Step]:
+    """remove, then update, then add; a value hidden as (id, fp) is never added or updated."""
+    present = {entry.id: entry for entry in export}
+    steps = [
+        Step("remove", identity) for identity in sorted(present) if identity in result.tombstones
+    ]
+    winners = sorted(result.entries.items())
+    for identity, winner in winners:
+        current = present.get(identity)
+        if (
+            current is not None
+            and current.fingerprint != winner.fingerprint
+            and not is_hidden(state, identity, winner.fingerprint)
+        ):
+            steps.append(Step("update", identity, current, winner))
+    for identity, winner in winners:
+        if identity not in present and not is_hidden(state, identity, winner.fingerprint):
+            steps.append(Step("add", identity, None, winner))
+    return steps
+
+
+def next_activation(state: HostState, export: Sequence[Entry]) -> str | None:
+    """The ID to activate next: a present ``reactivate`` target first, else the largest ID of an
+    integration without an active account."""
+    by_id = {entry.id: entry for entry in export}
+    for _integration, identity in sorted(state.reactivate.items()):
+        target = by_id.get(identity)
+        if target is not None and not target.active:
+            return identity
+    members: dict[str, list[Entry]] = {}
+    for entry in export:
+        members.setdefault(entry.integration_id, []).append(entry)
+    for integration in sorted(members):
+        if not any(entry.active for entry in members[integration]):
+            return max(entry.id for entry in members[integration])
+    return None
+
+
+def confirmation_matches(result: MergeResult, export: Sequence[Entry], state: HostState) -> bool:
+    """The export equals the result minus the hidden values, per ID and without ``active``."""
+    present = _fingerprints(export)
+    if not set(present) <= set(result.entries):
+        return False
+    for identity, winner in result.entries.items():
+        if is_hidden(state, identity, winner.fingerprint):
+            continue
+        if present.get(identity) != winner.fingerprint:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------------------------
+# Conflict copies: private backup, then removal
+# ---------------------------------------------------------------------------------------------
+
+_MOUNTINFO_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def mount_points(mountinfo: str | os.PathLike[str] = "/proc/self/mountinfo") -> frozenset[str]:
+    points: set[str] = set()
+    with open(mountinfo, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            fields = line.split(" ")
+            if len(fields) > 4:
+                points.add(
+                    _MOUNTINFO_ESCAPE.sub(lambda match: chr(int(match.group(1), 8)), fields[4])
+                )
+    return frozenset(points)
+
+
+def open_backup_dir(path: str | os.PathLike[str]) -> int:
+    """The private backup directory (0700), opened without following a symlink at its end."""
+    absolute = os.path.abspath(path)
+    parent, leaf = os.path.split(absolute)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        try:
+            descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+            ops.fsync_dir(parent_fd)
+            descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise Refused("backup directory is a symlink or not a directory") from error
+            raise
+    finally:
+        os.close(parent_fd)
+    try:
+        status = os.fstat(descriptor)
+        if status.st_uid != os.geteuid():
+            raise Refused("backup directory belongs to another user")
+        if status.st_mode & 0o077:
+            os.fchmod(descriptor, 0o700)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def backup_copy(backup_fd: int, copy: ConflictCopy) -> None:
+    """Make the copy durable in the backup directory; the name carries a content digest."""
+    digest = hashlib.sha256(copy.data).hexdigest()[:16]
+    name = f"{copy.name[: -len('.json')]}.{digest}.json"
+    existing = read_private(backup_fd, name, FILE_LIMIT)
+    if existing is None:
+        write_atomic(backup_fd, name, copy.data, None)
+    elif existing.data == copy.data:
+        ops.fsync_dir(backup_fd)
+    else:
+        raise ChangedOnDisk("a different backup holds the name")
+
+
+def remove_copy(
+    dir_fd: int,
+    carrier_path: str,
+    copy: ConflictCopy,
+    points: frozenset[str] | None,
+) -> bool:
+    """Unlink a backed-up copy: matching name, no mount point, still the inode that was read."""
+    name = copy.name
+    if _ENTRIES_COPY.fullmatch(name) is None and _TOMBSTONES_COPY.fullmatch(name) is None:
+        return False
+    if points is None or os.path.join(carrier_path, name) in points:
+        return False
+    try:
+        status = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    if status.st_dev != os.fstat(dir_fd).st_dev:
+        return False
+    if not stat.S_ISREG(status.st_mode) or status.st_ino != copy.inode:
+        return False
+    ops.unlink(name, dir_fd)
+    ops.fsync_dir(dir_fd)
+    return True
+
+
+# ---------------------------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass
+class SyncReport:
+    mode: str = ""
+    wrote_tombstones: bool = False
+    wrote_entries: bool = False
+    hidden: int = 0
+    removed: int = 0
+    updated: int = 0
+    added: int = 0
+    activated: int = 0
+    copies_removed: int = 0
+    copies_kept: list[str] = field(default_factory=lambda: cast(list[str], []))
+    copies_invalid: list[str] = field(default_factory=lambda: cast(list[str], []))
+    conflicts: list[str] = field(default_factory=lambda: cast(list[str], []))
+
+    def lines(self) -> list[str]:
+        lines = [
+            f"sync {self.mode}: tombstones written={int(self.wrote_tombstones)}"
+            f" entries written={int(self.wrote_entries)} hidden={self.hidden}"
+            f" removed={self.removed} updated={self.updated} added={self.added}"
+            f" activated={self.activated} conflict copies removed={self.copies_removed}"
+        ]
+        lines += [f"conflicting values for {item}" for item in self.conflicts]
+        lines += [f"conflict copy is invalid and stays: {name}" for name in self.copies_invalid]
+        lines += [f"conflict copy stays, backup retried next time: {n}" for n in self.copies_kept]
+        return lines
+
+
+def _database_inode(path: str | os.PathLike[str]) -> int | None:
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(status.st_mode):
+        raise Refused("database is not a regular file")
+    return status.st_ino
+
+
+def _adjust(
+    runner: OpenCode,
+    keeper: StateKeeper,
+    published: Published,
+    export: list[Entry],
+    report: SyncReport,
+) -> list[Entry]:
+    current = export
+    for step in plan(published.result, export, keeper.state):
+        current = _apply_step(runner, keeper, step, current)
+        report.removed += step.kind == "remove"
+        report.updated += step.kind == "update"
+        report.added += step.kind == "add"
+    while (target := next_activation(keeper.state, current)) is not None:
+        current = _apply_step(runner, keeper, Step("activate", target), current)
+        report.activated += 1
+    confirmed = runner.export()
+    if not confirmation_matches(published.result, confirmed, keeper.state):
+        raise ApplyFailed("confirming export differs from the merged result")
+    keeper.save(confirm(keeper.state, confirmed))
+    return confirmed
+
+
+def _consume_copies(
+    carrier: str,
+    copies: Sequence[ConflictCopy],
+    backup: str,
+    mountinfo: str,
+    lock_timeout: float,
+    report: SyncReport,
+) -> None:
+    if not copies:
+        return
+    with carrier_lock(carrier, lock_timeout) as lease:
+        real_carrier = os.path.realpath(carrier)
+        try:
+            points: frozenset[str] | None = mount_points(mountinfo)
+        except OSError:
+            points = None
+        backup_fd: int | None = None
+        try:
+            for copy in copies:
+                try:
+                    if backup_fd is None:
+                        backup_fd = open_backup_dir(backup)
+                    backup_copy(backup_fd, copy)
+                    if remove_copy(lease.dir_fd, real_carrier, copy, points):
+                        report.copies_removed += 1
+                    else:
+                        report.copies_kept.append(copy.name)
+                except (CredentialsError, OSError):
+                    report.copies_kept.append(copy.name)
+        finally:
+            if backup_fd is not None:
+                os.close(backup_fd)
+
+
+def sync(
+    carrier: str,
+    database: str,
+    host_state: str,
+    conflict_backup: str,
+    mode: str,
+    *,
+    executable: str = "opencode",
+    command_timeout: float = COMMAND_TIMEOUT_SECONDS,
+    lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+    mountinfo: str = "/proc/self/mountinfo",
+) -> SyncReport:
+    """One adjustment between the OpenCode database and the carrier."""
+    if mode not in MODES:
+        raise NotUnderstood("unknown mode")
+    check_environment()
+    report = SyncReport(mode=mode)
+    runner = OpenCode(command_timeout, executable)
+    state_dir, state_name = os.path.split(os.path.abspath(host_state))
+    _database_inode(database)
+    carrier_fd = open_dir(carrier)
+    try:
+        state_fd = open_dir(state_dir)
+        try:
+            read_carrier(carrier_fd)
+            state, raw = read_host_state(state_fd, state_name)
+            export = runner.export()
+            inode = _database_inode(database)
+            if inode is None:
+                raise NotUnderstood("database is missing after the export")
+            state = unhide_present(bind(state, inode), export)
+            lost = vanished(state.seen, export)
+            report.hidden = len(lost)
+            keeper = StateKeeper(state_fd, state_name, state, raw)
+            keeper.save(hide(state, lost))
+            with carrier_lock(carrier, lock_timeout) as lease:
+                remove_stale_own_temps(
+                    lease.dir_fd, [CREDENTIALS_NAME, TOMBSTONES_NAME], STALE_TEMP_SECONDS
+                )
+                published = publish(lease.dir_fd, export)
+            report.wrote_tombstones = published.wrote_tombstones
+            report.wrote_entries = published.wrote_entries
+            report.copies_invalid = list(published.read.invalid)
+            report.conflicts = [
+                f"{identity} ({published.result.entries[identity].integration_id})"
+                for identity in published.result.conflicts
+            ]
+            if mode != "final":
+                _adjust(runner, keeper, published, export, report)
+        finally:
+            os.close(state_fd)
+    finally:
+        os.close(carrier_fd)
+    _consume_copies(
+        carrier, published.read.copies, conflict_backup, mountinfo, lock_timeout, report
+    )
+    return report
+
+
+# ---------------------------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------------------------
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise NotUnderstood("usage error")
+
+
+def _warn(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Exit 0 done, 3 refused (path type or ownership), 1 everything else."""
+    parser = _Parser(prog="opencode-credentials")
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    sync_parser = commands.add_parser("sync")
+    for option in ("carrier", "database", "host-state", "conflict-backup"):
+        sync_parser.add_argument(f"--{option}", required=True)
+    sync_parser.add_argument("--mode", required=True, choices=MODES)
+    try:
+        arguments = parser.parse_args(argv)
+        report = sync(
+            arguments.carrier,
+            arguments.database,
+            arguments.host_state,
+            arguments.conflict_backup,
+            arguments.mode,
+        )
+    except Refused as error:
+        _warn(f"refused: {error.reason}")
+        return 3
+    except CredentialsError as error:
+        _warn(f"failed: {error.reason}")
+        return 1
+    except Exception as error:  # the message of an unexpected error may carry data
+        _warn(f"unexpected error: {type(error).__name__}")
+        return 1
+    for line in report.lines():
+        _warn(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
