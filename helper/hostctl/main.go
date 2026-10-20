@@ -23,6 +23,9 @@ import (
 
 const stateDir = "/var/lib/tailscale/djinn-hostctl"
 const socketPath = "/run/djinn-hostctl/control.sock"
+const relayListen = ":1080"
+const rawSocksAddr = "127.0.0.1:1055"
+const connectRelayAddr = "127.0.0.1" + relayListen
 const tailscaleSocket = "/run/djinn-hostctl/tailscaled.sock"
 
 type window struct {
@@ -282,15 +285,15 @@ func run(args []string) error {
 		return err
 	}
 	go serve(listener, c)
-	relay, err := net.Listen("tcp", ":1080")
+	relay, err := net.Listen("tcp", relayListen)
 	if err != nil {
 		return err
 	}
 	defer relay.Close()
-	go serveRelay(relay, c, "127.0.0.1:1055", os.Stdout)
+	go serveRelay(relay, c, rawSocksAddr, os.Stdout)
 	child := exec.Command("/usr/local/bin/tailscaled", "--tun=userspace-networking",
 		"--statedir=/var/lib/tailscale", "--socket="+tailscaleSocket,
-		"--socks5-server=127.0.0.1:1055")
+		"--socks5-server="+rawSocksAddr)
 	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return err
@@ -352,6 +355,31 @@ func monitor(c *controller, done <-chan error, signals <-chan os.Signal) string 
 	}
 }
 
+// A zero deadline retains the JSON client's separate dial and I/O budgets.
+func controlRequest(path string, r request, deadline time.Time) (response, error) {
+	dialTimeout := 2 * time.Second
+	if !deadline.IsZero() {
+		dialTimeout = time.Until(deadline)
+	}
+	conn, err := net.DialTimeout("unix", path, dialTimeout)
+	if err != nil {
+		return response{}, err
+	}
+	defer conn.Close()
+	if deadline.IsZero() {
+		deadline = time.Now().Add(3 * time.Second)
+	}
+	if err = conn.SetDeadline(deadline); err != nil {
+		return response{}, err
+	}
+	if err = json.NewEncoder(conn).Encode(r); err != nil {
+		return response{}, err
+	}
+	var reply response
+	err = json.NewDecoder(conn).Decode(&reply)
+	return reply, err
+}
+
 func client(args []string) error {
 	if len(args) < 2 {
 		return errors.New("expected operation generation [minutes]")
@@ -373,17 +401,8 @@ func client(args []string) error {
 			return err
 		}
 	}
-	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	reply, err := controlRequest(socketPath, r, time.Time{})
 	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	if err = json.NewEncoder(conn).Encode(r); err != nil {
-		return err
-	}
-	var reply response
-	if err = json.NewDecoder(conn).Decode(&reply); err != nil {
 		return err
 	}
 	if reply.Error != "" {
@@ -398,9 +417,11 @@ func client(args []string) error {
 func main() {
 	var err error
 	if len(os.Args) < 2 {
-		err = errors.New("expected run, status or set-deadline")
+		err = errors.New("expected run, connect, status or set-deadline")
 	} else if os.Args[1] == "run" {
 		err = run(os.Args[2:])
+	} else if os.Args[1] == "connect" {
+		err = connect(os.Args[2:], os.Stdin, os.Stdout)
 	} else {
 		err = client(os.Args[1:])
 	}

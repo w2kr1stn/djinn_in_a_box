@@ -988,6 +988,7 @@ user = "operator"
 ```sh
 djinn hostctl on --for 10m
 djinn hostctl status
+djinn hostctl check [HOST]
 djinn hostctl limit 5
 djinn hostctl off
 ```
@@ -1000,8 +1001,31 @@ login link with `status` on the host terminal. Before the first opening, follow
 [enrollment and tailnet policy](SECURITY-MODEL.md#enrollment-and-tailnet-policy)
 for node setup, target configuration and the policy example.
 
-Once `status` reports open, agents use `ssh host-a`. Generated aliases remain
-present while the window is closed. Git and signing work independently.
+Once `status` reports open, run `djinn hostctl check [HOST]` at the host terminal:
+omit `HOST` for all declared targets, or use `djinn hostctl check host-a` for one
+alias. It connects in declaration order as each target's configured user and
+runs `true`. The host's OpenSSH client shows any SSH approval banner; Djinn does
+not read or alter the banner. Approve in your own browser. Agents may then reuse
+the approval with `ssh host-a` within the target policy's `checkPeriod` (see
+limits below). The enrollment login link from `status` is separate from the
+target's SSH approval banner. `check` requires a terminal on stdin and stderr
+and an `ssh` client on the host PATH. Ctrl-C ends the check and removes its
+private temporary configuration. `on` prints: "Once status reports open, djinn
+hostctl check shows the SSH approval link in this terminal."
+
+Tailscale documents check reuse only for the applicable `checkPeriod` (default
+12 hours); its exact cache key across source node, SSH user and destination is
+undocumented. With `checkPeriod: "always"`, a host check does not approve the
+agent's later connection. Each check is a real login as the target user running
+`true`, visible as a connection in the relay log and as a login/session in the
+target's auth log.
+
+Approving the banner of a host check approves the helper's source identity for
+that target user: within the target policy's `checkPeriod` it can also cover the
+agents' later connections as that user; that is the intended effect.
+
+Generated aliases remain present while the window is closed. Git and signing
+work independently.
 Generated SSH delivery requires host numeric UID 1000, matching the dev image,
 so the dev user can read the owner-only public files.
 
@@ -1018,6 +1042,12 @@ replacement or profile drift closes an open window. No dev or authenticated
 peer snapshot means deferred.
 Configure the [host networking prerequisite](SECURITY-MODEL.md#direct-routes-and-target-authority)
 before relying on these checks.
+
+The trailing `Summary` block shows the window and approximate time left, sealing
+counts and up to three unknown groups followed by up to three cause groups,
+relay state and current-generation peer aliases, and one next action. It uses
+the existing snapshot and makes no SSH connection. An open relay does not mean
+SSH approval has completed. Helper-owned deadlines remain authoritative.
 
 For journal/connection-log locations, cutoffs and observation limits, see
 [window state, expiry and logs](SECURITY-MODEL.md#window-state-expiry-and-logs).

@@ -288,6 +288,21 @@ metadata logs, not payload or session recordings; login URLs and private keys
 are not journaled. SIGKILL, host loss, observer outages or log-write failures can
 leave gaps or unmatched starts; exact missing end times cannot be reconstructed.
 
+`connect` first checks generation and live admission over the private control
+socket, then sends one SOCKS5 CONNECT to `127.0.0.1:1080`, always on TCP 22. It
+adds no listener, direct route or per-client relay authentication. Connection
+setup has one 10-second deadline, cleared before streaming. Djinn places no
+timeout on waiting for the owner's SSH approval; window closure still cuts the
+stream. After Ctrl-C the relay's stream to the target can persist until the
+target closes it or the window ends. Only connection metadata is logged.
+
+The check's configuration and `known_hosts` are private temporary files under
+the hostctl state root, removed on completion, error or Ctrl-C. After SIGKILL or
+power loss a `check-*` directory can remain under the hostctl state root; it
+holds only public host keys and configuration and can be removed. Status's
+trailing `Summary` is passive; an unknown observation remains unknown and is
+not a claim of complete logging.
+
 Post-mortem records are separate JSON files under
 `~/.local/state/djinn/post-mortem/`, fixed to the controller's passwd home rather
 than `XDG_STATE_HOME`. They include final container state, limits and log tails;
@@ -465,6 +480,34 @@ These are independent controls:
 | Node-key expiry | Tailscale's device identity lifetime; disabling it does not open a window. |
 | Window expiry | Helper-enforced cutoff for relay access, independent of node identity. |
 | SSH check reauthentication | Target policy's approval interval, independent of window duration. Opening a window does not reset or force this check. |
+
+After enrollment and relay admission, the owner can run
+`djinn hostctl check [HOST]` in the host terminal. Host OpenSSH connects through
+`docker exec -i` and the helper's generation-checked `connect` operation to the
+same gated relay used by agents. It verifies the opening's frozen peer host keys
+and uses the opening's configured target user. Its generated `-F` configuration
+isolates user and system SSH settings, disables host private-key/agent
+authentication, forwarding, local commands and connection sharing, and keeps
+strict peer host-key checking. It sets `PasswordAuthentication no`;
+keyboard-interactive authentication keeps its default, so a keyboard-interactive
+approval prompt stays possible. Djinn never
+reads, alters, captures, parses or journals the SSH banner or approval link;
+OpenSSH inherits the terminal streams. The enrollment login link from `status`
+is separate from that SSH approval banner. Approval remains in the owner's
+browser, in the owner-controlled browser profile required above. `connect` is
+reachable only through `docker exec` on the controller host, with the same
+authority as `admit` and `pause`.
+
+Tailscale documents check reuse only for the applicable `checkPeriod` (default
+12 hours); its exact cache key across source node, SSH user and destination is
+undocumented. With `checkPeriod: "always"`, a host check does not approve the
+agent's later connection. Each check is a real login as the target user running
+`true`, visible as a connection in the relay log and as a login/session in the
+target's auth log.
+
+Approving the banner of a host check approves the helper's source identity for
+that target user: within the target policy's `checkPeriod` it can also cover the
+agents' later connections as that user; that is the intended effect.
 
 Never sync or back up node state, including through host/Docker snapshots.
 Copying it copies the identity. Djinn excludes the volume from backup/restore;

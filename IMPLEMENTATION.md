@@ -1253,6 +1253,84 @@ files in the mounted directory. The dev image's `djinn-hostctl-connect` uses
 SOCKS5 without a direct connection fallback. Each relay stream has structured
 start/end records in the rotated Docker log.
 
+The supervisor dispatches `connect <generation> <selector>` separately from its
+JSON control client. It checks generation and live admission over the private
+control socket, then uses the SOCKS5 client framing to enter only the gated
+`127.0.0.1:1080` relay, always on TCP 22. It copies the opaque SSH stream in both
+directions with half-close. Stdout carries only stream bytes. Before streaming,
+failures return exit 1 with one stderr diagnostic:
+`hostctl connect: generation changed`, `hostctl connect: window not open`,
+`hostctl connect: relay refused destination`,
+`hostctl connect: relay could not reach destination`,
+`hostctl connect: setup failed` or `hostctl connect: setup timed out`.
+
+One 10-second setup deadline covers the control request, gated dial and SOCKS
+handshake; it is cleared before streaming. After admission the operation returns
+exit 0 when streaming ends. When stdin ends, `connect` half-closes upstream,
+forwards remaining upstream bytes for at most 2 seconds, then closes the
+connection and returns without waiting for its stdin reader. After Ctrl-C the
+relay's stream to the target can persist until the target closes it or the
+window ends; its logs contain only connection metadata.
+
+`djinn hostctl check [HOST]` calls `core.hostctl.check_hosts`, selecting aliases
+and users from generation-matching `opening.json` and frozen peer trust. It
+requires a running, admitted, unpaused helper, a terminal on stdin and stderr,
+and `ssh` on the host PATH. It invokes host OpenSSH once per selected alias in
+declaration order with `-F <config> -T -n <alias> true`. The shared tailnet
+renderer supplies the host ProxyCommand and frozen `known_hosts` without
+changing container delivery. The generated `-F` profile isolates user and system
+SSH settings: `IdentitiesOnly yes` without an `IdentityFile`,
+`IdentityAgent none`, `PubkeyAuthentication no`, `PasswordAuthentication no`,
+`ForwardAgent no`,
+`ForwardX11 no`, `ForwardX11Trusted no`, `ClearAllForwardings yes`,
+`PermitLocalCommand no`, `ControlMaster no` and `ControlPersist no`. It sets
+`StrictHostKeyChecking yes`, `UpdateHostKeys no`, `UserKnownHostsFile` to the
+generated file, `GlobalKnownHostsFile /dev/null` and `LogLevel INFO`.
+Keyboard-interactive authentication keeps its default.
+
+OpenSSH runs the ProxyCommand through the user's `$SHELL -c`; the quoting is
+POSIX (sh, bash, zsh, dash). The owner's environment (for example `DOCKER_HOST`
+and `SSH_ASKPASS*`) is inherited by ssh and the proxy and is owner-trusted.
+
+Each check uses a fresh directory under the hostctl state root with mode `0700`
+and `config`/`known_hosts` files with mode `0600`, removed in a `finally` scope.
+SSH output inherits the terminal without capture or a Djinn timeout. SIGTERM
+and SIGHUP are converted to `KeyboardInterrupt` so cleanup runs; the previous
+handlers are restored afterwards. Ctrl-C returns 130. Each alias prints
+`Checking <alias>...`, then `<alias>: approved and reachable` for SSH exit 0 or
+`<alias>: check failed (ssh exit <n>)` on failure. An interrupted SSH invocation
+prints `<alias>: check interrupted`. The command exits 0 only if every selected
+target succeeds, 1 on refusal or failure, and 130 on interruption.
+
+Status appends a blank line, the header `Summary` and lines from the pure
+`summary_lines` function over the existing snapshot and a supplied UTC time.
+The `Window:`, `Sealing:`, `Relay:` and `Next:` lines show approximate time left,
+grouped sealing counts (unknowns first, at most three groups per list, then
+`+<n> more`), current-generation peers and one next action. Time left uses whole
+minutes rounded down, `less than 1 min left`, `deadline passed` or
+`time left unknown`; it never displays a negative duration. The summary adds no
+probe or SSH connection, leaves snapshot and doctor behavior intact, and follows
+the existing details and conditional single doctor hint.
+
+`Next:` takes the first matching rule: incomplete or conflicting helper state
+calls for `djinn doctor`; helper login needed calls for opening the login link
+above in your own browser; paused waits for the dev start; opening waits and
+reruns `djinn hostctl status`; open calls for `djinn hostctl check`, then agents
+can use `ssh <alias>`. Otherwise, unknown sealing calls for `djinn doctor first`,
+unsealed calls for
+`djinn hostctl on --allow-unsealed (only if you accept the unsealed boundary)`,
+and the remaining closed cases call for `djinn hostctl on`.
+While the snapshot state is `opening`, a missing generation-matching observation,
+`node_error` or missing node state counts as still starting. A present stale or
+failed observation, `relay_error`, `window_error` or conflicting state still
+calls for `djinn doctor`.
+
+Tailscale documents check reuse per `checkPeriod` (default 12 hours), with no
+documented exact cache key across source node, SSH user and destination. With
+`checkPeriod: "always"`, a host check does not approve the agent's later
+connection. Each check runs `true` as the target user and appears in the relay
+log and the target's auth log.
+
 `core/host_sealing.py` supplies the shared assessment for on, doctor and both
 creators. It reads actual ID, mounts, environment and network peers, canonicalizes
 host sources/aliases, and consumes the desktop provenance inspector. Assessment
