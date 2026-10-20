@@ -42,6 +42,20 @@ def _shutdown_section() -> str:
     return text[text.rindex("# ====", 0, marker) :]
 
 
+def _credential_helper(root: Path) -> Path:
+    helper = root / "credentials.py"
+    helper.write_text(
+        "#!/usr/bin/python3\nimport sys\nfrom pathlib import Path\n"
+        'mode = sys.argv[sys.argv.index("--mode") + 1]\n'
+        f"revision = Path({str(root / 'credential-revision')!r})\n"
+        'number = revision.read_text().strip() if revision.exists() else "0"\n'
+        f"with Path({str(root / 'credential-modes')!r}).open('a') as log:\n"
+        '    log.write(mode + ":" + number + "\\n")\n'
+    )
+    helper.chmod(0o755)
+    return helper
+
+
 def _harness(tmp_path: Path) -> Path:
     """Wrap the real section in stubs so it can run outside a container."""
     log = tmp_path / "sync.log"
@@ -63,6 +77,7 @@ def _harness(tmp_path: Path) -> Path:
         f'SYNC_LOG="{log}"\n'
         f'source "{ROOT / "scripts" / "seed-lib.sh"}"\n'
         f'SETTINGS_COPY_HELPER="{helper}"\n'
+        f'OPENCODE_CREDENTIALS_HELPER="{_credential_helper(tmp_path)}"\n'
         f'OPENCODE_RUNTIME_SETTINGS="{tmp_path / "opencode.json"}"\n'
         f'OPENCODE_RUNTIME_ROOT="{tmp_path / "runtime"}"\n'
         f'WORKFLOW_PUBLISHER="{ROOT / "src/djinn_in_a_box/core/workflow_publisher.py"}"\n'
@@ -392,6 +407,7 @@ class Session:
             (self.persistent / "claude/claude.json").write_bytes(b'{"initial":true}\n')
         self.baseline = baseline.read_bytes()
         self.env = _entrypoint_environment(self.home)
+        self.env["OPENCODE_CREDENTIALS_HELPER"] = str(_credential_helper(root))
         self.tmp = root / "private"
         self.tmp.mkdir()
         self.env["TMPDIR"] = str(self.tmp)
@@ -559,6 +575,10 @@ class Session:
         before = len(self.sleepers())
         (self.root / f"tick-{self.sleepers()[-1]}").touch()
         _wait_for(lambda: len(self.sleepers()) > before, "checkpoint did not finish its tick")
+
+    def credential_modes(self) -> list[str]:
+        marker = self.root / "credential-modes"
+        return marker.read_text().splitlines() if marker.exists() else []
 
     def close(self) -> None:
         if self.process is not None:
@@ -882,6 +902,7 @@ def test_clean_stop_joins_inflight_checkpoint_before_final_sync(sessions, stop_s
     assert not _pid_running(worker)
     assert not _pid_running(sleeper)
     assert len(session.sleepers()) == 1
+    assert session.credential_modes() == ["start:0", "checkpoint:0", "final:0"]
     assert not session.state.exists()
     assert session.out.read_bytes() == b""
     assert "stopped unexpectedly" not in session.err.read_text()
@@ -932,14 +953,14 @@ def test_unavailable_private_state_degrades_explicitly(
         _atomic_edit(session.targets[1], b'{"host-only":true}')
     assert session.process is not None
     children = Path(f"/proc/{session.process.pid}/task/{session.process.pid}/children")
-    assert len(children.read_text().split()) == 1, (
-        "worker started despite unavailable private state"
-    )
-    assert not session.sleepers()
+    assert len(children.read_text().split()) == 2
+    session.tick()
+    assert session.credential_modes() == ["start:0", "checkpoint:0"]
     assert not session.state_log.exists()
     if transient:
         session.tmp.chmod(0o700)
     stderr = session.finish()
+    assert session.credential_modes() == ["start:0", "checkpoint:0", "final:0"]
     assert stderr.count("  [warn] settings checkpoints disabled for this session\n") == 1
     assert "stopped unexpectedly" not in stderr
     for index, (runtime, target) in enumerate(zip(session.runtimes, session.targets, strict=True)):
@@ -1009,7 +1030,9 @@ def test_initial_missing_runtime_can_be_created_later(sessions) -> None:
     session.finish()
 
 
-def test_failed_initial_capture_disables_worker_and_retries_at_stop(sessions) -> None:
+def test_failed_initial_capture_keeps_credential_ticks_and_retries_settings_at_stop(
+    sessions,
+) -> None:
     assert os.geteuid() != 0
     session = sessions()
     for index, runtime in enumerate(session.runtimes):
@@ -1030,11 +1053,13 @@ def test_failed_initial_capture_disables_worker_and_retries_at_stop(sessions) ->
         + _shutdown_section()
     )
     session.start(entrypoint)
-    assert not session.sleepers()
+    session.tick()
+    assert session.credential_modes() == ["checkpoint:0"]
     assert not list(session.tmp.glob("djinn-session-state.*")), "partial initial state was retained"
     session.runtimes[1].chmod(0o600)
     session.targets[1].write_bytes(b'{"host-only":true}')
     stderr = session.finish()
+    assert session.credential_modes() == ["checkpoint:0", "final:0"]
     assert stderr.count("  [warn] settings checkpoints disabled for this session\n") == 1
     assert "stopped unexpectedly" not in stderr
     for index, target in enumerate(session.targets):
@@ -1443,7 +1468,8 @@ def test_oversize_protection_for_all_personal_kinds_in_every_sync_path(sessions,
     session.start()
     if degraded in {"initial-recovered", "never"}:
         assert "settings checkpoints disabled" in session.err.read_text()
-        assert not session.sleepers()
+        session.tick()
+        assert session.credential_modes() == ["start:0", "checkpoint:0"]
     for relative in PERSONAL_NAMES:
         assert f"skipped {relative}: larger than 1 MiB" in session.err.read_text()
     if degraded == "lost":
@@ -1711,7 +1737,7 @@ def test_protected_paths_remain_protected_after_host_repairs_content(sessions):
     recreated.finish()
 
 
-def test_partial_initial_snapshot_failure_disables_worker_and_degrades_as_a_unit(sessions):
+def test_partial_initial_snapshot_failure_keeps_credential_ticks_and_degrades_settings(sessions):
     session = sessions()
     _personal_seed(session)
     flag = session.root / "fail-capture-once"
@@ -1733,12 +1759,14 @@ def test_partial_initial_snapshot_failure_disables_worker_and_degrades_as_a_unit
     session.env["WORKFLOW_PUBLISHER"] = str(wrapper)
     session.start()
     assert "settings checkpoints disabled" in session.err.read_text()
-    assert not session.sleepers()
+    session.tick()
+    assert session.credential_modes() == ["start:0", "checkpoint:0"]
     assert not list(session.tmp.glob("djinn-session-state.*"))
     original = [p.read_bytes() for p in _personal_paths(session, "runtime")]
     for target in _personal_paths(session, "carrier"):
         target.write_bytes(b'{"host":true}')
     session.finish(signal.SIGTERM)
+    assert session.credential_modes() == ["start:0", "checkpoint:0", "final:0"]
     assert [p.read_bytes() for p in _personal_paths(session, "carrier")] == original
 
 
@@ -1820,8 +1848,12 @@ def test_protected_set_conversion_fails_closed_before_runtime_writers(sessions, 
     original = b"x" * ((1 << 20) + 1)
     _personal_seed(session, original)
     markers = [session.root / name for name in ("credentials-ran", "publisher-ran", "mcp-ran")]
-    credentials = session.root / "credentials.zsh"
-    credentials.write_text(f'ensure_opencode_credentials() {{ touch "{markers[0]}"; }}\n')
+    credentials = session.root / "credential-marker.py"
+    credentials.write_text(
+        "#!/usr/bin/python3\nimport sys\nfrom pathlib import Path\n"
+        f"Path({str(markers[0])!r}).write_text(sys.argv[sys.argv.index('--mode') + 1])\n"
+    )
+    credentials.chmod(0o755)
     session.env["OPENCODE_CREDENTIALS_HELPER"] = str(credentials)
     mcp = session.root / "mcp.zsh"
     mcp.write_text(f'register_mcp_servers() {{ touch "{markers[2]}"; }}\n')
@@ -1913,3 +1945,47 @@ def test_initial_oversize_runtime_entry_keeps_sibling_checkpoints_and_host_edits
         assert not target.exists()
         events = [json.loads(line) for line in session.events.read_text().splitlines()]
         assert not any(event[3] == str(target) for event in events)
+
+
+@pytest.mark.parametrize("stop_signal", (None, signal.SIGTERM, signal.SIGINT))
+def test_credentials_publish_last_change_once_on_each_stop(sessions, stop_signal):
+    session = sessions()
+    revision = session.root / "credential-revision"
+    revision.write_text("1")
+    session.start()
+    session.tick()
+    assert session.credential_modes() == ["start:1", "checkpoint:1"]
+    revision.write_text("2")
+    session.finish(stop_signal)
+    assert session.credential_modes() == ["start:1", "checkpoint:1", "final:2"]
+
+
+def test_credentials_publish_when_lost_settings_scratch_cannot_be_recreated(sessions):
+    session = sessions()
+    session.start()
+    session.tick()
+    shutil.rmtree(session.state)
+    session.tmp.chmod(0o500)
+    stderr = session.finish()
+    assert "could not persist" in stderr
+    assert session.credential_modes() == ["start:0", "checkpoint:0", "final:0"]
+
+
+def test_stopping_checkpoint_skips_credentials_before_final(sessions):
+    session = sessions()
+    entrypoint = session.root / "stopping.zsh"
+    entrypoint.write_text(
+        ENTRYPOINT.read_text().replace(
+            "        sync_session_state checkpoint || :",
+            "        _session_checkpoint_on_stop\n        sync_session_state checkpoint || :",
+        )
+    )
+    session.start(entrypoint)
+    _wait_for(lambda: bool(session.sleepers()), "no interval sleeper")
+    sleeper = session.sleepers()[0]
+    worker = int(Path(f"/proc/{sleeper}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    (session.root / f"tick-{sleeper}").touch()
+    _wait_for(lambda: not _pid_running(worker), "stopping worker did not exit")
+    assert session.credential_modes() == ["start:0"]
+    session.finish()
+    assert session.credential_modes() == ["start:0", "final:0"]

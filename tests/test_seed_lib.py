@@ -927,3 +927,129 @@ def test_claude_raw_sync_retains_its_jq_acceptance(tmp_path: Path, document: byt
     assert result.returncode == 0, result.stderr
     assert result.stdout == result.stderr == ""
     assert target.read_bytes() == ack.read_bytes() == document
+
+
+def _credential_command(tmp_path: Path) -> str:
+    helper = tmp_path / "credentials.py"
+    helper.write_text(
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"with Path({str(tmp_path / 'helper-calls')!r}).open('a') as log:\n"
+        "    log.write(json.dumps([sys.argv[1:], os.environ['PATH']]) + '\\n')\n"
+        "mode = sys.argv[sys.argv.index('--mode') + 1]\n"
+        "rc = int(os.environ.get('TEST_CREDENTIAL_RC', '0'))\n"
+        "print('discard helper stdout')\n"
+        "message = ('refused: entry is a symlink' if rc == 3 else 'failed: invalid JSON')\n"
+        "print(message if rc else 'sync ' + mode + ': done', file=sys.stderr)\n"
+        "if os.environ.get('TEST_CREDENTIAL_WARNINGS') == '1':\n"
+        "    print('conflicting values for account (provider)', file=sys.stderr)\n"
+        "    print('conflict copy is invalid and stays: copy-a', file=sys.stderr)\n"
+        "    print('conflict copy stays, backup retried next time: copy-b', file=sys.stderr)\n"
+        "sys.exit(rc)\n"
+    )
+    return f"OPENCODE_CREDENTIALS_HELPER={shlex.quote(str(helper))}; "
+
+
+@pytest.mark.parametrize("mode", ("start", "checkpoint", "final"))
+@pytest.mark.parametrize("rc", (0, 1, 3))
+@pytest.mark.parametrize("warnings", (False, True), ids=("no-warnings", "warnings"))
+def test_credential_sync_exit_code_and_output_mapping(tmp_path, mode, rc, warnings):
+    command = _credential_command(tmp_path)
+    result = run_seed_lib(
+        tmp_path,
+        command
+        + f"export TEST_CREDENTIAL_RC={rc} TEST_CREDENTIAL_WARNINGS={int(warnings)}; "
+        + f"_sync_opencode_credentials {mode}",
+    )
+    assert result.stdout == ""
+    assert result.returncode == (1 if mode == "start" and rc == 3 else 0)
+    output = result.stderr
+    assert "discard helper stdout" not in output
+    if mode == "start" and rc == 3:
+        assert "[err] OpenCode credential sync refused:" in output
+        assert "refused: entry is a symlink" in output
+        assert "[warn]" not in output
+    elif rc:
+        assert "[warn] OpenCode credential sync" in output
+        assert f"rc={rc}" in output
+        assert ("refused: entry is a symlink" if rc == 3 else "failed: invalid JSON") in output
+        assert "[err]" not in output
+        if mode == "checkpoint":
+            assert ("sync refused" if rc == 3 else "sync failed") in output
+    else:
+        if mode == "start":
+            assert "[info] sync start: done" in output
+        else:
+            assert "sync " + mode + ": done" not in output
+        for line in (
+            "conflicting values for account (provider)",
+            "conflict copy is invalid and stays: copy-a",
+            "conflict copy stays, backup retried next time: copy-b",
+        ):
+            assert (line in output) is warnings
+        assert output.count("[warn]") == (3 if mode != "checkpoint" else 1) * int(warnings)
+        assert "[err]" not in output
+        if mode != "start" and not warnings:
+            assert output == ""
+
+
+def test_credential_checkpoint_warns_once_across_failure_recovery_and_refusal(tmp_path):
+    command = _credential_command(tmp_path)
+    result = run_seed_lib(
+        tmp_path,
+        command
+        + "export TEST_CREDENTIAL_RC=1; _sync_opencode_credentials checkpoint; "
+        + "export TEST_CREDENTIAL_RC=0; _sync_opencode_credentials checkpoint; "
+        + "export TEST_CREDENTIAL_WARNINGS=1; _sync_opencode_credentials checkpoint; "
+        + "export TEST_CREDENTIAL_RC=3; _sync_opencode_credentials checkpoint; "
+        + "_sync_opencode_credentials final",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr.count("[warn]") == 2
+    assert result.stderr.count("rc=1") == 1
+    assert result.stderr.count("rc=3") == 1
+    # A new shell is a new session, even with the same helper and storage.
+    again = run_seed_lib(
+        tmp_path,
+        command + "export TEST_CREDENTIAL_RC=1; _sync_opencode_credentials checkpoint",
+    )
+    assert again.returncode == 0
+    assert again.stderr.count("[warn]") == 1
+
+
+@pytest.mark.parametrize("mode", ("start", "checkpoint", "final"))
+def test_credential_helper_arguments_and_callers_path(tmp_path, mode):
+    tmp_path = tmp_path / "home with spaces"
+    tmp_path.mkdir()
+    command = _credential_command(tmp_path)
+    bin_dir = tmp_path / "caller-bin"
+    bin_dir.mkdir()
+    probe = tmp_path / "python-ran"
+    python = bin_dir / "python3"
+    python.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(probe))}\nexec /usr/bin/python3 "$@"\n')
+    python.chmod(0o755)
+    result = run_seed_lib(
+        tmp_path,
+        command
+        + f"export PATH={shlex.quote(str(bin_dir))}:$PATH; "
+        + f"_sync_opencode_credentials {mode}",
+    )
+    assert result.returncode == 0, result.stderr
+    assert probe.exists()
+    calls = [json.loads(line) for line in (tmp_path / "helper-calls").read_text().splitlines()]
+    assert len(calls) == 1
+    argv, caller_path = calls[0]
+    assert caller_path.split(":")[0] == str(bin_dir)
+    assert argv == [
+        "sync",
+        "--carrier",
+        str(tmp_path / ".opencode"),
+        "--database",
+        str(tmp_path / ".local/share/opencode/opencode.db"),
+        "--host-state",
+        str(tmp_path / ".local/share/opencode/djinn-credentials-host.json"),
+        "--conflict-backup",
+        str(tmp_path / ".local/state/djinn/opencode-credential-conflicts"),
+        "--mode",
+        mode,
+    ]

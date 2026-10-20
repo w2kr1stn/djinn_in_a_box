@@ -57,7 +57,8 @@ def test_exact_allowlist_ignores_every_other_name(tmp_path: Path):
         "themes/sub/nested.json",
         "themes/a.JSON",
         "other.json",
-        "auth.json",
+        "credentials.json",
+        "credentials.removed.json",
         "seed/x",
     )
     for relative in (*KINDS, *ignored):
@@ -298,7 +299,8 @@ def test_install_creates_themes_fsyncs_and_uses_private_mode(tmp_path, monkeypat
         "themes/.x.json",
         "themes/.json",
         "themes/sub/x.json",
-        "auth.json",
+        "credentials.json",
+        "credentials.removed.json",
         "themes/x.tmp",
         "themes//x.json",
     ),
@@ -332,7 +334,8 @@ def test_credentials_backup_restore_then_personal_copy(tmp_path):
     config = AppConfig(code_dir=tmp_path, config_root=tmp_path / "config")
     carrier = config.config_root / "opencode"
     originals = dict.fromkeys(KINDS, b'{"personal":true}')
-    originals["auth.json"] = b'{"fixture":"credential"}'
+    originals["credentials.json"] = b"[]"
+    originals["credentials.removed.json"] = b"[]"
     for name, raw in originals.items():
         write(carrier, name, raw)
     archives = tmp_path / "archives"
@@ -346,7 +349,8 @@ def test_credentials_backup_restore_then_personal_copy(tmp_path):
     result = call("copy", "--carrier", carrier, "--runtime", runtime)
     assert result.returncode == 0, result.stderr
     assert all((runtime / name).read_bytes() == originals[name] for name in KINDS)
-    assert not (runtime / "auth.json").exists()
+    assert not (runtime / "credentials.json").exists()
+    assert not (runtime / "credentials.removed.json").exists()
 
 
 def test_runtime_admission_precedes_copying_even_a_safe_carrier_entry(tmp_path):

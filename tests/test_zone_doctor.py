@@ -136,3 +136,24 @@ def test_claude_mcp_needs_auth_cache_is_a_known_entry(zone_config: AppConfig) ->
     row = _check_named(doctor_mod.run_checks(zone_config), "Zone drift")
     assert row.status is doctor_mod.Status.PASS
     assert row.detail == "none"
+
+
+def test_opencode_credential_carriers_are_known_but_leftovers_are_reported(
+    zone_config: AppConfig,
+) -> None:
+    root = zone_config.config_root / "opencode"
+    root.mkdir(parents=True)
+    known = ("credentials.json", "credentials.removed.json")
+    leftovers = (
+        "credentials.sync-conflict-20261020-120000-ABCDEFG.json",
+        "credentials.removed.sync-conflict-20261020-120000-ABCDEFG.json",
+        ".credentials.json.0123456789abcdef.tmp",
+    )
+    for name in (*known, *leftovers):
+        (root / name).write_text("[]")
+    row = _check_named(doctor_mod.run_checks(zone_config), "Zone drift")
+    assert row.status is doctor_mod.Status.WARN
+    for name in known:
+        assert str(root / name) not in row.detail
+    for name in leftovers:
+        assert str(root / name) in row.detail

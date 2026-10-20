@@ -113,9 +113,8 @@ while IFS= read -r -d '' relative; do
     opencode_protected_paths+=("$relative")
 done <<< "$opencode_protected_result"
 
-OPENCODE_CREDENTIALS_HELPER="${OPENCODE_CREDENTIALS_HELPER:-/home/dev/opencode-credentials.sh}"
-source "$OPENCODE_CREDENTIALS_HELPER"
-ensure_opencode_credentials
+OPENCODE_CREDENTIALS_HELPER="${OPENCODE_CREDENTIALS_HELPER:-/home/dev/opencode-credentials.py}"
+_sync_opencode_credentials start || exit 1
 
 ui_info "[workflow-delivery] opencode:"
 CANONICAL_CONFIG_ROOT="${DJINN_CANONICAL_ROOT:-/home/dev/.djinn-canonical}"
@@ -265,6 +264,7 @@ echo "" >&2
 _DJINN_STATE_PERSISTED=0
 djinn_state_dir=''
 djinn_checkpoint_pid=''
+djinn_settings_checkpoints=0
 
 initialize_session_state() {
     local runtime_file acknowledged_file i initial_snapshot
@@ -296,6 +296,9 @@ initialize_session_state() {
 
 sync_session_state() {
     local mode=$1
+    [[ "$mode" == checkpoint && "${djinn_checkpoint_stopping:-0}" == 1 ]] && return 0
+    _sync_opencode_credentials "$mode"
+    [[ "$mode" == checkpoint && "$djinn_settings_checkpoints" == 0 ]] && return 0
     if [[ "$mode" == final && ! -d "$djinn_state_dir" ]]; then
         if ! djinn_state_dir=$(mktemp -d -t djinn-session-state.XXXXXXXX 2>/dev/null); then
             local i
@@ -353,7 +356,8 @@ _session_checkpoint_loop() {
 start_session_checkpointer() {
     if ! initialize_session_state; then
         ui_warn 'settings checkpoints disabled for this session'
-        return 0
+    else
+        djinn_settings_checkpoints=1
     fi
     _session_checkpoint_loop </dev/null 3<&- &
     djinn_checkpoint_pid=$!

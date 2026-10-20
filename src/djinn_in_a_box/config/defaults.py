@@ -181,8 +181,8 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
     ),
     "opencode": frozenset(
         {
-            "auth.json",
-            "mcp-auth.json",
+            "credentials.json",
+            "credentials.removed.json",
             "opencode.json",
             "cli.json",
             "themes",
