@@ -389,7 +389,9 @@ def test_current_readlink_names_target_without_resolving(
     tree: DaemonTree, tmp_path: Path, absolute: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tree.release(selected=False)
-    target = tmp_path / "outside/unopened-release" if absolute else Path("releases/0.163.0-test")
+    # Codex writes an absolute container path; the host only checks its `releases/<name>` shape.
+    container = Path("/home/dev/.codex/packages/app-server-daemon/releases/0.163.0-test")
+    target = container if absolute else Path("releases/0.163.0-test")
     (tree.releases.parent / "current").symlink_to(target)
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
@@ -400,6 +402,40 @@ def test_current_readlink_names_target_without_resolving(
         row = tree.checks()[1]
     assert row.status is doctor_mod.Status.PASS
     assert f"current: {target.name}" in row.detail
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "releases/missing",
+        "releases/not-present/../0.163.0-test",
+        "elsewhere/../releases/0.163.0-test",
+        "outside/0.163.0-test",
+        "releases/no-manifest",
+        "releases/.staging.abc",
+    ],
+)
+def test_current_outside_the_helper_rule_warns(tree: DaemonTree, target: str) -> None:
+    tree.release(selected=False)
+    (tree.releases / "no-manifest").mkdir()
+    (tree.releases / ".staging.abc").mkdir()
+    (tree.releases.parent / "current").symlink_to(target)
+    row = tree.checks()[1]
+    assert row.status is doctor_mod.Status.WARN
+    assert f"invalid current selection {target}; start-time pruning is skipped" in row.detail
+
+
+def test_container_writable_names_are_escaped_in_both_rows(tree: DaemonTree) -> None:
+    hostile = "rel\x1b]52;c;cGF5bG9hZA==\x07ease"
+    tree.release(hostile)
+    tree.release("second", selected=False)
+    (tree.releases / ".staging.\x1b[31m").mkdir()
+    tree.settings(b'{"updater":{"autoUpdateEnabled":false},"\\u001b]0;t\\u0007":1,"\\u001b]0;t\\u0007":2}')
+    updater, releases = tree.checks()
+    for row in (updater, releases):
+        assert "\x1b" not in row.detail and "\x07" not in row.detail
+    assert "\\x1b]52;c;cGF5bG9hZA==\\x07" in releases.detail
+    assert "duplicate member" in updater.detail and "\\x1b]0;t\\x07" in updater.detail
 
 
 def test_strict_walker_counts_symlink_bytes_without_visiting_target(

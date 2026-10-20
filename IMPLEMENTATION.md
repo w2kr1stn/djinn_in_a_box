@@ -704,9 +704,13 @@ Codex normally bootstraps a fresh installation on its first TUI launch.
 After rereading and validating the selection, the helper removes other direct
 entries under `packages/app-server-daemon/releases/` (about 410 MiB per measured
 release). Package ancestors and the selected directory/manifest must pass
-symlink/type checks; pruning stays inside the opened releases directory. The
-native update has closed stdin and a 300 s timeout; a timeout terminates its
-process group and skips pruning. Failures warn and startup continues. Version
+symlink/type checks, and a `current` link target containing `..` is refused;
+pruning stays inside the opened releases directory, and an entry that cannot be
+removed warns without keeping the others. `codex --version` (30 s) and the
+native update (300 s) run with closed stdin in their own process group; a
+timeout terminates that group, and an update timeout skips pruning. Only stdout
+carries the version; names in the helper's output are control-character
+escaped. Failures warn and startup continues. Version
 changes come through `djinn update`, `djinn build` and a new dev-container start.
 
 Both shutdown paths reach the reverse-sync, which matters because a detached
@@ -1820,8 +1824,10 @@ bounds release traversal to 200,000 entries.
   settings with an installed copy, or malformed/oversized/symlinked settings.
   `remoteControlEnabled` is displayed as on/off/unset information only.
 - `Codex daemon releases`: release count, total size and current selection;
-  PASS for zero or one release, WARN for multiple releases, unreadable paths or
-  an incomplete scan. A skipped `packages` or `app-server-daemon` default overlay
+  PASS for zero or one release, WARN for multiple releases, unreadable paths,
+  an incomplete scan, or a `current` link outside the helper's rule (a direct
+  `releases/<name>` child without `..`, holding a regular manifest). Details
+  escape control characters from container-writable names. A skipped `packages` or `app-server-daemon` default overlay
   makes both rows WARN with `not inspected: … overlay skipped`.
 
 These rows are read-only and have no `--fix` action; their remedy points to a

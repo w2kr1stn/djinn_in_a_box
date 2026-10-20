@@ -24,6 +24,14 @@ TERMINATE_GRACE = 0.25
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
+def printable(value: object) -> str:
+    """Escape control characters: names under the Codex home are container-writable."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii")
+        for ch in str(value)
+    )
+
+
 def object_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -134,7 +142,7 @@ class Policy:
 
     def warn(self, path: Path | str, reason: object) -> None:
         self.warned = True
-        print(f"warning: Codex daemon: {path}: {reason}", file=sys.stderr)
+        print(f"warning: Codex daemon: {printable(path)}: {printable(reason)}", file=sys.stderr)
 
     def selection(self, *, required: bool = False) -> Path | None:
         for directory in (self.home / "packages", self.package, self.releases):
@@ -158,17 +166,20 @@ class Policy:
             raise ValueError(f"{target}: selected release or regular codex-package.json is missing")
         return target
 
-    def update(self) -> bool:
+    def bounded(
+        self, arguments: Sequence[str], timeout: float
+    ) -> subprocess.CompletedProcess[bytes] | None:
+        """Run Codex in its own process group; on timeout terminate and reap the group."""
         process = subprocess.Popen(
-            [self.codex, "app-server", "daemon", "update", "--from-cli", "--yes"],
+            [self.codex, *arguments],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             env=self.environment,
             start_new_session=True,
         )
         try:
-            output = process.communicate(timeout=UPDATE_TIMEOUT)[0]
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             # The npm launcher and native child share this newly owned group.
             with suppress(ProcessLookupError):
@@ -181,11 +192,20 @@ class Policy:
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
+            return None
+        return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+    def update(self) -> bool:
+        result = self.bounded(
+            ["app-server", "daemon", "update", "--from-cli", "--yes"], UPDATE_TIMEOUT
+        )
+        if result is None:
             self.warn(self.current, "update timed out; process group terminated; skipping prune")
             return False
-        if process.returncode:
-            lines = output.decode("utf-8", errors="replace").strip().splitlines()
-            self.warn(self.current, lines[-1] if lines else f"update exited {process.returncode}")
+        if result.returncode:
+            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            lines = output.strip().splitlines()
+            self.warn(self.current, lines[-1] if lines else f"update exited {result.returncode}")
         return True
 
     def reconcile(self) -> Path | None:
@@ -193,15 +213,10 @@ class Policy:
         selected = self.selection()
         if selected is None:
             return None
-        result = subprocess.run(
-            [self.codex, "--version"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=VERSION_TIMEOUT,
-            env=self.environment,
-            check=False,
-        )
+        result = self.bounded(["--version"], VERSION_TIMEOUT)
+        if result is None:
+            raise ValueError(f"{self.codex} --version timed out; process group terminated")
+        # stderr may carry warnings; only stdout carries the version.
         match = re.fullmatch(rb"codex-cli (\d+\.\d+\.\d+)", result.stdout.strip())
         if result.returncode or match is None:
             raise ValueError(f"{self.codex}: unusable --version output: {result.stdout!r}")
@@ -221,17 +236,25 @@ class Policy:
             for name in os.listdir(descriptor):
                 if name == selected.name:
                     continue
-                size = entry_size(name, descriptor)
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                if stat.S_ISDIR(metadata.st_mode):
-                    shutil.rmtree(name, dir_fd=descriptor)
-                else:
-                    os.unlink(name, dir_fd=descriptor)
+                try:
+                    size = entry_size(name, descriptor)
+                    metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        shutil.rmtree(name, dir_fd=descriptor)
+                    else:
+                        os.unlink(name, dir_fd=descriptor)
+                except (OSError, RecursionError) as error:
+                    # One unremovable entry must not keep the others.
+                    self.warn(self.releases / name, error)
+                    continue
                 removed += 1
                 freed += size
         finally:
             os.close(descriptor)
-        print(f"Codex daemon: kept {selected.name}; removed {removed} entries; freed {freed} bytes")
+        print(
+            f"Codex daemon: kept {printable(selected.name)}; "
+            f"removed {removed} entries; freed {freed} bytes"
+        )
 
     def run(self) -> int:
         try:

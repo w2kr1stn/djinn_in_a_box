@@ -68,6 +68,8 @@ with open(os.environ["FAKE_LOG"], "a") as log:
 if sys.argv[1:] == ["--version"]:
     if os.environ.get("FAKE_VERSION_SLEEP"):
         time.sleep(2)
+    if os.environ.get("FAKE_VERSION_STDERR"):
+        print(os.environ["FAKE_VERSION_STDERR"], file=sys.stderr, flush=True)
     print(os.environ.get("FAKE_VERSION", "codex-cli 0.163.0"))
     sys.exit(int(os.environ.get("FAKE_VERSION_EXIT", "0")))
 assert sys.argv[1:] == ["app-server", "daemon", "update", "--from-cli", "--yes"]
@@ -861,7 +863,7 @@ def test_update_timeout_signal_grace_kill_and_reap_order(home, monkeypatch, grac
         assert argv == ["fake-codex", "app-server", "daemon", "update", "--from-cli", "--yes"]
         assert kwargs["stdin"] == subprocess.DEVNULL
         assert kwargs["stdout"] == subprocess.PIPE
-        assert kwargs["stderr"] == subprocess.STDOUT
+        assert kwargs["stderr"] == subprocess.PIPE
         assert kwargs["start_new_session"] is True
         assert kwargs["env"]["CODEX_HOME"] == str(home)
         return Process()
@@ -885,6 +887,58 @@ def test_update_timeout_signal_grace_kill_and_reap_order(home, monkeypatch, grac
         ("signal", signal.SIGKILL),
         ("communicate", None),
     ]
+
+
+def test_version_stderr_warning_does_not_hide_the_version(home, fake):
+    # Codex can print warnings (e.g. about PATH aliases) on stderr; the version is on stdout.
+    select(home, release(home, "keep"))
+    stale = release(home, "stale")
+    result = run(home, fake, overrides={"FAKE_VERSION_STDERR": "WARNING: proceeding, even though"})
+    assert result.returncode == 0, result.stderr
+    assert updates(home) == []
+    assert not stale.exists() and (releases(home) / "keep").is_dir()
+
+
+def test_version_probe_runs_in_its_own_process_group(home, fake):
+    select(home, release(home, "keep"))
+    result = run(home, fake)
+    assert result.returncode == 0, result.stderr
+    (probe,) = [call for call in calls(home) if call["argv"] == ["--version"]]
+    assert probe["pgid"] == probe["pid"] == probe["sid"]
+    assert probe["null_stdin"] is True
+
+
+def test_one_unremovable_entry_does_not_keep_the_others(home, fake):
+    select(home, release(home, "keep"))
+    blocked = release(home, "blocked")
+    (blocked / "locked").mkdir()
+    (blocked / "locked/file").write_bytes(b"x")
+    (blocked / "locked").chmod(0o500)
+    others = [release(home, f"stale-{index}") for index in range(4)]
+    try:
+        result = run(home, fake)
+    finally:
+        (blocked / "locked").chmod(0o700)
+    assert_warning(result, releases(home) / "blocked")
+    assert all(not other.exists() for other in others)
+    assert "removed 4 entries" in result.stdout
+
+
+def test_container_writable_names_are_escaped_in_helper_output(home, fake):
+    hostile = "keep\x1b]52;c;cGF5bG9hZA==\x07"
+    select(home, release(home, hostile))
+    release(home, "stale\x1b[31m")
+    (releases(home) / "stale\x1b[31m" / "locked").mkdir()
+    (releases(home) / "stale\x1b[31m" / "locked/file").write_bytes(b"x")
+    (releases(home) / "stale\x1b[31m" / "locked").chmod(0o500)
+    try:
+        result = run(home, fake)
+    finally:
+        (releases(home) / "stale\x1b[31m" / "locked").chmod(0o700)
+    output = result.stdout + result.stderr
+    assert "\x1b" not in output and "\x07" not in output
+    assert "kept keep\\x1b]52;c;cGF5bG9hZA==\\x07" in result.stdout
+    assert "stale\\x1b[31m" in result.stderr
 
 
 @pytest.mark.parametrize("version", ["0.160.0", "1.2.3"])
@@ -929,7 +983,7 @@ def test_prune_recursion_failure_warns_without_traceback(home, fake, monkeypatch
     monkeypatch.setattr(policy, "entry_size", fail)
     assert policy.main(["--codex-home", str(home), "--codex", str(fake)]) == 1
     captured = capsys.readouterr()
-    assert "warning:" in captured.err and str(releases(home).parent / "current") in captured.err
+    assert "warning:" in captured.err and str(releases(home) / "stale") in captured.err
     assert "injected release nesting failure" in captured.err
     assert "Traceback" not in captured.err
     assert stale.is_dir()

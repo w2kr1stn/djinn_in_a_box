@@ -558,8 +558,10 @@ Two read-only rows inspect Codex's local daemon state:
   malformed, over 64 KiB, or symlinked.
   Remote-control state is informational and does not change the status.
 - `Codex daemon releases`: reports release count, size and current selection;
-  WARN for more than one release or an unreadable/incomplete scan. Both rows
-  WARN when a required default overlay was skipped.
+  WARN for more than one release, an unreadable/incomplete scan, or a `current`
+  selection the start-time policy cannot use. Both rows WARN when a required
+  default overlay was skipped. Names from the Codex home are shown with control
+  characters escaped.
 
 Neither row has a fix action. The daemon policy runs at dev-container start.
 

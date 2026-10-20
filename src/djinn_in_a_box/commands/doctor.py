@@ -432,8 +432,13 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
 
     def uninspected(detail: str, remedy: str) -> list[Check]:
         return [
-            Check("Codex daemon updater", Status.WARN, f"{detail}; remote control: unset", remedy),
-            Check("Codex daemon releases", Status.WARN, detail, remedy),
+            Check(
+                "Codex daemon updater",
+                Status.WARN,
+                escape_nonprintable(f"{detail}; remote control: unset"),
+                remedy,
+            ),
+            Check("Codex daemon releases", Status.WARN, escape_nonprintable(detail), remedy),
         ]
 
     local = assignments.by_agent["codex"]["local"]
@@ -467,6 +472,7 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
 
     current_name = "unset"
     current_exists = False
+    current_raw: Path | None = None
     release_problem = ""
     if install in admitted:
         current = install / "current"
@@ -479,7 +485,8 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
         else:
             current_exists = True
             try:
-                current_name = Path(os.readlink(current)).name
+                current_raw = Path(os.readlink(current))
+                current_name = current_raw.name
             except OSError:
                 release_problem = f"unreadable: {current}"
 
@@ -507,6 +514,20 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
                             release_names.append(child.name)
             except OSError as exc:
                 release_problem = f"unreadable: {exc.filename or releases}"
+
+    if current_raw is not None and not release_problem:
+        # Same rule as the start-time helper: a direct `releases/<name>` child with a manifest.
+        selected = releases / current_name
+        try:
+            selected_ok = stat.S_ISDIR(os.lstat(selected).st_mode) and stat.S_ISREG(
+                os.lstat(selected / "codex-package.json").st_mode
+            )
+        except OSError:
+            selected_ok = False
+        if ".." in current_raw.parts or current_raw.parent.name != "releases" or not selected_ok:
+            release_problem = (
+                f"invalid current selection {current_raw}; start-time pruning is skipped"
+            )
 
     managed = current_exists or bool(release_entries > 1) or bool(release_problem)
     remote = "unset"
@@ -543,7 +564,7 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
     updater = Check(
         "Codex daemon updater",
         updater_status,
-        f"{updater_detail}; remote control: {remote}",
+        escape_nonprintable(f"{updater_detail}; remote control: {remote}"),
         remedy if updater_status is Status.WARN else "",
     )
 
@@ -565,7 +586,7 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
         Check(
             "Codex daemon releases",
             release_status,
-            detail,
+            escape_nonprintable(detail),
             remedy if release_status is Status.WARN else "",
         ),
     ]
