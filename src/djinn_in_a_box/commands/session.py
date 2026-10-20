@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, cast
 
 import typer
+from rich.markup import escape
 
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import ConfigSyncSource
@@ -15,6 +16,7 @@ from djinn_in_a_box.core.config_workflow import (
     HostWorkflowReview,
     WorkflowDeliveryTarget,
     prepare_config_workflow,
+    print_workflow_notices,
 )
 from djinn_in_a_box.core.console import err_console, error, print_captured, warning
 from djinn_in_a_box.core.console import (
@@ -168,15 +170,16 @@ def session(
         container_image_compatibility=container_image_compatibility,
         confirm_host_workflow=None if target.container_mode else _confirm_host_workflow,
     )
+    print_workflow_notices(workflow)
     if not workflow.success:
         problem = workflow.problems[0]
-        error(problem.message)
-        warning(problem.remedy)
+        error(escape(problem.message))
+        warning(escape(problem.remedy))
         raise typer.Exit(1)
     if target.container_mode and agent == "opencode":
         refreshed = mgr.refresh_opencode_workflow(target)
         if not refreshed.success:
-            error(refreshed.stderr or "OpenCode workflow refresh failed")
+            error(escape(refreshed.stderr or "OpenCode workflow refresh failed"))
             raise typer.Exit(1)
 
     if create:

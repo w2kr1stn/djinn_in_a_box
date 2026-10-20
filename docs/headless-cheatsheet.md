@@ -79,7 +79,7 @@ The shared publisher records the canonical `config/` tree in
 `.djinn-config-sync.json` and every publisher-managed runtime root in
 `.djinn-workflow-state.json`. Compose Claude is manifestless: it uses a direct
 `AGENTS.md` instruction mount plus the Claude settings merge. An image without
-the `djinn.workflow.publisher=1` label
+the `djinn.workflow.publisher=2` label
 is rejected with `Rebuild/recreate required.` before a Compose run or an OpenCode
 session refresh.
 

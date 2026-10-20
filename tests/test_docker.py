@@ -1340,7 +1340,7 @@ class TestEnsureNetwork:
 class TestWorkflowImageCompatibility:
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_accepts_publisher_label(self, run: MagicMock) -> None:
-        run.return_value = MagicMock(returncode=0, stdout="1\n")
+        run.return_value = MagicMock(returncode=0, stdout="2\n")
 
         assert workflow_image_compatible() is WorkflowImageCompatibility.COMPATIBLE
         assert run.call_args.args[0] == [
@@ -1351,6 +1351,12 @@ class TestWorkflowImageCompatibility:
             "--format",
             '{{ index .Config.Labels "djinn.workflow.publisher" }}',
         ]
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_rejects_previous_publisher_label(self, run: MagicMock) -> None:
+        run.return_value = MagicMock(returncode=0, stdout="1\n")
+
+        assert workflow_image_compatible() is WorkflowImageCompatibility.INCOMPATIBLE
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")
     def test_rejects_unlabelled_image_content_free(self, run: MagicMock) -> None:
@@ -3593,3 +3599,18 @@ def test_security_model_names_guarded_backup_restore_pathname_exception() -> Non
         "Backup and restore keep pathname tar and the post-restore chmod walk "
         "under the lifecycle guard with no Djinn container running"
     ) in paragraph
+
+
+def test_running_discovery_has_prefix_deadline_and_closed_stdin(monkeypatch):
+    calls = []
+
+    def timed_out(argv, **kwargs):
+        calls.append((argv, kwargs))
+        assert argv[-1] == "name=djinn-discard-test"
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert kwargs["timeout"] == 0.25
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", timed_out)
+    assert docker_mod.get_running_containers("djinn-discard-test", timeout=0.25) is None
+    assert len(calls) == 1

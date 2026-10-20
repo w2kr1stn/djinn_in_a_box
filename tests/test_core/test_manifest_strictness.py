@@ -205,6 +205,7 @@ def test_manifest_corruptions_fail_closed_consistently_and_preserve_the_tree(
     ).success
     manifest_path = target / RUNTIME_MANIFEST_NAME
     raw = manifest_path.read_bytes()
+    manifest_path.unlink()
     manifest_path.write_bytes(_corrupt(form, corruption, raw))
     before = _tree(target)
 

@@ -39,6 +39,13 @@ def _returns[T](value: T) -> Callable[..., T]:
 
 @pytest.fixture(autouse=True)
 def _ready_session_workflow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # These older doctor tests isolate other rows; runtime behavior has its own fake-Docker tests.
+    monkeypatch.setattr(
+        doctor_mod, "_opencode_runtime_check",
+        lambda config, *, daemon: doctor_mod.Check(
+            "OpenCode runtime", doctor_mod.Status.WARN, "check unavailable"
+        ),
+    )
     monkeypatch.setattr(session_mod, "load_config", lambda: object())
     monkeypatch.setattr(
         session_mod,

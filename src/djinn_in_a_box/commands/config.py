@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, cast, get_args
 
 import typer
 from pydantic import ValidationError
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from djinn_in_a_box.commands import _lifecycle
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import (
     AppConfig,
@@ -28,8 +29,14 @@ from djinn_in_a_box.config.models import (
 from djinn_in_a_box.core.config_lock import ConfigDirectoryLockError, config_directory_lock
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
+    WRITE_PROBLEM_IDENTIFIER,
     ConfigSyncAudit,
     DriftClass,
+    DriftEntry,
+    workflow_item_label,
+    workflow_item_summary,
+    workflow_label_component,
+    workflow_remedy,
 )
 from djinn_in_a_box.core.config_sync import (
     audit_config_sync as audit_workflow_config,
@@ -37,7 +44,22 @@ from djinn_in_a_box.core.config_sync import (
 from djinn_in_a_box.core.config_sync import (
     sync_config as synchronize_workflow_config,
 )
-from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowDiscardResult,
+    discard_workflow_target_drift,
+    inspect_workflow_targets,
+    inspection_failure,
+)
+from djinn_in_a_box.core.console import (
+    blank,
+    console,
+    error,
+    escape_nonprintable,
+    info,
+    rule,
+    success,
+    warning,
+)
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     ensure_host_env,
@@ -52,6 +74,7 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.hostinfo import detect_timezone, suggest_resources
 from djinn_in_a_box.core.paths import CONFIG_DIR, CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SeedingError, seed_config
+from djinn_in_a_box.core.workflow_drift_backup import admit_backup_root
 
 ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "general.code_dir",
@@ -702,22 +725,8 @@ def config_path() -> None:
     console.print(str(CONFIG_FILE), highlight=False)
 
 
-_SAFE_STATUS_LABEL = re.compile(r"[^A-Za-z0-9._/:-]")
-_DRIFT_REMEDIES: dict[DriftClass, str] = {
-    DriftClass.SOURCE_CHANGED: "Run `djinn config sync` or retry after source changes settle.",
-    DriftClass.TARGET_DRIFT: "Revert or adopt the managed change via the sync flow.",
-    DriftClass.COLLISION: "Move or remove the conflicting unmanaged file.",
-    DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
-}
-
-
-def _status_label(value: object) -> str:
-    return _SAFE_STATUS_LABEL.sub("?", str(value))[:160]
-
-
-def _status_location(tool: object | None, path: object | None) -> str:
-    parts = [_status_label(item) for item in (tool, path) if item is not None]
-    return ":".join(parts) if parts else "global"
+_status_label = workflow_label_component
+_status_location = workflow_item_label
 
 
 def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
@@ -727,20 +736,26 @@ def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
     console.print(f"Manifest source: {_status_label(active)}")
     console.print(f"State: {'clean' if audit.clean else 'action-required'}")
 
-    for drift in audit.drifts:
+    for drift in audit.drifts[:5]:
         console.print(
-            f"Drift: {_status_label(drift.kind.value)} "
-            f"({_status_location(drift.tool, drift.relative_path)})"
+            Text(
+                f"Drift: {_status_label(drift.kind.value)} "
+                f"({_status_location(drift.tool, drift.relative_path, drift.key_path)})"
+            )
         )
-    for problem in audit.problems:
+    if len(audit.drifts) > 5:
+        console.print(f"and {len(audit.drifts) - 5} more")
+    for problem in audit.problems[:5]:
         line = (
             f"Problem: {_status_label(problem.identifier)} "
             f"({_status_location(problem.tool, problem.relative_path)})"
         )
-        if problem.identifier == _LOCK_PROBLEM_IDENTIFIER:
-            line += f": {problem.message}"
-        console.print(line)
+        if problem.identifier in {_LOCK_PROBLEM_IDENTIFIER, WRITE_PROBLEM_IDENTIFIER}:
+            line += f": {escape_nonprintable(problem.message)}"
+        console.print(Text(line))
 
+    if len(audit.problems) > 5:
+        console.print(f"and {len(audit.problems) - 5} more")
     if not audit.clean:
         operational_remedy = next(
             (problem.remedy for problem in audit.problems if problem.remedy is not None), None
@@ -754,9 +769,14 @@ def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
             remedy = (
                 CANONICAL_REMEDY
                 if drift is None
-                else _DRIFT_REMEDIES.get(drift, CANONICAL_REMEDY)
+                else workflow_remedy(
+                    drift, audit.configured_source,
+                    items=tuple(DriftEntry(item.kind, item.relative_path or PurePosixPath("."),
+                                          item.key_path, reason=item.reason)
+                                for item in audit.drifts),
+                )
             )
-        console.print(f"Remedy: {remedy}")
+        console.print(Text(f"Remedy: {remedy}"))
 
 
 @handle_config_errors
@@ -764,17 +784,71 @@ def config_status() -> None:
     """Inspect workflow source, drift, and validation without modifying files."""
     audit = audit_workflow_config(get_project_root())
     _print_workflow_audit(audit)
-    if not audit.clean:
+    runtime_clean = _print_runtime_inspections(get_project_root())
+    if not audit.clean or not runtime_clean:
         raise typer.Exit(1)
 
 
 @handle_config_errors
-def config_sync() -> None:
+def config_sync(
+    discard_target_drift: Annotated[
+        bool, typer.Option("--discard-target-drift", help="Back up and discard target edits.")
+    ] = False,
+) -> None:
     """Explicitly synchronize managed workflow views."""
     try:
-        result = synchronize_workflow_config(get_project_root())
+        project_root = get_project_root()
+        if discard_target_drift:
+            config = load_config()
+            try:
+                admission = admit_backup_root(project_root, config)
+            except ValueError as exc:
+                # The refusal itself names the component and what to change.
+                error(escape(escape_nonprintable(str(exc))))
+                raise typer.Exit(1) from exc
+            with _lifecycle.lifecycle_guard():
+                config = load_config()
+                admission = admit_backup_root(project_root, config)
+                _lifecycle.guard_no_containers_running("discarding target drift")
+                discarded = discard_workflow_target_drift(project_root, config, admission)
+            for notice in discarded.notices:
+                console.print(Text(escape_nonprintable(notice)))
+            for label, entry in discarded.backups:
+                location = workflow_item_label(
+                    None if label == "config" else label,
+                    entry.entry.path, entry.entry.key_path,
+                    root=(None if label == "config"
+                          else resolve_zone_roots(config).config_root / label),
+                )
+                action = "was missing" if entry.backup_path is None else "backed up"
+                console.print(Text(escape_nonprintable(f"{location}: {action}")))
+            if discarded.backup_directory is not None:
+                console.print(
+                    Text(escape_nonprintable(f"Backed up to {discarded.backup_directory}"))
+                )
+            elif discarded.failure is None:
+                info("no target drift")
+            if discarded.failure is not None:
+                for problem in discarded.failure.problems:
+                    console.print(
+                        Text(escape_nonprintable(f"{problem.message} Remedy: {problem.remedy}"))
+                    )
+            if discarded.failed_phase is not None:
+                _print_discard_incomplete(discarded)
+                if discarded.failure is None and discarded.sync is not None:
+                    _print_workflow_audit(discarded.sync.audit)
+                raise typer.Exit(1)
+            if discarded.failure is not None:
+                raise typer.Exit(1)
+            assert discarded.sync is not None
+            result = discarded.sync
+        else:
+            result = synchronize_workflow_config(project_root)
     except (OSError, TypeError, ValueError) as exc:
-        error(f"Configuration synchronization could not start ({type(exc).__name__}).")
+        error(
+            "Configuration synchronization could not start "
+            f"({escape(escape_nonprintable(str(exc)))})."
+        )
         warning("Run `djinn config status`, correct the reported problem, and retry.")
         raise typer.Exit(1) from exc
 
@@ -786,3 +860,61 @@ def config_sync() -> None:
         "Configuration synchronized "
         f"({len(result.changed_paths)} changed, {len(result.removed_paths)} removed)."
     )
+    _print_runtime_inspections(get_project_root(), after_sync=True)
+
+
+def _print_discard_incomplete(discarded: WorkflowDiscardResult) -> None:
+    phase = escape_nonprintable(str(discarded.failed_phase))
+    console.print(Text(f"Discard incomplete: failed during {phase}."))
+    if discarded.completed:
+        console.print(Text(f"Completed: {', '.join(discarded.completed)}."))
+    if discarded.skipped:
+        console.print(
+            Text(f"Skipped: {', '.join(discarded.skipped)}; runtime repair is incomplete.")
+        )
+    elif discarded.failed_phase != "backup":
+        console.print(Text("Runtime repair may be incomplete."))
+    if discarded.backup_directory is not None:
+        console.print(
+            Text(escape_nonprintable(f"Backups were kept in {discarded.backup_directory}."))
+        )
+    console.print(
+        Text("Fix the cause above, then rerun `djinn config sync --discard-target-drift`.")
+    )
+
+
+def _print_runtime_inspections(project_root: Path, *, after_sync: bool = False) -> bool:
+    config = load_config()
+    clean = True
+    for inspection in inspect_workflow_targets(project_root, config):
+        if inspection.clean:
+            continue
+        clean = False
+        failure = inspection_failure(inspection, config).problems[0]
+        if after_sync:
+            warning(escape(f"{failure.message} Run `djinn config status`"))
+        elif (
+            inspection.result is not None
+            and inspection.result.write_error is None
+            and inspection.result.lock_error is None
+        ):
+            result = inspection.result
+            labels = tuple(
+                workflow_item_label(
+                    inspection.target.tool,
+                    item.path,
+                    item.key_path,
+                    root=inspection.target.destination_root,
+                    origin=item.origin,
+                )
+                for item in result.drift_items
+            )
+            summary = workflow_item_summary(labels)
+            location = f" ({summary})" if summary else ""
+            console.print(Text(f"Drift: {result.drift_class.value}{location}"))
+            console.print(Text(f"Remedy: {failure.remedy}"))
+        else:
+            # Operational failure or unchecked runtime: the cause, not a drift class.
+            console.print(Text(f"Runtime: {failure.message}"))
+            console.print(Text(f"Remedy: {failure.remedy}"))
+    return clean

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from djinn_in_a_box.config.declarations import RESERVED_ENVIRONMENT
-from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
@@ -77,9 +77,12 @@ def mock_agents() -> dict[str, AgentConfig]:
 
 
 @pytest.fixture
-def session_mgr(mock_agents: dict[str, AgentConfig], tmp_path: Path) -> SessionManager:
+def session_mgr(
+    mock_agents: dict[str, AgentConfig], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> SessionManager:
     """Create a SessionManager with mocked agents."""
     _init_inert_repo(tmp_path)
+    monkeypatch.setattr(f"{_SESSION_MODULE}.load_config", lambda: AppConfig(code_dir=tmp_path))
     with patch(f"{_SESSION_MODULE}.load_agents", return_value=mock_agents):
         return SessionManager("testproject")
 
@@ -213,6 +216,7 @@ class TestRefreshOpenCodeWorkflow:
                 "--profile",
                 "opencode",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=10.0,
@@ -221,7 +225,9 @@ class TestRefreshOpenCodeWorkflow:
 
     def test_failure_output_is_sanitized(self, session_mgr: SessionManager) -> None:
         sentinel = "PRIVATE-CONTAINER-OUTPUT"
-        failed = MagicMock(returncode=9, stdout=sentinel, stderr=sentinel)
+        failed = MagicMock(
+            returncode=9, stdout=sentinel, stderr="Traceback: earlier detail\nexec failed\x1b[31m"
+        )
 
         with (
             patch.object(
@@ -236,16 +242,28 @@ class TestRefreshOpenCodeWorkflow:
             )
 
         assert result.returncode == 9
-        assert result.stderr == "OpenCode workflow refresh failed"
+        assert result.stderr == "OpenCode workflow refresh failed: exec failed\\x1b[31m"
         assert sentinel not in repr(result)
 
     @pytest.mark.parametrize(
         ("code", "expected"),
         [
-            ("source-changed", "Run `djinn config sync`"),
-            ("target-drift", "modified managed workflow item"),
-            ("collision", "conflicting unmanaged workflow item"),
-            ("invalid-or-semantic", "Author or edit the artifact natively"),
+            ("source-changed", "Run `djinn config sync`, then retry."),
+            (
+                "target-drift",
+                "Run `djinn config status` on the host and follow its remedy, then recreate the "
+                "container (`djinn clean`, `djinn start`).",
+            ),
+            (
+                "collision",
+                "Run `djinn config status` on the host and follow its remedy, then recreate the "
+                "container (`djinn clean`, `djinn start`).",
+            ),
+            (
+                "invalid-or-semantic",
+                "Run `djinn config status` on the host and follow its remedy, then recreate the "
+                "container (`djinn clean`, `djinn start`).",
+            ),
         ],
     )
     def test_publisher_classes_have_one_content_free_remedy(
@@ -269,8 +287,7 @@ class TestRefreshOpenCodeWorkflow:
                 SessionTarget(container_id="container-id")
             )
 
-        assert code in result.stderr
-        assert expected in result.stderr
+        assert result.stderr == f"OpenCode workflow refresh failed: {code}. Remedy: {expected}"
 
     def test_publisher_write_error_reports_destination_io(
         self, session_mgr: SessionManager, tmp_path: Path
@@ -331,8 +348,8 @@ class TestRefreshOpenCodeWorkflow:
         assert result.returncode == failed.returncode
         assert result.stderr == (
             f"OpenCode workflow refresh failed to publish workflow to {target}: Permission denied. "
-            "Remedy: Check that the workflow destination and its parent directories are writable "
-            "with available space, then retry."
+            "Remedy: Check that the workflow destination and its contents are readable, and that "
+            "it and its parent directories are writable with available space, then retry."
         )
         assert sentinel not in result.stderr
 
@@ -411,7 +428,8 @@ class TestRefreshOpenCodeWorkflow:
         ("label", "expected"),
         [
             ("", WorkflowImageCompatibility.INCOMPATIBLE),
-            ("1\n", WorkflowImageCompatibility.COMPATIBLE),
+            ("1\n", WorkflowImageCompatibility.INCOMPATIBLE),
+            ("2\n", WorkflowImageCompatibility.COMPATIBLE),
         ],
     )
     def test_container_image_label_distinguishes_compatibility(
@@ -452,7 +470,11 @@ class TestRefreshOpenCodeWorkflow:
             )
 
         assert "target-drift" in result.stderr
-        assert "modified managed workflow item" in result.stderr
+        assert result.stderr == (
+            "OpenCode workflow refresh failed: target-drift. Remedy: "
+            "Run `djinn config status` on the host and follow its remedy, then recreate the "
+            "container (`djinn clean`, `djinn start`)."
+        )
 
     def test_publisher_refresh_prefers_the_later_lock_diagnostic_over_write_diagnostic(
         self, session_mgr: SessionManager

@@ -10,8 +10,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
-from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 
+from djinn_in_a_box.commands import _lifecycle
 from djinn_in_a_box.config.defaults import (
     DESKTOP_RUNTIME_VOLUMES,
     SYNC_PATHS,
@@ -28,7 +28,6 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import host_runtime, hostctl
 from djinn_in_a_box.core.console import blank, error, info, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
@@ -37,7 +36,6 @@ from djinn_in_a_box.core.docker import (
     extract_sync_path_name,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
-    get_running_containers,
     is_sync_archive,
     resolve_zone_roots,
     restore_sync_path,
@@ -45,7 +43,6 @@ from djinn_in_a_box.core.docker import (
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.paths import BACKUPS_DIR
-from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
 DEFAULT_CATEGORIES: list[str] = ["credentials", "repo-dotfiles", "data"]
@@ -75,34 +72,10 @@ def _harden_restored_sync_directories(path: Path) -> None:
                     stack.append(Path(entry.path))
 
 
-def _guard_no_containers_running() -> None:
-    running = get_running_containers()
-    if running is None:
-        error("Could not determine whether Djinn containers are running.")
-        error("Restore Docker access before backup/restore, then retry.")
-        raise typer.Exit(1)
-    if running:
-        error(f"Containers are running: {', '.join(running)}")
-        error("Stop all containers before backup/restore (djinn clean)")
-        raise typer.Exit(1)
-
-
-@contextmanager
-def _lifecycle_guard() -> Iterator[None]:
-    with ExitStack() as guards:
-        try:
-            guards.enter_context(hostctl.control_guard())
-            guards.enter_context(host_runtime.creation_guard())
-        except (hostctl.HostctlError, GitSSHError, OSError) as exc:
-            error(str(exc))
-            raise typer.Exit(1) from exc
-        yield
-
-
 def _with_lifecycle_guard(func: Callable[P, R]) -> Callable[P, R]:
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        with _lifecycle_guard():
+        with _lifecycle.lifecycle_guard():
             return func(*args, **kwargs)
 
     return wrapper
@@ -227,7 +200,7 @@ def backup(
     and sync paths (credentials/repo-dotfiles under ${DJINN_CONFIG_ROOT}).
     The archive is encrypted with an age passphrase and replaces any previous backup.
     """
-    _guard_no_containers_running()
+    _lifecycle.guard_no_containers_running()
 
     config = load_config()
     selected = categories or DEFAULT_CATEGORIES
@@ -347,7 +320,7 @@ def restore() -> None:
     Finds the backup archive in ~/.djinn/backups/ and restores all contained
     volumes and sync paths. Existing contents are overwritten.
     """
-    _guard_no_containers_running()
+    _lifecycle.guard_no_containers_running()
     config = load_config()
     categories = volume_categories(config)
     builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}

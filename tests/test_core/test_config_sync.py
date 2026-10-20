@@ -162,7 +162,7 @@ def test_each_source_delivers_one_global_instruction_file(
         expected = {"AGENTS.md", "CLAUDE.md"} if tool == "claude" else {"AGENTS.md"}
         assert {path.name for path in runtime.glob("*.md")} == expected
         assert (runtime / "AGENTS.md").read_bytes() == content
-        assert stat.S_IMODE((runtime / "AGENTS.md").stat().st_mode) == 0o755
+        assert stat.S_IMODE((runtime / "AGENTS.md").stat().st_mode) == 0o555
         runtime_manifest = json.loads((runtime / RUNTIME_MANIFEST_NAME).read_bytes())
         if tool != "claude":
             assert not (runtime / "CLAUDE.md").exists()

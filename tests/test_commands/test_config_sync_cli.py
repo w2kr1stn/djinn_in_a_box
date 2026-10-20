@@ -12,6 +12,7 @@ from djinn_in_a_box.config.models import AppConfig, ConfigSyncConfig
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     LOCK_REMEDY,
+    WORKFLOW_REMEDIES,
     ConfigSyncAudit,
     ConfigSyncResult,
     DriftClass,
@@ -21,6 +22,16 @@ from djinn_in_a_box.core.config_sync import (
 
 runner = CliRunner()
 _SENTINEL = "PRIVATE-WORKFLOW-BODY-SENTINEL"
+
+
+@pytest.fixture(autouse=True)
+def _runtime_inspection_inputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Unit tests below inject canonical audits; runtime integration is exercised separately.
+    monkeypatch.setattr("djinn_in_a_box.commands.config.load_config",
+                        lambda: AppConfig(code_dir=tmp_path, config_root=tmp_path / "runtime"))
+    monkeypatch.setattr("djinn_in_a_box.commands.config.inspect_workflow_targets",
+                        lambda project, config: ())
+    monkeypatch.setattr(doctor_module, "inspect_workflow_targets", lambda project, config: ())
 
 
 def _no_mount_args() -> list[str]:
@@ -44,10 +55,13 @@ def _audit(kind: DriftClass | None = None) -> ConfigSyncAudit:
         (
             DriftClass.SOURCE_CHANGED,
             1,
-            "Run `djinn config sync` or retry after source changes settle.",
+            "Run `djinn config sync`, then retry.",
         ),
-        (DriftClass.TARGET_DRIFT, 1, "Revert or adopt the managed change via the sync flow."),
-        (DriftClass.COLLISION, 1, "Move or remove the conflicting unmanaged file."),
+        (DriftClass.TARGET_DRIFT, 1, WORKFLOW_REMEDIES["target-drift"].format(source="claude")),
+        (
+            DriftClass.COLLISION, 1,
+            "Move or remove the conflicting unmanaged workflow item, then retry.",
+        ),
         (DriftClass.INVALID_OR_SEMANTIC, 1, CANONICAL_REMEDY),
     ],
 )
@@ -225,7 +239,9 @@ def test_doctor_audits_once_without_sync_or_provider(
 
     workflow = next(check for check in checks if check.name == "Config workflow")
     assert workflow.status is doctor_module.Status.WARN
-    assert workflow.detail == "source=claude; drift=invalid-or-semantic"
+    assert workflow.detail == (
+        "source=claude; drift=invalid-or-semantic (config/codex/agents/reviewer.toml)"
+    )
     assert _SENTINEL not in workflow.detail
     audit.assert_called_once_with(tmp_path)
     sync.assert_not_called()

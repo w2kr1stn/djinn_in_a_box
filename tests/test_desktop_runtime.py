@@ -1050,7 +1050,7 @@ def test_reclaim_removal_timeout_reaches_cli(fake_owner, monkeypatch, command):
     module = container if command == "start" else agent
     monkeypatch.setattr(module, "load_config", lambda: config)
     monkeypatch.setattr(
-        module, "prepare_config_workflow", lambda *a, **k: SimpleNamespace(success=True)
+        module, "prepare_config_workflow", lambda *a, **k: SimpleNamespace(success=True, notices=())
     )
     def create(*args, **kwargs):
         with host_runtime.git_runtime(config, "djinn"):

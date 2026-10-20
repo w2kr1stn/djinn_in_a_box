@@ -13,8 +13,8 @@ import yaml
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
+from djinn_in_a_box.commands import _lifecycle, container
 from djinn_in_a_box.commands import backup as backup_module
-from djinn_in_a_box.commands import container
 from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import docker
@@ -222,7 +222,7 @@ def test_default_backup_includes_packages_volume(
 
     with (
         patch.object(backup_module, "load_config", return_value=config),
-        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(_lifecycle, "get_running_containers", return_value=[]),
         patch.object(docker.subprocess, "run", side_effect=_inspect_package_volume),
         patch.object(backup_module, "backup_volume", side_effect=write_volume) as backup_volume,
         patch.object(backup_module, "BACKUPS_DIR", backups_dir),

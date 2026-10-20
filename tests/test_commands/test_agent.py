@@ -550,7 +550,9 @@ class TestRunCommand:
         )
         run_mocks["run"].assert_called_once()
 
-    def test_blocked_opencode_workflow_never_starts_runner(self, run_mocks: dict[str, Any]) -> None:
+    def test_blocked_opencode_workflow_never_starts_runner(
+        self, run_mocks: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
         from djinn_in_a_box.commands.agent import run
 
         run_mocks["workflow"].return_value = WorkflowPreparationResult(
@@ -558,16 +560,23 @@ class TestRunCommand:
             (
                 WorkflowPreparationProblem(
                     "semantic-agent-required",
-                    "Workflow is blocked.",
-                    "Resolve drift.",
+                    "Workflow blocked in a.toml[error].",
+                    "Resolve drift in a.toml[error].",
                 ),
             ),
+            ("Synchronized source changes into the canonical workflow: 2 changed, 1 removed.",),
         )
 
         with pytest.raises(typer.Exit) as exc_info:
             run(agent="opencode", prompt="test prompt")
 
         assert exc_info.value.exit_code == 1
+        captured = " ".join(capsys.readouterr().err.split())
+        assert "Workflow blocked in a.toml[error]." in captured
+        assert "Synchronized source changes into the canonical workflow: 2 changed, 1 removed." in (
+            captured
+        )
+        assert "Resolve drift in a.toml[error]." in captured
         run_mocks["run"].assert_not_called()
 
     def test_blocked_codex_workflow_never_starts_runner_and_checks_image(

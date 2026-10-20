@@ -37,7 +37,20 @@ from djinn_in_a_box.config.zones import (
 )
 from djinn_in_a_box.core import docker as docker_core
 from djinn_in_a_box.core import post_mortem
-from djinn_in_a_box.core.config_sync import audit_config_sync as audit_workflow_config
+from djinn_in_a_box.core import session as session_core
+from djinn_in_a_box.core.config_sync import (
+    audit_config_sync as audit_workflow_config,
+)
+from djinn_in_a_box.core.config_sync import (
+    workflow_item_label,
+    workflow_item_summary,
+    workflow_remedy,
+)
+from djinn_in_a_box.core.config_workflow import (
+    WorkflowPreparationProblem,
+    inspect_workflow_targets,
+    inspection_failure,
+)
 from djinn_in_a_box.core.console import (
     blank,
     console,
@@ -66,6 +79,12 @@ from djinn_in_a_box.core.exceptions import (
 )
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
+from djinn_in_a_box.core.session import (
+    SessionTarget,
+    opencode_publisher_argv,
+    parse_publisher_drift_items,
+)
+from djinn_in_a_box.core.workflow_publisher import DriftClass, DriftEntry
 
 _IMAGE: str = "djinn-in-a-box:latest"
 
@@ -263,16 +282,153 @@ def _config_workflow_check(config: AppConfig | None) -> Check:
             "Run from the Djinn repo, then run `djinn config status`.",
         )
     source = audit.configured_source
+    inspections = inspect_workflow_targets(project_root, config)
+    runtime_problems: list[WorkflowPreparationProblem] = []
+    for inspection in inspections:
+        if not inspection.clean:
+            problem = inspection_failure(inspection, config).problems[0]
+            runtime_problems.append(problem)
     if audit.clean:
+        if runtime_problems:
+            return Check(
+                "Config workflow",
+                Status.WARN,
+                f"source={source}; " + " ".join(p.message for p in runtime_problems),
+                " ".join(dict.fromkeys(p.remedy for p in runtime_problems)),
+            )
         return Check("Config workflow", Status.PASS, f"source={source}; clean")
-    drift = ",".join(item.kind.value for item in audit.drifts) or "validation-problem"
+    drift = (
+        ",".join(dict.fromkeys(item.kind.value for item in audit.drifts)) or "validation-problem"
+    )
+    labels = tuple(
+        workflow_item_label(item.tool, item.relative_path, item.key_path) for item in audit.drifts
+    )
+    labels += tuple(workflow_item_label(item.tool, item.relative_path) for item in audit.problems)
+    runtime_kinds: list[str] = []
+    for inspection in inspections:
+        if (
+            inspection.result is not None and not inspection.clean
+            and inspection.result.lock_error is None and inspection.result.write_error is None
+        ):
+            runtime_kinds.append(inspection.result.drift_class.value)
+            labels += tuple(
+                workflow_item_label(
+                    inspection.target.tool,
+                    item.path,
+                    item.key_path,
+                    root=inspection.target.destination_root,
+                    origin=item.origin,
+                )
+                for item in inspection.result.drift_items
+            )
+    drift = ",".join(dict.fromkeys([drift, *runtime_kinds]))
+    kind = audit.drifts[0].kind if audit.drifts else DriftClass.INVALID_OR_SEMANTIC
+    remedy = next(
+        (problem.remedy for problem in audit.problems if problem.remedy is not None),
+        workflow_remedy(
+            kind,
+            source,
+            items=tuple(
+                DriftEntry(
+                    item.kind,
+                    item.relative_path or PurePosixPath("."),
+                    item.key_path,
+                    reason=item.reason,
+                )
+                for item in audit.drifts
+            ),
+        ),
+    )
     return Check(
         "Config workflow",
         Status.WARN,
-        f"source={source}; drift={drift}",
-        "Run `djinn config status`, then `djinn config sync` when ready.",
+        f"source={source}; drift={drift} ({workflow_item_summary(labels)})"
+        + "".join(
+            f"; {problem.message}"
+            for problem in runtime_problems
+            if problem.identifier in {
+                "runtime-not-checked", "workflow-lock-failed", "workflow-inspect-failed",
+            } or any(
+                inspection.problem is not None and inspection.problem == problem
+                for inspection in inspections
+            )
+        ),
+        " ".join(dict.fromkeys([remedy, *(p.remedy for p in runtime_problems)])),
     )
 
+
+
+def _opencode_runtime_check(config: AppConfig | None, *, daemon: bool) -> Check:
+    name = "OpenCode runtime"
+    unavailable = Check(
+        name, Status.WARN, "check unavailable", "Run `djinn config status` on the host, then retry."
+    )
+    if not daemon or config is None:
+        return unavailable
+    container_name = session_core._DJINN_CONTAINER_NAME  # pyright: ignore[reportPrivateUsage]
+    try:
+        discovered = subprocess.run(
+            [
+                DOCKER_EXECUTABLE, "container", "inspect", container_name,
+                "--format", "{{json .State.Running}}",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        absent = (
+            discovered.returncode != 0
+            and discovered.stderr.strip()
+            == f"Error response from daemon: No such container: {container_name}"
+        )
+        if absent or (discovered.returncode == 0 and discovered.stdout.strip() == "false"):
+            return Check(name, Status.PASS, "container-local; rebuilt at every djinn start")
+        if discovered.returncode != 0 or discovered.stdout.strip() != "true":
+            return unavailable
+        target = SessionTarget(container_id=container_name)
+        compatibility = session_core.container_workflow_image_compatible(container_name)
+        if compatibility is not docker_core.WorkflowImageCompatibility.COMPATIBLE:
+            detail = (
+                "rebuild and recreate required"
+                if compatibility is docker_core.WorkflowImageCompatibility.INCOMPATIBLE
+                else "check unavailable"
+            )
+            return Check(
+                name, Status.WARN, detail, "Run `djinn build`, `djinn clean`, `djinn start`."
+            )
+        checked = subprocess.run(
+            opencode_publisher_argv(target, check=True),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return unavailable
+    if checked.returncode == 0:
+        return Check(name, Status.PASS, "clean; container-local; rebuilt at every djinn start")
+    operational = session_core.publisher_operational_failure(checked.stderr)
+    if operational is not None:
+        return Check(name, Status.WARN, f"check unavailable ({operational[0]})", operational[1])
+    diagnostic = parse_publisher_drift_items(checked.stderr)
+    if checked.returncode not in {10, 11, 12, 13} or diagnostic is None or not diagnostic.items:
+        return unavailable
+    kind = {
+        10: DriftClass.SOURCE_CHANGED,
+        11: DriftClass.TARGET_DRIFT,
+        12: DriftClass.COLLISION,
+        13: DriftClass.INVALID_OR_SEMANTIC,
+    }[checked.returncode]
+    detail = f"{kind.value} in {workflow_item_summary(diagnostic.labels, total=diagnostic.total)}"
+    remedy = workflow_remedy(
+        kind, config.config_sync.source, scope="opencode", items=diagnostic.items
+    )
+    if kind is DriftClass.SOURCE_CHANGED:
+        remedy += " Then recreate the container (`djinn clean`, `djinn start`)."
+    return Check(name, Status.WARN, detail, remedy)
 
 def _format_size(size: int) -> str:
     if size < 1024:
@@ -1066,6 +1222,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
         )
 
     checks.append(_config_workflow_check(config))
+    checks.append(_opencode_runtime_check(config, daemon=daemon))
 
     if config is not None:
         code_ok = config.code_dir.is_dir()

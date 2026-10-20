@@ -74,6 +74,7 @@ COMPOSE_PROJECT = "djinn-in-a-box"
 DECLARED_VOLUME_PREFIX = "djinn-"
 _WORKFLOW_IMAGE = "djinn-in-a-box:latest"
 _WORKFLOW_PUBLISHER_LABEL = "djinn.workflow.publisher"
+_WORKFLOW_PUBLISHER_VERSION = "2"
 _WORKFLOW_IMAGE_INSPECT_TIMEOUT = 10.0
 _MOUNT_ROOT = Path("/home/dev/mount")
 _WORKSPACE_PATH = Path("/home/dev/workspace")
@@ -445,9 +446,15 @@ def _decode_timeout_output(
     return stdout, stderr
 
 
-def _docker_list(cmd: list[str]) -> list[str] | None:
+def _docker_list(cmd: list[str], *, timeout: float | None = None) -> list[str] | None:
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=timeout, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        warning("Docker container discovery timed out")
+        return None
     except FileNotFoundError:
         warning("Docker is not installed")
         return None
@@ -2905,9 +2912,10 @@ def is_container_running(name: str) -> bool:
     return names is not None and name in names
 
 
-def get_running_containers(prefix: str = "djinn") -> list[str] | None:
+def get_running_containers(prefix: str = "djinn", *, timeout: float = 5) -> list[str] | None:
     return _docker_list(
-        [DOCKER_EXECUTABLE, "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"]
+        [DOCKER_EXECUTABLE, "ps", "--format", "{{.Names}}", "--filter", f"name={prefix}"],
+        timeout=timeout,
     )
 
 
@@ -3132,7 +3140,7 @@ def workflow_image_compatible(
         )
     return (
         WorkflowImageCompatibility.COMPATIBLE
-        if result.stdout.strip() == "1"
+        if result.stdout.strip() == _WORKFLOW_PUBLISHER_VERSION
         else WorkflowImageCompatibility.INCOMPATIBLE
     )
 

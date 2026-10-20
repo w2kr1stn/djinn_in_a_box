@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import cast
 
@@ -27,12 +28,15 @@ from djinn_in_a_box.core.config_sync_adapters import (
 )
 from djinn_in_a_box.core.workflow_publisher import (
     CANONICAL_MANIFEST_NAME,
+    BackedUpState,
     CanonicalLockLease,
     CarrierFragment,
     DriftClass,
+    DriftEntry,
     ManifestError,
     PublishedFile,
     PublishError,
+    TargetReadError,
     WorkflowView,
     canonical_lock,
     decode_lean_manifest,
@@ -53,7 +57,114 @@ LOCK_REMEDY = (
     "Check that the canonical workflow root is a readable, lockable directory "
     "and that no other Djinn process is stuck on it, then retry."
 )
+WRITE_PROBLEM_IDENTIFIER = "canonical-publish-failed"
+WRITE_REMEDY = (
+    "Check that the canonical workflow root and its contents are readable, and that "
+    "it and its parent directories are writable "
+    "with available space, then retry; a partial update may already be in place, so "
+    "rerun `djinn config sync` and check `djinn config status`."
+)
 _TOOLS: tuple[ConfigSyncSource, ...] = ("claude", "codex", "opencode")
+
+_SAFE_STATUS_LABEL = re.compile(r"[^A-Za-z0-9._/:-]")
+WORKFLOW_REMEDIES = {
+    "source-changed": "Run `djinn config sync`, then retry.",
+    "target-drift": (
+        "Keep wanted edits in the selected source config/{source}, stop running Djinn containers "
+        "(`djinn clean`), then run `djinn config sync --discard-target-drift` "
+        "(it backs up the edited files first)."
+    ),
+    "opencode-target-drift": (
+        "Keep wanted edits in the selected source config/{source}, then recreate the container: "
+        "`djinn clean`, then `djinn start`."
+    ),
+    "host-target-drift": (
+        "Keep wanted edits in the selected source config/{source} and run `djinn config sync`. "
+        "Then restore each named item from the copy named next to it, and retry."
+    ),
+    "collision": "Move or remove the conflicting unmanaged workflow item, then retry.",
+    "invalid-or-semantic": CANONICAL_REMEDY,
+    "carrier-key": (
+        "Rewrite the named managed TOML key as a single-line value, or delete the named key "
+        "and retry. Keep neighbouring personal keys."
+    ),
+    "changed-during-publish": "changed while publishing; retry",
+    "entrypoint-generic": (
+        "Run `djinn config status` on the host and follow its remedy, then recreate the "
+        "container (`djinn clean`, `djinn start`)."
+    ),
+    "entrypoint-target-drift": (
+        "Keep wanted edits in the selected source, then recreate the container "
+        "(`djinn clean`, `djinn start`)."
+    ),
+    "entrypoint-collision": (
+        "Move or remove the named item in ~/.config/opencode, or recreate the container."
+    ),
+    "clean": "",
+}
+
+
+def workflow_label_component(value: object) -> str:
+    return _SAFE_STATUS_LABEL.sub("?", str(value))[:160]
+
+
+def workflow_item_label(
+    tool: object | None,
+    path: object | None,
+    key: tuple[str, ...] | None = None,
+    *,
+    root: object | None = None,
+    origin: str = "target",
+    opencode_runtime: bool = False,
+) -> str:
+    if path is None:
+        return "config"
+    relative = workflow_label_component(path)
+    if key is not None:
+        relative += "[" + ".".join(workflow_label_component(part) for part in key) + "]"
+    if origin == "canonical-manifest":
+        return f"config/{relative}"
+    if origin == "seed":
+        return f"config/opencode/{relative} (seed)"
+    if opencode_runtime:
+        return f"opencode-runtime:{relative}"
+    if root is not None:
+        return f"{workflow_label_component(tool)}:{relative} ({workflow_label_component(root)})"
+    prefix = f"{workflow_label_component(tool)}/" if tool is not None else ""
+    return f"config/{prefix}{relative}"
+
+
+def workflow_item_summary(labels: tuple[str, ...], *, total: int | None = None) -> str:
+    count = len(labels) if total is None else total
+    result = ", ".join(labels[:5])
+    if count > min(5, len(labels)):
+        result += f" and {count - min(5, len(labels))} more"
+    return result
+
+
+def workflow_remedy(
+    kind: DriftClass,
+    source: str,
+    *,
+    scope: str = "start",
+    items: tuple[DriftEntry, ...] = (),
+) -> str:
+    key = kind.value
+    if (
+        scope == "opencode"
+        and kind not in {DriftClass.CLEAN, DriftClass.SOURCE_CHANGED}
+        and (not items or any(item.origin in {"seed", "canonical-manifest"} for item in items))
+    ):
+        key = "entrypoint-generic"
+    elif any(item.reason == "changed-during-publish" for item in items):
+        key = "changed-during-publish"
+    elif kind is DriftClass.INVALID_OR_SEMANTIC and any(
+        item.key_path is not None and item.path.suffix == ".toml" for item in items
+    ):
+        key = "carrier-key"
+    elif kind is DriftClass.TARGET_DRIFT and scope in {"host", "opencode"}:
+        key = f"{scope}-target-drift"
+    return WORKFLOW_REMEDIES[key].format(source=workflow_label_component(source))
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +173,8 @@ class DriftItem:
     message: str
     tool: ConfigSyncSource | None = None
     relative_path: PurePosixPath | None = None
+    key_path: tuple[str, ...] | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +268,9 @@ def sync_config(
     project_root: Path,
     *,
     config_path: Path | None = None,
+    accept_drift: (
+        Mapping[tuple[PurePosixPath, tuple[str, ...] | None], BackedUpState] | None
+    ) = None,
 ) -> ConfigSyncResult:
     source = load_config(config_path).config_sync.source
     config_root = project_root / "config"
@@ -177,12 +293,26 @@ def sync_config(
                 source_root=config_root / source,
                 source_residue_prefixes=runtime_residue_prefixes(source),
                 preflight_manifest=preflight_manifest,
+                accept_drift=accept_drift,
             )
+            if result.lock_error is not None:
+                return ConfigSyncResult(
+                    False, _lock_failure_audit(source, config_root, result.lock_error)
+                )
+            if result.write_error is not None:
+                return ConfigSyncResult(
+                    False, _write_failure_audit(source, config_root, result.write_error)
+                )
             audit = (
                 _audit_for(source, DriftClass.SOURCE_CHANGED)
                 if result.drift_class is DriftClass.SOURCE_CHANGED
                 else _audit_locked(project_root, source)
             )
+            if not result.success and result.drift_items:
+                audit = ConfigSyncAudit(source, audit.manifest_source, tuple(
+                    replace(_drift(item.kind, item.path, item.key_path), reason=item.reason)
+                    for item in result.drift_items
+                ))
             return ConfigSyncResult(
                 result.success,
                 audit,
@@ -269,7 +399,9 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
     try:
         raw = _read_manifest(project_root / "config")
     except (OSError, PublishError):
-        return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+        return _audit_for(
+            source, DriftClass.INVALID_OR_SEMANTIC, path=PurePosixPath(MANIFEST_NAME)
+        )
     if raw is None:
         drifts = _compare_manifest(project_root / "config", build.canonical, ())
         kind = _worst_drift(drifts)
@@ -278,7 +410,9 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
     try:
         manifest_source, items = _lean_items(raw)
     except ValueError:
-        return _audit_for(source, DriftClass.INVALID_OR_SEMANTIC)
+        return _audit_for(
+            source, DriftClass.INVALID_OR_SEMANTIC, path=PurePosixPath(MANIFEST_NAME)
+        )
     drifts = _compare_manifest(project_root / "config", build.canonical, items)
     if manifest_source != source:
         drifts.insert(0, DriftItem(DriftClass.SOURCE_CHANGED, "Selected source changed.", source))
@@ -539,7 +673,7 @@ def _compare_manifest(
         path, key_path = key
         actual, issue = _carrier_item_at(config_root, path, key_path)
         if issue:
-            drifts.append(_drift(DriftClass.COLLISION, path))
+            drifts.append(_drift(DriftClass.COLLISION, path, key_path))
         else:
             drifts.extend(_item_drift(wanted, recorded, actual, path))
     return drifts
@@ -551,20 +685,22 @@ def _item_drift(
     actual: _ManifestItem | None,
     path: PurePosixPath,
 ) -> list[DriftItem]:
+    item = wanted or recorded or actual
+    key = item.key_path if item is not None else None
     if wanted is None:
         if actual is None or actual == recorded:
-            return [_drift(DriftClass.SOURCE_CHANGED, path)]
-        return [_drift(DriftClass.TARGET_DRIFT, path)]
+            return [_drift(DriftClass.SOURCE_CHANGED, path, key)]
+        return [_drift(DriftClass.TARGET_DRIFT, path, key)]
     if recorded is None:
         if actual is None or actual == wanted:
-            return [_drift(DriftClass.SOURCE_CHANGED, path)]
-        return [_drift(DriftClass.COLLISION, path)]
+            return [_drift(DriftClass.SOURCE_CHANGED, path, key)]
+        return [_drift(DriftClass.COLLISION, path, key)]
     if actual is None:
-        return [_drift(DriftClass.TARGET_DRIFT, path)]
+        return [_drift(DriftClass.TARGET_DRIFT, path, key)]
     if actual != recorded and actual != wanted:
-        return [_drift(DriftClass.TARGET_DRIFT, path)]
+        return [_drift(DriftClass.TARGET_DRIFT, path, key)]
     if wanted != recorded or actual != wanted:
-        return [_drift(DriftClass.SOURCE_CHANGED, path)]
+        return [_drift(DriftClass.SOURCE_CHANGED, path, key)]
     return []
 
 
@@ -744,20 +880,45 @@ def _lock_failure_audit(
     )
 
 
+def _write_failure_audit(
+    source: ConfigSyncSource, config_root: Path, error: OSError
+) -> ConfigSyncAudit:
+    detail = (
+        str(error) if isinstance(error, TargetReadError) else error.strerror or type(error).__name__
+    )
+    return ConfigSyncAudit(
+        source,
+        None,
+        problems=(
+            SyncProblem(
+                WRITE_PROBLEM_IDENTIFIER,
+                f"Failed to publish the canonical workflow at {config_root}: "
+                f"{detail}",
+                remedy=WRITE_REMEDY,
+            ),
+        ),
+    )
+
+
 def _audit_for(
-    source: ConfigSyncSource, kind: DriftClass, manifest_source: ConfigSyncSource | None = None
+    source: ConfigSyncSource, kind: DriftClass, manifest_source: ConfigSyncSource | None = None,
+    *, path: PurePosixPath | None = None,
 ) -> ConfigSyncAudit:
     return ConfigSyncAudit(
         source,
         manifest_source,
-        () if kind is DriftClass.CLEAN else (DriftItem(kind, _message(kind)),),
+        () if kind is DriftClass.CLEAN else (
+            DriftItem(kind, _message(kind), relative_path=path),
+        ),
     )
 
 
-def _drift(kind: DriftClass, path: PurePosixPath) -> DriftItem:
+def _drift(
+    kind: DriftClass, path: PurePosixPath, key: tuple[str, ...] | None = None
+) -> DriftItem:
     tool = path.parts[0] if path.parts and path.parts[0] in _TOOLS else None
     relative = PurePosixPath(*path.parts[1:]) if tool is not None and len(path.parts) > 1 else None
-    return DriftItem(kind, _message(kind), tool, relative)
+    return DriftItem(kind, _message(kind), tool, relative or path, key)
 
 
 def _message(kind: DriftClass) -> str:

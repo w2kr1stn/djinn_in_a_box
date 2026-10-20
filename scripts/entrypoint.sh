@@ -120,13 +120,51 @@ ensure_opencode_credentials
 ui_info "[workflow-delivery] opencode:"
 CANONICAL_CONFIG_ROOT="${DJINN_CANONICAL_ROOT:-/home/dev/.djinn-canonical}"
 OPENCODE_WORKFLOW_VIEW="${OPENCODE_WORKFLOW_VIEW:-/home/dev/.opencode/seed}"
-python3 "$WORKFLOW_PUBLISHER" \
+if opencode_publish_output=$(python3 "$WORKFLOW_PUBLISHER" \
     --view "$OPENCODE_WORKFLOW_VIEW" \
     --canonical-root "$CANONICAL_CONFIG_ROOT" \
     --target "$OPENCODE_RUNTIME_ROOT" \
     --manifest "$OPENCODE_RUNTIME_ROOT/.djinn-workflow-state.json" \
     --ignore opencode.json \
-    --profile opencode >&2
+    --profile opencode 2>&1); then
+    print -r -- "$opencode_publish_output" >&2
+else
+    opencode_publish_exit=$?
+    print -r -- "$opencode_publish_output" >&2
+    # Keep these three strings equal to core.config_sync.WORKFLOW_REMEDIES.
+    opencode_advice_generic='Run `djinn config status` on the host and follow its remedy, then recreate the container (`djinn clean`, `djinn start`).'
+    opencode_advice_drift='Keep wanted edits in the selected source, then recreate the container (`djinn clean`, `djinn start`).'
+    opencode_advice_collision='Move or remove the named item in ~/.config/opencode, or recreate the container.'
+    opencode_advice="$opencode_advice_generic"
+    opencode_origins=$(print -r -- "$opencode_publish_output" | jq -R -s -r '
+        split("\n") | map(select(startswith("workflow publisher drift-items: ")))
+        | last | ltrimstr("workflow publisher drift-items: ") | fromjson
+        | if (.items | type == "array") and (.total | type == "number")
+             and (.truncated | type == "boolean")
+             and (.total >= (.items | length))
+             and (.truncated == (.total > (.items | length)))
+             and all(.items[];
+                 (.class | IN("source-changed", "target-drift", "collision", "invalid-or-semantic"))
+                 and (.root | type == "string") and (.path | type == "string")
+                 and (has("key")) and (has("reason"))
+                 and (.key == null or (.key | type == "array" and all(.[]; type == "string")))
+                 and (.reason == null or (.reason | type == "string")))
+          then if (.items | length > 0) and all(.items[];
+                   .origin == "target" or .origin == "target-manifest")
+               then "target" else "unknown" end
+          else "unknown" end
+    ' 2>/dev/null) || opencode_origins=unknown
+    if [[ "$opencode_publish_output" != *'workflow publisher write-error: '* &&
+          "$opencode_publish_output" != *'workflow publisher lock-error: '* &&
+          "$opencode_origins" == target ]]; then
+        case "$opencode_publish_exit" in
+            11) opencode_advice="$opencode_advice_drift" ;;
+            12) opencode_advice="$opencode_advice_collision" ;;
+        esac
+    fi
+    ui_err "$opencode_advice"
+    exit 1
+fi
 
 # =============================================================================
 # MCP Server Registration (all CLI tools, from canonical config)

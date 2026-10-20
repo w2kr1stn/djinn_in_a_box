@@ -208,7 +208,10 @@ class TestSessionCommand:
         target = SessionTarget(container_id="container-123")
         blocked = WorkflowPreparationResult(
             False,
-            (WorkflowPreparationProblem("blocked", "Workflow blocked.", "Resolve drift."),),
+            (WorkflowPreparationProblem(
+                "blocked", "Workflow blocked in a.toml[error].", "Resolve drift in a.toml[error]."
+            ),),
+            ("Synchronized source changes into the canonical workflow: 2 changed, 1 removed.",),
         )
         with (
             patch("djinn_in_a_box.commands.session.Path.home", return_value=tmp_path),
@@ -234,7 +237,12 @@ class TestSessionCommand:
             )
 
         assert result.exit_code == 1
+        assert "Workflow blocked in a.toml[error]." in (" ".join(result.output.split()))
+        assert "Synchronized source changes into the canonical workflow: 2 changed, 1 removed." in (
+            " ".join(result.output.split())
+        )
         assert not (tmp_path / ".djinn/sessions/new-project").exists()
+        assert "Resolve drift in a.toml[error]." in result.output
         instance.resolve_target.assert_called_once_with()
         instance.refresh_opencode_workflow.assert_not_called()
         instance.preflight_check.assert_not_called()
@@ -288,7 +296,7 @@ class TestSessionCommand:
             instance.resolve_target.return_value = target
             instance.workflow_image_compatible.return_value = WorkflowImageCompatibility.COMPATIBLE
             instance.refresh_opencode_workflow.return_value = SessionResult(
-                1, stderr="OpenCode workflow refresh failed"
+                1, stderr="OpenCode workflow refresh failed in a.toml[error]"
             )
             result = runner.invoke(
                 app,
@@ -303,6 +311,7 @@ class TestSessionCommand:
             )
 
         assert result.exit_code == 1
+        assert "OpenCode workflow refresh failed in a.toml[error]" in result.output
         assert not (tmp_path / ".djinn/sessions/new-project").exists()
         instance.resolve_target.assert_called_once_with()
         instance.refresh_opencode_workflow.assert_called_once_with(target)

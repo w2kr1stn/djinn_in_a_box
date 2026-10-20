@@ -491,9 +491,20 @@ A canonical publication holds one exclusive canonical lock. A runtime
 publication holds a shared canonical lock plus an exclusive target lock; an
 already-held canonical lease is inherited rather than reacquired.
 
-Dev can write the target and source trees, so every access below a root is
-anchored to the root's locked directory descriptor and follows no symlink. Each
-path component is opened with `O_DIRECTORY|O_NOFOLLOW`; a symlinked or
+Whole managed runtime files are written `0444` (`0555` when executable), and
+the runtime manifest `0444`. A clean managed file or manifest with any write bit
+is replaced at the next delivery to reseal it. Write permissions are not drift
+state; the content hash and executable flag remain the comparison. Carriers
+(`settings.json`, `config.toml`, `opencode.json`) keep their existing mode
+handling, as does the canonical tree (`0644`/`0755`). Read-only modes stop
+in-place writers such as Codex/OpenCode edits and shell redirection; rename-based
+tools such as Claude Code's Edit and `sed -i` can still replace files. Detection
+and the backed-up discard path provide recovery.
+
+Dev can write runtime trees and writable aliases of canonical files, so every
+access below a root is anchored to the root's locked directory descriptor and
+follows no symlink. Each path component is opened with `O_DIRECTORY|O_NOFOLLOW`;
+a symlinked or
 non-directory component is `collision`. A file is pinned with `O_PATH|O_NOFOLLOW`
 and read through `/proc/self/fd` only when the pinned inode is regular, so links,
 FIFOs, sockets and devices are never opened for I/O. A write creates a random
@@ -503,8 +514,12 @@ opened without following, and root identity is decided by `lstat`/`fstat`, so a
 symlinked canonical or target root is refused. The source walk works the same
 way and refuses a symlinked directory instead of skipping it. Config sync and the
 native-only adapter reads use the same reader, `read_regular_file()`. Ancestors
-of the roots are trusted; dev can still rewrite a managed file after a publish,
-which the next publish reports as drift or collision.
+of the roots are trusted. Each file, carrier, retired unlink and manifest is
+rechecked against its preflight snapshot at the mutation boundary; a change is
+named as `changed-during-publish` and refused. This narrows but cannot close the
+last read-to-rename window against writers that ignore Djinn's advisory locks.
+Dev can also replace a managed file after publication; the next check reports
+drift or collision. Host-side writers bypassing Djinn remain outside its locks.
 
 The one manifest schema is `{source, items}`. An item is either a file path or a
 carrier path plus key path and records `content_hash` and `executable`. The
@@ -515,12 +530,93 @@ while preserving every other byte and then re-parsed. Unknown or edited current
 manifest state fails closed.
 
 The audit result is one of `clean`, `source-changed`, `target-drift`,
-`collision`, or `invalid-or-semantic`. `djinn config status` takes a shared
-canonical lock, makes no writes, prints only sanitized identifiers and one
-remedy, and exits `0` iff clean. `djinn config sync` is the explicit writer.
-`commands/doctor.py` performs the same audit once for its read-only `Config
-workflow` check. `doctor --fix` may seed a source root, but does not synchronize
-workflow views.
+`collision`, or `invalid-or-semantic`. Drift entries retain class, relative path,
+carrier key, origin and optional reason. Labels are `config/<tool>/<relative>`
+for canonical items, `<tool>:<relative> (<root>)` for runtime/host-fallback
+items, `opencode-runtime:<relative>` for container OpenCode, and
+`config/opencode/<relative> (seed)` for its seed view. Fragments append
+`[key.path]`; manifests use `config/.djinn-config-sync.json` or the runtime
+root's `.djinn-workflow-state.json` label. Components are sanitized; human
+summaries show at most five items and an `and N more` count. Failures without
+a known item do not invent a manifest path; a generic canonical audit names
+`config`.
+
+The standalone publisher emits a structured `workflow publisher drift-items:`
+JSON diagnostic (at most 200 items plus total/truncation), alongside human item
+lines, without file content. Origins are `target`, `seed`, `target-manifest`
+and `canonical-manifest`. Its `--check` verifies the seed before inspecting the
+runtime and never publishes or provisions. A seed mismatch is `source-changed`
+and prevents runtime inspection. Lock and write diagnostics retain precedence.
+
+`start_workflow_targets()` in `core/config_workflow.py` defines the shared root
+set for start, status, doctor and discard: config-root Claude and Codex, with
+Compose Claude skipped because it uses direct mounts. Runtime inspection builds
+the wanted view from the current source and uses the same final delivery
+transform as publication, including host-Claude bridge/hook rewrites. Shared
+canonical and target locks protect checks; a missing runtime root is clean and
+is never provisioned by inspection. An invalid source build reports runtime
+`not checked` rather than clean.
+
+`djinn config status` audits canonical and start runtime roots read-only, prints
+sanitized item labels and remedies, and exits `1` if either is non-clean (`0`
+only when clean). Plain `djinn config sync` writes canonical views, then warns
+about runtime drift without repairing it or changing a successful canonical
+sync's exit status. Doctor's `Config workflow` row combines the same canonical
+and runtime checks with named `WARN`s. `doctor --fix` may seed a source root but
+does not synchronize workflow views.
+
+`core/config_sync.py` owns the shared remedy table used by config, preflight and
+session; entrypoint advice follows the publisher's class and item origins. See
+the [operator state/remedy table](README.md#global-agent-workflow-ownership).
+Host-fallback roots are excluded from discard and retain their confirmation
+gate. Their target-drift refusals precede confirmation and give per-item
+restore sources from the final view: `config/<source-or-tool>/<path>`, the
+shipped Claude bridge, or a carrier key's value (with the host-Claude hook path
+rewrite). Retired items get `remove` actions. The manifest is never deleted,
+so ownership and retirement survive; executable restores retain the exec bit.
+
+`djinn config sync --discard-target-drift` restores managed target edits in the
+canonical tree and start runtime roots, including pending source synchronization.
+It refuses collisions and invalid states, including a managed TOML key that
+cannot be spliced from a multi-line/table form. The named-key remedy is to use
+a single-line value or delete that key while preserving personal neighbors.
+With no target drift, it behaves like plain sync without creating a drift
+backup directory.
+
+`commands/_lifecycle.py` supplies the same lifecycle guard and fail-closed
+running-container check to backup and discard. Discard takes the control guard
+then the non-blocking creation guard before checking for running Djinn containers;
+running or unknown refuses. The guard stays held through the final publish.
+Publisher leases are acquired and released within each phase:
+
+1. Audit the canonical tree and inspect all start runtime roots read-only.
+   Admit only target drift and pending canonical source changes.
+2. Back up every root before publishing any root. Canonical backup uses an
+   exclusive canonical lease and the same released ownership records as sync;
+   runtime backup uses shared canonical and target locks. Copy whole differing
+   files, once per carrier for key drift; record missing items without a copy.
+   Flush all backup files and directories, including the home-to-backup chain,
+   before crossing the backup barrier. Failure keeps partial backups and
+   overwrites no target.
+3. Acquire fresh leases for canonical sync, then direct runtime delivery.
+   Accept only target-drift items whose current state matches the backed-up
+   state; the mutation-boundary recheck still applies. Carrier authorization
+   compares the managed key value: later personal-key changes are preserved
+   by the merge. Completed root publications remain if a later publish refuses.
+
+`core/workflow_drift_backup.py` admits the backup location without mutation
+before taking the lifecycle guard. The fixed location is
+`~/.local/state/djinn/workflow-drift/<UTC %Y%m%dT%H%M%SZ>-<pid>/` under the resolved
+passwd home, independent of `HOME`/`XDG_STATE_HOME`, with per-root `config/` and
+`<tool>/` subdirectories. A no-follow descriptor walk requires owned directories,
+creates new directories `0700` and files `0600`, and refuses unsafe existing
+components rather than chmodding them. Existing `.local`/`state` modes stay
+unchanged; `djinn` and below must be private. Both prospective paths and the
+physical paths of opened descriptors must not overlap the installation,
+config/shared/local roots, `code_dir`, sessions or any declared bind source.
+These records are outside `djinn backup`, sync zones and dev mounts; operators
+exclude `~/.local/state/djinn` from their own sync and mounts, as for post-mortem
+records. Output names each backed-up or missing item and the backup directory.
 
 Credentials, auth, history, caches, themes, UI policy, MCP, arbitrary plugins,
 `PostToolUse`, status-line configuration, and unlisted settings never enter the
@@ -968,10 +1064,26 @@ Common mounts include:
 - the read-only `templates/claude/CLAUDE.md` bridge at `/home/dev/.claude/CLAUDE.md`
 - the read-only canonical `./config` mount at `/home/dev/.djinn-canonical` for
   the shared publisher
+- the read-only `./config/opencode` view at `/home/dev/.opencode/seed`
 - `${CODE_DIR}` to `${DJINN_WORKSPACE_TARGET:-/home/dev/projects}`: one workspace
   root at `/home/dev/projects` or `/home/dev/aios`; AIOS's `projects/` is then at
   `/home/dev/aios/projects`
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
+
+Both canonical views refuse writes with `EROFS`; only `config/claude` retains
+writable workflow binds. With a non-Claude source these remain writable aliases
+of generated targets (follow-up
+[#165](https://github.com/w2kr1stn/djinn_in_a_box/issues/165)). With OpenCode as
+source, no writable source alias is delivered and its seed verification has a
+known mismatch reported as `source-changed`
+([#168](https://github.com/w2kr1stn/djinn_in_a_box/issues/168)). The publisher
+checks that seed first, so a mismatch can mask runtime drift. A writable
+workspace or other bind containing the installation, which would alias these
+views, is refused at creation.
+OpenCode's `~/.config/opencode` runtime stays in the container layer and is
+rebuilt at every start. The image gate requires `djinn.workflow.publisher=2`;
+older or unlabeled images refuse with `Rebuild/recreate required.` before
+Compose or a running-container refresh.
 
 The base Compose environment sets `TZ`, `NO_COLOR`, `DJINN_TERM_WIDTH`,
 `UV_LINK_MODE=copy`, and `LOCAL_ENDPOINT`.
@@ -1561,7 +1673,7 @@ The Python `djinn` CLI and its parser dependencies run on the host. The image
 copies the stdlib-only `workflow_publisher.py` to
 `/home/dev/workflow-publisher.py` and `settings-copy.py` to
 `/home/dev/settings-copy.py`. The Dockerfile also sets
-`djinn.workflow.publisher="1"`; Compose starts and OpenCode session refreshes
+`djinn.workflow.publisher="2"`; Compose starts and OpenCode session refreshes
 check that label before doing workflow work. OpenCode is installed from npm as
 [`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
 (published 2026-10-08), with the numeric `OPENCODE_VERSION` pin. Node agents are installed through
@@ -1803,7 +1915,26 @@ socket permission, Compose v2, configuration, projects directory, config root,
 image, network, actual agent Docker endpoint/identity/health/storage (with separate
 stale/orphan reporting), actual D-Bus/audio delivery and raw desktop exposure, and seed
 config presence. It also includes the read-only `Config workflow` audit, which
-is `PASS` when clean and `WARN` when drift or validation needs attention.
+combines canonical and start runtime roots: `PASS` when clean, otherwise `WARN`
+with named items and the shared remedy.
+
+`OpenCode runtime` describes the container-local delivery rebuilt at every
+`djinn start`. Absent/stopped dev is `PASS` for that lifecycle, without a runtime
+inspection. Running dev first passes the publisher image-label gate, then runs
+the publisher `--check` via `docker exec` with closed stdin and a bounded
+timeout. Only exit `0` is clean; known non-zero drift exits warn with item labels.
+Unknown exits, malformed diagnostics, timeout or unavailable Docker warn
+`check unavailable`. Seed mismatch is `source-changed`, with sync then
+recreation advice. Session refresh uses the same argv builder for publication;
+runtime target drift names `opencode-runtime:<relative>` and advises keeping
+wanted edits in the selected source, then `djinn clean` and `djinn start`.
+
+Workflow preparation for start, run and session inspects every delivery target
+before canonical auto-sync or runtime publication. Host directory provisioning
+still precedes this workflow check after the image gate. Host-fallback drift
+refuses before confirmation. A successful auto-sync produces
+`Synchronized source changes into the canonical workflow: <n> changed, <n> removed.`;
+all callers print the notice even when a later step refuses.
 
 With valid config, the read-only `Managed bind sources` row calls
 `managed_bind_problems()`: `PASS` prints `no overlap with host execution inputs`;
