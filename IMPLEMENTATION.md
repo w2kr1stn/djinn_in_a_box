@@ -1869,9 +1869,9 @@ server with the same password and recorded CORS origin (or neither origin set)
 returns `already-running`; a changed password, changed CORS origin or degraded
 state stops ours before merging the password. A failed stop aborts
 before that merge.
-Rerunning while tailnet state is unknown starts without the CORS origin and
-therefore restarts a server that has one; this affects availability only, since
-CORS only narrows access.
+Rerunning while no tailnet URL is known (unknown tailnet state or no Serve entry)
+starts without the CORS origin and therefore restarts a server that has one;
+this affects availability only, since CORS only narrows access.
 
 The host generates a stable password once in
 `$XDG_STATE_HOME/djinn/serve/opencode-password`, using `~/.local/state` when

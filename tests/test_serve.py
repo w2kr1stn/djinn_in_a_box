@@ -864,6 +864,31 @@ def test_funnel_tcp_forward_and_nested_foreground(host):
     assert runner.invoke(app, ["serve", "opencode"]).exit_code == 1
 
 
+@pytest.mark.parametrize("flag", ["true", 1, 0, None, [], {}])
+@pytest.mark.parametrize("on_matching_key", [True, False])
+def test_non_boolean_funnel_flag_is_unknown(host, flag, on_matching_key):
+    # Tailscale writes booleans; any other flag value leaves the Funnel state unknown.
+    config = tailscale_config()
+    key = "box.example.ts.net:443" if on_matching_key else "other.example.ts.net:443"
+    config["AllowFunnel"] = {key: flag}
+    host.tailnet = config
+    assert serve.tailnet_state(PORT) == (None, "unreadable output", False)
+
+
+def test_non_boolean_funnel_flag_keeps_positive_evidence(host):
+    config = tailscale_config(funnel=True)
+    config["AllowFunnel"]["other.example.ts.net:443"] = "true"
+    host.tailnet = config
+    assert serve.tailnet_state(PORT) == (None, "unreadable output", True)
+    assert runner.invoke(app, ["serve", "opencode"]).exit_code == 1
+
+
+def test_deeply_nested_tailscale_status_is_unknown(host, monkeypatch):
+    nested = "[" * 100000 + "]" * 100000
+    monkeypatch.setattr(serve, "_run_captured", lambda *_a, **_k: RunResult(0, nested))
+    assert serve.tailnet_state(PORT) == (None, "unreadable output", False)
+
+
 @pytest.mark.parametrize(
     "anomaly",
     [

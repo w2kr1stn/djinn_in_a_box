@@ -567,12 +567,13 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
         # Inspect every sibling, even after malformed layers or entries.
         for layer in layers:
             layers.extend(
-                read_object(value)
-                for value in read_object(layer.get("Foreground", {})).values()
+                read_object(value) for value in read_object(layer.get("Foreground", {})).values()
             )
-            funnel_keys.update(
-                k for k, v in read_object(layer.get("AllowFunnel", {})).items() if v is True
-            )
+            for key, flag in read_object(layer.get("AllowFunnel", {})).items():
+                if flag is True:
+                    funnel_keys.add(key)
+                elif flag is not False:
+                    unreadable = True  # Tailscale writes booleans; anything else is unknown.
         candidates: list[tuple[str, str]] = []
         for layer in layers:
             tcp = {k: read_object(v) for k, v in read_object(layer.get("TCP", {})).items()}
@@ -593,11 +594,7 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
                         f"http://localhost:{port}",
                         f"http://[::1]:{port}",
                     )
-                    if (
-                        path == "/"
-                        and strict
-                        and tcp.get(https_port, {}).get("HTTPS") is True
-                    ):
+                    if path == "/" and strict and tcp.get(https_port, {}).get("HTTPS") is True:
                         url = f"https://{host}" + ("" if https_port == "443" else f":{https_port}")
                         # DNS labels also need an alphanumeric first character.
                         if (
@@ -619,7 +616,15 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
         if candidates:
             return sorted(candidates)[0][1], "", funnel
         return None, f"no Serve entry for http://127.0.0.1:{port}", funnel
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        RecursionError,
+    ):
         return None, "unreadable output", bool(funnel_keys & matching)
 
 
