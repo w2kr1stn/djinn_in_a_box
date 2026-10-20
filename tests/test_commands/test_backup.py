@@ -18,6 +18,7 @@ import typer
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
+from djinn_in_a_box.commands import _lifecycle
 from djinn_in_a_box.commands import backup as backup_module
 from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES, volume_categories
 from djinn_in_a_box.config.loader import load_config, save_config
@@ -84,7 +85,7 @@ def test_restore_refused_items_skip_extraction_and_hardening_and_continue(
 
     with (
         patch.object(backup_module, "load_config", return_value=config),
-        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(_lifecycle, "get_running_containers", return_value=[]),
         patch.object(backup_module, "BACKUPS_DIR", backups),
         patch.object(docker, "clear_directory", side_effect=clear),
         patch.object(docker, "_run_captured", wraps=docker._run_captured) as extract,
@@ -123,7 +124,7 @@ def test_backup_restore_lifecycle_guard_order(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(hostctl, "control_guard", control)
     monkeypatch.setattr(host_runtime, "creation_guard", creation)
-    with backup_module._lifecycle_guard():
+    with _lifecycle.lifecycle_guard():
         calls.append("body")
     assert calls == ["control-enter", "creation-enter", "body", "creation-exit", "control-exit"]
 
@@ -152,7 +153,7 @@ def test_backup_restore_guard_filesystem_failure_exits_cleanly(
     fds = len(os.listdir("/proc/self/fd"))
     with (
         patch.object(backup_module, "load_config") as load,
-        patch.object(backup_module, "get_running_containers") as running,
+        patch.object(_lifecycle, "get_running_containers") as running,
     ):
         result = runner.invoke(app, [command])
     assert result.exit_code == 1, result.output
@@ -177,9 +178,9 @@ def test_lifecycle_guard_body_exceptions_pass_through(
     monkeypatch.setattr(host_runtime, "runtime_root", lambda **kwargs: runtime)
     fds = len(os.listdir("/proc/self/fd"))
     with (
-        patch.object(backup_module, "error") as error,
+        patch.object(_lifecycle, "error") as error,
         pytest.raises(type(failure)) as raised,
-        backup_module._lifecycle_guard(),
+        _lifecycle.lifecycle_guard(),
     ):
         raise failure
     assert raised.value is failure
@@ -207,7 +208,7 @@ def test_restore_hardening_failure_is_failed_item_and_continues(
 
     with (
         patch.object(backup_module, "load_config", return_value=config),
-        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(_lifecycle, "get_running_containers", return_value=[]),
         patch.object(backup_module, "BACKUPS_DIR", backups),
         patch.object(backup_module, "_harden_restored_sync_directories",
                      side_effect=harden) as secure,
@@ -250,7 +251,7 @@ def test_restore_deep_sync_tree_hardens_and_continues(
     try:
         with (
             patch.object(backup_module, "load_config", return_value=config),
-            patch.object(backup_module, "get_running_containers", return_value=[]),
+            patch.object(_lifecycle, "get_running_containers", return_value=[]),
             patch.object(backup_module, "BACKUPS_DIR", backups),
             patch.object(backup_module.typer, "confirm", return_value=True),
         ):
@@ -302,7 +303,7 @@ def test_restore_walk_error_fails_item_and_continues(
     fds = len(os.listdir("/proc/self/fd"))
     with (
         patch.object(backup_module, "load_config", return_value=config),
-        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(_lifecycle, "get_running_containers", return_value=[]),
         patch.object(backup_module, "BACKUPS_DIR", backups),
         patch.object(backup_module.os, "scandir", side_effect=denied),
     ):
@@ -395,7 +396,8 @@ def test_backup_restore_hold_lifecycle_guards_through_last_host_step(
         assert hostctl._held.active
         probes.append(label)
 
-    def running() -> list[str]:
+    def running(*, prefix: str) -> list[str]:
+        assert prefix == "djinn"
         probe("running-check")
         return []
 
@@ -405,7 +407,7 @@ def test_backup_restore_hold_lifecycle_guards_through_last_host_step(
 
     with (
         patch.object(backup_module, "load_config", return_value=config),
-        patch.object(backup_module, "get_running_containers", side_effect=running),
+        patch.object(_lifecycle, "get_running_containers", side_effect=running),
         patch.object(backup_module, "get_existing_volumes_by_category", return_value=[]),
         patch.object(backup_module, "BACKUPS_DIR", backups),
         patch.object(backup_module.shutil, "rmtree", side_effect=cleanup),
@@ -433,7 +435,7 @@ def test_backup_restore_held_lock_precedes_every_host_path_step(
     try:
         with (
             patch.object(backup_module, "load_config") as load,
-            patch.object(backup_module, "get_running_containers") as running,
+            patch.object(_lifecycle, "get_running_containers") as running,
             patch.object(backup_module, "_collect_items") as collect,
             patch.object(backup_module, "_list_backups") as listing,
             patch.object(backup_module.tempfile, "mkdtemp") as stage,
@@ -522,7 +524,7 @@ def test_declared_backup_categories(
         args.extend(["--categories", category])
     with (
         patch.object(backup_module, "load_config", return_value=config) as load,
-        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(_lifecycle, "get_running_containers", return_value=[]),
         patch("djinn_in_a_box.core.docker.volume_exists", side_effect=lambda name: name not in {
             "djinn-vscode-server", "djinn-vscode-workspaces",
         }),
@@ -604,7 +606,7 @@ def test_declared_volume_restore_namespace(
             outer.add(inner, arcname=member)
     with (
         patch.object(backup_module, "load_config", return_value=config),
-        patch.object(backup_module, "get_running_containers", return_value=[]),
+        patch.object(_lifecycle, "get_running_containers", return_value=[]),
         patch.object(backup_module, "BACKUPS_DIR", backups_dir),
         patch.object(backup_module, "restore_volume", return_value=RunResult(0)) as volume,
         patch.object(backup_module, "restore_sync_path",
@@ -658,8 +660,8 @@ class TestGuardNoContainersRunning:
     """Tests for _guard_no_containers_running."""
 
     def test_passes_when_no_containers(self) -> None:
-        with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]):
-            backup_module._guard_no_containers_running()
+        with patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]):
+            _lifecycle.guard_no_containers_running()
 
     def test_refuses_an_unknown_container_state_from_the_docker_probe(self) -> None:
         with (
@@ -671,14 +673,14 @@ class TestGuardNoContainersRunning:
             ),
             pytest.raises(typer.Exit) as exc_info,
         ):
-            backup_module._guard_no_containers_running()
+            _lifecycle.guard_no_containers_running()
 
         assert exc_info.value.exit_code == 1
 
     def test_exits_when_containers_running(self) -> None:
-        with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=["djinn"]):
+        with patch.object(_lifecycle, "get_running_containers", return_value=["djinn"]):
             with pytest.raises(typer.Exit) as exc_info:
-                backup_module._guard_no_containers_running()
+                _lifecycle.guard_no_containers_running()
             assert exc_info.value.exit_code == 1
 
 
@@ -776,14 +778,14 @@ class TestBackupCommand:
         assert exc_info.value.exit_code == 1
 
     def test_aborts_when_containers_running(self) -> None:
-        with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=["djinn"]):
+        with patch.object(_lifecycle, "get_running_containers", return_value=["djinn"]):
             with pytest.raises(typer.Exit) as exc_info:
                 backup_module.backup()
             assert exc_info.value.exit_code == 1
 
     def test_exits_when_no_volumes_found(self) -> None:
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=[],
@@ -819,7 +821,7 @@ class TestBackupCommand:
             real_add(archive, name, *args, **kwargs)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.get_existing_volumes_by_category") as mock_get,
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -858,7 +860,7 @@ class TestBackupCommand:
         staging_dir.mkdir()
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.get_existing_volumes_by_category") as mock_get,
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -897,7 +899,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -930,7 +932,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -954,7 +956,7 @@ class TestBackupCommand:
         staging_dir.mkdir()
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.get_existing_volumes_by_category") as mock_get,
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -979,7 +981,7 @@ class TestBackupCommand:
         backups_dir = tmp_path / "backups"
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.get_existing_volumes_by_category") as mock_get,
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_sync_paths_by_category",
@@ -1020,7 +1022,7 @@ class TestBackupCommand:
                 "djinn_in_a_box.commands.backup.load_config",
                 side_effect=lambda: load_config(config_file),
             ),
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=[],
@@ -1047,7 +1049,7 @@ class TestBackupCommand:
         real_mkstemp = backup_module.tempfile.mkstemp
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1084,7 +1086,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1133,7 +1135,7 @@ class TestBackupCommand:
             warnings.append(message)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1189,7 +1191,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1226,7 +1228,7 @@ class TestBackupCommand:
         real_replace = backup_module.os.replace
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1281,7 +1283,7 @@ class TestBackupCommand:
             return subprocess.CompletedProcess(argv, 0)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1352,7 +1354,7 @@ class TestBackupCommand:
             return subprocess.CompletedProcess(argv, 0)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1388,7 +1390,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1422,7 +1424,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1462,7 +1464,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1496,7 +1498,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1527,7 +1529,7 @@ class TestBackupCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -1572,7 +1574,7 @@ class TestRestoreCommand:
         assert exc_info.value.exit_code == 1
 
     def test_aborts_when_containers_running(self) -> None:
-        with patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=["djinn"]):
+        with patch.object(_lifecycle, "get_running_containers", return_value=["djinn"]):
             with pytest.raises(typer.Exit) as exc_info:
                 backup_module.restore()
             assert exc_info.value.exit_code == 1
@@ -1589,7 +1591,7 @@ class TestRestoreCommand:
         )
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -1619,7 +1621,7 @@ class TestRestoreCommand:
             outer.add(inner_archive, arcname=inner_archive.name)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
@@ -1639,7 +1641,7 @@ class TestRestoreCommand:
         backups_dir.mkdir()
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -1666,7 +1668,7 @@ class TestRestoreCommand:
             outer.add(str(inner_archive), arcname="djinn-opencode-data.tar.gz")
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
@@ -1700,7 +1702,7 @@ class TestRestoreCommand:
             outer.add(str(inner_archive), arcname="djinn-opencode-data.tar.gz")
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
@@ -1721,7 +1723,7 @@ class TestRestoreCommand:
             pass
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.typer.confirm", side_effect=typer.Abort()),
             pytest.raises(typer.Abort),
@@ -1743,7 +1745,7 @@ class TestRestoreCommand:
             outer.add(str(inner_staging / "some-file.txt"), arcname="some-file.txt")
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -1756,7 +1758,7 @@ class TestRestoreCommand:
     def test_restore_exits_when_backups_dir_missing(self, tmp_path: Path) -> None:
         nonexistent = tmp_path / "does-not-exist"
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", nonexistent),
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -1781,7 +1783,7 @@ class TestRestoreCommand:
                 outer.add(str(archive), arcname=archive.name)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
@@ -1825,7 +1827,7 @@ class TestRestoreCommand:
                 "djinn_in_a_box.commands.backup.load_config",
                 side_effect=lambda: load_config(config_file),
             ),
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -1870,7 +1872,7 @@ class TestRestoreCommand:
 
         with (
             patch("djinn_in_a_box.commands.backup.load_config", return_value=config),
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.typer.confirm", return_value=True),
         ):
@@ -1903,7 +1905,7 @@ class TestRestoreCommand:
 
         with (
             patch("djinn_in_a_box.commands.backup.load_config", return_value=config),
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.typer.confirm", return_value=True),
             pytest.raises(typer.Exit) as exc_info,
@@ -1936,7 +1938,7 @@ class TestRestoreCommand:
             return subprocess.CompletedProcess(argv, 0)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.restore_volume") as mock_restore,
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
@@ -1966,7 +1968,7 @@ class TestRestoreCommand:
             return subprocess.CompletedProcess(argv, 1)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -2004,7 +2006,7 @@ class TestRestoreCommand:
             return subprocess.CompletedProcess(argv, 1)
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -2033,7 +2035,7 @@ class TestRestoreCommand:
             raise KeyboardInterrupt
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -2061,7 +2063,7 @@ class TestRestoreCommand:
         )
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.tempfile.mkdtemp", return_value=str(staging_dir)),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
@@ -2083,7 +2085,7 @@ class TestRestoreCommand:
         (backups_dir / "djinn-backup-2026-03-13.tar.gz.age").write_bytes(b"not age")
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.typer.confirm") as mock_confirm,
             pytest.raises(typer.Exit) as exc_info,
@@ -2102,7 +2104,7 @@ class TestRestoreCommand:
         (backups_dir / "djinn-backup-2026-03-13.tar.gz").write_bytes(b"bad")
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
             pytest.raises(typer.Exit) as exc_info,
@@ -2122,7 +2124,7 @@ class TestRestoreCommand:
         (backups_dir / "djinn-backup-2026-03-13.tar.gz").write_bytes(b"\x1f\x8b\x08")
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.BACKUPS_DIR", backups_dir),
             patch("djinn_in_a_box.commands.backup.typer.confirm"),
             pytest.raises(typer.Exit) as exc_info,
@@ -2174,7 +2176,7 @@ class TestRestoreCommand:
         )
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch(
                 "djinn_in_a_box.commands.backup.get_existing_volumes_by_category",
                 return_value=["djinn-opencode-data"],
@@ -2260,7 +2262,7 @@ class TestControllingTerminalCheck:
         staging_dir.mkdir()
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.get_existing_volumes_by_category") as mock_get,
             patch("djinn_in_a_box.commands.backup.backup_volume") as mock_backup,
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
@@ -2280,7 +2282,7 @@ class TestControllingTerminalCheck:
         staging_dir.mkdir()
 
         with (
-            patch("djinn_in_a_box.commands.backup.get_running_containers", return_value=[]),
+            patch("djinn_in_a_box.commands._lifecycle.get_running_containers", return_value=[]),
             patch("djinn_in_a_box.commands.backup.get_existing_volumes_by_category") as mock_get,
             patch("djinn_in_a_box.commands.backup.backup_volume") as mock_backup,
             patch("djinn_in_a_box.commands.backup.tempfile") as mock_tempfile,
@@ -2337,7 +2339,7 @@ def test_restore_unreadable_sync_root_and_child_hardens_and_continues(
     try:
         with (
             patch.object(backup_module, "load_config", return_value=config),
-            patch.object(backup_module, "get_running_containers", return_value=[]),
+            patch.object(_lifecycle, "get_running_containers", return_value=[]),
             patch.object(backup_module, "BACKUPS_DIR", backups),
             patch.object(backup_module.typer, "confirm", return_value=True),
         ):

@@ -15,6 +15,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from djinn_in_a_box.commands import _lifecycle
 from djinn_in_a_box.config.loader import load_config, save_config
 from djinn_in_a_box.config.models import (
     AppConfig,
@@ -42,7 +43,11 @@ from djinn_in_a_box.core.config_sync import (
 from djinn_in_a_box.core.config_sync import (
     sync_config as synchronize_workflow_config,
 )
-from djinn_in_a_box.core.config_workflow import inspect_workflow_targets, inspection_failure
+from djinn_in_a_box.core.config_workflow import (
+    discard_workflow_target_drift,
+    inspect_workflow_targets,
+    inspection_failure,
+)
 from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
@@ -58,6 +63,7 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.hostinfo import detect_timezone, suggest_resources
 from djinn_in_a_box.core.paths import CONFIG_DIR, CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SeedingError, seed_config
+from djinn_in_a_box.core.workflow_drift_backup import admit_backup_root
 
 ALLOWED_CONFIG_KEYS: tuple[str, ...] = (
     "general.code_dir",
@@ -773,12 +779,43 @@ def config_status() -> None:
 
 
 @handle_config_errors
-def config_sync() -> None:
+def config_sync(
+    discard_target_drift: Annotated[
+        bool, typer.Option("--discard-target-drift", help="Back up and discard target edits.")
+    ] = False,
+) -> None:
     """Explicitly synchronize managed workflow views."""
     try:
-        result = synchronize_workflow_config(get_project_root())
+        project_root = get_project_root()
+        if discard_target_drift:
+            config = load_config()
+            admission = admit_backup_root(project_root, config)
+            with _lifecycle.lifecycle_guard():
+                _lifecycle.guard_no_containers_running("discarding target drift")
+                discarded = discard_workflow_target_drift(project_root, config, admission)
+            for label, entry in discarded.backups:
+                location = workflow_item_label(
+                    None if label == "config" else label,
+                    entry.entry.path, entry.entry.key_path,
+                    root=(None if label == "config"
+                          else resolve_zone_roots(config).config_root / label),
+                )
+                action = "was missing" if entry.backup_path is None else "backed up"
+                console.print(Text(f"{location}: {action}"))
+            if discarded.backup_directory is not None:
+                console.print(Text(f"Backed up to {discarded.backup_directory}"))
+            elif discarded.failure is None:
+                info("no target drift")
+            if discarded.failure is not None:
+                for problem in discarded.failure.problems:
+                    console.print(Text(f"{problem.message} Remedy: {problem.remedy}"))
+                raise typer.Exit(1)
+            assert discarded.sync is not None
+            result = discarded.sync
+        else:
+            result = synchronize_workflow_config(project_root)
     except (OSError, TypeError, ValueError) as exc:
-        error(f"Configuration synchronization could not start ({type(exc).__name__}).")
+        error(f"Configuration synchronization could not start ({exc}).")
         warning("Run `djinn config status`, correct the reported problem, and retry.")
         raise typer.Exit(1) from exc
 

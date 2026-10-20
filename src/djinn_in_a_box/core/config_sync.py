@@ -28,6 +28,7 @@ from djinn_in_a_box.core.config_sync_adapters import (
 )
 from djinn_in_a_box.core.workflow_publisher import (
     CANONICAL_MANIFEST_NAME,
+    BackedUpState,
     CanonicalLockLease,
     CarrierFragment,
     DriftClass,
@@ -253,6 +254,9 @@ def sync_config(
     project_root: Path,
     *,
     config_path: Path | None = None,
+    accept_drift: (
+        Mapping[tuple[PurePosixPath, tuple[str, ...] | None], BackedUpState] | None
+    ) = None,
 ) -> ConfigSyncResult:
     source = load_config(config_path).config_sync.source
     config_root = project_root / "config"
@@ -275,6 +279,7 @@ def sync_config(
                 source_root=config_root / source,
                 source_residue_prefixes=runtime_residue_prefixes(source),
                 preflight_manifest=preflight_manifest,
+                accept_drift=accept_drift,
             )
             audit = (
                 _audit_for(source, DriftClass.SOURCE_CHANGED)

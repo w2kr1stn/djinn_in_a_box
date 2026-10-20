@@ -5,7 +5,7 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
@@ -16,9 +16,11 @@ from djinn_in_a_box.core.config_lock import config_directory_lock
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     ConfigSyncAudit,
+    ConfigSyncResult,
     DriftClass,
     SyncProblem,
     _BuildError,  # pyright: ignore[reportPrivateUsage]
+    _release_manifest_records,  # pyright: ignore[reportPrivateUsage]
     _snapshot_build,  # pyright: ignore[reportPrivateUsage]
     audit_config_sync,
     load_canonical_delivery_view,
@@ -35,8 +37,12 @@ from djinn_in_a_box.core.docker import (
     workflow_image_compatible,
 )
 from djinn_in_a_box.core.paths import CONFIG_DIR, get_project_root
+from djinn_in_a_box.core.workflow_drift_backup import BackupAdmission, open_backup_root
 from djinn_in_a_box.core.workflow_publisher import (
+    CANONICAL_MANIFEST_NAME,
     RUNTIME_MANIFEST_NAME,
+    BackedUpEntry,
+    BackedUpState,
     CanonicalLockLease,
     CarrierFragment,
     DriftEntry,
@@ -45,6 +51,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     PublishError,
     PublishResult,
     WorkflowView,
+    backup_target_drift,
     canonical_lock,
     inspect_workflow_view,
     load_strict_json,
@@ -267,6 +274,122 @@ def inspection_failure(
     return _publish_failure(inspection.result, config, inspection.target, inspection.view)
 
 
+@dataclass(frozen=True)
+class WorkflowDiscardResult:
+    sync: ConfigSyncResult | None = None
+    failure: WorkflowPreparationResult | None = None
+    backups: tuple[tuple[str, BackedUpEntry], ...] = ()
+    backup_directory: Path | None = None
+
+
+def discard_workflow_target_drift(
+    project_root: Path,
+    config: AppConfig,
+    admission: BackupAdmission,
+    *,
+    config_path: Path | None = None,
+) -> WorkflowDiscardResult:
+    """Run the read-only check, durable backup barrier and authorized publications.
+
+    The command holds lifecycle exclusion throughout this call. Publisher leases are
+    acquired independently in each phase; none crosses the backup barrier.
+    """
+    audit = audit_config_sync(project_root, config_path=config_path)
+    inspections = inspect_workflow_targets(project_root, config)
+    allowed = {DriftClass.SOURCE_CHANGED, DriftClass.TARGET_DRIFT}
+    if audit.problems or any(item.kind not in allowed for item in audit.drifts):
+        return WorkflowDiscardResult(failure=_audit_failure(audit))
+    for inspection in inspections:
+        if not inspection.clean and (
+            inspection.result is None
+            or inspection.result.drift_class is not DriftClass.TARGET_DRIFT
+        ):
+            return WorkflowDiscardResult(failure=inspection_failure(inspection, config))
+    drifted = any(item.kind is DriftClass.TARGET_DRIFT for item in audit.drifts) or any(
+        item.result is not None and item.result.drift_class is DriftClass.TARGET_DRIFT
+        for item in inspections
+    )
+    if not drifted:
+        return WorkflowDiscardResult(sync=sync_config(project_root, config_path=config_path))
+
+    canonical_root = project_root / "config"
+    backups: dict[str, tuple[BackedUpEntry, ...]] = {}
+    backup_directory = admission.path
+    backup_target: WorkflowDeliveryTarget | None = None
+    try:
+        with open_backup_root(admission) as directories:
+            # Phase 1: release source-owned records exactly as canonical sync does.
+            with canonical_lock(canonical_root, exclusive=True) as lease:
+                build = _snapshot_build(project_root, config.config_sync.source)
+                if build.problems:
+                    return WorkflowDiscardResult(
+                        failure=_audit_failure(ConfigSyncAudit(build.source, None,
+                                                               problems=build.problems)),
+                        backup_directory=backup_directory,
+                    )
+                preflight_manifest = _release_manifest_records(
+                    canonical_root, build.source, build.fingerprint
+                )
+                backups["config"] = backup_target_drift(
+                    build.canonical, canonical_root, canonical_root,
+                    canonical_root / CANONICAL_MANIFEST_NAME, directories.root("config"),
+                    canonical_lease=lease, preflight_manifest=preflight_manifest,
+                )
+            for inspection in inspections:
+                if inspection.view is None:
+                    continue
+                target = inspection.target
+                backup_target = target
+                backups[target.tool] = backup_target_drift(
+                    inspection.view, canonical_root, target.destination_root,
+                    target.destination_root / RUNTIME_MANIFEST_NAME, directories.root(target.tool),
+                )
+            directories.barrier()
+    except PublishError as exc:
+        if exc.lock_error is not None:
+            failure = _canonical_lock_failure(canonical_root, exc)
+        else:
+            target = backup_target
+            failure = _failure(
+                exc.drift_class.value, source=config.config_sync.source,
+                labels=tuple(workflow_item_label(
+                    target.tool if target is not None else None, item.path, item.key_path,
+                    root=target.destination_root if target is not None else None,
+                    origin=item.origin,
+                ) for item in exc.items),
+            )
+        return WorkflowDiscardResult(failure=failure, backup_directory=backup_directory)
+    except (_BuildError, OSError, ValueError) as exc:
+        failure = WorkflowPreparationResult(False, (WorkflowPreparationProblem(
+            "drift-backup-failed", f"Workflow drift backup failed ({exc}).",
+            "Correct the backup problem and retry; partial backups have been kept.",
+        ),))
+        return WorkflowDiscardResult(failure=failure, backup_directory=backup_directory)
+
+    entries = tuple((label, entry) for label, items in backups.items() for entry in items)
+
+    def authorization(
+        label: str,
+    ) -> dict[tuple[PurePosixPath, tuple[str, ...] | None], BackedUpState]:
+        return {(e.entry.path, e.entry.key_path): e.state for e in backups.get(label, ())}
+
+    # Phase 2: these calls acquire fresh leases. Preparation would reject runtime
+    # drift before the authorized delivery, so use the delivery level directly.
+    synced = sync_config(
+        project_root, config_path=config_path, accept_drift=authorization("config")
+    )
+    if not synced.success or not synced.audit.clean:
+        return WorkflowDiscardResult(synced, backups=entries, backup_directory=backup_directory)
+    for inspection in inspections:
+        result = _deliver_target(
+            config, project_root, inspection.target, config_path, False, None,
+            accept_drift=authorization(inspection.target.tool),
+        )
+        if not result.success:
+            return WorkflowDiscardResult(synced, result, entries, backup_directory)
+    return WorkflowDiscardResult(synced, backups=entries, backup_directory=backup_directory)
+
+
 def prepare_config_workflow(
     project_root: Path,
     targets: tuple[WorkflowDeliveryTarget, ...] = (),
@@ -403,6 +526,10 @@ def _deliver_target(
     config_path: Path | None,
     gated: bool,
     confirm: Callable[[HostWorkflowReview], bool] | None,
+    *,
+    accept_drift: (
+        Mapping[tuple[PurePosixPath, tuple[str, ...] | None], BackedUpState] | None
+    ) = None,
 ) -> WorkflowPreparationResult:
     canonical_root = project_root / "config"
     record_path = HOST_WORKFLOW_TRUST_FILE
@@ -414,7 +541,10 @@ def _deliver_target(
             if isinstance(delivery, WorkflowPreparationResult):
                 return delivery
             if not gated or delivery.items == confirmed:
-                return _publish_delivery(delivery, canonical_root, target, lease, config=config)
+                return _publish_delivery(
+                    delivery, canonical_root, target, lease,
+                    config=config, accept_drift=accept_drift
+                )
     except PublishError as error:
         return _canonical_lock_failure(canonical_root, error)
     except OSError:
@@ -486,6 +616,9 @@ def _publish_delivery(
     *,
     config: AppConfig,
     confirming: bool = False,
+    accept_drift: (
+        Mapping[tuple[PurePosixPath, tuple[str, ...] | None], BackedUpState] | None
+    ) = None,
 ) -> WorkflowPreparationResult:
     # A failed publication after confirmation can leave the (empty) destination created
     # here; it is deliberately not removed, because a path-based cleanup cannot prove that
@@ -499,6 +632,7 @@ def _publish_delivery(
         target.destination_root,
         target.destination_root / RUNTIME_MANIFEST_NAME,
         canonical_lease=lease,
+        accept_drift=accept_drift,
         source_root=canonical_root / delivery.source,
         source_inputs=delivery.source_inputs,
         source_residue_prefixes=runtime_residue_prefixes(delivery.source),
