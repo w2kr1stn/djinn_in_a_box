@@ -538,6 +538,12 @@
         },
         {
           "type": "bind",
+          "source": "/tmp/djinn-test/config.local/codex/sqlite",
+          "target": "/home/dev/.codex/sqlite",
+          "bind": {}
+        },
+        {
+          "type": "bind",
           "source": "/tmp/djinn-test/config.shared/codex/sessions",
           "target": "/home/dev/.codex/sessions",
           "bind": {}

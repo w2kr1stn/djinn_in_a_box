@@ -97,6 +97,7 @@ services:
     volumes: *common-volumes
     environment:
       <<: *common-environment
+      CODEX_SQLITE_HOME: /home/dev/.codex/sqlite
       ENABLE_FIREWALL: ${ENABLE_FIREWALL:-false}
       DJINN_DETACHED: ${DJINN_DETACHED:-false}
     extra_hosts:

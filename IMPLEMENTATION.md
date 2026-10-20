@@ -670,6 +670,8 @@ container start
   +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
       using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
+  +-- Codex daemon: updater off, reconcile to image CLI, prune other releases
+      (dev-container starts only; warn and continue)
   +-- root helper replays missing runtime packages (no network if none missing; warn and continue)
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
@@ -677,6 +679,39 @@ container start
   +-- run interactive zsh as a background job, waited on by PID 1
   +-- stop/join checkpointer and sync once on shell exit or SIGTERM/SIGINT
 ```
+
+The `Codex daemon` step invokes `/home/dev/codex-daemon-policy.py` with
+`--codex-home "$HOME/.codex"` only when the entrypoint has no command arguments
+(`$# -eq 0`). This covers foreground and detached dev-container starts; one-shot
+`djinn run` and `compose run … <cmd>` skip it. Interactive Codex TUI, resume and
+fork normally start the managed daemon; `codex exec` and plain stdio
+`codex app-server` do not.
+
+The helper first strictly parses `app-server-daemon/settings.json` and sets only
+`updater.autoUpdateEnabled=false`, preserving other keys, including
+`remoteControlEnabled`. It creates an absent file and atomically replaces a
+changed valid document in the same directory. Malformed JSON, invalid document
+shape or symlinked/non-regular settings are left untouched with a warning.
+
+With an existing `packages/app-server-daemon/current` selection, it compares
+the selected `codex-package.json` version with `codex --version`. A mismatch or
+unreadable selected manifest triggers
+`codex app-server daemon update --from-cli --yes`, copying and pinning the
+image's CLI package. Codex child processes receive `CODEX_HOME` bound to the
+mounted home. Without a selection, reconciliation and pruning do nothing;
+Codex normally bootstraps a fresh installation on its first TUI launch.
+
+After rereading and validating the selection, the helper removes other direct
+entries under `packages/app-server-daemon/releases/` (about 410 MiB per measured
+release). Package ancestors and the selected directory/manifest must pass
+symlink/type checks, and a `current` link target containing `..` is refused;
+pruning stays inside the opened releases directory, and an entry that cannot be
+removed warns without keeping the others. `codex --version` (30 s) and the
+native update (300 s) run with closed stdin in their own process group; a
+timeout terminates that group, and an update timeout skips pruning. Only stdout
+carries the version; names in the helper's output are control-character
+escaped. Failures warn and startup continues. Version
+changes come through `djinn update`, `djinn build` and a new dev-container start.
 
 Both shutdown paths reach the reverse-sync, which matters because a detached
 container (`djinn start --detach`) never exits its shell — `docker stop` sends
@@ -944,6 +979,12 @@ The base Compose environment sets `TZ`, `NO_COLOR`, `DJINN_TERM_WIDTH`,
 width decisions into the container shell UI. Resource limits use the Compose
 variables rendered by `build_compose_env()`.
 
+The dev service also sets `CODEX_SQLITE_HOME=/home/dev/.codex/sqlite`. Codex
+honors an explicit `sqlite_home` in its `config.toml` ahead of that environment
+variable. `COMPOSE_ENV_KEYS` reserves `CODEX_SQLITE_HOME`; `DJINN_ENV_KEYS`
+reserves `CODEX_HOME` and the policy helper override so declarations cannot
+redirect the mounted Codex home or its policy.
+
 `docker-compose.agent-docker.yml` defines the pinned UID-1000 rootless companion
 profile and healthcheck (rootless, overlay2, expected data root). `core/agent_docker.py`
 contains profile constants, pure workspace delivery data and the side-effect-free
@@ -1177,6 +1218,17 @@ directories over the config-zone bind mounts. These overlays do not change the
 user mount that supplies `--workdir`. Doctor reports current assignment validity,
 skipped defaults, zone drift, private-directory modes and large direct files
 that cannot be overlaid.
+
+`DEFAULT_ZONES["codex"]["local"]` includes `sqlite`, alongside the daemon's
+`packages`, `app-server-daemon` and `app-server-control` directories. With the
+Compose SQLite setting, `state_*`, `logs_*`, `goals_*`, `memories_*`, `queue_*`
+and `thread_history_*` databases, their `-wal`/`-shm` siblings and
+`.sqlite-maintenance.lock` stay in `<local_root>/codex/sqlite/`.
+`KNOWN_CONFIG_ROOT_ENTRIES["codex"]` does not list SQLite files or the
+maintenance lock; such files in the config root report zone drift and, when
+large, large-file findings. Sessions remain shared; SQLite operational state stays per host
+and outside config-root backups. Cross-host discovery and memory-state limits
+are documented in [the sync guide](docs/sync-across-machines.md#codex-sessions-and-local-state).
 
 Declared mounts follow the three-layer configuration boundary: fixed built-ins
 (credentials, seeds, workflow and cache targets), built-ins with a config value
@@ -1762,6 +1814,25 @@ dependent SOPS, credential/zone-mode and zone-diagnostic rows, so a config-root
 failure does not prevent the managed row or remaining table from rendering.
 Zone diagnostics contain `OSError`/`ValueError` as a `Zone configuration` WARN.
 
+Zone diagnostics include `_codex_daemon_checks()` against the resolved
+`<local_root>/codex/` without invoking Codex. It inspects directory components
+without following symlinks, strictly reads regular settings up to 64 KiB and
+bounds release traversal to 200,000 entries.
+
+- `Codex daemon updater`: PASS for `updater.autoUpdateEnabled=false`, or absent
+  settings with no managed copy; WARN for true/unset/invalid keys, missing
+  settings with an installed copy, or malformed/oversized/symlinked settings.
+  `remoteControlEnabled` is displayed as on/off/unset information only.
+- `Codex daemon releases`: release count, total size and current selection;
+  PASS for zero or one release, WARN for multiple releases, unreadable paths,
+  an incomplete scan, or a `current` link outside the helper's rule (a direct
+  `releases/<name>` child without `..`, holding a regular manifest). Details
+  escape control characters from container-writable names. A skipped `packages` or `app-server-daemon` default overlay
+  makes both rows WARN with `not inspected: … overlay skipped`.
+
+These rows are read-only and have no `--fix` action; their remedy points to a
+dev-container start, where the entrypoint applies the policy.
+
 The `Post-mortem records` row calls `post_mortem.latest()` independently of config
 and Docker availability. It reads only the host filesystem, returning `PASS`
 with `none` or `<n> kept; latest <path>`. A historical incident is not a current
@@ -1786,6 +1857,7 @@ reachable. Only after Docker is usable does it provision host directories with
 `ensure_host_env(config)`. It does not call `seed_config()`; this keeps
 Docker-down failures from creating unrelated host artifacts and preserves the
 workflow seeding boundary.
+Preflight does not run the daemon diagnostic rows or apply the daemon policy.
 
 ## Agent Commands
 
@@ -1942,6 +2014,10 @@ Category definitions come from `config/defaults.py`:
 - `SYNC_PATHS["credentials"]`: `claude`, `codex`, `opencode`, `gh`, `age`
 - `SYNC_PATHS["repo-dotfiles"]`: `repo-dotfiles`
 
+Codex SQLite in the local zone is outside these config-root archives, including
+durable goals, queued messages, preferences and memory-extraction state. Shared
+rollouts and generated memory text are not a complete backup of that state.
+
 `volume_categories(config=None)` copies every built-in list and adds only
 `VolumeDeclaration` actual names by category, including `none`, rejecting
 built-in name collisions before returning. Constants are never mutated and no
@@ -2062,6 +2138,8 @@ entrypoint.sh
   +-- Seed & Config: merge Claude settings and publish the OpenCode workflow
       from the read-only canonical mount
   +-- MCP: register MCP servers and box third-party CLI output
+  +-- Codex daemon: disable updater, reconcile image version, prune old releases
+      (no command arguments; failures warn and continue)
   +-- Packages: dev wrapper calls root helper replay for the root-owned persistent list
   +-- Tools: install optional tools
   +-- Security: summarize firewall and Docker access

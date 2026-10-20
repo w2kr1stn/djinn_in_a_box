@@ -83,6 +83,14 @@ def test_runtime_delivery_packaging_uses_shared_publisher_and_canonical_mount() 
         in dockerfile
     )
     assert "scripts/settings-copy.py /home/dev/settings-copy.py" in dockerfile
+    assert (
+        "COPY --chown=dev:dev scripts/codex-daemon-policy.py /home/dev/codex-daemon-policy.py"
+        in dockerfile
+    )
+    assert (
+        'CODEX_DAEMON_POLICY_HELPER="${CODEX_DAEMON_POLICY_HELPER:-/home/dev/codex-daemon-policy.py}"'
+        in entrypoint
+    )
     assert 'LABEL djinn.workflow.publisher="1"' in dockerfile
     assert "opencode-workflow" + "-delivery.py" not in dockerfile
     assert "./config:/home/dev/.djinn-canonical:ro" in compose

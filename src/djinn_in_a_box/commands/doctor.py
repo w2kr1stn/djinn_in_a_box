@@ -11,6 +11,8 @@ it provisions later through compose workflow preparation instead.
 from __future__ import annotations
 
 import fnmatch
+import json
+import math
 import os
 import stat
 import subprocess
@@ -18,7 +20,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Final
+from typing import Annotated, Any, Final, cast
 
 import typer
 from rich.table import Table
@@ -28,6 +30,7 @@ from djinn_in_a_box.config.declarations import DeclarationSet
 from djinn_in_a_box.config.defaults import KNOWN_CONFIG_ROOT_ENTRIES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import (
+    ZONE_CONTAINER_TARGETS,
     ZoneAssignment,
     ZoneAssignments,
     load_zone_assignments,
@@ -90,6 +93,9 @@ CREDENTIAL_DIR_MODE = 0o700
 
 LARGE_NON_OVERLAYABLE_FILE_BYTES: Final = 10 * 1024 * 1024
 """Report individual config-zone files at least this large."""
+
+CODEX_DAEMON_SETTINGS_MAX_BYTES = 64 * 1024
+CODEX_DAEMON_SCAN_MAX_ENTRIES = 200_000
 
 
 def loose_credential_dirs(
@@ -353,6 +359,246 @@ def _skipped_default_detail(roots: ZoneRoots, assignment: ZoneAssignment) -> tup
     return f"{assignment.agent}/{assignment.relative_path} (blocked by {path})", path
 
 
+def _codex_daemon_tree_size(path: Path) -> tuple[int, int, Path | None, bool]:
+    """Return logical bytes, entry count, unreadable path, and scan-cap flag."""
+    pending = [path]
+    total = entries = 0
+    while pending:
+        if entries >= CODEX_DAEMON_SCAN_MAX_ENTRIES:
+            return total, entries, None, True
+        current = pending.pop()
+        try:
+            info = os.lstat(current)
+            entries += 1
+            total += info.st_size
+            if stat.S_ISDIR(info.st_mode):
+                with os.scandir(current) as children:
+                    for child in children:
+                        if entries + len(pending) >= CODEX_DAEMON_SCAN_MAX_ENTRIES:
+                            return total, entries, None, True
+                        pending.append(Path(child.path))
+        except OSError:
+            return total, entries, current, False
+    return total, entries, None, False
+
+
+def _codex_daemon_settings(path: Path) -> dict[str, Any]:
+    """Read bounded, strict JSON without following a settings symlink."""
+
+    def members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate member: {key}")
+            result[key] = value
+        return result
+
+    def finite_number(raw: str) -> float:
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("non-finite number")
+        return value
+
+    def reject_constant(raw: str) -> Any:
+        raise ValueError(f"invalid constant: {raw}")
+
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"not a regular file: {path}")
+    if info.st_size > CODEX_DAEMON_SETTINGS_MAX_BYTES:
+        raise ValueError(f"settings larger than 64 KiB: {path}")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        opened = os.fstat(source.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        raw = source.read(CODEX_DAEMON_SETTINGS_MAX_BYTES + 1)
+    if len(raw) > CODEX_DAEMON_SETTINGS_MAX_BYTES:
+        raise ValueError(f"settings larger than 64 KiB: {path}")
+    value = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=members,
+        parse_float=finite_number,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("settings must be an object")
+    if "updater" in value and not isinstance(value["updater"], dict):
+        raise ValueError("updater must be an object")
+    return cast("dict[str, Any]", value)
+
+
+def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list[Check]:
+    """Inspect only the assigned host-local daemon state; never invoke Codex."""
+    remedy = "Start the dev container to apply the policy."
+
+    def uninspected(detail: str, remedy: str) -> list[Check]:
+        return [
+            Check(
+                "Codex daemon updater",
+                Status.WARN,
+                escape_nonprintable(f"{detail}; remote control: unset"),
+                remedy,
+            ),
+            Check("Codex daemon releases", Status.WARN, escape_nonprintable(detail), remedy),
+        ]
+
+    local = assignments.by_agent["codex"]["local"]
+    for entry in ("packages", "app-server-daemon"):
+        if Path(entry) not in local:
+            return uninspected(
+                f"not inspected: {entry} overlay skipped",
+                'See the "Skipped shipped zone defaults" row.',
+            )
+
+    home = roots.local_root / "codex"
+    daemon = home / "app-server-daemon"
+    packages = home / "packages"
+    install = packages / "app-server-daemon"
+    releases = install / "releases"
+    admitted: set[Path] = set()
+    # Provisioning refuses a symlinked zone root, so the local root is admitted like its children.
+    for path in (roots.local_root, home, daemon, packages, install, releases):
+        if path != roots.local_root and path.parent not in admitted:
+            continue
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return uninspected(f"unreadable: {path}", "Review local daemon directory permissions.")
+        if not stat.S_ISDIR(info.st_mode):
+            kind = "symlink" if stat.S_ISLNK(info.st_mode) else "non-directory"
+            return uninspected(f"unexpected {kind} at {path}", "Review the local daemon layout.")
+        admitted.add(path)
+
+    current_name = "unset"
+    current_exists = False
+    current_raw: Path | None = None
+    release_problem = ""
+    if install in admitted:
+        current = install / "current"
+        try:
+            os.lstat(current)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            release_problem = f"unreadable: {current}"
+        else:
+            current_exists = True
+            try:
+                current_raw = Path(os.readlink(current))
+                current_name = current_raw.name
+            except OSError:
+                release_problem = f"unreadable: {current}"
+
+    release_names: list[str] = []
+    staging: list[str] = []
+    release_entries = 0
+    size = 0
+    if releases in admitted:
+        size, release_entries, unreadable, capped = _codex_daemon_tree_size(releases)
+        if unreadable is not None:
+            release_problem = f"unreadable: {unreadable}"
+        elif capped:
+            release_problem = "scan incomplete"
+        else:
+            try:
+                with os.scandir(releases) as children:
+                    for index, child in enumerate(children):
+                        if index >= CODEX_DAEMON_SCAN_MAX_ENTRIES:
+                            release_problem = "scan incomplete"
+                            break
+                        info = os.lstat(child.path)
+                        if child.name.startswith(".staging."):
+                            staging.append(child.name)
+                        elif stat.S_ISDIR(info.st_mode):
+                            release_names.append(child.name)
+            except OSError as exc:
+                release_problem = f"unreadable: {exc.filename or releases}"
+
+    if current_raw is not None and not release_problem:
+        # Same rule as the start-time helper: a direct `releases/<name>` child with a manifest.
+        selected = releases / current_name
+        try:
+            selected_ok = stat.S_ISDIR(os.lstat(selected).st_mode) and stat.S_ISREG(
+                os.lstat(selected / "codex-package.json").st_mode
+            )
+        except OSError:
+            selected_ok = False
+        # Relative links are `releases/<name>`; absolute ones name the container's own releases.
+        expected_parent = (
+            ZONE_CONTAINER_TARGETS["codex"] / "packages/app-server-daemon/releases"
+            if current_raw.is_absolute()
+            else Path("releases")
+        )
+        if ".." in current_raw.parts or current_raw.parent != expected_parent or not selected_ok:
+            release_problem = (
+                f"invalid current selection {current_raw}; start-time pruning is skipped"
+            )
+
+    managed = current_exists or bool(release_entries > 1) or bool(release_problem)
+    remote = "unset"
+    updater_status = Status.PASS
+    updater_detail = ""
+    value: dict[str, Any] | None = None
+    settings = daemon / "settings.json"
+    try:
+        value = _codex_daemon_settings(settings) if daemon in admitted else None
+    except FileNotFoundError:
+        value = None
+    except (OSError, ValueError, RecursionError) as exc:
+        updater_status = Status.WARN
+        updater_detail = f"invalid settings: {exc}"
+    if updater_status is Status.PASS:
+        if value is None:
+            updater_status = Status.WARN if managed else Status.PASS
+            updater_detail = (
+                "settings missing; the updater runs by default" if managed else "none installed"
+            )
+        else:
+            remote_value = value.get("remoteControlEnabled")
+            remote = "on" if remote_value is True else "off" if remote_value is False else "unset"
+            enabled = value.get("updater", {}).get("autoUpdateEnabled")
+            if enabled is False:
+                updater_detail = "updater.autoUpdateEnabled: false"
+            else:
+                updater_status = Status.WARN
+                updater_detail = (
+                    "updater.autoUpdateEnabled: true"
+                    if enabled is True
+                    else "updater.autoUpdateEnabled unset or invalid; the updater runs by default"
+                )
+    updater = Check(
+        "Codex daemon updater",
+        updater_status,
+        escape_nonprintable(f"{updater_detail}; remote control: {remote}"),
+        remedy if updater_status is Status.WARN else "",
+    )
+
+    count = len(release_names)
+    release_status = Status.WARN if release_problem or count > 1 else Status.PASS
+    if release_problem:
+        detail = release_problem
+    elif count > 1:
+        detail = f"{count} releases, {_format_size(size)}; pruning runs at dev-container start"
+    elif count == 1:
+        detail = f"{release_names[0]} ({_format_size(size)})"
+    else:
+        detail = "none installed"
+    detail += f"; current: {current_name}"
+    if staging:
+        detail += f"; staging: {', '.join(sorted(staging))}"
+    return [
+        updater,
+        Check(
+            "Codex daemon releases",
+            release_status,
+            escape_nonprintable(detail),
+            remedy if release_status is Status.WARN else "",
+        ),
+    ]
+
+
 def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> list[Check]:
     roots = resolve_zone_roots(config)
     checks: list[Check] = []
@@ -399,6 +645,7 @@ def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> 
             else "",
         )
     )
+    checks.extend(_codex_daemon_checks(roots, assignments))
     return checks
 
 

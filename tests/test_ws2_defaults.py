@@ -46,6 +46,15 @@ def test_compose_common_environment_forwards_terminal_ui_env() -> None:
     assert common_env["DJINN_TERM_WIDTH"] == "${DJINN_TERM_WIDTH:-}"
 
 
+def test_compose_dev_keeps_codex_sqlite_in_the_local_overlay() -> None:
+    compose_file = project_root() / "docker-compose.yml"
+    compose = yaml.safe_load(compose_file.read_text())
+
+    assert compose["services"]["dev"]["environment"]["CODEX_SQLITE_HOME"] == (
+        "/home/dev/.codex/sqlite"
+    )
+
+
 def test_app_config_default_timezone_is_utc(tmp_path: Path) -> None:
     assert AppConfig(code_dir=tmp_path).timezone == "UTC"
 

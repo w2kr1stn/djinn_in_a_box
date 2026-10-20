@@ -282,6 +282,9 @@ shell startup files or third-party tools outside the repository are outside this
 reservation boundary. Declared environment affects dev only. Declared mounts are also delivered to
 the agent daemon as workspace mounts; neither affects image builds or host execution. No declared string may contain NUL.
 
+`CODEX_HOME` and `CODEX_SQLITE_HOME` are reserved: Codex uses the mounted
+`~/.codex`, with SQLite directed to its per-host `sqlite/` overlay.
+
 `djinn config show` includes declarations, with `read_only=true` on read-only
 binds in text and an explicit boolean on every bind in JSON. `djinn config set`
 preserves effective modes, omits false `read_only`, rewrites the file and loses
@@ -425,6 +428,10 @@ template, endpoint declarations and optional plugins.
 
 ### Tool-Owned Runtime State
 
+Codex daemon settings have one managed runtime key: every dev-container start
+sets `updater.autoUpdateEnabled=false`, preserving other settings. See
+[Codex](#codex) for the startup policy and remote-control preference.
+
 Claude state, Claude personal settings and OpenCode personal settings are
 checkpointed every 30 s and at clean stop or `docker stop`, using atomic writes
 and exactly one JSON document for write-back. Changes older than about 30 s survive
@@ -543,6 +550,21 @@ provisioning. Run it before upgrading or restarting: `PASS` says
 `no overlap with host execution inputs`; `FAIL` lists every overlapping or
 uncheckable managed source and its remedy.
 
+Two read-only rows inspect Codex's local daemon state:
+
+- `Codex daemon updater`: PASS when `updater.autoUpdateEnabled` is `false`, or
+  neither a managed copy nor settings exist. WARN when enabled, when the key is
+  missing/invalid, when installed copies lack settings, or when settings are
+  malformed, over 64 KiB, or symlinked.
+  Remote-control state is informational and does not change the status.
+- `Codex daemon releases`: reports release count, size and current selection;
+  WARN for more than one release, an unreadable/incomplete scan, or a `current`
+  selection the start-time policy cannot use. Both rows WARN when a required
+  default overlay was skipped. Names from the Codex home are shown with control
+  characters escaped.
+
+Neither row has a fix action. The daemon policy runs at dev-container start.
+
 The filesystem-only `Post-mortem records` row works without valid config or a
 Docker daemon. It reports `PASS` with `none` or the kept count and latest record
 path; historical records do not signal a current failure. An unreadable or
@@ -598,6 +620,9 @@ Only `djinn init` and `djinn doctor --fix` copy missing seed targets from
 
 Existing targets are left alone when they already have the expected type. This
 means seed files are starting points, not managed config.
+
+The [Codex daemon policy](#codex) is separate from seeding: it reapplies the
+updater setting at every dev-container start.
 
 Bring your own native workflow in the root selected by `config_sync.source`.
 The seeded Claude `AGENTS.md`, `settings.json`, `mcp-servers.json`, and empty
@@ -685,6 +710,36 @@ djinn agents --verbose
 djinn agents --json
 ```
 
+### Codex
+
+By default, interactive `codex`, `codex resume` and `codex fork` start Codex's
+managed app-server daemon. `codex exec` and plain `codex app-server` (stdio) do
+not start that managed daemon.
+
+On every dev-container start, Djinn applies this policy in the mounted `~/.codex`:
+
+1. Set only `updater.autoUpdateEnabled=false` in
+   `app-server-daemon/settings.json`, creating it if absent and preserving all
+   other keys. A malformed or symlinked file is left untouched with a warning.
+2. If a selected daemon release differs from the image's Codex CLI version,
+   run `codex app-server daemon update --from-cli --yes` to select the image's
+   pinned Codex. Without a selected release, this step does nothing.
+3. Keep only the selected release under
+   `packages/app-server-daemon/releases/` once the selection is validated.
+   A measured release occupies about 410 MiB.
+
+Failures warn and container startup continues. Updates come from `djinn update`
+followed by `djinn build` and a new dev-container start; the daemon's automatic
+updater is disabled.
+
+The managed daemon's remote control is off by default upstream. Enabling it
+requires an explicit `codex app-server daemon enable-remote-control` and a
+ChatGPT login; Djinn preserves that preference. A log line saying
+`remote control websocket loop started … initial_desired_state=Disabled`
+does not mean a connection was established. Plugin discovery and model traffic
+can still contact vendor services with both updater and remote control off;
+see [the firewall allowlist](#what---firewall-allows).
+
 ### Agent Overrides
 
 The only automatically honored agent override path is:
@@ -719,6 +774,10 @@ value overrides `default_model` for that invocation.
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback checks the selected agent binary on `PATH` and applies workspace checks before launch. Claude, Codex, and OpenCode host fallback receives that agent's confirmed canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
+
+The [Codex daemon policy](#codex) runs on foreground and detached dev-container
+starts, not on one-shot `djinn run` or `compose run … <cmd>` invocations.
+Attaching with `enter` or `session` does not rerun the entrypoint.
 
 Without a running container, `djinn session` asks before publishing an
 unconfirmed or changed workflow to `~/.claude`, `~/.codex`, or
@@ -761,6 +820,10 @@ The firewall denies outbound traffic by default and permits a fixed domain list
 in `scripts/init-firewall.sh`: package registries including the Debian archive
 `deb.debian.org`, the three bundled CLIs' API and sign-in endpoints, GitHub, and
 the Docker networks. Every address a domain resolves to is permitted.
+
+`chatgpt.com`, used by Codex remote control and some plugin/model requests, is
+not on the list. Disabling Codex's updater and remote control does not disable other
+vendor traffic, and this mutable IP allowlist is no hard network boundary.
 
 A blocked connection is refused immediately rather than dropped, so a tool that
 hits the allowlist fails in about 0.2 seconds with "connection refused" instead
@@ -845,6 +908,24 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
+
+Codex's `sqlite` directory is a default local-zone overlay. Djinn sets
+`CODEX_SQLITE_HOME=/home/dev/.codex/sqlite`, so its SQLite stores (`state_*`,
+`logs_*`, `goals_*`, `memories_*`, `queue_*`, `thread_history_*`), their
+`-wal`/`-shm` files and `.sqlite-maintenance.lock` stay on each host rather than
+travel through the synchronized config root. An explicit `sqlite_home` in your
+Codex `config.toml` takes precedence.
+
+Session rollouts stay shared, so continuation on another machine works with
+`codex resume <id>` or `codex exec resume <id>`; the ID is in the rollout filename
+under `~/.codex/sessions/YYYY/MM/DD/`. An already populated local index can omit
+new sessions from the other machine in the resume picker and `--last`; session
+names also use the local index. Goals, queued messages, pins/projects/read state
+and remote-control enrollment are per machine. Memory extraction state is local
+while generated text in `memories/` stays shared. See
+[cross-machine behavior](docs/sync-across-machines.md#codex-sessions-and-local-state).
+
+Local-zone SQLite is outside the config-root backup.
 
 ### Git identities and SSH signing
 
@@ -1127,6 +1208,10 @@ By default, this backs up:
   the GitHub CLI, and the `age` encryption identity store
 - `repo-dotfiles`: the optional config-root `repo-dotfiles` directory if present
 - `data`: the OpenCode data, VS Code workspace, and `djinn-packages` named volumes
+
+Codex's local-zone SQLite stores are excluded, including durable goals, queued
+messages and preferences. Arrange a separate host-local backup if needed;
+the shared session rollouts do not restore all of this state.
 
 Post-mortem records under `~/.local/state/djinn/post-mortem/` are never part of
 a Djinn backup. Exclude `~/.local/state/djinn` from operator-managed backups and

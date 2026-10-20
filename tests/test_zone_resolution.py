@@ -91,6 +91,7 @@ def test_default_zones_match_the_frozen_assignment_table() -> None:
                 "app-server-control",
                 "thread-writer-locks",
                 "tui-thread-reference-capabilities",
+                "sqlite",
             ],
             "shared": ["sessions"],
         },
@@ -302,6 +303,8 @@ def test_host_provisioning_creates_every_overlay_and_nested_bind_target(
 
     roots = resolve_zone_roots(config)
     actual = set(roots.local_root.rglob("*")) | set(roots.shared_root.rglob("*"))
+    assert (roots.local_root / "codex/sqlite").is_dir()
+    assert (roots.config_root / "codex/sqlite").is_dir()
     assert actual == expected
     for directory in expected:
         metadata = directory.lstat()

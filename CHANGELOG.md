@@ -102,6 +102,14 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Keep Codex SQLite stores per host with
+  `CODEX_SQLITE_HOME=/home/dev/.codex/sqlite` and a new `sqlite` local-zone default.
+  Session-ID resume works across machines; picker/`--last` discovery and
+  goals, queued messages and preferences remain local. SQLite is excluded from
+  config-root backups; an explicit Codex `sqlite_home` still takes precedence
+  (#164).
+- Reserve `CODEX_HOME`, `CODEX_SQLITE_HOME` and the Codex daemon policy helper
+  override in environment declarations (#164).
 - Move dev and audit OpenCode installs to npm
   [`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
   (published 2026-10-08).
@@ -128,6 +136,14 @@ Versioning before and after the first stable release.
   isolated temporary OpenSSH configuration. `on` adds a check hint, and `status`
   ends with a passive summary of window time, sealing, relay peers and the next
   action (#130).
+- Best-effort `Codex daemon` policy on dev-container starts: disable only the
+  daemon updater, align selected releases with the image's pinned Codex CLI via
+  `update --from-cli --yes`, and prune old releases. Other settings, including
+  remote-control preference, are preserved; one-shot commands skip the policy
+  (#164).
+- Read-only `Codex daemon updater` and `Codex daemon releases` doctor rows,
+  showing updater/remote-control settings and release count, size and selection
+  without a fix action (#164).
 - Host-private post-mortem records before recovery removes unexpectedly stopped
   containers, plus hostctl teardown observations. Records keep bounded log tails
   and final state under `~/.local/state/djinn/post-mortem/` (last 10 / 8 MiB);
