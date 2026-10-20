@@ -304,13 +304,19 @@ def _password_location(path: Path) -> Path:
 
 
 def _excluded_root(root: Path) -> Path:
-    """Resolve where an excluded root really lies; only missing components stay lexical."""
+    """Resolve where an excluded root really lies; only missing components stay lexical.
+
+    A root the user cannot traverse (rootful Docker's data directory) counts at its lexical
+    location: the symlink-free password walk itself refuses a password beneath it.
+    """
     if not root.is_absolute():
         raise ServeError(
             "Could not determine an excluded password root: paths must be absolute; refusing."
         )
     try:
         return Path(os.path.realpath(root, strict=os.path.ALLOW_MISSING))
+    except PermissionError:
+        return Path(os.path.normpath("/" + str(root).lstrip("/")))
     except (OSError, ValueError) as exc:
         raise ServeError("Could not inspect an excluded password root; refusing.") from exc
 

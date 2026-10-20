@@ -178,7 +178,9 @@ refuses. Before creation or reading, Djinn checks every component
 of the password path without following symlinks and refuses locations inside the
 config root, zone sources, Djinn backups or any running-container bind source or
 volume host storage, including local-driver bind aliases, each taken at its
-resolved location. Symlinks in the password path and undeterminable
+resolved location. A root the user cannot traverse, such as rootful Docker's data
+directory, counts at its lexical location; a password beneath it already fails
+the path check. Symlinks in the password path and other undeterminable
 locations refuse. Staying outside synced trees and backups also
 requires keeping `XDG_STATE_HOME` host-local, outside other sync, indexing and
 backup tools. Delete it and run `djinn serve opencode` to

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
@@ -1656,7 +1657,8 @@ def test_password_uninspectable_component_refused(host, monkeypatch, exception):
         return real(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "lstat", refusing)
-    with pytest.raises(serve.ServeError, match="Could not inspect"):
+    # The untraversable-root exception never applies to the password path itself.
+    with pytest.raises(serve.ServeError, match="Could not inspect the password location"):
         serve.ensure_password(host.config, serve.detect_container())
     assert not path.exists()
 
@@ -1704,6 +1706,50 @@ def test_password_unresolvable_excluded_root_refused(host, tmp_path, kind):
         {"Type": "bind", "Source": f"{source}\0" if kind == "nul" else str(source)}
     ]
     with pytest.raises(serve.ServeError, match="Could not inspect an excluded password root"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()
+
+
+def _untraversable(monkeypatch, prefix, code=errno.EACCES):
+    # Rootful Docker's data directory is not traversable for the user: resolving it raises EACCES.
+    real = os.path.realpath
+
+    def realpath(path, *args, **kwargs):
+        if str(path).startswith(str(prefix)):
+            raise OSError(code, os.strerror(code), str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(serve.os.path, "realpath", realpath)
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM])
+@pytest.mark.parametrize("kind", ["volume", "bind"])
+def test_password_untraversable_root_counts_lexically(host, monkeypatch, tmp_path, kind, code):
+    data = tmp_path / "docker-data"
+    mount = {"Type": kind, "Source": str(data / "volumes/data/_data"), "Destination": "/data"}
+    if kind == "volume":
+        mount["Name"] = "data"
+        monkeypatch.setattr(serve, "volume_bind_source", lambda _mount: None)
+    host.inspect["Mounts"] = [mount]
+    _untraversable(monkeypatch, data, code)
+    assert len(serve.ensure_password(host.config, serve.detect_container())) >= 40
+
+
+@pytest.mark.parametrize("code", [errno.EIO, errno.ENOTDIR, errno.ENAMETOOLONG])
+def test_password_other_root_resolution_errors_refused(host, monkeypatch, tmp_path, code):
+    data = tmp_path / "docker-data"
+    host.inspect["Mounts"] = [{"Type": "bind", "Source": str(data), "Destination": "/data"}]
+    _untraversable(monkeypatch, data, code)
+    with pytest.raises(serve.ServeError, match="Could not inspect an excluded password root"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()
+
+
+def test_password_lexically_beneath_untraversable_root_refused(host, monkeypatch, tmp_path):
+    state = tmp_path / "state"
+    host.inspect["Mounts"] = [{"Type": "bind", "Source": str(state), "Destination": "/data"}]
+    _untraversable(monkeypatch, state)
+    with pytest.raises(serve.ServeError, match="inside a config, zone, backup"):
         serve.ensure_password(host.config, serve.detect_container())
     assert not serve.password_path().exists()
 
