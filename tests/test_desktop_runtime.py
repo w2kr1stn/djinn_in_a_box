@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -23,138 +22,6 @@ def write_json(path, data):
     with os.fdopen(fd, "w") as stream:
         stream.write(json.dumps(data))
     os.replace(temporary, path)
-
-
-@pytest.fixture
-def fake_owner(git_inputs, tmp_path, monkeypatch):
-    directory = tmp_path / "trusted"
-    directory.mkdir()
-    binary = directory / "docker"
-    objects = directory / "objects.json"
-    log = directory / "calls.jsonl"
-    write_json(objects, {})
-    settings = directory / "behavior.json"
-    write_json(settings, {})
-    records = post_mortem.records_root(create=False)
-    binary.write_text(f"""#!{sys.executable}
-import json, os, pathlib, sys, tempfile
-store = pathlib.Path({str(objects)!r})
-log = pathlib.Path({str(log)!r})
-settings = json.loads(pathlib.Path({str(settings)!r}).read_text())
-records = pathlib.Path({str(records)!r})
-
-def write_json(data):
-    fd, temporary = tempfile.mkstemp(dir=store.parent)
-    with os.fdopen(fd, 'w') as stream:
-        stream.write(json.dumps(data))
-    os.replace(temporary, store)
-
-args = sys.argv[1:]
-# Docker 29 daemon messages for missing objects; volumes use lower case.
-MISSING = {{
-    'container': 'No such container: %s',
-    'image': 'No such image: %s',
-    'volume': 'get %s: no such volume',
-}}
-try:
-    data = json.loads(store.read_text())
-    def lookup(name):
-        return next((key for key, obj in data.items()
-                     if key == name or obj.get('Id') == name), None)
-
-    mutating = args[0] in ('stop', 'start', 'rm', 'compose-down') or args[:2] == ['volume', 'rm']
-    if mutating:
-        documents = [json.loads(p.read_text()) for p in records.glob('*Z-*.json')]
-        if settings.get('record'):
-            expected = settings['record']
-            assert any(doc['trigger'] == expected['trigger']
-                       and doc['runtime_generation'] == expected['generation']
-                       and set(expected['ids']) == {{s['id'] for s in doc['subjects']}}
-                       for doc in documents), 'readable record missing before mutation'
-        if settings.get('no_record'):
-            assert not documents, 'unexpected record before mutation'
-        if settings.get('markers') and args[0] == 'rm':
-            assert json.loads((records / 'provenance.json').read_text()) == settings['markers']
-        failure = settings.get('failure', {{}})
-        if args == failure.get('argv'):
-            key = lookup(failure.get('target', args[-1]))
-            if 'running' in failure:
-                data[key]['State']['Running'] = failure['running']
-            if failure.get('new_started'):
-                data[key]['State']['StartedAt'] = failure['new_started']
-            if failure.get('unclear'):
-                data[key]['InspectionError'] = True
-            write_json(data)
-            print('operation refused', file=sys.stderr)
-            sys.exit(1)
-    if len(args) > 1 and args[1] == 'inspect':
-        name = lookup(args[2])
-        if name is None:
-            print('Error response from daemon: ' + MISSING[args[0]] % args[2], file=sys.stderr)
-            sys.exit(1)
-        if data[name].get('InspectionError'):
-            print('inspection unavailable', file=sys.stderr)
-            sys.exit(2)
-        if args[0] == 'container':
-            state = data[name].setdefault('State', {{}})
-            for key, value in {{'Running': False, 'Status': 'exited', 'ExitCode': 0,
-                               'OOMKilled': False, 'Error': '', 'StartedAt': 'run-a',
-                               'FinishedAt': 'finish-a'}}.items():
-                state.setdefault(key, value)
-        print(json.dumps([data[name]]))
-    elif args[0] == 'logs':
-        print('isolated container log')
-    elif args[0] == 'ps':
-        if '--filter' in args:
-            constraint = args[args.index('--filter') + 1]
-            if constraint.startswith('label='):
-                label, expected = constraint[6:].split('=', 1)
-                for obj in data.values():
-                    if obj.get('Config', {{}}).get('Labels', {{}}).get(label) == expected:
-                        if '-aq' in args or obj.get('State', {{}}).get('Running'):
-                            print(obj['Id'])
-    elif args[0] == 'compose-down':
-        data = {{k: v for k, v in data.items()
-                 if v.get('Config', {{}}).get('Labels', {{}}).get('com.docker.compose.project')
-                 != 'djinn-in-a-box'}}
-        write_json(data)
-    elif args[0] == 'rm' or args[:2] == ['volume', 'rm']:
-        for key in list(data):
-            if key == args[-1] or data[key].get('Id') == args[-1]:
-                data.pop(key, None)
-        write_json(data)
-    elif args[0] in ('stop', 'start'):
-        key = lookup(args[-1])
-        state = data[key].setdefault('State', {{}})
-        state['Running'] = args[0] == 'start'
-        state['Status'] = 'running' if state['Running'] else 'exited'
-        if state['Running']:
-            state['StartedAt'] = 'restart-' + str(len(log.read_text().splitlines()))
-        else:
-            state['FinishedAt'] = 'djinn-stop'
-
-        write_json(data)
-    else:
-        sys.exit(2)
-finally:
-    with log.open('a') as stream:
-        stream.write(json.dumps(args) + '\\n')
-""")
-    binary.chmod(0o700)
-    monkeypatch.setattr(host_runtime, "DOCKER_EXECUTABLE", str(binary))
-    monkeypatch.setattr(docker, "DOCKER_EXECUTABLE", str(binary))
-    monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", str(binary))
-    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
-    try:
-        yield git_inputs, binary, objects, log
-    finally:
-        metadata = host_runtime.runtime_root() / "state.json"
-        if metadata.exists():
-            state = json.loads(metadata.read_text())
-            if state.get("observer_pid", -1) > 0:
-                host_runtime.stop_owned_process(state["observer_pid"], state["observer_token"])
-            if state.get("agent_pid", -1) > 0:
-                host_runtime.stop_owned_process(state["agent_pid"], state["agent_token"])
 
 
 def wait_for(predicate):
@@ -240,7 +107,7 @@ def test_observer_desktop_stop_start_remove_and_pinned_path(fake_owner, monkeypa
         assert not marker.exists()
 
 
-@pytest.mark.parametrize("creator", ["foreground", "headless", "detached", "clean"])
+@pytest.mark.parametrize("creator", ["foreground", "detached", "clean"])
 def test_empty_identity_pending_guard_refuses_every_path(fake_owner, creator, monkeypatch):
     config, binary, objects, log = fake_owner
     config = config.model_copy(update={"git": GitConfig()})
@@ -1300,7 +1167,7 @@ def test_clean_discovery_is_bounded_and_captured(clean_owner, monkeypatch):
     discoveries = []
 
     def run(argv, **kwargs):
-        if argv[1] == "ps" and "-aq" in argv:
+        if argv[1] == "ps" and "-aq" in argv and argv.count("--filter") == 1:
             assert kwargs["stdin"] is subprocess.DEVNULL
             assert kwargs["timeout"] == 5
             assert kwargs["capture_output"] is True and kwargs["text"] is True
@@ -1503,7 +1370,7 @@ def test_clean_discovery_failure_falls_back(clean_owner, monkeypatch, capsys, fa
     candidates = []
 
     def failed_discovery(argv, **kwargs):
-        if argv[1] == "ps" and "--no-trunc" in argv:
+        if argv[1] == "ps" and "--no-trunc" in argv and argv.count("--filter") == 1:
             if fault == "exception":
                 raise OSError("private-discovery-exception")
             return docker.RunResult(fault, stderr="private-discovery-stderr")
@@ -1539,7 +1406,7 @@ def test_clean_discovery_fallback_requires_project_label(clean_owner, monkeypatc
     run = docker._run_captured
 
     def failed_discovery(argv, **kwargs):
-        if argv[1] == "ps" and "--no-trunc" in argv:
+        if argv[1] == "ps" and "--no-trunc" in argv and argv.count("--filter") == 1:
             return docker.RunResult(124)
         return run(argv, **kwargs)
 

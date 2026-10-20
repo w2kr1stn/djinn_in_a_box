@@ -1,9 +1,11 @@
 """Pytest configuration and fixtures for Djinn in a Box tests."""
 
 import errno
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -175,7 +177,7 @@ def _isolate_legacy_compose_subprocess_tests(request, monkeypatch, tmp_path):
     """Legacy Compose tests mock Docker. Dedicated Git tests exercise the real lifecycle."""
     dedicated = {"test_git_runtime", "test_desktop", "test_desktop_runtime", "test_desktop_live",
                  "test_hostctl", "test_hostctl_observer", "test_hostctl_doctor",
-                 "test_agent_docker", "test_agent_docker_p2", "test_post_mortem"}
+                 "test_agent_docker", "test_agent_docker_p2", "test_post_mortem", "test_guest_run"}
     if request.module.__name__.split(".")[-1] in dedicated:
         return
     from djinn_in_a_box.core import docker
@@ -399,3 +401,207 @@ def _isolate_post_mortem_records(monkeypatch, tmp_path, _post_mortem_real_direct
 
     monkeypatch.setattr(post_mortem, "records_root", isolated)
     return original
+
+
+@pytest.fixture
+def fake_owner(git_inputs, tmp_path, monkeypatch):
+    from djinn_in_a_box.core import docker, host_runtime, hostctl, post_mortem
+
+    directory = tmp_path / "trusted"
+    directory.mkdir()
+    binary = directory / "docker"
+    objects = directory / "objects.json"
+    log = directory / "calls.jsonl"
+    objects.write_text(json.dumps({}))
+    settings = directory / "behavior.json"
+    settings.write_text(json.dumps({}))
+    records = post_mortem.records_root(create=False)
+    binary.write_text(f"""#!{sys.executable}
+import json, os, pathlib, sys, tempfile
+store = pathlib.Path({str(objects)!r})
+log = pathlib.Path({str(log)!r})
+settings = json.loads(pathlib.Path({str(settings)!r}).read_text())
+records = pathlib.Path({str(records)!r})
+
+def write_json(data):
+    fd, temporary = tempfile.mkstemp(dir=store.parent)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(json.dumps(data))
+    os.replace(temporary, store)
+
+args = sys.argv[1:]
+logged = False
+# Docker 29 daemon messages for missing objects; volumes use lower case.
+MISSING = {{
+    'container': 'No such container: %s',
+    'image': 'No such image: %s',
+    'volume': 'get %s: no such volume',
+    'network': 'network %s not found',
+}}
+try:
+    data = json.loads(store.read_text())
+    def lookup(name):
+        return next((key for key, obj in data.items()
+                     if key == name or obj.get('Id') == name), None)
+
+    mutating = args[0] in ('stop', 'start', 'rm', 'compose-down') or args[:2] == ['volume', 'rm']
+    if mutating:
+        documents = [json.loads(p.read_text()) for p in records.glob('*Z-*.json')]
+        if settings.get('record'):
+            expected = settings['record']
+            assert any(doc['trigger'] == expected['trigger']
+                       and doc['runtime_generation'] == expected['generation']
+                       and set(expected['ids']) == {{s['id'] for s in doc['subjects']}}
+                       for doc in documents), 'readable record missing before mutation'
+        if settings.get('no_record'):
+            assert not documents, 'unexpected record before mutation'
+        if settings.get('markers') and args[0] == 'rm':
+            assert json.loads((records / 'provenance.json').read_text()) == settings['markers']
+        failure = settings.get('failure', {{}})
+        if args == failure.get('argv'):
+            key = lookup(failure.get('target', args[-1]))
+            if 'running' in failure:
+                data[key]['State']['Running'] = failure['running']
+            if failure.get('new_started'):
+                data[key]['State']['StartedAt'] = failure['new_started']
+            if failure.get('unclear'):
+                data[key]['InspectionError'] = True
+            write_json(data)
+            print('operation refused', file=sys.stderr)
+            sys.exit(1)
+    message = settings.get('errors', {{}}).get(' '.join(args))
+    if message:
+        print(message, file=sys.stderr)
+        sys.exit(1)
+    if args[0] == 'stop' and settings.get('stop_timeout'):
+        os.execlp('sleep', 'sleep', '60')
+    if args[0] == 'info':
+        print(json.dumps({{'DockerRootDir': str(store.parent / 'docker-data')}}))
+    elif args[0] == 'compose' and 'config' in args:
+        print(json.dumps(settings.get('compose_config', {{
+            'services': {{'dev': {{'networks': {{'default': None}}, 'volumes': []}}}},
+            'networks': {{'default': {{'name': 'djinn-in-a-box_default'}}}},
+        }})))
+        sys.exit(settings.get('config_rc', 0))
+    elif args[0] == 'compose' and 'run' in args:
+        name = args[args.index('--name') + 1]
+        run_id = args[args.index('-l') + 1].split('=', 1)[1]
+        if not settings.get('run_absent'):
+            data[name] = settings.get('run_replace', {{
+                'Id': 'guest-' + run_id, 'Name': '/' + name,
+                'Config': {{'Labels': {{'djinn.run': run_id,
+                    'com.docker.compose.project': 'djinn-in-a-box',
+                    'com.docker.compose.service': 'dev', 'com.docker.compose.oneoff': 'True'}}}},
+                'State': {{'Running': True}},
+            }})
+            write_json(data)
+        (store.parent / 'ready').write_text(name)
+        if settings.get('run_hang'):
+            with log.open('a') as stream:
+                stream.write(json.dumps(args) + '\\n')
+            logged = True
+            os.execlp('sleep', 'sleep', '60')
+        print('guest output')
+        print('guest diagnostic', file=sys.stderr)
+        sys.exit(settings.get('run_rc', 0))
+    elif len(args) > 1 and args[1] == 'inspect':
+        name = lookup(args[2])
+        if name is None:
+            print('Error response from daemon: ' + MISSING[args[0]] % args[2], file=sys.stderr)
+            sys.exit(1)
+        if (settings.get('post_stop_error')
+            and data[name].get('State', {{}}).get('Running') is False):
+            print(settings['post_stop_error'], file=sys.stderr)
+            sys.exit(1)
+        if data[name].get('InspectionError'):
+            print('inspection unavailable', file=sys.stderr)
+            sys.exit(2)
+        if args[0] == 'container':
+            state = data[name].setdefault('State', {{}})
+            for key, value in {{'Running': False, 'Status': 'exited', 'ExitCode': 0,
+                               'OOMKilled': False, 'Error': '', 'StartedAt': 'run-a',
+                               'FinishedAt': 'finish-a'}}.items():
+                state.setdefault(key, value)
+        print(json.dumps([data[name]]))
+    elif args[0] == 'logs':
+        print('isolated container log')
+    elif args[0] == 'ps':
+        constraints = [args[i + 1][6:].partition('=')
+                       for i, arg in enumerate(args) if arg == '--filter']
+        for obj in data.values():
+            labels = obj.get('Config', {{}}).get('Labels', {{}})
+            if (all(label in labels and (not equal or labels[label] == expected)
+                    for label, equal, expected in constraints)
+                and ('-aq' in args or obj.get('State', {{}}).get('Running'))):
+                print(obj['Id'])
+    elif args[0] == 'compose-down':
+        data = {{k: v for k, v in data.items()
+                 if v.get('Config', {{}}).get('Labels', {{}}).get('com.docker.compose.project')
+                 != 'djinn-in-a-box'}}
+        write_json(data)
+    elif args[0] == 'rm' or args[:2] in (['volume', 'rm'], ['network', 'rm']):
+        for key in list(data):
+            if key == args[-1] or data[key].get('Id') == args[-1]:
+                data.pop(key, None)
+        write_json(data)
+    elif args[0] in ('stop', 'start'):
+        key = lookup(args[-1])
+        state = data[key].setdefault('State', {{}})
+        state['Running'] = args[0] == 'start'
+        state['Status'] = 'running' if state['Running'] else 'exited'
+        if state['Running']:
+            state['StartedAt'] = 'restart-' + str(len(log.read_text().splitlines()))
+        else:
+            state['FinishedAt'] = 'djinn-stop'
+
+        write_json(data)
+    else:
+        sys.exit(2)
+finally:
+    if not logged:
+        with log.open('a') as stream:
+            stream.write(json.dumps(args) + '\\n')
+""")
+    binary.chmod(0o700)
+    monkeypatch.setattr(host_runtime, "DOCKER_EXECUTABLE", str(binary))
+    monkeypatch.setattr(docker, "DOCKER_EXECUTABLE", str(binary))
+    monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", str(binary))
+    monkeypatch.setattr(host_runtime, "CONTAINER_USER_UID", os.getuid())
+    try:
+        yield git_inputs, binary, objects, log
+    finally:
+        metadata = host_runtime.runtime_root() / "state.json"
+        if metadata.exists():
+            state = json.loads(metadata.read_text())
+            if state.get("observer_pid", -1) > 0:
+                host_runtime.stop_owned_process(state["observer_pid"], state["observer_token"])
+            if state.get("agent_pid", -1) > 0:
+                host_runtime.stop_owned_process(state["agent_pid"], state["agent_token"])
+
+
+@pytest.fixture
+def legacy_guest_inputs(monkeypatch):
+    """Keep mount/argv unit tests focused; dedicated guest tests exercise real preflight."""
+    from djinn_in_a_box.core import docker
+
+    monkeypatch.setattr(docker, "_run_preflight", lambda *args: {})
+
+
+@pytest.fixture
+def compose_yaml_loader():
+    """Compose supports precisely these two local merge tags, never arbitrary YAML tags."""
+    import yaml
+
+    class ComposeLoader(yaml.SafeLoader):
+        pass
+
+    def merge_value(loader, node):
+        if isinstance(node, yaml.SequenceNode):
+            return loader.construct_sequence(node)
+        if isinstance(node, yaml.MappingNode):
+            return loader.construct_mapping(node)
+        return loader.construct_scalar(node)
+
+    for tag in ("!override", "!reset"):
+        ComposeLoader.add_constructor(tag, merge_value)
+    return ComposeLoader

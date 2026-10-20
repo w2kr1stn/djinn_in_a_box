@@ -38,6 +38,9 @@ from djinn_in_a_box.core.exceptions import MountSpecificationError, SopsAgeKeyFi
 _EXPECTED_ENV = f"SOPS_AGE_KEY_FILE={SOPS_AGE_KEY_TARGET}"
 
 
+pytestmark = pytest.mark.usefixtures("legacy_guest_inputs")
+
+
 @pytest.fixture
 def key_file(tmp_path: Path) -> Path:
     path = tmp_path / "machine-bound" / "keys.txt"

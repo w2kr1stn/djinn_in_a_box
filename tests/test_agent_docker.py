@@ -14,16 +14,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from test_desktop_runtime import calls, dev, write_json
-from test_desktop_runtime import fake_owner as daemon_owner_fixture
 
 from djinn_in_a_box.config.defaults import volume_categories
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import agent_docker, docker, host_runtime
 from djinn_in_a_box.core.exceptions import DeclarationSpecificationError
 from djinn_in_a_box.core.host_runtime import GitRuntime
-
-# Reuse the isolated daemon/observer fixture without duplicating a fake executable.
-fake_owner = daemon_owner_fixture
 
 
 @pytest.fixture
@@ -175,7 +171,7 @@ def test_profile_refuses_untrusted_delivery(evidence, section, key, value):
         docker.require_agent_profile(actual, manifest)
 
 
-@pytest.mark.parametrize("creator", ["foreground", "headless", "detached"])
+@pytest.mark.parametrize("creator", ["foreground", "detached"])
 @pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])
 def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, read_only):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -260,7 +256,7 @@ def test_selector_override_refused_before_generation(tmp_path, monkeypatch, key)
             AppConfig(code_dir=tmp_path),
             docker.ContainerOptions(docker_mode=docker.DockerMode.AGENT),
             env={key: "foreign"},
-            interactive=False,
+            interactive=True,
         )
 
 
@@ -777,7 +773,7 @@ def test_firewall_initializer_provenance_and_partial_cleanup(tmp_path, monkeypat
     assert bool(inventory) == (failure == "foreign")
 
 
-@pytest.mark.parametrize("creator", ["foreground", "headless", "detached"])
+@pytest.mark.parametrize("creator", ["foreground", "detached"])
 def test_observer_death_after_preparation_never_admits_dev(tmp_path, monkeypatch, creator):
     @contextmanager
     def owner(*args):

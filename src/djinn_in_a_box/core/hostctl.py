@@ -11,7 +11,6 @@ import pwd
 import re
 import secrets
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -30,6 +29,7 @@ from djinn_in_a_box.config.ssh import HostctlConfig, HostctlHost, duration_minut
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
 from djinn_in_a_box.core import post_mortem
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+from djinn_in_a_box.core.signals import signals_as_interrupt as _signals_as_interrupt
 
 if TYPE_CHECKING:
     from djinn_in_a_box.core.docker import RunResult
@@ -835,26 +835,6 @@ CHECK_INCOMPLETE = "hostctl check state is incomplete; run djinn doctor"
 def _stdio_is_terminal() -> bool:
     """Both streams the owner needs for the approval prompt; stdout may be redirected."""
     return sys.stdin.isatty() and sys.stderr.isatty()
-
-
-@contextlib.contextmanager
-def _signals_as_interrupt() -> Iterator[None]:
-    """Treat SIGTERM/SIGHUP like Ctrl-C so cleanup runs; handlers are restored afterwards."""
-
-    def interrupt(signum: int, frame: Any) -> None:
-        raise KeyboardInterrupt
-
-    previous: dict[int, Any] = {}
-    try:
-        for number in (signal.SIGTERM, signal.SIGHUP):
-            previous[number] = signal.signal(number, interrupt)
-    except ValueError:  # not the main thread: nothing to convert
-        pass
-    try:
-        yield
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler if handler is not None else signal.SIG_DFL)
 
 
 def _live_helper() -> tuple[str, str]:

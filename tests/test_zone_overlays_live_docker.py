@@ -118,7 +118,8 @@ def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
         def project_root() -> Path:
             return project
 
-        def compose_files(_mode: DockerMode) -> list[str]:
+        def compose_files(_mode: DockerMode, *, guest: bool = False) -> list[str]:
+            assert not guest  # This fixture deliberately exercises a non-dev service.
             return ["--project-name", project_name, "-f", str(compose_file)]
 
         monkeypatch.setattr(docker_mod, "get_project_root", project_root)

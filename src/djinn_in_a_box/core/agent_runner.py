@@ -8,13 +8,11 @@ from collections.abc import Callable
 from djinn_in_a_box.config.loader import load_agents, load_config
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.docker import (
-    DJINN_NETWORK,
     ContainerMount,
     ContainerOptions,
     DockerMode,
     RunResult,
     compose_run,
-    ensure_network,
 )
 
 
@@ -25,14 +23,6 @@ class UnknownAgentError(ValueError):
         self.agent = agent
         self.available = available
         super().__init__(f"Unknown agent: {agent}")
-
-
-class AgentNetworkError(RuntimeError):
-    """Raised when the shared Docker network cannot be prepared."""
-
-    def __init__(self, network: str = DJINN_NETWORK) -> None:
-        self.network = network
-        super().__init__(f"Failed to create Docker network '{network}'")
 
 
 def build_agent_command(
@@ -80,9 +70,6 @@ def run_headless_agent(
         agent_config = agent_configs[agent]
     except KeyError:
         raise UnknownAgentError(agent, tuple(sorted(agent_configs))) from None
-
-    if not ensure_network():
-        raise AgentNetworkError
 
     if on_ready is not None:
         on_ready(resolved_mounts)

@@ -6,7 +6,7 @@ import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
@@ -467,7 +467,6 @@ class TestRunCommand:
                 "djinn_in_a_box.commands.agent.workflow_image_compatible",
                 return_value=WorkflowImageCompatibility.COMPATIBLE,
             ),
-            patch("djinn_in_a_box.core.agent_runner.ensure_network", return_value=True),
             patch(
                 "djinn_in_a_box.core.agent_runner.load_agents",
                 return_value={"claude": claude_config},
@@ -612,14 +611,54 @@ class TestRunCommand:
 
         assert run_mocks["run"].call_args.kwargs["timeout"] == 300
 
-    def test_run_with_docker_flag(self, run_mocks: dict[str, Any]) -> None:
-        """Test run --docker enables docker option."""
+    def test_run_with_docker_flag(self, run_mocks: dict[str, Any], capsys) -> None:
+        """Refusal happens before config, workflow or runner work."""
         from djinn_in_a_box.commands.agent import run
 
-        with pytest.raises(typer.Exit):
+        with pytest.raises(typer.Exit) as caught:
             run(agent="claude", prompt="test", docker=True)
+        assert caught.value.exit_code == 1
+        run_mocks["run"].assert_not_called()
+        output = capsys.readouterr().err
+        assert "djinn run cannot use --docker:" in output
+        assert "--docker-direct (host Docker authority)" in output
 
-        assert run_mocks["run"].call_args.kwargs["docker_mode"] is DockerMode.AGENT
+    def test_docker_refusal_precedes_all_preparation(self, monkeypatch) -> None:
+        from djinn_in_a_box.commands import agent
+
+        for name in ("load_config", "prepare_config_workflow", "run_headless_agent"):
+            monkeypatch.setattr(agent, name, MagicMock(side_effect=AssertionError(name)))
+        result = CliRunner().invoke(app, ["run", "codex", "inspect", "--docker"])
+        assert result.exit_code == 1
+        expected = (
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        )
+        assert expected in result.output
+        for name in ("load_config", "prepare_config_workflow", "run_headless_agent"):
+            getattr(agent, name).assert_not_called()
+
+    def test_run_refusal_escapes_markup(self, run_mocks, capsys) -> None:
+        from djinn_in_a_box.commands.agent import run
+        from djinn_in_a_box.core.docker import RunRefusedError
+
+        run_mocks["run"].side_effect = RunRefusedError("cannot verify [bold]source[/bold]")
+        with pytest.raises(typer.Exit) as caught:
+            run(agent="claude", prompt="inspect")
+        assert caught.value.exit_code == 1
+        assert "cannot verify [bold]source[/bold]" in capsys.readouterr().err
+
+    def test_run_help_has_no_docker_example(self) -> None:
+        result = CliRunner().invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "Refused for runs" in result.output
+        assert '"Build the Docker image" --docker' not in result.output
+        from djinn_in_a_box.commands.agent import run
+
+        for line in (run.__doc__ or "").splitlines():
+            if "djinn run" in line:
+                assert not re.search(r"--docker(?!-)", line)
 
     def test_run_with_docker_direct_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker-direct delegates the direct Docker mode."""
@@ -644,3 +683,12 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
         mock_run.assert_not_called()
+
+
+def test_run_status_has_no_agent_docker_branch():
+    from djinn_in_a_box.commands.agent import _show_run_status
+
+    with patch("djinn_in_a_box.commands.agent.status_line") as status:
+        _show_run_status("codex", (), write=False, json_output=False,
+                         docker_mode=DockerMode.AGENT, firewall=False, timeout=None)
+    assert not any(call.args[0] == "Docker" for call in status.call_args_list)

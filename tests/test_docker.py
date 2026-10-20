@@ -63,6 +63,8 @@ from djinn_in_a_box.core.docker import (
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 
+pytestmark = pytest.mark.usefixtures("legacy_guest_inputs")
+
 
 def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
     return []
@@ -3407,7 +3409,7 @@ def test_generated_overrides_match_real_creation(
         assert generated_overrides(["-f", str(path)], prefix) == [path]
 
 
-def test_compose_reservations_match(tmp_path, monkeypatch):
+def test_compose_reservations_match(tmp_path, monkeypatch, compose_yaml_loader):
     import socket
 
     import yaml
@@ -3419,7 +3421,10 @@ def test_compose_reservations_match(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
     keys, names = set(), set()
     for path in root.glob("docker-compose*.yml"):
-        data = yaml.safe_load(path.read_text())
+        data = yaml.load(path.read_text(), Loader=compose_yaml_loader)
+        if path.name == "docker-compose.run.yml":
+            assert set(data) == {"services"}
+            assert data["services"] == {"dev": {"networks": ["default"]}}
         for service in data["services"].values():
             environment = service.get("environment", {})
             keys.update(

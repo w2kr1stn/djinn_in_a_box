@@ -181,7 +181,7 @@ def test_network_failure_prevents_helper(inputs, fake_transitions, monkeypatch, 
     assert not any(c[0] == "run" for c in fake_transitions["calls"])
 
 
-def test_packaging_and_volume_producer_registry(inputs):
+def test_packaging_and_volume_producer_registry(inputs, compose_yaml_loader):
     import yaml
 
     from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
@@ -197,7 +197,10 @@ def test_packaging_and_volume_producer_registry(inputs):
     root = Path(__file__).parents[1]
     compose_names = set()
     for path in root.glob("docker-compose*.yml"):
-        compose = yaml.safe_load(path.read_text())
+        compose = yaml.load(path.read_text(), Loader=compose_yaml_loader)
+        if path.name == "docker-compose.run.yml":
+            assert set(compose) == {"services"}
+            assert compose["services"] == {"dev": {"networks": ["default"]}}
         compose_names.update(value["name"] for value in (compose.get("volumes") or {}).values())
     category_names = {name for names in VOLUME_CATEGORIES.values() for name in names}
     helper_names = {
@@ -1104,3 +1107,14 @@ def test_hostctl_stopped_helper_never_stops_on_removal(postmortem_helper, monkey
     assert json.loads(store.read_text()) is None
     assert not any(json.loads(line)[1][0] == "stop" for line in call_log.read_text().splitlines())
     assert not (root / "provenance.json").exists()
+
+
+def test_compose_loader_only_accepts_merge_tags(compose_yaml_loader):
+    import yaml
+
+    assert yaml.load("value: !override [default]", Loader=compose_yaml_loader) == {
+        "value": ["default"],
+    }
+    assert yaml.load("value: !reset []", Loader=compose_yaml_loader) == {"value": []}
+    with pytest.raises(yaml.constructor.ConstructorError):
+        yaml.load("value: !unknown []", Loader=compose_yaml_loader)

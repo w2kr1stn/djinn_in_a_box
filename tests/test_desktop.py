@@ -284,7 +284,7 @@ def test_caller_cannot_override_endpoint(creator, key, tmp_path, monkeypatch):
             )
 
 
-@pytest.mark.parametrize("creator", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("creator", ["interactive", "detached"])
 @pytest.mark.parametrize(
     "outcome",
     [

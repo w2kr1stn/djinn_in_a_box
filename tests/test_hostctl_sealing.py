@@ -687,7 +687,7 @@ def test_doctor_each_address_and_cause_no_helper_start(tmp_path, monkeypatch, st
         assert "100.64.0.1" in rows[2].name and "fd7a:" in rows[3].name
 
 
-@pytest.mark.parametrize("mode", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("mode", ["interactive", "detached"])
 def test_every_creator_guards_before_launch(tmp_path, monkeypatch, mode):
     config = AppConfig(code_dir=tmp_path)
     calls = []

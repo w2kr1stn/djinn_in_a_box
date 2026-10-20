@@ -13,7 +13,6 @@ from rich.table import Table
 from djinn_in_a_box.config.loader import load_agents, load_config
 from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.agent_runner import (
-    AgentNetworkError,
     UnknownAgentError,
     run_headless_agent,
 )
@@ -37,6 +36,7 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     DockerMode,
     MountCollisionError,
+    RunRefusedError,
     get_config_root,
     resolve_container_mounts,
     resolve_docker_mode,
@@ -99,9 +99,7 @@ def _show_run_status(
     else:
         status_line("Mode", "Read-only (plan/analysis)", "status.enabled")
 
-    if docker_mode is DockerMode.AGENT:
-        status_line("Docker", "Enabled (agent daemon)")
-    elif docker_mode is DockerMode.DIRECT:
+    if docker_mode is DockerMode.DIRECT:
         status_line("Docker", "Enabled (DIRECT)", "warning")
     if firewall:
         status_line("Firewall", "Enabled")
@@ -137,7 +135,10 @@ def run(
     ] = None,
     docker: Annotated[
         bool,
-        typer.Option("--docker", "-d", help="Enable rootless agent Docker daemon"),
+        typer.Option(
+            "--docker", "-d",
+            help="Refused for runs; the rootless agent Docker daemon belongs to the dev",
+        ),
     ] = False,
     docker_direct: Annotated[
         bool,
@@ -184,8 +185,8 @@ def run(
         # Use a specific model with JSON output
         djinn run claude "Refactor this file" --write --model sonnet --json
 
-        # With Docker access and timeout
-        djinn run claude "Build the Docker image" --docker --timeout 300
+        # With a timeout
+        djinn run claude "Review the build setup" --timeout 300
 
         # Mount the current directory and two additional directories
         djinn run claude "Compare these projects" --here \\
@@ -196,6 +197,14 @@ def run(
     except ValueError as e:
         error(str(e))
         raise typer.Exit(1) from None
+
+    if docker_mode is DockerMode.AGENT:
+        error(
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        )
+        raise typer.Exit(1)
 
     checked_config = None
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
@@ -259,8 +268,8 @@ def run(
         error(str(e))
         console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
-    except AgentNetworkError as e:
-        error(str(e))
+    except RunRefusedError as e:
+        error(escape(str(e)))
         raise typer.Exit(1) from None
     except RuntimeMountSpecificationError as e:
         error(f"Internal runtime mount construction failed: {e}")
