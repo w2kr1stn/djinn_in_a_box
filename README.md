@@ -255,6 +255,19 @@ a PATH entry below a directory the user cannot traverse) makes the inputs
 undeterminable, so all affected writable binds are refused. Set `read_only = true`
 or remove an affected bind.
 `djinn doctor` reports affected `[mounts.*]` entries as FAIL rows.
+
+Managed writable binds whose host paths the configuration selects use the same
+check: the workspace root (also delivered to the agent-Docker companion), the
+config-root tool directories (`claude`, `codex`, `opencode`, `gh`, `age`), assigned
+shared/local zone overlay sources, and `~/.djinn/sessions`. `djinn start` and
+`djinn run` refuse an overlap immediately after loading the config, before host
+provisioning, in every Docker mode. They also refuse when the execution inputs
+or a source cannot be determined. Move the overlapping installation, Python
+environment, `PATH` directory or Docker plugins/config out of that root, or choose
+another `general.code_dir`, `general.config_root` (or `DJINN_CONFIG_ROOT`),
+`general.shared_root` or `general.local_root`. For sessions, move the input out
+of `~/.djinn/sessions`.
+
 This point-in-time check pins no inode: source pathnames and their ancestors must
 stay stable and outside any agent's rename authority (including through another
 writable bind of a parent directory) until Docker has bound them.
@@ -523,6 +536,11 @@ endpoint (none, verified agent, host-direct or unknown), companion identity,
 health and cache storage. Unused companion rows say "not in use"; stale/orphan
 resources are listed separately. These checks use bounded, read-only host
 inspection and never start or repair a daemon. Doctor never starts helpers.
+
+The `Managed bind sources` row applies the same creation-time check without
+provisioning. Run it before upgrading or restarting: `PASS` says
+`no overlap with host execution inputs`; `FAIL` lists every overlapping or
+uncheckable managed source and its remedy.
 
 The filesystem-only `Post-mortem records` row works without valid config or a
 Docker daemon. It reports `PASS` with `none` or the kept count and latest record
@@ -804,6 +822,7 @@ workflow and cache targets; built-ins with a config value for the workspace,
 config root, SOPS key file and OMP theme; and declared additional mounts and
 environment variables. Use the existing config keys to configure the second
 layer; declarations extend the set and keep the tracked Compose files unchanged.
+See [Configuration](#configuration) for the managed writable source restriction.
 
 Bind mounts are host paths that you can inspect and manage directly:
 
@@ -902,6 +921,8 @@ directory is `/home/dev/workspace` with `--here`, otherwise the first mount targ
 `djinn start` without mounts passes no `--workdir`, so the Compose service default
 `working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` applies: `/home/dev/projects`
 in projects mode or `/home/dev/aios` in aios mode.
+The managed-source check in [Configuration](#configuration) also applies without
+`--mount` or `--here`.
 At creation, a writable `--mount`, `--here`, or `djinn run`'s implicit `--here`
 is refused if its source overlaps a host execution input. For `--mount`, append
 `:ro` or remove it. For `--here`, start from a directory outside the input or use

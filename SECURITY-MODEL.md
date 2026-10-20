@@ -118,9 +118,12 @@ config roots and the `config/claude` and `config/opencode` seeds. The workflow
 publisher and config sync anchor every access there to an opened root directory
 and follow no symlink at or below it. A symlinked or non-directory path component
 is refused as a collision, and links, FIFOs, sockets and devices are never opened
-for I/O. Ancestors of these roots are trusted; placing the project or config root
-inside a writable mount such as the workspace is outside this guarantee. The
-publisher contains its own I/O; it does not protect a dev-writable tree from dev.
+for I/O. Ancestors of these roots are trusted. A workspace or other managed root
+that contains the installation is refused at creation, because the installation
+is a host execution input ([creation-time rule](#sealed-deployments-and-trusted-controller));
+placing a config root inside a writable mount such as the workspace remains
+outside this guarantee. The publisher contains its own I/O; it does not protect a
+dev-writable tree from dev.
 Host creates, chmods and deletes below the config, shared and local zone roots,
 sessions root and Claude seed root use the same opened-root anchoring. They never
 follow a symlink below it. Backup and restore keep pathname tar and the post-restore
@@ -193,16 +196,30 @@ For a running dev container it requires complete inspection and no named causes:
   symlinked commands inside `PATH` directories (for example a tool's own install
   tree); do not mount them writable.
   At creation, Djinn refuses a writable `[mounts.*]`, `--mount` or `--here` bind
-  overlapping this same execution-input inventory. Inaccessible execution inputs
-  make the inputs undeterminable: creation refuses writable covered binds and
-  sealing reports inspection uncertain (under Docker authority see below). The
-  creation check applies to pathnames
-  at that point in time and pins no inode: sources and their ancestors must stay
-  stable and outside any agent's rename authority (for example through another
-  writable bind of a parent directory) until Docker has bound them.
-  Sealing continues to report managed-bind and running-state findings. The
-  workspace root is outside this creation-time rule.
+  overlapping this same execution-input inventory. The same predicate covers
+  managed writable binds whose host paths the configuration selects: the workspace
+  root (also delivered to the agent-Docker companion), config-root tool directories
+  (`claude`, `codex`, `opencode`, `gh`, `age`), assigned shared/local zone overlay
+  sources, and `~/.djinn/sessions`, in every Docker mode. Undeterminable inputs or
+  sources refuse creation. Inaccessible execution inputs make sealing report
+  inspection uncertain (under Docker authority see below). The creation check
+  applies to pathnames at that point in time and pins no inode: sources and their
+  ancestors must stay stable and outside any agent's rename authority (for example
+  through another writable bind of a parent directory) until Docker has bound them.
+  Sealing continues to report managed-bind and running-state findings.
 - Desktop channels are absent or verified filtered/locked, with no raw endpoints.
+
+Workspace content that host tools execute anyway is outside this creation-time
+rule: Git hooks (`core.hooksPath`, `.git/hooks`), build files and build backends,
+`.envrc`/direnv, and editor tasks. The workspace is writable by design; Djinn cannot
+inventory what a host tool will execute from it. Running such tools on the host
+against the workspace executes agent-writable content. Host-mode `djinn session`
+keeps its separate [automatic-loading guard](#direct-routes-and-target-authority).
+
+The installation's built-in workflow seed binds (`config/claude`,
+`config/opencode`) are outside this rule because their host paths are not
+configurable. Their bind modes are decided separately; sealing reports a writable
+one as writable installation content.
 
 Inspection resolves canonical ancestors, inode aliases and local named-volume
 bind options, and inventories nested sockets/hardlinks with bounds. Missing,

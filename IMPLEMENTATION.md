@@ -543,7 +543,9 @@ resource variables. Those are not the same as `docker compose run -e` container
 variables. Djinn centralizes host interpolation through:
 
 - `build_compose_env(config)` renders Compose variables from `AppConfig`
-- `_compose_host_env(config)` overlays them onto `os.environ`
+- `_compose_host_env(config)` overlays them onto `os.environ` and pins `HOME` to
+  `str(Path.home())`, so Compose's `${HOME}/.djinn/sessions` is the checked
+  directory even without inherited `HOME` or with a project `.env`
 - `_run_compose(args, config, cwd)` is the captured `docker compose` choke-point
 
 `DJINN_WORKSPACE_TARGET` derives from the mode and drives both the configured
@@ -1130,6 +1132,27 @@ The same module owns the repeatable user-mount contract:
   `MountCollisionError` reports the two involved mounts and the conflict path;
   managed-root conflicts identify the Djinn-managed root.
 
+`managed_bind_problems(config)` collects problems for configurable managed
+writable sources without provisioning: the expanded `config.code_dir`,
+`get_config_root(config) / name` for `SYNC_PATHS["credentials"]` (`claude`, `codex`,
+`opencode`, `gh`, `age`), assigned zone overlay sources, and
+`Path.home() / ".djinn" / "sessions"`. One `_execution_input_check()` closure per
+call reuses the declared/invocation inventory and `host_sealing.execution_overlap()`
+predicate, including symmetric overlap, inode aliases, symlink locations and
+missing suffixes. Relative or uninspectable sources and undeterminable inputs
+fail closed. Source construction also contains `OSError`, `ValueError`, `KeyError`,
+`TypeError` and `RuntimeError` (including `ConfigValidationError`), so config-root,
+zone-root, zone-assignment or home-lookup failures become family-specific
+`cannot be checked against host execution inputs (<cause>)` problems. Each problem
+names the family, source or configuration setting, cause and remedy.
+`validate_managed_bind_sources(config)` raises `MountSpecificationError` with the
+first problem.
+
+Both `compose_run()` and `compose_up_detached()` call this wrapper first, in every
+Docker mode, before shell/SOPS/zone mount builders, declared/invocation validators,
+workspace preparation, companions, helpers or temporary overrides. These creator
+gates also cover direct callers and headless runs.
+
 When a mount exists, `compose_run()` uses the first mount target as
 `--workdir`. With no mount it omits `--workdir`, so the Compose service's
 `working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` remains effective,
@@ -1137,6 +1160,10 @@ using the same selected target as the workspace bind. This also applies to
 mount-less detached starts.
 
 `config/zones.py` resolves additive shipped and user `zones.toml` assignments.
+`_zone_overlay_sources()` enumerates every assigned source/target pair, including
+missing sources, for both the managed collector and
+`_zone_overlay_mount_args_and_targets()`. The latter reserves all assigned targets,
+refuses symlinked or non-directory sources, and emits mounts for existing directories.
 `ensure_host_env` creates every assigned local/shared overlay directory before
 Compose runs. `compose_run` and `compose_up_detached` mount empty and populated
 directories over the config-zone bind mounts. These overlays do not change the
@@ -1176,7 +1203,9 @@ skipped. Inventory or comparison failures become declaration diagnostics with
 the `cannot be checked against host execution inputs (<cause>)` wording, so
 `djinn doctor` reports the affected declarations as FAIL rows.
 `compose_up_detached()` doubles `$` as `$$` in invocation mount sources, resolved
-targets and `working_dir`, so Compose receives those values literally.
+targets and `working_dir`, and in every `_volume_specs_from_mount_args()` spec for
+zone overlays and read-only shell/SOPS mounts as it enters the detached override.
+Compose receives those paths literally; attached `-v` arguments remain raw.
 
 The single reserved-environment registry covers all Compose service modes and
 everything the repository ships into the image or runs at startup: Python,
@@ -1498,7 +1527,11 @@ that prepend the tools library directory only for their real binaries in
   `preflight(config)` or `_sync_build_files()`, then refreshes local build files
   and calls `compose_build(agent_args=...)`. Invalid records fail before
   provisioning, sync or Docker work, naming the record file.
-- `start()`: resolves Docker mode, preflights, ensures `djinn-network`, parses
+- `start()`: resolves Docker mode, loads config, then calls
+  `validate_managed_bind_sources()` immediately after `load_config()`, before
+  `preflight()`, `get_config_root()` or `prepare_config_workflow()`. A
+  `MountSpecificationError` is printed through `error()` and exits 1. It then
+  preflights, prepares the workflow, ensures `djinn-network`, parses
   repeatable `--mount SRC[:DST[:ro|rw]]` values, and resolves each source with
   `resolve_container_mounts()`. `--here` is placed first at
   `/home/dev/workspace`; explicit targets are assigned before derived targets,
@@ -1711,6 +1744,14 @@ stale/orphan reporting), actual D-Bus/audio delivery and raw desktop exposure, a
 config presence. It also includes the read-only `Config workflow` audit, which
 is `PASS` when clean and `WARN` when drift or validation needs attention.
 
+With valid config, the read-only `Managed bind sources` row calls
+`managed_bind_problems()`: `PASS` prints `no overlap with host execution inputs`;
+`FAIL` joins every problem and remedy with `; `. `run_checks()` contains
+`get_config_root()` resolution errors (`OSError`, `ValueError`, `KeyError`,
+`TypeError`, `RuntimeError`) as a `Config root` FAIL with the cause. It skips the
+dependent SOPS, credential/zone-mode and zone-diagnostic rows, so a config-root
+failure does not prevent the managed row or remaining table from rendering.
+
 The `Post-mortem records` row calls `post_mortem.latest()` independently of config
 and Docker availability. It reads only the host filesystem, returning `PASS`
 with `none` or `<n> kept; latest <path>`. A historical incident is not a current
@@ -1745,8 +1786,11 @@ command string from `AgentConfig`. It appends the prompt template, which expands
 `$AGENT_PROMPT` inside the container. An explicit `model` takes precedence;
 otherwise the command uses `AgentConfig.default_model` when configured.
 
-`run()` loads app config and agent config, validates the requested agent, runs
-the shared workflow preparation for Claude/Codex/OpenCode, accepts repeatable
+`run()` loads app config and calls `validate_managed_bind_sources()` immediately
+after `load_config()`, before `get_config_root()` or `prepare_config_workflow()`.
+It prints a `MountSpecificationError` through `error()` and exits 1. It then
+loads agent config, validates the requested agent, runs the shared workflow
+preparation for Claude/Codex/OpenCode, accepts repeatable
 `--mount SRC[:DST[:ro|rw]]` values, and ensures the Docker network. Without an
 explicit mount it keeps the implicit current-directory mount at
 `/home/dev/workspace`; with explicit mounts it uses their resolved targets and
