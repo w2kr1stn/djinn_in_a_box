@@ -58,6 +58,8 @@ Repository = "https://github.com/w2kr1stn/djinn_in_a_box"
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+# The credential helper also runs as a script on the dev image's Debian Python 3.11.
+per-file-target-version = { "src/djinn_in_a_box/core/opencode_credentials.py" = "py311" }
 
 [tool.ruff.lint]
 select = [
