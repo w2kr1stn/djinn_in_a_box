@@ -488,6 +488,56 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     assert "not a regular file" in out["message"]
 
 
+@pytest.mark.parametrize("name", ["claude", "opencode"])
+def test_status_exited_record_with_fifo_log_returns(ctx: Ctx, name: str) -> None:
+    ctx.env["FAKE_CLAUDE_MODE"] = "refusal"
+    ctx.env["FAKE_OC_MODE"] = "exit-early"
+    rc, out = ctx.claude() if name == "claude" else ctx.opencode()
+    assert rc == 0 and out["result"] == "exited", out
+    log = ctx.state / f"{name}.log"
+    log.unlink()
+    os.mkfifo(log, 0o600)
+    for _ in range(2):
+        status = ctx.status(timeout=3)
+        assert status["busy"] is False
+        entry = status["servers"][name]
+        assert entry["state"] == "exited" and entry["last_line"] is None
+
+
+@pytest.mark.parametrize("name", ["claude", "opencode"])
+def test_start_exit_tail_with_fifo_log_returns(ctx: Ctx, name: str) -> None:
+    # The exiting process replaces its log after spawn has created the regular file.
+    script = ctx.fake / "bin" / name
+    source = script.read_text()
+    start = source.index(
+        'if mode == "refusal":' if name == "claude" else 'if mode == "exit-early":'
+    )
+    source = (
+        source[:start]
+        + f"""
+log = os.path.join(os.environ["DJINN_SERVE_TEST_STATE_DIR"], "{name}.log")
+os.unlink(log)
+os.mkfifo(log, 0o600)
+sys.exit(1)
+"""
+        + source[start:]
+    )
+    script.write_text(source)
+    if name == "claude":
+        rc, out = ctx.claude(timeout=3)
+    else:
+        rc, out = ctx.run(
+            "opencode-start",
+            "--port",
+            str(ctx.port),
+            stdin=json.dumps({"password": os.urandom(24).hex()}),
+            timeout=3,
+        )
+    assert rc == 0 and out["result"] == "exited" and out["log_tail"] == [], out
+    status = ctx.status(timeout=3)
+    assert status["busy"] is False and status["servers"][name]["state"] == "exited"
+
+
 def test_merge_password_keeps_keys_mode_and_refuses_symlink(tmp_path: Path) -> None:
     home = tmp_path / "h"
     home.mkdir()

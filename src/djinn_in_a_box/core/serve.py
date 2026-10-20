@@ -536,12 +536,6 @@ def exec_helper(
         raise ServeError("helper failed", code="protocol", detail=result.stderr[:200]) from None
 
 
-def _layers(root: dict[str, Any], layers: list[dict[str, Any]]) -> None:
-    layers.append(root)
-    for value in _object(root.get("Foreground", {})).values():
-        _layers(_object(value), layers)
-
-
 def _target_port(target: str) -> int | None:
     try:
         return urlsplit(target if "://" in target else "//" + target).port
@@ -559,27 +553,37 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
         result = _run_captured([binary, "serve", "status", "--json"], timeout=timeout)
         if not result.success:
             return None, f"tailscale serve status failed (exit {result.returncode})", False
-        layers: list[dict[str, Any]] = []
+        layers = [_object(json.loads(result.stdout))]
         unreadable = False
-        try:
-            _layers(_object(json.loads(result.stdout)), layers)
-        except (ValueError, KeyError, TypeError, AttributeError):
-            # Keep readable layers so a malformed remainder cannot erase Funnel evidence.
-            unreadable = True
+
+        def read_object(value: object) -> dict[str, Any]:
+            nonlocal unreadable
+            try:
+                return _object(value)
+            except ValueError:
+                unreadable = True
+                return {}
+
+        # Inspect every sibling, even after malformed layers or entries.
         for layer in layers:
+            layers.extend(
+                read_object(value)
+                for value in read_object(layer.get("Foreground", {})).values()
+            )
             funnel_keys.update(
-                k for k, v in _object(layer.get("AllowFunnel", {})).items() if v is True
+                k for k, v in read_object(layer.get("AllowFunnel", {})).items() if v is True
             )
         candidates: list[tuple[str, str]] = []
         for layer in layers:
-            tcp = _object(layer.get("TCP", {}))
-            for key, value in _object(layer.get("Web", {})).items():
+            tcp = {k: read_object(v) for k, v in read_object(layer.get("TCP", {})).items()}
+            for key, value in read_object(layer.get("Web", {})).items():
                 host, sep, https_port = key.rpartition(":")
                 if not sep:
-                    raise ValueError("invalid web key")
-                handlers = _object(_object(value).get("Handlers", {}))
+                    unreadable = True
+                    continue
+                handlers = read_object(read_object(value).get("Handlers", {}))
                 for path, handler in handlers.items():
-                    target = _object(handler).get("Proxy")
+                    target = read_object(handler).get("Proxy")
                     if not isinstance(target, str):
                         continue
                     if _target_port(target) == port:
@@ -592,7 +596,7 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
                     if (
                         path == "/"
                         and strict
-                        and _object(tcp.get(https_port, {})).get("HTTPS") is True
+                        and tcp.get(https_port, {}).get("HTTPS") is True
                     ):
                         url = f"https://{host}" + ("" if https_port == "443" else f":{https_port}")
                         # DNS labels also need an alphanumeric first character.
@@ -604,7 +608,7 @@ def tailnet_state(port: int, *, timeout: float = 5) -> tuple[str | None, str, bo
                         ):
                             candidates.append((key, url))
             for tcp_port, value in tcp.items():
-                forward = _object(value).get("TCPForward")
+                forward = value.get("TCPForward")
                 if isinstance(forward, str) and _target_port(forward) == port:
                     matching.update(
                         key for key in funnel_keys if key.rpartition(":")[2] == tcp_port

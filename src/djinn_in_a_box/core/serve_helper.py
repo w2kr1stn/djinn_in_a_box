@@ -380,9 +380,7 @@ def remove_file(dirfd: int, name: str) -> None:
 def read_nofollow(name: str, dirfd: int | None, code: str) -> bytes | None:
     """Read a small regular file without following a symlink; None when absent."""
     try:
-        fd = os.open(
-            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd
-        )
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -492,11 +490,16 @@ def clean_lines(text: str, count: int = TAIL_LINES) -> list[str]:
 def sanitize_tail(path: str, count: int = TAIL_LINES, *, dir_fd: int | None = None) -> list[str]:
     """Sanitized last lines of the log at ``path`` (read-only, bounded, no symlink)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+        fd = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd
+        )
     except OSError:
         return []
     try:
-        size = os.fstat(fd).st_size
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return []
+        size = info.st_size
         offset = max(0, size - TAIL_BYTES)
         data = os.pread(fd, TAIL_BYTES, offset)
     finally:

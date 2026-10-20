@@ -864,31 +864,120 @@ def test_funnel_tcp_forward_and_nested_foreground(host):
     assert runner.invoke(app, ["serve", "opencode"]).exit_code == 1
 
 
-@pytest.mark.parametrize("anomaly", ["web-key", "handler", "foreground"])
-@pytest.mark.parametrize("evidence", [True, False], ids=["confirmed", "unknown"])
-def test_funnel_evidence_survives_unrelated_parse_anomaly(host, anomaly, evidence):
-    # A flag alone is not positive evidence: its handler must target the OpenCode port.
-    host.tailnet = tailscale_config(
-        target=f"http://127.0.0.1:{PORT if evidence else PORT + 1}", funnel=True
-    )
-    if anomaly == "web-key":
-        host.tailnet["Web"]["weird"] = {}
-    elif anomaly == "handler":
-        host.tailnet["Web"]["other.example.ts.net:443"] = {"Handlers": {"/": "unexpected"}}
+@pytest.mark.parametrize(
+    "anomaly",
+    [
+        "web-key",
+        "web-value",
+        "handler",
+        "handlers",
+        "web",
+        "tcp-entry",
+        "tcp",
+        "foreground",
+        "layer",
+        "funnel-flags",
+    ],
+)
+@pytest.mark.parametrize("position", ["before", "after", "only", "clean"])
+def test_funnel_evidence_survives_unrelated_parse_anomaly(host, anomaly, position):
+    def entries(good, bad):
+        if position == "clean":
+            return good
+        if position == "only":
+            return bad
+        return {**bad, **good} if position == "before" else {**good, **bad}
+
+    config = tailscale_config(funnel=True)
+    if anomaly in ("web-key", "web-value"):
+        bad = {"weird": {}} if anomaly == "web-key" else {"other.example.ts.net:443": None}
+        config["Web"] = entries(config["Web"], bad)
+    elif anomaly in ("handler", "handlers"):
+        key = "box.example.ts.net:443"
+        if anomaly == "handler":
+            # Sibling handlers on one key must also be evaluated independently.
+            config["Web"][key]["Handlers"] = entries(
+                config["Web"][key]["Handlers"], {"/broken": None}
+            )
+        else:
+            config["Web"] = entries(config["Web"], {"other.example.ts.net:443": {"Handlers": None}})
+    elif anomaly == "tcp-entry":
+        config["TCP"] = entries(config["TCP"], {"1": None})
+        if position == "only":
+            config["Web"] = {}
     else:
-        host.tailnet["Foreground"] = None
-    assert serve.tailnet_state(PORT) == (None, "unreadable output", evidence)
+        bad = {
+            "web": {"Web": None},
+            "tcp": {"TCP": None},
+            "foreground": {"Foreground": None},
+            "layer": None,
+            "funnel-flags": {"AllowFunnel": None},
+        }[anomaly]
+        config = {"Foreground": entries({"good": config}, {"bad": bad})}
+    host.tailnet = config
+    evidence = position != "only"
+    expected = (
+        ("https://box.example.ts.net", "", True)
+        if position == "clean"
+        else (None, "unreadable output", evidence)
+    )
+    assert serve.tailnet_state(PORT) == expected
     for mode in (["opencode"], ["--pair", "opencode"]):
         result = runner.invoke(app, ["serve", *mode])
         if evidence:
             assert result.exit_code == 1
             assert "Tailscale Funnel is enabled" in result.output
+            assert not host.direct
         elif mode == ["opencode"]:
             assert result.exit_code == 0, result.output
             assert "Funnel state unknown (unreadable output)" in result.output
         else:
             assert result.exit_code == 1
-            assert "No tailnet URL" in result.output
+            assert "No tailnet URL: unreadable output" in result.output
+            assert len(host.direct) == 1  # Only the earlier, allowed start executed.
+
+
+@pytest.mark.parametrize("anomaly", ["web", "tcp", "tcp-entry", "flags", "layer"])
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_funnel_tcp_evidence_survives_malformed_siblings(host, anomaly, position):
+    good = {"TCP": {"8443": {"TCPForward": f"other.example:{PORT}"}}}
+    bad = {"Web": None} if anomaly == "web" else {"TCP": {"1": None}}
+    if anomaly == "flags":
+        bad = {"AllowFunnel": None}
+    elif anomaly == "layer":
+        bad = None
+    if anomaly == "tcp-entry":
+        forward, invalid = good["TCP"], {"1": None}
+        good["TCP"] = {**invalid, **forward} if position == "before" else {**forward, **invalid}
+        layers = {"good": good}
+    else:
+        layers = {"bad": bad, "good": good} if position == "before" else {"good": good, "bad": bad}
+    host.tailnet = {"Foreground": layers, "AllowFunnel": {"box.example.ts.net:8443": True}}
+    assert serve.tailnet_state(PORT) == (None, "unreadable output", True)
+    assert runner.invoke(app, ["serve", "opencode"]).exit_code == 1
+
+
+def test_funnel_flag_for_other_port_does_not_refuse(host):
+    host.tailnet = tailscale_config(target=f"http://127.0.0.1:{PORT + 1}", funnel=True)
+    assert serve.tailnet_state(PORT) == (None, f"no Serve entry for http://127.0.0.1:{PORT}", False)
+    assert runner.invoke(app, ["serve", "opencode"]).exit_code == 0
+
+
+def test_tailnet_uses_sorted_candidates_across_layers(host):
+    host.tailnet = tailscale_config(key="z.example.ts.net:8443")
+    host.tailnet["Foreground"] = {"session": tailscale_config(key="a.example.ts.net:443")}
+    assert serve.tailnet_state(PORT) == ("https://a.example.ts.net", "", False)
+
+
+def test_tailnet_anomaly_discards_readable_url_without_funnel(host):
+    host.tailnet["Web"]["weird"] = {}
+    assert serve.tailnet_state(PORT) == (None, "unreadable output", False)
+    result = runner.invoke(app, ["serve", "opencode"])
+    assert result.exit_code == 0
+    assert "Funnel state unknown (unreadable output)" in result.output
+    assert "--cors" not in host.direct[-1][0]
+    result = runner.invoke(app, ["serve", "--pair", "opencode"])
+    assert result.exit_code == 1 and "No tailnet URL: unreadable output" in result.output
 
 
 @pytest.mark.parametrize(
@@ -897,17 +986,20 @@ def test_funnel_evidence_survives_unrelated_parse_anomaly(host, anomaly, evidenc
         ("missing", "tailscale not found on PATH"),
         ("failed", "tailscale serve status failed (exit 1)"),
         ("bad", "unreadable output"),
+        ("non-object", "unreadable output"),
         ("empty", f"no Serve entry for http://127.0.0.1:{PORT}"),
     ],
 )
 def test_tailnet_failures(host, monkeypatch, kind, reason):
     if kind == "missing":
         monkeypatch.setattr(serve.shutil, "which", lambda _: None)
-    elif kind in ("failed", "bad"):
+    elif kind in ("failed", "bad", "non-object"):
         monkeypatch.setattr(
             serve,
             "_run_captured",
-            lambda *a, **k: RunResult(1 if kind == "failed" else 0, "broken"),
+            lambda *a, **k: RunResult(
+                1 if kind == "failed" else 0, "[]" if kind == "non-object" else "broken"
+            ),
         )
     else:
         host.tailnet = {}

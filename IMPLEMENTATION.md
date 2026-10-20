@@ -1869,6 +1869,9 @@ server with the same password and recorded CORS origin (or neither origin set)
 returns `already-running`; a changed password, changed CORS origin or degraded
 state stops ours before merging the password. A failed stop aborts
 before that merge.
+Rerunning while tailnet state is unknown starts without the CORS origin and
+therefore restarts a server that has one; this affects availability only, since
+CORS only narrows access.
 
 The host generates a stable password once in
 `$XDG_STATE_HOME/djinn/serve/opencode-password`, using `~/.local/state` when
@@ -1930,8 +1933,8 @@ For Funnel detection, any target naming the host port counts regardless of
 scheme, host or path. The HTTPS URL requires a root handler, an HTTP proxy to
 `127.0.0.1`, `localhost` or `[::1]` at that port, and `TCP[port].HTTPS: true`.
 Validated candidates are selected by sorted key; port 443 is omitted in the URL.
-Detected Funnel refuses start/pair and warns in status, including when a later
-parse anomaly affects an unrelated element. Without confirmed evidence,
+Detected Funnel refuses start/pair and warns in status, regardless of where
+parse anomalies affect unrelated elements. Without confirmed evidence,
 missing/unreadable Tailscale status leaves Funnel unknown and allows start with
 the printed note
 `Funnel state unknown (<reason>)`; pairing still needs a discoverable URL.
