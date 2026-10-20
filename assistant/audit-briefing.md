@@ -20,6 +20,12 @@ and ephemeral. Credential refreshes are copied back at exit. Custom config roots
 and workspaces outside these mounts are not delivered; inspect their configured
 paths and the dev container's actual Mounts rather than assuming access.
 
+OpenCode audits differ: logins come from a private session seed under
+`/run/djinn-credentials`, and the audit's OpenCode data directory is the
+session's own `data/` directory. Refreshes and new logins are merged back into
+the installation's credentials at the end of the session, and nothing is logged
+out elsewhere.
+
 Check invariants: independent assistant image, exactly one selected native CLI,
 host UID/GID, distinct config/shared/local zones, regular credential files,
 canonical workflow ownership, and the declared workspace/mount contract. Native

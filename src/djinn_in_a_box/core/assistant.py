@@ -17,17 +17,20 @@ from typing import Any, cast
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig, AssistantAgent, AssistantConfig
 from djinn_in_a_box.config.zones import load_zone_assignments
+from djinn_in_a_box.core import opencode_credentials as credentials
 from djinn_in_a_box.core.agent_versions import (
     AgentVersionError,
     effective_version,
     load_versions,
     version_pin,
 )
+from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker import (
     DJINN_NETWORK,
     _run_captured,  # pyright: ignore[reportPrivateUsage]
     _run_streamed,  # pyright: ignore[reportPrivateUsage]
     ensure_network,
+    export_opencode_credentials,
     get_config_root,
     is_background_process_group,
 )
@@ -46,8 +49,13 @@ SESSION_LABEL = "djinn.assistant.session"
 CREDENTIALS = {
     "claude": (".credentials.json", "claude.json"),
     "codex": ("auth.json",),
-    "opencode": ("auth.json", "mcp-auth.json"),
+    # OpenCode logins travel through a private per-session directory, not single-file binds.
+    "opencode": (),
 }
+OPENCODE_CREDENTIAL_TARGET = Path("/run/djinn-credentials")
+OPENCODE_DATA_TARGET = Path("/home/dev/.local/share/opencode")
+STOP_GRACE_SECONDS = 10
+STOP_TIMEOUT_SECONDS = 40
 PIN_NAMES = {
     "claude": "CLAUDE_CODE_VERSION",
     "codex": "CODEX_VERSION",
@@ -315,6 +323,130 @@ def cleanup(name: str) -> None:
         raise AssistantError(f"Assistant container cleanup failed: {name}")
 
 
+def _reason(error: Exception) -> str:
+    """A value-free reason: credential errors are value-free by contract, OS errors name no path."""
+    if isinstance(error, credentials.CredentialsError):
+        return str(error)
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror
+    return type(error).__name__
+
+
+def stop_container(name: str) -> None:
+    """Stop with a grace period and wait; a container that is already gone is fine."""
+    result = _run_captured(
+        [DOCKER_EXECUTABLE, "stop", "--time", str(STOP_GRACE_SECONDS), name],
+        timeout=STOP_TIMEOUT_SECONDS,
+    )
+    if not result.success and f"No such container: {name}" not in result.stderr:
+        raise AssistantError(result.stderr.strip() or f"Could not stop container {name}")
+
+
+def container_exists(name: str) -> bool:
+    """By name and by the session label, so a renamed or half-created container still counts."""
+    if inspect("container", name) is not None:
+        return True
+    labelled = capture("ps", "--all", "--quiet", "--filter", f"label={SESSION_LABEL}={name}")
+    return bool(labelled.strip())
+
+
+def opencode_carrier(config: AppConfig | None) -> Path:
+    return get_config_root(config).expanduser().resolve() / "opencode"
+
+
+def recover_leftover_sessions(
+    project: Path, config: AppConfig | None, own_session: credentials.Session | None = None
+) -> None:
+    """Merge leftover OpenCode audit sessions back. Every failure is a warning, never an error.
+
+    The export always runs in the OpenCode assistant image, whatever agent is audited, and that
+    image is resolved (and built, if needed) only when a session actually holds a database.
+    """
+    image: str | None = None
+
+    def export_db(data_directory: str) -> bytes:
+        nonlocal image
+        try:
+            if image is None:
+                _, platform = local_daemon()
+                network = config.build.network if config else "default"
+                image = ensure_image(project, "opencode", platform, network)
+            return export_opencode_credentials(image=image, source=data_directory, kind="bind")
+        except (AssistantError, RuntimeError) as error:
+            warning(f"OpenCode audit session export failed: {error}")
+            raise
+
+    carrier = opencode_carrier(config)
+    try:
+        if Path(credentials.default_audit_root()).is_dir():
+            # A session can only be merged into a carrier directory that exists.
+            carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+        report = credentials.recover_audit_sessions(
+            None,
+            carrier,
+            export_db,
+            container_exists,
+            own_session,
+            stop_container=stop_container,
+        )
+    except Exception as error:  # noqa: BLE001 - recovery must never stop an audit or a start
+        warning(f"OpenCode audit session recovery failed: {_reason(error)}")
+        return
+    for identity, reason in report.kept:
+        warning(f"OpenCode audit session {identity} was kept: {reason}")
+
+
+def audit_session_mounts(session: credentials.Session) -> list[tuple[Path, Path]]:
+    """Exactly two mounts: the session's io/ and data/, never the session or a parent."""
+    return [
+        (Path(session.io_path), OPENCODE_CREDENTIAL_TARGET),
+        (Path(session.data_path), OPENCODE_DATA_TARGET),
+    ]
+
+
+def open_audit_session(config: AppConfig | None) -> credentials.Session:
+    """Create the session and write its seed. Without a usable carrier the audit has no seed."""
+    try:
+        session = credentials.create_audit_session()
+    except (credentials.CredentialsError, OSError) as error:
+        raise AssistantError(
+            f"Could not create the OpenCode audit session: {_reason(error)}"
+        ) from error
+    carrier = opencode_carrier(config)
+    try:
+        carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with credentials.carrier_lock(carrier) as lease:
+            credentials.write_seed(session, credentials.materialize_seed(carrier, lease))
+    except (credentials.CredentialsError, OSError) as error:
+        warning(f"OpenCode audit starts without a login seed: {_reason(error)}")
+    except BaseException:
+        session.close()
+        raise
+    return session
+
+
+def finish_session(
+    name: str,
+    session: credentials.Session,
+    project: Path,
+    config: AppConfig | None,
+    *,
+    launched: bool,
+) -> None:
+    """Stop, clean up, merge back, release: in this order, each step even if one before fails."""
+    try:
+        if launched:
+            try:
+                stop_container(name)
+            finally:
+                cleanup(name)
+    finally:
+        try:
+            recover_leftover_sessions(project, config, session)
+        finally:
+            session.close()
+
+
 def run_audit(occasion: str | None, selected: str | None = None) -> int:
     config, config_error = audit_config()
     agent = AssistantConfig.model_validate(
@@ -328,21 +460,41 @@ def run_audit(occasion: str | None, selected: str | None = None) -> int:
     socket, platform = local_daemon()
     mounts = session_mounts(project, config, agent, socket)
     briefing = (project / "assistant" / "audit-briefing.md").read_text(encoding="utf-8")
-    layout = "\n".join(f"- {source} -> {target} (rw)" for source, target in mounts)
-    prompt = f"{briefing}\n\nInstallation mounts:\n{layout}\n"
-    if config_error:
-        prompt += f"\nConfiguration loader error (diagnose this):\n{config_error}\n"
-    prompt += f"\nUser occasion:\n{occasion or 'Perform a general installation health check.'}"
-    image = ensure_image(project, agent, platform, config.build.network if config else "default")
-    if not ensure_network(DJINN_NETWORK):
-        raise AssistantError(f"Could not ensure {DJINN_NETWORK}; see the Docker error above")
-    name = f"djinn-assistant-{uuid.uuid4().hex}"
-    argv = session_argv(
-        image, name, agent, prompt, project, socket, mounts, config.timezone if config else "UTC"
-    )
+    recover_leftover_sessions(project, config)
+    session = open_audit_session(config) if agent == "opencode" else None
+    launched = False
     try:
-        return subprocess.run(argv, check=False).returncode
-    except KeyboardInterrupt:
-        return 130
+        if session is not None:
+            mounts.extend(audit_session_mounts(session))
+        layout = "\n".join(f"- {source} -> {target} (rw)" for source, target in mounts)
+        prompt = f"{briefing}\n\nInstallation mounts:\n{layout}\n"
+        if config_error:
+            prompt += f"\nConfiguration loader error (diagnose this):\n{config_error}\n"
+        prompt += f"\nUser occasion:\n{occasion or 'Perform a general installation health check.'}"
+        image = ensure_image(
+            project, agent, platform, config.build.network if config else "default"
+        )
+        if not ensure_network(DJINN_NETWORK):
+            raise AssistantError(f"Could not ensure {DJINN_NETWORK}; see the Docker error above")
+        name = session.container_name if session else f"djinn-assistant-{uuid.uuid4().hex}"
+        argv = session_argv(
+            image,
+            name,
+            agent,
+            prompt,
+            project,
+            socket,
+            mounts,
+            config.timezone if config else "UTC",
+        )
+        launched = True
+        try:
+            return subprocess.run(argv, check=False).returncode
+        except KeyboardInterrupt:
+            return 130
+        finally:
+            if session is None:
+                cleanup(name)
     finally:
-        cleanup(name)
+        if session is not None:
+            finish_session(session.container_name, session, project, config, launched=launched)

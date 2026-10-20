@@ -582,6 +582,7 @@ class TestStartCommand:
                 return_value=Path("/project"),
             ),
             patch("djinn_in_a_box.core.console.err_console", test_err_console),
+            patch("djinn_in_a_box.commands.container.recover_leftover_sessions") as mock_recover,
         ):
             mock_config = MagicMock()
             mock_config.code_dir = Path("/projects")
@@ -610,6 +611,7 @@ class TestStartCommand:
                 "workflow": mock_workflow,
                 "network": mock_network,
                 "err_output": err_output,
+                "recover": mock_recover,
             }
 
     def test_start_prepares_both_runtime_views_before_network(
@@ -629,6 +631,58 @@ class TestStartCommand:
             "require_compose_host_env": True,
         }
         start_mocks["network"].assert_called_once_with()
+
+    def test_start_recovers_audit_sessions_before_compose(
+        self, start_mocks: dict[str, Any]
+    ) -> None:
+        order: list[str] = []
+        start_mocks["recover"].side_effect = lambda *args: order.append("recover")
+        start_mocks["run"].side_effect = lambda *args, **kwargs: (
+            order.append("compose") or RunResult(returncode=0)
+        )
+
+        with pytest.raises(typer.Exit):
+            container.start()
+
+        assert order == ["recover", "compose"]
+        start_mocks["recover"].assert_called_once_with(Path("/project"), start_mocks["config"])
+
+    def test_start_recovers_before_a_detached_start_too(self, start_mocks: dict[str, Any]) -> None:
+        order: list[str] = []
+        start_mocks["recover"].side_effect = lambda *args: order.append("recover")
+        start_mocks["detached"].side_effect = lambda *args, **kwargs: (
+            order.append("compose") or RunResult(returncode=0)
+        )
+
+        with pytest.raises(typer.Exit):
+            container.start(detach=True)
+
+        assert order == ["recover", "compose"]
+
+    def test_start_continues_when_recovery_fails(
+        self, start_mocks: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from djinn_in_a_box.core import assistant, opencode_credentials
+
+        def refused(*args: Any, **kwargs: Any) -> None:
+            raise opencode_credentials.Refused("an ancestor belongs to another user")
+
+        # The real helper, with only the merge function failing underneath it.
+        monkeypatch.setattr(
+            container, "recover_leftover_sessions", assistant.recover_leftover_sessions
+        )
+        monkeypatch.setattr(assistant.credentials, "recover_audit_sessions", refused)
+        monkeypatch.setattr(
+            assistant.credentials, "default_audit_root", lambda: str(tmp_path / "none")
+        )
+        start_mocks["config"].build.network = "default"
+
+        with pytest.raises(typer.Exit) as exc_info:
+            container.start()
+
+        assert exc_info.value.exit_code == 0
+        start_mocks["run"].assert_called_once()
+        assert "recovery failed" in start_mocks["err_output"].getvalue()
 
     def test_blocked_workflow_stops_before_network_and_compose(
         self, start_mocks: dict[str, Any]

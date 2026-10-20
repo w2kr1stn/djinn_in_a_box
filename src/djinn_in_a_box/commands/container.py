@@ -34,6 +34,7 @@ from djinn_in_a_box.core.agent_versions import (
     load_versions,
     save_versions,
 )
+from djinn_in_a_box.core.assistant import recover_leftover_sessions
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
     prepare_config_workflow,
@@ -340,6 +341,9 @@ def start(
             "This is equivalent to root access on the host. "
             "Use --docker for an isolated agent daemon."
         )
+
+    # Leftover OpenCode audit sessions still hold logins that were not merged back. Only warns.
+    recover_leftover_sessions(get_project_root(), config)
 
     rule("Container")
 

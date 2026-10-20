@@ -8,7 +8,7 @@ store=/run/djinn-credentials
 case "$DJINN_ASSISTANT_AGENT" in
     claude) native="$HOME/.claude"; names=(.credentials.json);;
     codex) native="$HOME/.codex"; names=(auth.json);;
-    opencode) native="$HOME/.local/share/opencode"; names=(auth.json mcp-auth.json);;
+    opencode) native="$HOME/.local/share/opencode"; names=();;
     *) printf 'Unknown assistant agent\n' >&2; exit 1;;
 esac
 mkdir -p "$native"
@@ -38,7 +38,55 @@ persist_credentials() {
     done
     return "$failed"
 }
-trap 'persist_credentials || exit 1' EXIT
+
+# OpenCode keeps its logins in a database. Credential commands run with an empty private
+# config home and without the agent's inline config, so no plugin or MCP server is loaded.
+opencode_credentials() {
+    local config variable status=0
+    local -a unset_config=()
+    while read -r variable; do
+        if [[ $variable == OPENCODE_CONFIG* ]]; then
+            unset_config+=(-u "$variable")
+        fi
+    done < <(compgen -e)
+    config=$(mktemp -d) || return 1
+    (
+        cd "$config" &&
+        exec env "${unset_config[@]}" XDG_CONFIG_HOME="$config" \
+            OPENCODE_DISABLE_PROJECT_CONFIG=true OPENCODE_DISABLE_AUTOUPDATE=true \
+            OPENCODE_DISABLE_MODELS_FETCH=true DO_NOT_TRACK=1 \
+            opencode auth "$1" --standalone 2>/dev/null
+    ) || status=$?
+    rm -rf "$config"
+    return "$status"
+}
+
+import_opencode() {
+    if [[ -f "$store/seed.json" && ! -L "$store/seed.json" ]]; then
+        opencode_credentials import < "$store/seed.json" ||
+            printf 'Could not import the credential seed\n' >&2
+    fi
+}
+
+# Runs from the EXIT trap, which shellcheck cannot see through.
+# shellcheck disable=SC2317
+export_opencode() {
+    local temporary
+    temporary=$(mktemp "$store/.final.XXXXXX") || return 1
+    if opencode_credentials export > "$temporary" && mv -f "$temporary" "$store/final.json"; then
+        return 0
+    fi
+    rm -f "$temporary"
+    printf 'Could not export credentials\n' >&2
+    return 1
+}
+
+if [[ "$DJINN_ASSISTANT_AGENT" == opencode ]]; then
+    import_opencode
+    trap 'export_opencode || exit 1' EXIT
+else
+    trap 'persist_credentials || exit 1' EXIT
+fi
 child=
 terminate() {
     trap '' TERM INT HUP
