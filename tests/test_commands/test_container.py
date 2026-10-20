@@ -1947,7 +1947,7 @@ class TestEnterCommand:
         if dev_running:
             names.append("djinn")
 
-        def docker_ps(cmd: list[str]) -> list[str]:
+        def docker_ps(cmd: list[str], *, timeout: float | None = None) -> list[str]:
             # Docker's name filter is an unanchored regular-expression search.
             pattern = cmd[cmd.index("--filter") + 1].removeprefix("name=")
             return [name for name in names if re.search(pattern, name)]
