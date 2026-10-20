@@ -499,6 +499,16 @@ def test_opencode_installer_change_invalidates_assistant_image(installation):
     assert first != second
 
 
+def test_audit_image_owns_the_session_bind_targets_before_switching_user():
+    dockerfile = (Path(__file__).parents[2] / "assistant" / "Dockerfile").read_text()
+    created = dockerfile.index("RUN install -d -o dev -g dev /home/dev/.local ")
+    end = dockerfile.index("\n", dockerfile.index("/home/dev/.cache", created))
+    command = dockerfile[created:end]
+    for target in ("/home/dev/.local/share/opencode", "/home/dev/.local/state", "/home/dev/.cache"):
+        assert target in command
+    assert dockerfile.index("useradd") < created < dockerfile.index("\nUSER dev")
+
+
 # --- One-off credential export adapter ----------------------------------------------------------
 
 DATA_TARGET = "/home/dev/.local/share/opencode"

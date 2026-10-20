@@ -43,6 +43,10 @@ RUN set -eu; mkdir -p /opt/djinn-agent; \
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN groupadd --gid "$USER_GID" dev && useradd --uid "$USER_UID" --gid "$USER_GID" -m dev
+# OpenCode's data directory is a bind target. Without it in the image, Docker creates its parents
+# as root, and OpenCode can no longer create ~/.local/state beside it.
+RUN install -d -o dev -g dev /home/dev/.local /home/dev/.local/share \
+    /home/dev/.local/share/opencode /home/dev/.local/state /home/dev/.cache
 COPY entrypoint.sh /usr/local/bin/djinn-assistant-entrypoint
 RUN chmod 0755 /usr/local/bin/djinn-assistant-entrypoint
 ENV HOME=/home/dev DISABLE_AUTOUPDATER=1 OPENCODE_DISABLE_AUTOUPDATE=true
