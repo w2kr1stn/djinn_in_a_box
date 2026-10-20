@@ -8,6 +8,18 @@ from djinn_in_a_box.core.docker import repo_owned_submount_targets
 
 _ROOT = Path(__file__).resolve().parents[1]
 
+# Byte-for-byte copy of templates/claude/CLAUDE.md: one literal per line of that file.
+_BRIDGE = (
+    b"@AGENTS.md\n"
+    b"\n"
+    b"Djinn note: global instructions and workflow files are authored only in the selected workflow source,\n"  # noqa: E501
+    b"`config/<source>/` in the Djinn installation (`djinn config show` names it). Every other copy Djinn delivers from it\n"  # noqa: E501
+    b"is generated and may be read-only; an edit there is reported as drift and blocks the next delivery. Inside the Djinn\n"  # noqa: E501
+    b"container with the default source `claude`, the source is mounted at `~/.claude/` (for example\n"  # noqa: E501
+    b"`~/.claude/AGENTS.md`); `~/.codex/` and `~/.config/opencode/` hold generated workflow copies, and\n"  # noqa: E501
+    b"`~/.djinn-canonical/` and `~/.opencode/seed/` are read-only views.\n"
+)
+
 
 def _docker_instructions():
     source = (_ROOT / "Dockerfile").read_text()
@@ -91,12 +103,14 @@ def test_runtime_delivery_packaging_uses_shared_publisher_and_canonical_mount() 
         'CODEX_DAEMON_POLICY_HELPER="${CODEX_DAEMON_POLICY_HELPER:-/home/dev/codex-daemon-policy.py}"'
         in entrypoint
     )
-    assert 'LABEL djinn.workflow.publisher="1"' in dockerfile
+    assert 'LABEL djinn.workflow.publisher="2"' in dockerfile
     assert "opencode-workflow" + "-delivery.py" not in dockerfile
     assert "./config:/home/dev/.djinn-canonical:ro" in compose
+    assert "./config/opencode:/home/dev/.opencode/seed:ro" in compose
     assert "./config/claude/AGENTS.md:/home/dev/.claude/AGENTS.md" in compose
     assert "./templates/claude/CLAUDE.md:/home/dev/.claude/CLAUDE.md:ro" in compose
-    assert (_ROOT / "templates/claude/CLAUDE.md").read_bytes() == b"@AGENTS.md\n"
+    assert (_ROOT / "templates/claude/CLAUDE.md").read_bytes() == _BRIDGE
+    assert _BRIDGE.splitlines()[0] == b"@AGENTS.md"
     assert Path("/home/dev/.claude/CLAUDE.md") in repo_owned_submount_targets(
         Path("/home/dev/.claude")
     )

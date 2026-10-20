@@ -905,7 +905,7 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
 | `./config/claude/AGENTS.md` | `/home/dev/.claude/AGENTS.md` | Direct Compose-Claude instruction mount |
 | `./templates/claude/CLAUDE.md` | `/home/dev/.claude/CLAUDE.md:ro` | Read-only bridge importing `AGENTS.md` |
-| `./config/opencode` | `/home/dev/.opencode/seed` | Local OpenCode seed source |
+| `./config/opencode` | `/home/dev/.opencode/seed:ro` | Read-only OpenCode workflow view for the publisher |
 | `./config` | `/home/dev/.djinn-canonical:ro` | Read-only canonical workflow source for the publisher |
 | `./config/mcp-servers.json` | `/home/dev/.config/mcp-servers.json:ro` | Local MCP registry |
 
