@@ -1150,7 +1150,7 @@ zone-root, zone-assignment or home-lookup failures become family-specific
 `cannot be checked against host execution inputs (<cause>)` problems. Each problem
 names the family, source or configuration setting, cause and remedy.
 Identical uncheckable causes from the per-source check are reported once, with
-the neutral remedy `fix the cause named above and retry`; overlap remedies and
+the neutral remedy `fix that cause and retry`; overlap remedies and
 construction-error problems are unchanged.
 `validate_managed_bind_sources(config)` raises `MountSpecificationError` with the
 first problem.

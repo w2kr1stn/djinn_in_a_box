@@ -251,7 +251,7 @@ def test_relative_home_fails_closed(ground, monkeypatch):
     assert docker.managed_bind_problems(config) == [
         f"Sessions directory {source} is mounted writable and cannot be checked against "
         f"host execution inputs (non-absolute host path: {source}); "
-        "fix the cause named above and retry"
+        "fix that cause and retry"
     ]
 
 
@@ -384,7 +384,7 @@ def test_inventory_failure_is_cached_and_closed(ground, error_type):
     assert problems == [
         f"Workspace root {config.code_dir} is mounted writable and cannot be checked against "
         f"host execution inputs ({error_type('inventory unavailable')}); "
-        "fix the cause named above and retry"
+        "fix that cause and retry"
     ]
     inventory.assert_called_once_with()
 
@@ -400,7 +400,7 @@ def test_identical_uncheckable_causes_are_reported_once(ground, monkeypatch, inv
         )
     assert docker.managed_bind_problems(config) == [
         f"Workspace root {config.code_dir} is mounted writable and cannot be checked against "
-        "host execution inputs (unavailable); fix the cause named above and retry"
+        "host execution inputs (unavailable); fix that cause and retry"
     ]
     inventory.assert_called_once_with()
 
@@ -421,7 +421,7 @@ def test_distinct_uncheckable_causes_keep_neutral_remedies(ground, monkeypatch):
     monkeypatch.setattr(host_sealing, "execution_overlap", overlap)
     assert docker.managed_bind_problems(config) == [
         f"{LABELS[family]} {source} is mounted writable and cannot be checked against "
-        f"host execution inputs ({cause}); fix the cause named above and retry"
+        f"host execution inputs ({cause}); fix that cause and retry"
         for family, (source, cause) in zip(
             ("workspace", "config root"), failures.items(), strict=True
         )
@@ -451,7 +451,7 @@ def test_source_failure_is_closed(ground, monkeypatch, failure):
     )
     assert problems[0] == (
         f"{LABELS['workspace']} {config.code_dir} is mounted writable and cannot be checked "
-        f"against host execution inputs ({cause}); fix the cause named above and retry"
+        f"against host execution inputs ({cause}); fix that cause and retry"
     )
 
 
@@ -1052,7 +1052,7 @@ def test_construction_and_source_failures_use_distinct_remedies(ground, monkeypa
     monkeypatch.setattr(host_sealing, "canonical", canonical)
     assert docker.managed_bind_problems(config) == [
         f"Workspace root {config.code_dir} is mounted writable and cannot be checked against "
-        "host execution inputs (source unreadable); fix the cause named above and retry",
+        "host execution inputs (source unreadable); fix that cause and retry",
         expected_construction("config root", "root failed"),
         expected_construction("zones", "root failed"),
     ]

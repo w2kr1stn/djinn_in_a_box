@@ -908,7 +908,7 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
                     if cause in reported_uncheckable:
                         continue
                     reported_uncheckable.add(cause)
-                    source_remedy = "fix the cause named above and retry"
+                    source_remedy = "fix that cause and retry"
                 problems.append(
                     f"{family} {source} is mounted writable and {cause}; {source_remedy}"
                 )
