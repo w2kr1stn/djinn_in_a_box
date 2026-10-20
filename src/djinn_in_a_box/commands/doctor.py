@@ -461,10 +461,10 @@ def _path_size_bytes(path: Path) -> int:
     return total
 
 
-def _opencode_credentials_check(config: AppConfig | None) -> Check:
+def _opencode_credentials_check(config_root: Path) -> Check:
     findings = [
         finding
-        for finding in opencode_credentials.carrier_findings(get_config_root(config) / "opencode")
+        for finding in opencode_credentials.carrier_findings(config_root / "opencode")
         if finding.kind != "conflict-copy"
     ]
     remedies: list[str] = []
@@ -1252,7 +1252,6 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
 
     checks.append(_config_workflow_check(config))
     checks.append(_opencode_runtime_check(config, daemon=daemon))
-    checks.append(_opencode_credentials_check(config))
 
     if config is not None:
         code_ok = config.code_dir.is_dir()
@@ -1290,6 +1289,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             sops_check = _sops_age_key_check(config, root)
             if sops_check is not None:
                 checks.append(sops_check)
+            checks.append(_opencode_credentials_check(root))
 
             try:
                 assignments = load_zone_assignments(config)
