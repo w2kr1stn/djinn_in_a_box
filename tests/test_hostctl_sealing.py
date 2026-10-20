@@ -14,9 +14,10 @@ import pytest
 
 from djinn_in_a_box.commands.doctor import Status, hostctl_boundary_checks
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core import agent_docker, desktop, docker, host_runtime, hostctl
+from djinn_in_a_box.core import agent_docker, desktop, docker, host_runtime, hostctl, post_mortem
 from djinn_in_a_box.core import host_sealing as sealing
 from djinn_in_a_box.core.exceptions import DeclarationSpecificationError
+from djinn_in_a_box.core.host_runtime import inspect_object
 
 
 def dev(mounts=(), *, identity="dev-a", env=()):
@@ -2275,3 +2276,279 @@ def test_serve_state_is_protected(ground, monkeypatch, delivery):
     source = {"directory": root, "ancestor": root.parent, "password": password}[delivery]
     result = sealing.assess(dev([bind(source)]))
     assert any("exposed serve state" in cause for cause in result.cause_details)
+
+
+@pytest.fixture
+def run_peer(ground, monkeypatch):
+    empty_desktop(monkeypatch)
+    peer = dev(identity="run-a")
+    peer["Name"] = "/djinn-run-a"
+    peer["Config"]["Labels"] = {"djinn.run": ""}
+    peer["NetworkSettings"]["Networks"] = {"djinn-in-a-box_default": {}}
+    ground.objects["run-a"] = peer
+    monkeypatch.setattr(
+        hostctl,
+        "command",
+        lambda *args, **kwargs: "dev-a\nrun-a\n"
+        if args[0] == "ps"
+        else json.dumps({"DockerRootDir": str(ground.paths["data"])}),
+    )
+    return peer
+
+
+@pytest.mark.parametrize(
+    "stderr, vanished",
+    [
+        ("Error response from daemon: No such container: run-a", True),
+        ("Error: No such container: run-a", True),
+        ("open /x: no such file or directory", False),
+        ("Error response from daemon: get run-a: no such volume", False),
+        ("permission denied", False),
+    ],
+)
+def test_peer_inspection_skips_only_vanished_containers(
+    ground, run_peer, monkeypatch, stderr, vanished
+):
+    calls = []
+
+    def inspect(name, *args, **kwargs):
+        if name == "run-a":
+            calls.append(kwargs)
+            return inspect_object(name, "/fake/docker", **kwargs)
+        return ground.objects.get(name)
+
+    monkeypatch.setattr(host_runtime, "inspect_object", inspect)
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", stderr)
+    )
+    result = sealing.assess(dev())
+    assert calls == [{"missing": "No such container"}]
+    assert not result.causes
+    if vanished:
+        assert result.state == "sealed" and not result.errors
+        result.require()
+    else:
+        assert result.state == "unknown"
+        assert any("inspection uncertain" in error for error in result.errors)
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=True)
+
+
+@pytest.mark.parametrize("volume_present", [False, True])
+@pytest.mark.parametrize("timeout", [None, 1.25])
+def test_docker_storage_roots_and_timeout(ground, monkeypatch, volume_present, timeout):
+    calls = []
+
+    def command(*args, **kwargs):
+        calls.append(("info", args, kwargs))
+        return json.dumps({"DockerRootDir": str(ground.paths["data"])})
+
+    def inspect(*args, **kwargs):
+        calls.append(("volume", args, kwargs))
+        return ground.objects[hostctl.HOSTCTL_STATE_VOLUME] if volume_present else None
+
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(host_runtime, "inspect_object", inspect)
+    result = sealing.docker_storage_roots(**({} if timeout is None else {"timeout": timeout}))
+    data = ground.paths["data"]
+    assert result == (data, ground.backing if volume_present else data)
+    expected_timeout = {"timeout": 5 if timeout is None else timeout}
+    assert calls == [
+        ("info", ("info", "--format", "{{json .}}"), expected_timeout),
+        (
+            "volume",
+            (hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume"),
+            expected_timeout,
+        ),
+    ]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+@pytest.mark.parametrize("storage", ["data", "backing"])
+def test_docker_storage_roots_unreadable_parent_is_non_strict(ground, monkeypatch, storage):
+    denied = ground.paths["data"] / "denied"
+    denied.mkdir()
+    target = denied / "unseen" / "storage"
+    data, backing = ground.paths["data"], ground.backing
+    if storage == "data":
+        data = target
+        monkeypatch.setattr(
+            hostctl, "command", lambda *a, **kw: json.dumps({"DockerRootDir": str(data)})
+        )
+    else:
+        backing = target
+        ground.objects[hostctl.HOSTCTL_STATE_VOLUME]["Mountpoint"] = str(backing)
+    denied.chmod(0o000)
+    try:
+        assert sealing.docker_storage_roots() == (data, backing)
+    finally:
+        denied.chmod(0o755)
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_protected_host_roots_cover_private_state_and_run_inputs(ground, monkeypatch, timeout):
+    controller = ground.paths["home"] / "controller"
+    records = ground.paths["home"] / "records"
+    roots_called = []
+
+    def state_root(*, create):
+        roots_called.append(("hostctl", create))
+        return controller
+
+    def records_root(*, create):
+        roots_called.append(("post-mortem", create))
+        return records
+
+    monkeypatch.setattr(hostctl, "state_root", state_root)
+    monkeypatch.setattr(post_mortem, "records_root", records_root)
+    storage_calls = []
+
+    def storage(*, timeout):
+        storage_calls.append(timeout)
+        return ground.paths["data"], ground.backing
+
+    monkeypatch.setattr(sealing, "docker_storage_roots", storage)
+    sockets = (ground.socket, ground.socket.with_name("rootless.sock"))
+    monkeypatch.setattr(sealing, "docker_sockets", lambda: sockets)
+    keys = (ground.paths["home"] / "one/keys.txt", ground.paths["home"] / "two/keys.txt")
+    protected = sealing.protected_host_roots(
+        iter(keys), **({} if timeout is None else {"timeout": timeout})
+    )
+    expected = (
+        ground.paths["runtime"], controller, controller.parent / "serve", records,
+        ground.paths["data"], ground.backing, *keys, *sockets,
+    )
+    assert len(protected) == len(expected)
+    assert set(protected.values()) == set(expected)
+    assert len(set(protected)) == len(protected)
+    assert roots_called == [("hostctl", False), ("post-mortem", False)]
+    assert storage_calls == [30 if timeout is None else timeout]
+    assert all(
+        any(path.is_relative_to(root) for root in protected.values())
+        for path in sealing.private_state_paths().values()
+    )
+    assert list(protected.values()).count(controller) == 1
+    assert list(protected.values()).count(records) == 1
+    assert not controller.exists() and not records.exists()
+
+
+@pytest.mark.parametrize("site", ["storage", "hostctl", "post-mortem", "sockets"])
+def test_protected_host_roots_propagate_failures(ground, monkeypatch, site):
+    failure = OSError("protection inventory unavailable")
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    target, name = {
+        "storage": (sealing, "docker_storage_roots"),
+        "hostctl": (hostctl, "state_root"),
+        "post-mortem": (post_mortem, "records_root"),
+        "sockets": (sealing, "docker_sockets"),
+    }[site]
+    monkeypatch.setattr(target, name, fail)
+    with pytest.raises(OSError) as caught:
+        sealing.protected_host_roots()
+    assert caught.value is failure
+
+
+@pytest.mark.parametrize("field", ["Source", "Destination"])
+@pytest.mark.parametrize("socket", ["standard", "discovered"])
+@pytest.mark.parametrize("as_path", [False, True], ids=["string", "path"])
+def test_run_socket_authority_on_another_network(ground, run_peer, field, socket, as_path):
+    value = "/var/run/docker.sock" if socket == "standard" else str(ground.socket)
+    run_peer["Mounts"] = [
+        {"Type": "bind", field: Path(value) if as_path else value, "RW": False}
+    ]
+    assert host_runtime.RUN_LABEL == "djinn.run"
+    result = sealing.assess(dev())
+    assert not result.errors
+    assert result.cause_findings == (
+        sealing.Finding("Docker authority in a running djinn run /djinn-run-a"),
+    )
+    with pytest.raises(hostctl.HostctlError, match="Docker authority in a running djinn run"):
+        result.require()
+    result.require(allow_unsealed=True)
+
+
+@pytest.mark.parametrize(
+    "env, authority",
+    [
+        (["DOCKER_HOST=tcp://x:2375"], True),
+        (["DOCKER_HOST=unix:///other/socket"], True),
+        (["DOCKER_HOST="], False),
+        (["OTHER_DOCKER_HOST=tcp://x:2375"], False),
+        (["DOCKER_HOST"], False),
+        (["DOCKER_HOST=tcp://x:2375", "DOCKER_HOST="], True),
+        (["unparsed", "DOCKER_HOST=tcp://x:2375"], True),
+    ],
+)
+def test_run_docker_host_authority_is_lexical(run_peer, env, authority):
+    run_peer["Config"]["Env"] = env
+    result = sealing.assess(dev())
+    assert not result.errors
+    assert bool(result.causes) is authority
+    if authority:
+        assert result.causes == ("Docker authority in a running djinn run /djinn-run-a",)
+
+
+@pytest.mark.parametrize("labels", [None, {}, {"unrelated": "run"}])
+def test_unlabelled_peer_socket_on_another_network_is_unchanged(run_peer, labels):
+    run_peer["Config"]["Labels"] = labels
+    run_peer["Mounts"] = [bind("/var/run/docker.sock")]
+    result = sealing.assess(dev())
+    assert result.state == "sealed" and not result.causes and not result.errors
+
+
+@pytest.mark.parametrize("labels", [None, {"djinn.run": "run-a"}])
+def test_peer_tmpfs_and_null_metadata_are_safe(run_peer, labels):
+    run_peer["Config"]["Labels"] = labels
+    run_peer["Config"]["Env"] = None
+    run_peer["Mounts"] = [{"Type": "tmpfs", "Destination": "/tmp"}]
+    result = sealing.assess(dev())
+    assert result.state == "sealed" and not result.causes and not result.errors
+
+
+@pytest.mark.parametrize("field", ["Config", "Mounts"])
+def test_peer_null_config_or_mounts_are_safe(run_peer, field):
+    run_peer[field] = None
+    result = sealing.assess(dev())
+    assert result.state == "sealed" and not result.causes and not result.errors
+
+
+def test_run_authority_uses_peer_id_without_name(run_peer):
+    del run_peer["Name"]
+    run_peer["Config"]["Env"] = ["DOCKER_HOST=tcp://x:2375"]
+    result = sealing.assess(dev())
+    assert result.causes == ("Docker authority in a running djinn run run-a",)
+    assert not result.errors
+
+
+@pytest.mark.parametrize("value", ["/var/run", "/var/run/docker.sock/child", "alias"])
+def test_run_socket_authority_is_lexical(ground, run_peer, value):
+    if value == "alias":
+        alias = ground.socket.with_name("socket-alias")
+        alias.symlink_to(ground.socket)
+        value = str(alias)
+    run_peer["Mounts"] = [bind(value)]
+    result = sealing.assess(dev())
+    assert result.state == "sealed" and not result.causes and not result.errors
+
+
+def test_run_authority_adds_no_filesystem_or_socket_probes(ground, run_peer, monkeypatch):
+    run_peer["Mounts"] = [bind(ground.socket)]
+    original_stat = os.stat
+
+    def guarded_stat(path, *args, **kwargs):
+        assert not isinstance(path, str | Path) or Path(path) != ground.socket, (
+            "run authority must use only lexical paths"
+        )
+        return original_stat(path, *args, **kwargs)
+
+    def forbidden_probe(*args, **kwargs):
+        pytest.fail("run authority must not probe sockets")
+
+    monkeypatch.setattr(os, "stat", guarded_stat)
+    monkeypatch.setattr(sealing, "_socket_is_docker", forbidden_probe)
+    result = sealing.assess(dev())
+    assert result.causes == ("Docker authority in a running djinn run /djinn-run-a",)
+    assert not result.errors

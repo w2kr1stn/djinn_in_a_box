@@ -17,10 +17,57 @@ from djinn_in_a_box.core.git_agent import agent_keys
 from djinn_in_a_box.core.host_runtime import (
     GENERATION_LABEL,
     git_runtime,
+    inspect_object,
     runtime_root,
     stop_owned_process,
 )
 from djinn_in_a_box.core.ssh_delivery import GitSSHError, read_public_delivery
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error response from daemon: get X: no such volume",
+        "Error response from daemon: No such container: X",
+        "NO SUCH image: X",
+    ],
+)
+def test_inspect_object_default_missing_match_is_unchanged(monkeypatch, stderr):
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", stderr)
+    )
+    assert inspect_object("X", "/fake/docker", "volume") is None
+
+
+@pytest.mark.parametrize(
+    "stderr, missing, absent",
+    [
+        ("Error response from daemon: No such container: X", "No such container", True),
+        ("Error: No such container: X", "No such container", True),
+        ("open /x: no such file or directory", "No such container", False),
+        ("Error response from daemon: get X: no such volume", "No such container", False),
+        ("permission denied", "No such container", False),
+        ("Error response from daemon: no such container: X", "No such container", False),
+        ("Error response from daemon: No such container: X", "no such", False),
+        ("Error response from daemon: get X: no such volume", "no such", True),
+        ("Error response from daemon: network X not found", "network X not found", True),
+    ],
+)
+def test_inspect_object_explicit_missing_is_case_sensitive(monkeypatch, stderr, missing, absent):
+    calls = []
+
+    def inspect(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 1, "", stderr)
+
+    monkeypatch.setattr(subprocess, "run", inspect)
+    if absent:
+        assert inspect_object("X", "/fake/docker", missing=missing, timeout=1.25) is None
+    else:
+        with pytest.raises(GitSSHError, match="Docker inspection failed"):
+            inspect_object("X", "/fake/docker", missing=missing, timeout=1.25)
+    assert calls[0][0] == ["/fake/docker", "container", "inspect", "X"]
+    assert calls[0][1]["timeout"] == 1.25
 
 
 @pytest.fixture(autouse=True)
