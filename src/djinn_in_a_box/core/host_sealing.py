@@ -380,6 +380,24 @@ def volume_bind_source(mount: dict[str, Any]) -> str | None:
     raise ValueError(f"volume storage provenance unknown: {mount['Name']}")
 
 
+def private_state_paths() -> dict[str, Path]:
+    """Private host state, excluding the public runtime deliveries."""
+    return {
+        "host controller/journal": hostctl.state_root(create=False),
+        "journal": hostctl.state_root(create=False) / "journal.jsonl",
+        "post-mortem records": post_mortem.records_root(create=False),
+        "private agent": host_runtime.runtime_root() / "private",
+        "private agent socket": host_runtime.runtime_root() / "private/agent.sock",
+        "host runtime control": host_runtime.runtime_root() / host_runtime.STATE_FILE,
+        "host runtime temporary state": host_runtime.runtime_root() / host_runtime.STATE_TMP,
+        "host runtime creator lock": host_runtime.runtime_root() / host_runtime.CREATOR_LOCK,
+        "host runtime ready": host_runtime.runtime_root() / host_runtime.READY,
+        "host runtime attached": host_runtime.runtime_root() / host_runtime.ATTACHED,
+        "host runtime loaded": host_runtime.runtime_root() / host_runtime.LOADED,
+        "host runtime observer log": host_runtime.runtime_root() / host_runtime.OBSERVER_LOG,
+    }
+
+
 def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = None) -> Assessment:
     from djinn_in_a_box.core import docker
 
@@ -414,12 +432,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         )
         backing = canonical(volume["Mountpoint"]) if volume is not None else data_root
         private = {
-            "host controller/journal": canonical(hostctl.state_root(create=False)),
-            "journal": canonical(hostctl.state_root(create=False) / "journal.jsonl"),
-            "post-mortem records": canonical(post_mortem.records_root(create=False)),
-            "private agent": canonical(host_runtime.runtime_root() / "private"),
-            "private agent socket": canonical(host_runtime.runtime_root() / "private/agent.sock"),
-            "host runtime control": canonical(host_runtime.runtime_root() / "runtime.json"),
+            name: canonical(path) for name, path in private_state_paths().items()
         }
         execution: dict[str, tuple[Path, str, str]] = {}
         execution_error: Exception | None = None

@@ -39,6 +39,13 @@ if TYPE_CHECKING:
     from djinn_in_a_box.core.docker import ComposeFragment
 
 GENERATION_LABEL = "djinn.git-agent.generation"
+STATE_FILE = "state.json"
+STATE_TMP = "state.tmp"
+CREATOR_LOCK = "creator.lock"
+READY = "ready"
+ATTACHED = "attached"
+LOADED = "loaded"
+OBSERVER_LOG = "observer.log"
 STARTUP_SECONDS = 60
 REMOVE_TIMEOUT_SECONDS = 60
 CONTAINER_USER_UID = 1000
@@ -134,7 +141,7 @@ def inspect_dev(name: str, docker_path: str | None = None) -> tuple[str, bool, s
 
 
 def acquire_creation_lock(root: Path) -> int:
-    fd = os.open(root / "creator.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = os.open(root / CREATOR_LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
@@ -161,19 +168,19 @@ def creation_guard(root: Path | None = None) -> Iterator[Path]:
 
 def read_state(root: Path) -> dict[str, Any] | None:
     try:
-        return json.loads((root / "state.json").read_text())
+        return json.loads((root / STATE_FILE).read_text())
     except FileNotFoundError:
         return None
 
 
 def save_state(root: Path, state: dict[str, Any]) -> None:
-    temporary = root / "state.tmp"
+    temporary = root / STATE_TMP
     from djinn_in_a_box.core.hostctl import control_guard
 
     with control_guard():
         temporary.write_text(json.dumps(state))
         temporary.chmod(0o600)
-        temporary.replace(root / "state.json")
+        temporary.replace(root / STATE_FILE)
 
 
 def inspect_owned_resource(
@@ -371,10 +378,10 @@ def clear_state(root: Path, generation: str) -> None:
     for name in (
         "private/agent.sock",
         "export/auth.sock",
-        "ready",
-        "attached",
-        "loaded",
-        "state.json",
+        READY,
+        ATTACHED,
+        LOADED,
+        STATE_FILE,
     ):
         (root / name).unlink(missing_ok=True)
 
@@ -438,7 +445,7 @@ class GitRuntime:
                                 return
                     except (GitSSHError, OSError, subprocess.SubprocessError):
                         continue  # Unknown dev state keeps the preparation guard.
-                if (root / "attached").exists():
+                if (root / ATTACHED).exists():
                     state = read_state(root)
                     if (
                         state is not None
@@ -567,7 +574,7 @@ class GitRuntime:
                 self.release_creator_lock()
                 self.detached = True
                 return
-        while not (self.root / "attached").exists():
+        while not (self.root / ATTACHED).exists():
             if self.observer.poll() is not None or time.monotonic() >= deadline:
                 raise GitSSHError("host observer could not attach to the new dev container")
             time.sleep(0.05)
@@ -651,7 +658,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                 stop_owned_process(previous["agent_pid"], previous["agent_token"])
             clear_state(root, previous["generation"])
         runtime.owns_generation = True
-        for name in ("ready", "attached", "loaded"):
+        for name in (READY, ATTACHED, LOADED):
             (root / name).unlink(missing_ok=True)
         blobs: frozenset[bytes] = frozenset()
         if git_enabled:
@@ -692,7 +699,7 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
             if agent is not None:
                 state.update(agent_pid=agent.pid, agent_token=process_token(agent.pid))
             save_state(root, state)
-            with (root / "observer.log").open("ab") as log:
+            with (root / OBSERVER_LOG).open("ab") as log:
                 runtime.observer = subprocess.Popen(
                     [
                         sys.executable,
@@ -721,9 +728,9 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
                 observe_start()
             except OSError as exc:
                 warning(f"Desktop observer failed: {exc}; desktop endpoints will be omitted")
-        (root / "loaded").touch(mode=0o600)
+        (root / LOADED).touch(mode=0o600)
         deadline = time.monotonic() + 5
-        while runtime.observer is not None and not (root / "ready").exists():
+        while runtime.observer is not None and not (root / READY).exists():
             if runtime.observer.poll() is not None or time.monotonic() >= deadline:
                 if git_enabled:
                     raise GitSSHError(
@@ -773,7 +780,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
 
     signal.signal(signal.SIGTERM, stopping)
     signal.signal(signal.SIGINT, stopping)
-    (root / "ready").touch(mode=0o600)
+    (root / READY).touch(mode=0o600)
     deadline = time.monotonic() + 120
     loading = True
     dev_id = None
@@ -781,7 +788,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
     try:
         while not stop.wait(0.25):
             if loading:
-                if not (root / "loaded").exists():
+                if not (root / LOADED).exists():
                     if (
                         time.monotonic() >= deadline
                         or process_token(state["creator_pid"]) != state["creator_token"]
@@ -802,7 +809,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                         break
                     fresh["dev_id"] = dev_id
                     save_state(root, fresh)
-                    (root / "attached").touch(mode=0o600)
+                    (root / ATTACHED).touch(mode=0o600)
                     os.close(lock_fd)
                     lock_fd = -1
                 elif (

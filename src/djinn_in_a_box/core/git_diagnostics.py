@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core import host_runtime
 from djinn_in_a_box.core.git_agent import agent_keys
 from djinn_in_a_box.core.host_runtime import inspect_dev, process_token, runtime_root
 from djinn_in_a_box.core.ssh_delivery import (
@@ -314,7 +315,7 @@ def git_diagnostics(config: AppConfig) -> list[GitDiagnostic]:
         )
     try:
         root = runtime_root()
-        state_path = root / "state.json"
+        state_path = root / host_runtime.STATE_FILE
         if not state_path.exists():
             rows.append(
                 GitDiagnostic(

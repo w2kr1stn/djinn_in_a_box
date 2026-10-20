@@ -236,6 +236,23 @@ def test_clean_and_readonly_execution_binds_pass(ground, read_only):
         assert any("Djinn installation/build context" in cause for cause in writable)
 
 
+def test_public_and_export_runtime_binds_remain_sealed(ground, monkeypatch):
+    empty_desktop(monkeypatch)
+    mounts = []
+    for subtree, target, filename in (
+        ("public", "/home/dev/.ssh", "config"),
+        ("export", "/run/djinn-git-agent", "auth.sock"),
+    ):
+        source = ground.paths["runtime"] / subtree
+        source.mkdir()
+        (source / filename).touch()
+        mounts.append({**bind(source), "Destination": target})
+    result = sealing.assess(dev(mounts))
+    assert result.state == "sealed"
+    assert result.causes == ()
+    assert result.errors == ()
+
+
 @pytest.mark.parametrize("contents", ["[]", "null"])
 def test_non_object_docker_config_is_inspection_uncertain(tmp_path, monkeypatch, contents):
     (tmp_path / "config.json").write_text(contents)
@@ -1146,7 +1163,7 @@ def test_root_bind_groups_execution_inventory(ground, monkeypatch):
     assert result.causes == (
         "/ -> /delivery: host root; user home or ancestor; "
         "Docker data root/helper backing storage; "
-        f"exposed controller/journal/agent state (6 items); Docker socket {ground.socket}; "
+        f"exposed controller/journal/agent state (12 items); Docker socket {ground.socket}; "
         "writable Djinn installation and configuration (5 items); "
         "writable Python environment (17 items); "
         "writable Docker CLI and plugins (7 items); writable PATH directory (4 items)",
@@ -1164,6 +1181,12 @@ def test_root_bind_groups_execution_inventory(ground, monkeypatch):
                 "private agent",
                 "private agent socket",
                 "host runtime control",
+                "host runtime temporary state",
+                "host runtime creator lock",
+                "host runtime ready",
+                "host runtime attached",
+                "host runtime loaded",
+                "host runtime observer log",
             )
         ),
         f"Docker socket {ground.socket}: / -> /delivery",
@@ -1380,7 +1403,7 @@ def test_finding_attribution_variants(ground, monkeypatch, entry):
         "journal": hostctl.state_root() / "journal.jsonl",
         "private agent": ground.paths["runtime"] / "private",
         "private agent socket": ground.paths["runtime"] / "private/agent.sock",
-        "host runtime control": ground.paths["runtime"] / "runtime.json",
+        "host runtime control": ground.paths["runtime"] / host_runtime.STATE_FILE,
     }
     if entry in private:
         path = private[entry]
