@@ -51,6 +51,7 @@ DJINN_ENV_KEYS = frozenset(
         "DJINN_GIT_MANIFEST",
         "GIT_CONFIG_HELPER",
         "AGENT_PROMPT",
+        "DJINN_EGRESS_ALLOW",
         "TERM",
         "COLORTERM",
         "ZSH_THEME",

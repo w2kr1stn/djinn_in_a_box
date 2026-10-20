@@ -28,6 +28,7 @@ from djinn_in_a_box.core.console import (
     console,
     err_console,
     error,
+    escape_nonprintable,
     info,
     print_captured,
     rule,
@@ -45,7 +46,9 @@ from djinn_in_a_box.core.docker import (
     validate_managed_bind_sources,
     workflow_image_compatible,
 )
+from djinn_in_a_box.core.egress import EgressPlan, plan_egress
 from djinn_in_a_box.core.exceptions import (
+    EgressSpecificationError,
     MountSpecificationError,
     RuntimeMountSpecificationError,
 )
@@ -71,6 +74,7 @@ def _show_run_status(
     docker_mode: DockerMode,
     firewall: bool,
     timeout: int | None,
+    egress: EgressPlan | None = None,
 ) -> None:
     """Render CLI-only execution status after runner prerequisites pass."""
     err_console.print()
@@ -105,7 +109,11 @@ def _show_run_status(
         status_line("Docker", "Enabled (agent daemon)")
     elif docker_mode is DockerMode.DIRECT:
         status_line("Docker", "Enabled (DIRECT)", "warning")
-    if firewall:
+    if egress is not None:
+        status_line("Firewall", f"Allowlist ({len(egress.rules)} destinations)")
+        for entry, rules in egress.entries:
+            status_line("Egress", f"{entry} -> {', '.join(rule.describe() for rule in rules)}")
+    elif firewall:
         status_line("Firewall", "Enabled")
     if json_output:
         status_line("Output", "JSON")
@@ -149,6 +157,14 @@ def run(
         bool,
         typer.Option("--firewall", "-f", help="Enable network firewall"),
     ] = False,
+    allow: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow",
+            help=escape("Allow outbound HOST[/PREFIX][:PORT]; repeatable, "
+                        "replaces the default firewall list"),
+        ),
+    ] = None,
     here: Annotated[
         bool,
         typer.Option("--here", help="Mount current directory as ~/workspace"),
@@ -189,6 +205,9 @@ def run(
         # With Docker access and timeout
         djinn run claude "Build the Docker image" --docker --timeout 300
 
+        # Restrict outbound traffic to a pinned provider endpoint
+        djinn run claude "Explain this code" --allow api.anthropic.com:443
+
         # Mount the current directory and two additional directories
         djinn run claude "Compare these projects" --here \\
             --mount ~/other-project --mount ~/reference:/home/dev/reference:ro
@@ -198,6 +217,17 @@ def run(
     except ValueError as e:
         error(str(e))
         raise typer.Exit(1) from None
+
+    egress = None
+    if allow is not None:
+        if docker_mode is not DockerMode.NONE:
+            error("--allow cannot be combined with --docker or --docker-direct")
+            raise typer.Exit(1)
+        try:
+            egress = plan_egress(allow)
+        except EgressSpecificationError as e:
+            error(escape(str(e)))
+            raise typer.Exit(1) from None
 
     checked_config = None
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
@@ -244,6 +274,7 @@ def run(
             model=model,
             docker_mode=docker_mode,
             firewall=firewall,
+            egress=egress,
             resolved_mounts=resolved_mounts,
             timeout=timeout,
             app_config=checked_config,
@@ -255,6 +286,7 @@ def run(
                 model=model,
                 docker_mode=docker_mode,
                 firewall=firewall,
+                egress=egress,
                 timeout=timeout,
             ),
         )
@@ -268,8 +300,11 @@ def run(
     except RuntimeMountSpecificationError as e:
         error(f"Internal runtime mount construction failed: {e}")
         raise typer.Exit(1) from None
-    except (MountCollisionError, MountSpecificationError) as e:
-        error(escape(str(e)))
+    except (MountCollisionError, MountSpecificationError, EgressSpecificationError) as e:
+        message = str(e)
+        if egress is not None:
+            message = escape_nonprintable(message)
+        error(escape(message))
         raise typer.Exit(1) from None
 
     if result.stdout:

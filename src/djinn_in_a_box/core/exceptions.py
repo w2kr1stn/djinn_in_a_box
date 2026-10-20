@@ -38,6 +38,10 @@ class MountSpecificationError(ValueError):
     """Raised when a ``--mount`` value cannot be resolved or parsed."""
 
 
+class EgressSpecificationError(ValueError):
+    """Raised before creation when an outbound allowlist cannot be applied safely."""
+
+
 class SopsAgeKeyFileError(MountSpecificationError):
     """Raised when the configured SOPS age identity file cannot be mounted safely."""
 

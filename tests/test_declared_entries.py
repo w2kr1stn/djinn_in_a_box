@@ -377,3 +377,12 @@ def test_declared_dynamic_reservations(tmp_path, monkeypatch, case):
         config, docker.ContainerOptions(), runtime_targets=targets, caller_env=None
     )
     assert bool(result.diagnostics[0].error) is (case != "inactive-workspace")
+
+
+@pytest.mark.parametrize("value", ["", "8.8.8.8/32:443"])
+def test_egress_environment_is_reserved_in_config(tmp_path, value):
+    result = resolve(tmp_path, environment={"DJINN_EGRESS_ALLOW": value})
+    with pytest.raises(DeclarationSpecificationError, match="DJINN_EGRESS_ALLOW.*reserved"):
+        result.require_valid()
+    with pytest.raises(ValueError, match="DJINN_EGRESS_ALLOW.*reserved"):
+        AppConfig(code_dir=tmp_path, environment={"DJINN_EGRESS_ALLOW": value})

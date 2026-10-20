@@ -3800,3 +3800,318 @@ def test_opencode_export_refuses_an_unverified_volume_lookup() -> None:
         docker_mod.export_opencode_data_credentials()
     assert sentinel not in str(exc.value)
     export.assert_not_called()
+
+
+_EGRESS_PREPARE_COMPANIONS = docker_mod._prepare_companions
+
+
+@pytest.fixture
+def egress_compose(monkeypatch, mock_app_config):
+    from djinn_in_a_box.core.egress import plan_egress
+
+    monkeypatch.setattr(docker_mod.host_sealing, "execution_paths", lambda: {})
+
+    monkeypatch.setattr(docker_mod, "get_shell_mount_args", _empty_mount_args)
+    monkeypatch.setattr(docker_mod, "get_sops_age_key_mount_args", _empty_mount_args)
+    monkeypatch.setattr(docker_mod, "_prepare_companions", _EGRESS_PREPARE_COMPANIONS)
+    discover = MagicMock(return_value=[])
+    monkeypatch.setattr(docker_mod.desktop, "discover_desktop_endpoints", discover)
+    helper = MagicMock(side_effect=AssertionError("desktop helper called"))
+    monkeypatch.setattr(docker_mod.desktop, "helper_fragment", helper)
+    monkeypatch.setattr(docker_mod.desktop, "add_delivery", helper)
+    observed = []
+
+    def run(argv, **kwargs):
+        override = Path(argv[argv.index("run") - 1])
+        assert argv[argv.index("run") - 2] == "-f"
+        observed.append((argv, json.loads(override.read_text())))
+        return subprocess.CompletedProcess(argv, 0, "agent stdout", "djinn-egress: locked 2\n")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", run)
+    plan = plan_egress(["API.Example:443"], resolve=lambda _: ["8.8.8.8", "1.1.1.1"])
+    return mock_app_config, plan, observed, discover, helper
+
+
+def test_egress_real_override_and_default_compose_contract(egress_compose):
+    config, plan, observed, discover, helper = egress_compose
+    result = compose_run(
+        config,
+        ContainerOptions(egress=plan, firewall_enabled=True),
+        command="agent",
+        interactive=False,
+    )
+    argv, fragment = observed[-1]
+    dev = fragment["services"]["dev"]
+    assert dev["user"] == "0:0"
+    assert dev["entrypoint"] == ["/usr/local/bin/djinn-egress-init"]
+    assert dev["extra_hosts"] == ["api.example:1.1.1.1", "api.example:8.8.8.8"]
+    assert dev["environment"]["DJINN_EGRESS_ALLOW"] == "1.1.1.1/32:443 8.8.8.8/32:443"
+    assert "ENABLE_FIREWALL=true" in argv
+    assert not any(arg.startswith("DJINN_EGRESS_ALLOW=") for arg in argv)
+    assert not any(name.startswith("desktop-") for name in fragment.get("volumes", {}))
+    assert not any(name.startswith("desktop-") for name in fragment["services"])
+    assert all(dev["environment"][name] is None for name in docker_mod.desktop.MANAGED_ENV)
+    discover.assert_not_called()
+    helper.assert_not_called()
+    assert result.stdout == "agent stdout"
+    assert result.stderr == "djinn-egress: locked 2\n"
+
+    base = yaml.safe_load((Path(__file__).parents[1] / "docker-compose.yml").read_text())
+    assert base["services"]["dev"]["extra_hosts"] == ["host.docker.internal:host-gateway"]
+    # Compose unions extra_hosts sequences; pins cannot replace the built-in alias.
+    assert set(base["services"]["dev"]["extra_hosts"] + dev["extra_hosts"]) == {
+        "host.docker.internal:host-gateway",
+        "api.example:1.1.1.1",
+        "api.example:8.8.8.8",
+    }
+
+    compose_run(config, ContainerOptions(), interactive=False)
+    _, default = observed[-1]
+    assert not {"user", "entrypoint", "extra_hosts"}.intersection(default["services"]["dev"])
+    assert "DJINN_EGRESS_ALLOW" not in default["services"]["dev"]["environment"]
+    assert "ENABLE_FIREWALL=false" in observed[-1][0]
+    discover.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("service", "mode"),
+    [("other", DockerMode.NONE), ("dev", DockerMode.AGENT), ("dev", DockerMode.DIRECT)],
+)
+def test_egress_unsupported_compose_modes_before_runtime(
+    egress_compose,
+    monkeypatch,
+    service,
+    mode,
+):
+    config, plan, observed, _, _ = egress_compose
+    monkeypatch.setattr(docker_mod, "git_runtime", MagicMock(side_effect=AssertionError("runtime")))
+    with pytest.raises(ValueError, match="dev service without Docker"):
+        compose_run(
+            config,
+            ContainerOptions(egress=plan, docker_mode=mode),
+            service=service,
+            interactive=False,
+        )
+    assert observed == []
+
+
+def test_egress_detached_refused_without_subprocess(egress_compose):
+    config, plan, observed, _, _ = egress_compose
+    with pytest.raises(ValueError, match="only supported by compose_run"):
+        compose_up_detached(config, ContainerOptions(egress=plan))
+    assert observed == []
+
+
+_EGRESS_HOOKS = [
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "LD_CUSTOM",
+    "GLIBC_TUNABLES",
+    "GCONV_PATH",
+    "LOCPATH",
+    "NLSPATH",
+    "BASH_ENV",
+    "ENV",
+    "BASHOPTS",
+    "SHELLOPTS",
+    "BASH_FUNC_poison%%",
+]
+
+
+@pytest.mark.parametrize("key", _EGRESS_HOOKS)
+@pytest.mark.parametrize("source", ["config", "caller"])
+def test_egress_hook_refusals_before_runtime(egress_compose, monkeypatch, key, source):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    config, plan, observed, _, _ = egress_compose
+    runtime = MagicMock(side_effect=AssertionError("allocated generation"))
+    monkeypatch.setattr(docker_mod, "git_runtime", runtime)
+    env = {key: ""} if source == "caller" else None
+    if source == "config":
+        config = config.model_copy(update={"environment": {key: ""}})
+    with pytest.raises((EgressSpecificationError, MountSpecificationError), match=key):
+        compose_run(config, ContainerOptions(egress=plan), env=env, interactive=False)
+    runtime.assert_not_called()
+    assert observed == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/",
+        "/bin",
+        "/sbin",
+        "/usr",
+        "/usr/local/bin",
+        "/etc",
+        "/lib",
+        "/lib64",
+        "/run",
+        "/var/run",
+        "/run/xtables.lock",
+        "/home",
+        "/home/dev",
+        "/home/../usr",
+    ],
+)
+@pytest.mark.parametrize("source", ["runtime", "declared"])
+def test_egress_mount_refusals_before_runtime(
+    egress_compose,
+    monkeypatch,
+    tmp_path,
+    target,
+    source,
+):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    config, plan, observed, _, _ = egress_compose
+    runtime = MagicMock(side_effect=AssertionError("allocated generation"))
+    monkeypatch.setattr(docker_mod, "git_runtime", runtime)
+    mounts = ()
+    if source == "runtime":
+        mounts = (ContainerMount(tmp_path, Path(target), True),)
+    else:
+        config = config.model_copy(
+            update={
+                "mounts": {
+                    "input": {"source": str(tmp_path), "target": target, "read_only": True},
+                }
+            }
+        )
+    with pytest.raises(
+        (EgressSpecificationError, MountSpecificationError, MountCollisionError),
+        match="target|conflicts"
+    ):
+        compose_run(config, ContainerOptions(egress=plan, mounts=mounts), interactive=False)
+    runtime.assert_not_called()
+    assert observed == []
+
+
+@pytest.mark.parametrize("target", ["/home/dev/workspace", "/home/dev/input", "/opt/data"])
+@pytest.mark.parametrize("source", ["runtime", "declared"])
+def test_egress_safe_mounts(egress_compose, tmp_path, target, source):
+    config, plan, observed, _, _ = egress_compose
+    mounts = ()
+    if source == "runtime":
+        mounts = (ContainerMount(tmp_path, Path(target), True),)
+    else:
+        config = config.model_copy(
+            update={
+                "mounts": {
+                    "input": {"source": str(tmp_path), "target": target, "read_only": True},
+                }
+            }
+        )
+    assert (
+        compose_run(
+            config, ContainerOptions(egress=plan, mounts=mounts), interactive=False
+        ).returncode
+        == 0
+    )
+    argv, fragment = observed[-1]
+    if source == "runtime":
+        assert f"{tmp_path}:{target}:ro" in argv
+    else:
+        assert fragment["services"]["dev"]["volumes"][0]["target"] == target
+
+
+@pytest.mark.parametrize("key", _EGRESS_HOOKS)
+def test_hook_caller_environment_unchanged_without_egress(egress_compose, key):
+    config, _, observed, _, _ = egress_compose
+    assert (
+        compose_run(config, ContainerOptions(), env={key: "value"}, interactive=False).returncode
+        == 0
+    )
+    assert f"{key}=value" in observed[-1][0]
+
+
+@pytest.mark.parametrize("key", _EGRESS_HOOKS)
+@pytest.mark.parametrize("source", ["config", "caller"])
+def test_egress_hook_class_guard(key, source):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    declarations = docker_mod.ResolvedDeclarations([], {key: ""} if source == "config" else {}, [])
+    with pytest.raises(EgressSpecificationError, match=key):
+        docker_mod._validate_egress_inputs(
+            declarations,
+            (),
+            {key: ""} if source == "caller" else {},
+        )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/",
+        "/bin",
+        "/sbin",
+        "/usr",
+        "/etc",
+        "/lib",
+        "/lib64",
+        "/run",
+        "/var/run",
+        "/home",
+        "/home/dev",
+        "/bin/tool",
+        "/sbin/tool",
+        "/usr/local/bin",
+        "/etc/config",
+        "/lib/module",
+        "/lib64/module",
+        "/run/xtables.lock",
+        "/home/../usr",
+    ],
+)
+@pytest.mark.parametrize("source", ["runtime", "declared"])
+def test_egress_mount_class_guard(target, source):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    mount = docker_mod.ResolvedDeclaration("input", "bind", "/input", Path(target), True)
+    declarations = docker_mod.ResolvedDeclarations([mount] if source == "declared" else [], {}, [])
+    runtime = (ContainerMount(Path("/input"), Path(target), True),) if source == "runtime" else ()
+    with pytest.raises(EgressSpecificationError, match="input.*target.*shadows"):
+        docker_mod._validate_egress_inputs(declarations, runtime, {})
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/home/dev/workspace", "/home/dev/input", "/home/other", "/opt", "/usr-other", "/run-other"],
+)
+def test_egress_mount_class_positive_controls(target):
+    docker_mod._validate_egress_inputs(
+        docker_mod.ResolvedDeclarations([], {}, []),
+        (ContainerMount(Path("/input"), Path(target)),),
+        {},
+    )
+
+
+@pytest.mark.parametrize("source", ["hook", "mount"])
+def test_egress_setting_errors_are_single_line(source):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    env = {"LD_POISON\nname": ""} if source == "hook" else {}
+    mounts = (ContainerMount(Path("/input\nsource"), Path("/etc/input\nname")),)
+    with pytest.raises(EgressSpecificationError) as exc:
+        docker_mod._validate_egress_inputs(docker_mod.ResolvedDeclarations([], {}, []),
+                                         mounts if source == "mount" else (), env)
+    assert len(str(exc.value).splitlines()) == 1
+    assert "\\n" in str(exc.value)
+
+
+def test_egress_declared_volume_guard_and_positive_control(egress_compose):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    config, plan, observed, _, _ = egress_compose
+    unsafe = config.model_copy(update={"mounts": {
+        "input": {"volume": True, "target": "/usr/p1-input", "backup": "cache"},
+    }})
+    with pytest.raises(EgressSpecificationError, match="mounts.input.*shadows"):
+        compose_run(unsafe, ContainerOptions(egress=plan), interactive=False)
+    assert observed == []
+    safe = config.model_copy(update={"mounts": {
+        "input": {"volume": True, "target": "/home/dev/input", "backup": "cache"},
+    }})
+    assert compose_run(safe, ContainerOptions(egress=plan), interactive=False).returncode == 0
+    assert observed[-1][1]["services"]["dev"]["volumes"][0]["target"] == "/home/dev/input"

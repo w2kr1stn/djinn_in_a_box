@@ -16,6 +16,7 @@ from djinn_in_a_box.core.docker import (
     compose_run,
     ensure_network,
 )
+from djinn_in_a_box.core.egress import EgressPlan
 
 
 class UnknownAgentError(ValueError):
@@ -68,6 +69,7 @@ def run_headless_agent(
     model: str | None = None,
     docker_mode: DockerMode = DockerMode.NONE,
     firewall: bool = False,
+    egress: EgressPlan | None = None,
     resolved_mounts: tuple[ContainerMount, ...],
     timeout: int | None = None,
     on_ready: Callable[[tuple[ContainerMount, ...]], None] | None = None,
@@ -95,7 +97,8 @@ def run_headless_agent(
     )
     options = ContainerOptions(
         docker_mode=docker_mode,
-        firewall_enabled=firewall,
+        firewall_enabled=firewall or egress is not None,
+        egress=egress,
         mounts=resolved_mounts,
     )
 

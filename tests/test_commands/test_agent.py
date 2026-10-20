@@ -656,6 +656,115 @@ class TestRunCommand:
         assert exc_info.value.exit_code == 1
         mock_run.assert_not_called()
 
+    @pytest.mark.parametrize("docker_flag", ["--docker", "--docker-direct"])
+    def test_allow_refuses_docker_before_workflow(self, run_mocks, docker_flag):
+        result = CliRunner().invoke(
+            app,
+            ["run", "claude", "test", "--allow", "8.8.8.8", docker_flag],
+        )
+        assert result.exit_code == 1
+        assert "--allow cannot be combined with --docker or --docker-direct" in result.stderr
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("entry", ["*", "", "éxample.com", "10.0.0.1/8"])
+    def test_allow_validation_precedes_workflow(self, run_mocks, entry):
+        result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", entry])
+        assert result.exit_code == 1
+        assert "--allow" in result.stderr
+        assert result.stdout == ""
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("firewall", [False, True])
+    def test_allow_status_streams_and_exit_code(self, run_mocks, firewall):
+        from djinn_in_a_box.core.egress import plan_egress
+
+        plan = plan_egress(
+            ["API.Example:443", "api.example:443", "10.0.0.0/8"],
+            resolve=lambda _: ["8.8.8.8", "1.1.1.1"],
+        )
+
+        def run_agent(*args, **kwargs):
+            assert kwargs["egress"] == plan
+            kwargs["on_ready"](kwargs["resolved_mounts"])
+            return RunResult(
+                7,
+                '{"agent":"stdout"}\n',
+                "djinn-egress: allow 10.0.0.0/8 any\ndjinn-egress: locked 3\ncontainer stderr\n",
+            )
+
+        run_mocks["run"].side_effect = run_agent
+        with patch("djinn_in_a_box.commands.agent.plan_egress", return_value=plan) as planner:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "run",
+                    "claude",
+                    "test",
+                    "--json",
+                    "--allow",
+                    "API.Example:443",
+                    "--allow",
+                    "10.0.0.0/8",
+                ]
+                + (["--firewall"] if firewall else []),
+            )
+        planner.assert_called_once_with(["API.Example:443", "10.0.0.0/8"])
+        assert result.exit_code == 7, result.output
+        assert result.stdout == '{"agent":"stdout"}\n'
+        assert "Firewall" in result.stderr and "Allowlist (3 destinations)" in result.stderr
+        assert "api.example:443 -> 1.1.1.1/32 tcp/443, 8.8.8.8/32 tcp/443" in result.stderr
+        assert "10.0.0.0/8 -> 10.0.0.0/8 any" in result.stderr
+        assert "djinn-egress: locked 3" in result.stderr
+        assert "container stderr" in result.stderr
+
+    def test_allow_compose_refusal_is_one_escaped_error(self, run_mocks):
+        from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+        run_mocks["run"].side_effect = EgressSpecificationError("environment.BASH_ENV: [red]hook")
+        result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", "8.8.8.8"])
+        assert result.exit_code == 1
+        assert "environment.BASH_ENV: [red]hook" in result.stderr
+        assert result.stdout == ""
+        assert len(result.stderr.splitlines()) == 1
+
+    def test_allow_planner_error_is_escaped(self, run_mocks):
+        from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+        with patch(
+            "djinn_in_a_box.commands.agent.plan_egress",
+            side_effect=EgressSpecificationError("--allow '[red]': invalid name"),
+        ):
+            result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", "[red]"])
+        assert result.exit_code == 1
+        assert "--allow '[red]': invalid name" in result.stderr
+        assert len(result.stderr.splitlines()) == 1
+        run_mocks["workflow"].assert_not_called()
+
+    def test_allow_help(self):
+        result = CliRunner().invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "--allow" in result.output
+        assert "Allow outbound HOST[/PREFIX][:PORT]" in result.output
+        assert "replaces the default firewall list" in re.sub(r"[│\s]+", " ", result.output)
+
+    @pytest.mark.parametrize("allow", [False, True])
+    def test_allow_inherited_mount_error_stays_one_line(self, run_mocks, allow):
+        run_mocks["run"].side_effect = MountCollisionError(
+            "Mount /in\nput -> / conflicts with reserved mount at /home/dev/.claude "
+            "(conflict path: /home/dev/.claude)"
+        )
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test"] + (["--allow", "8.8.8.8"] if allow else []),
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        if allow:
+            assert "Mount /in\\nput -> / conflicts" in result.stderr
+            assert len(result.stderr.splitlines()) == 1
+        else:
+            assert "Mount /in\nput -> / conflicts" in result.stderr
 
 class TestAgentsJson:
     @pytest.fixture
