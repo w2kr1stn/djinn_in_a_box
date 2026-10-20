@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any, cast
@@ -57,6 +58,10 @@ OPENCODE_CREDENTIAL_TARGET = Path("/run/djinn-credentials")
 OPENCODE_DATA_TARGET = Path("/home/dev/.local/share/opencode")
 STOP_GRACE_SECONDS = 10
 STOP_TIMEOUT_SECONDS = 40
+REMOVAL_WAIT_SECONDS = 20
+REMOVAL_POLL_SECONDS = 0.2
+# Docker's answer when `--rm` already removes the container, for example right after a stop.
+_REMOVAL_IN_PROGRESS = "is already in progress"
 PIN_NAMES = {
     "claude": "CLAUDE_CODE_VERSION",
     "codex": "CODEX_VERSION",
@@ -319,9 +324,16 @@ def cleanup(name: str) -> None:
     identity = container.get("Id")
     if not isinstance(identity, str) or not identity:
         raise AssistantError("Assistant cleanup could not verify the container ID")
-    capture("rm", "--force", identity)
-    if inspect("container", name) is not None:
-        raise AssistantError(f"Assistant container cleanup failed: {name}")
+    try:
+        capture("rm", "--force", identity)
+    except AssistantError as error:
+        if _REMOVAL_IN_PROGRESS not in str(error):
+            raise
+    deadline = time.monotonic() + REMOVAL_WAIT_SECONDS
+    while inspect("container", name) is not None:
+        if time.monotonic() >= deadline:
+            raise AssistantError(f"Assistant container cleanup failed: {name}")
+        time.sleep(REMOVAL_POLL_SECONDS)
 
 
 def _reason(error: Exception) -> str:
@@ -344,7 +356,8 @@ def stop_container(name: str) -> None:
         [DOCKER_EXECUTABLE, "stop", "--time", str(STOP_GRACE_SECONDS), name],
         timeout=STOP_TIMEOUT_SECONDS,
     )
-    if not result.success and f"No such container: {name}" not in result.stderr:
+    gone = f"No such container: {name}" in result.stderr or _REMOVAL_IN_PROGRESS in result.stderr
+    if not result.success and not gone:
         raise AssistantError(result.stderr.strip() or f"Could not stop container {name}")
 
 

@@ -43,6 +43,8 @@ class Docker:
         self.exports = []
         self.stubborn = False
         self.on_run = None
+        self.removing = 0
+        self.stop_error = ""
 
     def run(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
@@ -78,9 +80,16 @@ class Docker:
                 return subprocess.CompletedProcess(argv, 1, "[]", f"No such image: {args[2]}")
             return subprocess.CompletedProcess(argv, 0, json.dumps([self.image]), "")
         if args[:2] == ["container", "inspect"]:
+            if args[2] in self.containers and self.removing:
+                # An auto-removal in progress: the container vanishes after some inspects.
+                self.removing -= 1
+                if not self.removing:
+                    del self.containers[args[2]]
             if args[2] not in self.containers:
                 return subprocess.CompletedProcess(argv, 1, "[]", f"No such container: {args[2]}")
             return subprocess.CompletedProcess(argv, 0, json.dumps([self.containers[args[2]]]), "")
+        if args[0] == "stop" and self.stop_error:
+            return subprocess.CompletedProcess(argv, 1, "", self.stop_error)
         if args[:2] == ["network", "inspect"]:
             return subprocess.CompletedProcess(
                 argv,
@@ -105,6 +114,9 @@ class Docker:
         if args[0] == "rm":
             if self.fail_remove:
                 return subprocess.CompletedProcess(argv, 1, "", "removal failed")
+            if self.removing:
+                message = f"Error response from daemon: removal of container {args[-1]}"
+                return subprocess.CompletedProcess(argv, 1, "", f"{message} is already in progress")
             self.containers = {
                 name: obj for name, obj in self.containers.items() if obj["Id"] != args[2]
             }
@@ -459,6 +471,47 @@ def test_cleanup_refuses_foreign_label(installation):
     with pytest.raises(a.AssistantError, match="unknown ownership"):
         a.cleanup("fixture")
     assert not any(argv[1] == "rm" for argv, _ in f.docker.calls)
+
+
+def _owned(f, name):
+    f.docker.containers[name] = {
+        "Id": "d" * 64,
+        "Config": {"Labels": {a.SESSION_LABEL: name}},
+        "State": {"Running": False},
+    }
+
+
+def test_cleanup_waits_for_an_auto_removal_already_in_progress(installation, monkeypatch):
+    f = installation
+    _owned(f, "fixture")
+    f.docker.removing = 4
+    monkeypatch.setattr(a, "REMOVAL_POLL_SECONDS", 0)
+    a.cleanup("fixture")
+    assert "fixture" not in f.docker.containers
+
+
+def test_cleanup_fails_visibly_when_an_auto_removal_never_ends(installation, monkeypatch):
+    f = installation
+    _owned(f, "fixture")
+    f.docker.removing = 10**9
+    monkeypatch.setattr(a, "REMOVAL_POLL_SECONDS", 0)
+    monkeypatch.setattr(a, "REMOVAL_WAIT_SECONDS", 0.05)
+    with pytest.raises(a.AssistantError, match="cleanup failed"):
+        a.cleanup("fixture")
+
+
+@pytest.mark.parametrize(
+    "stderr", ("No such container: fixture", "removal of container x is already in progress")
+)
+def test_stop_tolerates_a_container_that_is_gone_or_being_removed(installation, stderr):
+    installation.docker.stop_error = f"Error response from daemon: {stderr}"
+    a.stop_container("fixture")
+
+
+def test_stop_reports_other_failures(installation):
+    installation.docker.stop_error = "Error response from daemon: cannot stop"
+    with pytest.raises(a.AssistantError, match="cannot stop"):
+        a.stop_container("fixture")
 
 
 def test_terminal_required_before_docker(installation, monkeypatch):
