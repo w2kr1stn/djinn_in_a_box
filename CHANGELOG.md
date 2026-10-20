@@ -12,6 +12,8 @@ Versioning before and after the first stable release.
 - Raise the default OpenCode version to 2.1.1; a fresh build with the previous
   default 2.0.26 failed in OpenCode's npm postinstall. Maintainers now build
   once with the defaults alone after any default bump (#176).
+- Doctor no longer reports Claude's `mcp-needs-auth-cache.json` as zone drift;
+  it is a known config-root entry (#177).
 - Name offending workflow roots, files and carrier keys in delivery refusals.
   `djinn config status` and doctor's `Config workflow` check now inspect start
   runtime roots read-only; runtime drift makes status exit `1`. Plain sync

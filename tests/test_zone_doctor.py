@@ -110,3 +110,13 @@ def test_opencode_personal_cli_and_themes_are_known_entries(zone_config: AppConf
     assert str(unexpected) in row.detail
     assert str(root / "themes") not in row.detail
     assert str(root / "cli.json") not in row.detail
+
+
+def test_claude_mcp_needs_auth_cache_is_a_known_entry(zone_config: AppConfig) -> None:
+    root = zone_config.config_root / "claude"
+    root.mkdir(parents=True)
+    (root / "settings.json").write_text("{}")
+    (root / "mcp-needs-auth-cache.json").write_text("{}")
+    row = _check_named(doctor_mod.run_checks(zone_config), "Zone drift")
+    assert row.status is doctor_mod.Status.PASS
+    assert row.detail == "none"
