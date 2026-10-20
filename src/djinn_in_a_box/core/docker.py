@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Required, TypedDict, cast
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
@@ -64,6 +65,7 @@ from djinn_in_a_box.core.exceptions import (
 )
 from djinn_in_a_box.core.opencode_credentials import EXPORT_LIMIT
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
+from djinn_in_a_box.core.signals import signals_as_interrupt, signals_ignored
 from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
 
 git_runtime = host_runtime.git_runtime
@@ -700,8 +702,10 @@ def ensure_network(name: str = DJINN_NETWORK) -> bool:
     return result.success
 
 
-def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
-    """Get project and compose file arguments based on Docker mode."""
+def get_compose_files(
+    docker_mode: DockerMode = DockerMode.NONE, *, guest: bool = False,
+) -> list[str]:
+    """Get Compose inputs in merge order, with the isolated network overlay for guests."""
     project_root = get_project_root()
     files = ["-p", COMPOSE_PROJECT, "-f", str(project_root / "docker-compose.yml")]
 
@@ -711,6 +715,9 @@ def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
         files.extend(["-f", str(project_root / "docker-compose.agent-docker.yml")])
     elif docker_mode is DockerMode.DIRECT:
         files.extend(["-f", str(project_root / "docker-compose.docker-direct.yml")])
+
+    if guest:
+        files.extend(["-f", str(project_root / "docker-compose.run.yml")])
 
     return files
 
@@ -773,6 +780,7 @@ def _run_compose(
     cwd: Path,
     extra_env: dict[str, str] | None = None,
     timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> RunResult:
     """Single choke-point for non-interactive ``docker compose`` calls.
 
@@ -782,11 +790,11 @@ def _run_compose(
 
     ``extra_env`` carries values a subcommand cannot pass as a flag — ``up`` has
     no per-invocation ``-e`` — and is layered on top of the host bridge, never
-    replacing it.
+    replacing it. ``env`` supplies a previously captured host environment unchanged.
     """
-    env = _compose_host_env(config)
+    env = _compose_host_env(config) if env is None else env
     if extra_env:
-        env.update(extra_env)
+        env = {**env, **extra_env}
     return _run_captured([DOCKER_EXECUTABLE, "compose", *args], cwd=cwd, env=env, timeout=timeout)
 
 
@@ -2499,6 +2507,133 @@ def _apply_egress(fragment: ComposeFragment, egress: EgressPlan) -> None:
     dev.setdefault("environment", {})["DJINN_EGRESS_ALLOW"] = egress.environment_value()
 
 
+class RunRefusedError(RuntimeError):
+    """A guest run could not establish its required isolation."""
+
+
+def _guest_source_check(
+    config: AppConfig, options: ContainerOptions, *,
+    resolved: dict[str, Any] | None = None, mount_args: list[str] | None = None,
+) -> None:
+    """Integration boundary for A-S3's user-source and resolved Compose bind checks."""
+
+
+def _run_preflight(
+    args: list[str], config: AppConfig, project_root: Path, host_env: dict[str, str],
+) -> dict[str, Any]:
+    """Resolve exactly the guest invocation and require its isolated default network."""
+    result = RunResult(1)
+    try:
+        result = _run_compose(
+            [*args, "config", "--format", "json"], config=config, cwd=project_root,
+            timeout=30, env=host_env,
+        )
+        if not result.success:
+            raise ValueError("Compose resolution failed")
+        resolved = json.loads(result.stdout)
+        service = resolved["services"]["dev"]
+        networks = service["networks"]
+        default = resolved["networks"]["default"]
+        if not isinstance(networks, dict | list) or not isinstance(default, dict):
+            raise TypeError("invalid run network configuration")
+        networks = cast(dict[str, Any] | list[str], networks)
+        default = cast(dict[str, Any], default)
+        if (
+            set(networks) != {"default"}
+            or "network_mode" in service
+            or set(default) - {"name", "ipam"}
+            or default.get("name") != f"{COMPOSE_PROJECT}_default"
+            or default.get("ipam", {}) != {}
+        ):
+            raise ValueError("unexpected run network configuration")
+        return resolved
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        first_line = result.stderr.splitlines()[0] if result.stderr else str(exc)
+        raise RunRefusedError(
+            "Compose did not keep the run on its own network. Causes: Docker Compose older "
+            "than 2.24.4, or a Compose file or fragment that sets networks or network_mode. "
+            f"Compose rc={result.returncode}; {first_line}"
+        ) from exc
+
+
+def _remove_run(identifier: str, grace: int) -> bool:
+    """Verify a run by name and labels, then stop and remove only its pinned Docker ID."""
+    run_id = identifier if re.fullmatch(r"[0-9a-f]{12}", identifier) else None
+    target = f"djinn-run-{run_id}" if run_id else identifier
+    warnings: list[str] = []
+
+    def gone(exc: Exception) -> bool:
+        message = str(exc)
+        return "No such container" in message or bool(
+            re.search(r"removal of container .* is already in progress", message)
+        )
+
+    with signals_ignored():
+        try:
+            actual: dict[str, Any] | None = None
+            for timeout in (5, 15):
+                try:
+                    actual = host_runtime.inspect_object(
+                        target, DOCKER_EXECUTABLE, timeout=timeout, missing="No such container",
+                    )
+                    break
+                except Exception as exc:
+                    if timeout == 15:
+                        warnings.append(
+                            f"{target} may still exist; `djinn clean` removes it: {exc}"
+                        )
+                        return False
+            if actual is None:
+                return True
+            try:
+                name = actual.get("Name", "")
+                match = re.fullmatch(r"/djinn-run-([0-9a-f]{12})", name)
+                labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
+                docker_id = actual["Id"]
+                verified = (
+                    match is not None
+                    and labels.get(host_runtime.RUN_LABEL) == match[1]
+                    and labels.get("com.docker.compose.project") == COMPOSE_PROJECT
+                    and labels.get("com.docker.compose.service") == "dev"
+                    and isinstance(docker_id, str) and bool(docker_id)
+                    and (name == "/" + target if run_id else docker_id == identifier)
+                )
+                if not verified:
+                    raise ValueError("run identity does not match")
+            except Exception as exc:
+                warnings.append(f"Skipping {target}: {exc}")
+                return True
+            try:
+                host_runtime.run_runtime_command(
+                    DOCKER_EXECUTABLE, "stop", "-t", str(grace), docker_id, timeout=15,
+                )
+            except Exception as exc:
+                if gone(exc):
+                    return True
+                warnings.append(f"Could not stop {target}: {exc}")
+            try:
+                if host_runtime.inspect_object(
+                    docker_id, DOCKER_EXECUTABLE, missing="No such container",
+                ) is None:
+                    return True
+            except Exception as exc:
+                warnings.append(f"Could not re-inspect {target}: {exc}")
+            try:
+                host_runtime.run_runtime_command(
+                    DOCKER_EXECUTABLE, "rm", "-f", docker_id, timeout=15,
+                )
+                return True
+            except Exception as exc:
+                if gone(exc):
+                    return True
+                warnings.append(f"{target} may still exist; `djinn clean` removes it: {exc}")
+                return False
+        finally:
+            for message in warnings:
+                with suppress(Exception):
+                    warning(message)
+
+
 def compose_run(
     config: AppConfig,
     options: ContainerOptions,
@@ -2525,6 +2660,11 @@ def compose_run(
         service != "dev" or options.docker_mode is not DockerMode.NONE
     ):
         raise ValueError("Egress allowlists require the dev service without Docker access")
+    guest = not interactive and service == "dev"
+    if guest and options.docker_mode is DockerMode.AGENT:
+        raise RuntimeMountSpecificationError("djinn run cannot use the dev's agent Docker daemon")
+    if guest:
+        _guest_source_check(config, options)
     validate_managed_bind_sources(config)
     # Fail before allocating a TTY: a background start would otherwise degenerate
     # into a SIGTTOU storm that kills the container. Headless runs pass -T and are
@@ -2536,11 +2676,17 @@ def compose_run(
     project_root = get_project_root()
 
     # Build compose command
-    compose_files = get_compose_files(options.docker_mode)
+    compose_files = get_compose_files(options.docker_mode, guest=guest)
     # Map service to fixed container name (matches container_name in compose YAML)
-    container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
+    run_id = uuid4().hex[:12] if guest else None
+    container_name = (
+        f"djinn-run-{run_id}"
+        if guest else _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
+    )
 
     cmd = [DOCKER_EXECUTABLE, "compose", *compose_files, "run", "--rm", "--name", container_name]
+    if guest:
+        cmd.extend(["-l", f"{host_runtime.RUN_LABEL}={run_id}"])
 
     # TTY handling
     if not interactive:
@@ -2628,6 +2774,30 @@ def compose_run(
         )
     if service == "dev" and options.docker_mode is DockerMode.AGENT:
         _prepare_workspace(config, options, declarations, mounts, fragment)
+    if guest:
+        with _compose_override(fragment, prefix="djinn-run-") as override_path:
+            args = [*compose_files, "-f", str(override_path)]
+            cmd[2 : 2 + len(compose_files)] = args
+            resolved = _run_preflight(args, config, project_root, host_env)
+            _guest_source_check(config, options, resolved=resolved, mount_args=cmd)
+            with signals_as_interrupt():
+                try:
+                    result = subprocess.run(
+                        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                        cwd=project_root, env=host_env, timeout=timeout, check=False,
+                    )
+                    return RunResult(result.returncode, stdout=result.stdout, stderr=result.stderr)
+                except subprocess.TimeoutExpired as exc:
+                    assert timeout is not None
+                    stdout, stderr = _decode_timeout_output(exc, timeout)
+                    return RunResult(124, stdout=stdout, stderr=stderr)
+                except FileNotFoundError as exc:
+                    return RunResult(127, stderr=f"Docker command not found: {exc}")
+                except PermissionError as exc:
+                    return RunResult(126, stderr=f"Permission denied: {exc}")
+                finally:
+                    assert run_id is not None
+                    _remove_run(run_id, 10)
     owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
     with owner_context as git_delivery:
         if git_delivery is not None:
@@ -3034,25 +3204,6 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         return RunResult(
                             1, stderr="runtime volume ownership changed; preserving resources"
                         )
-                if "agent_docker" in state:
-                    listed = _run_captured(
-                        [
-                            DOCKER_EXECUTABLE,
-                            "ps",
-                            "-aq",
-                            "--no-trunc",
-                            "--filter",
-                            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
-                        ],
-                        timeout=5,
-                    )
-                    owned = {r["id"] for r in state["resources"].values()}
-                    if state.get("dev_id"):
-                        owned.add(state["dev_id"])
-                    if not listed.success or set(listed.stdout.split()) - owned:
-                        return RunResult(
-                            1, stderr="unknown project resources; preserving resources"
-                        )
             # Diagnostic discovery must never change clean's outcome.
             candidates: list[post_mortem.Candidate] = []
             compose_targets: set[str] = set()
@@ -3099,6 +3250,38 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                     "clean", docker_path=DOCKER_EXECUTABLE, candidates=candidates,
                     runtime_generation=state["generation"] if state else None,
                 )
+            runs = _run_captured(
+                [
+                    DOCKER_EXECUTABLE, "ps", "-aq", "--no-trunc", "--filter",
+                    f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                    "--filter", f"label={host_runtime.RUN_LABEL}",
+                ],
+                timeout=5,
+            )
+            if not runs.success:
+                return RunResult(1, stderr="Cannot list djinn runs; preserving resources")
+            for identifier in runs.stdout.split():
+                if not _remove_run(identifier, 3):
+                    return RunResult(1, stderr=f"Could not remove djinn run {identifier}")
+            if state and "agent_docker" in state:
+                listed = _run_captured(
+                    [
+                        DOCKER_EXECUTABLE,
+                        "ps",
+                        "-aq",
+                        "--no-trunc",
+                        "--filter",
+                        f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                    ],
+                    timeout=5,
+                )
+                owned = {r["id"] for r in state["resources"].values()}
+                if state.get("dev_id"):
+                    owned.add(state["dev_id"])
+                if not listed.success or set(listed.stdout.split()) - owned:
+                    return RunResult(
+                        1, stderr="unknown project resources; preserving resources"
+                    )
             hostctl.stop_helper_locked(remove=True)
             actual = host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
             if actual is not None:
@@ -3164,6 +3347,21 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                             )
             if not result.success:
                 return result
+            network_name = f"{COMPOSE_PROJECT}_default"
+            network = host_runtime.inspect_object(
+                network_name, DOCKER_EXECUTABLE, "network",
+                missing=f"network {network_name} not found",
+            )
+            if network is not None:
+                network_labels: dict[str, Any] = network.get("Labels") or {}
+                if (
+                    network_labels.get("com.docker.compose.project") == COMPOSE_PROJECT
+                    and network_labels.get("com.docker.compose.network") == "default"
+                ):
+                    if not delete_network(str(network["Id"])):
+                        return RunResult(1, stderr="Could not remove the run network")
+                else:
+                    warning(f"Skipping {network_name}: network ownership does not match")
             if state is not None:
                 if not host_runtime.cleanup_owned(root, state["generation"], DOCKER_EXECUTABLE):
                     return RunResult(1, stderr="runtime ownership changed during clean")

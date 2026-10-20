@@ -35,6 +35,9 @@ from djinn_in_a_box.core.seeding import SeedingError
 _GUARDED = ("CODE_DIR", "DJINN_CONFIG_ROOT")
 
 
+pytestmark = pytest.mark.usefixtures("legacy_guest_inputs")
+
+
 class TestBuildComposeEnv:
     """build_compose_env renders the compose interpolation variables."""
 

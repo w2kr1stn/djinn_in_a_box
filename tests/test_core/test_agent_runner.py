@@ -9,11 +9,12 @@ import pytest
 
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.agent_runner import (
-    AgentNetworkError,
     UnknownAgentError,
     run_headless_agent,
 )
 from djinn_in_a_box.core.docker import ContainerMount, DockerMode, RunResult
+
+pytestmark = pytest.mark.usefixtures("legacy_guest_inputs")
 
 
 @pytest.fixture
@@ -46,7 +47,6 @@ def runner_mocks(
             "djinn_in_a_box.core.agent_runner.load_agents",
             return_value={"codex": agent_config},
         ),
-        patch("djinn_in_a_box.core.agent_runner.ensure_network", return_value=True) as network,
         patch("djinn_in_a_box.core.agent_runner.compose_run") as compose,
     ):
         result = RunResult(returncode=0, stdout="agent output", stderr="")
@@ -54,7 +54,6 @@ def runner_mocks(
         yield {
             "app_config": app_config,
             "compose": compose,
-            "network": network,
             "result": result,
             "load_config": load_config,
         }
@@ -70,7 +69,7 @@ def test_run_headless_agent_builds_and_executes_typed_request(
         "codex",
         "inspect this",
         json_output=True,
-        docker_mode=DockerMode.AGENT,
+        docker_mode=DockerMode.DIRECT,
         firewall=True,
         resolved_mounts=(
             ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),
@@ -87,7 +86,7 @@ def test_run_headless_agent_builds_and_executes_typed_request(
     compose.assert_called_once()
     assert compose.call_args.args[0] is runner_mocks["app_config"]
     options = compose.call_args.args[1]
-    assert options.docker_mode is DockerMode.AGENT
+    assert options.docker_mode is DockerMode.DIRECT
     assert options.firewall_enabled is True
     assert options.mounts == (
         ContainerMount(tmp_path, Path(f"/home/dev/mount/{tmp_path.name}")),
@@ -169,7 +168,7 @@ def test_checked_config_snapshot_is_used_without_reload(
     assert runner_mocks["compose"].call_args.args[0] is checked
 
 
-def test_run_headless_agent_rejects_unknown_agent_before_network(
+def test_run_headless_agent_rejects_unknown_agent_before_container(
     app_config: AppConfig,
 ) -> None:
     with (
@@ -178,34 +177,19 @@ def test_run_headless_agent_rejects_unknown_agent_before_network(
             "djinn_in_a_box.core.agent_runner.load_agents",
             return_value={"codex": AgentConfig(binary="codex")},
         ),
-        patch("djinn_in_a_box.core.agent_runner.ensure_network") as network,
         pytest.raises(UnknownAgentError) as exc_info,
     ):
         run_headless_agent("missing", "inspect", resolved_mounts=())
 
     assert exc_info.value.available == ("codex",)
-    network.assert_not_called()
 
 
-def test_run_headless_agent_reports_network_failure_without_container(
-    app_config: AppConfig,
-    agent_config: AgentConfig,
-) -> None:
-    with (
-        patch("djinn_in_a_box.core.agent_runner.load_config", return_value=app_config),
-        patch(
-            "djinn_in_a_box.core.agent_runner.load_agents",
-            return_value={"codex": agent_config},
-        ),
-        patch("djinn_in_a_box.core.agent_runner.ensure_network", return_value=False),
-        patch("djinn_in_a_box.core.agent_runner.compose_run") as compose,
-        pytest.raises(AgentNetworkError),
-    ):
-        run_headless_agent("codex", "inspect", resolved_mounts=())
+def test_run_headless_agent_does_not_prepare_dev_network(runner_mocks, monkeypatch):
+    from djinn_in_a_box.core import docker
 
-    compose.assert_not_called()
-
-
+    monkeypatch.setattr(docker, "ensure_network", lambda: pytest.fail("run touched dev network"))
+    run_headless_agent("codex", "inspect", resolved_mounts=())
+    runner_mocks["compose"].assert_called_once()
 
 
 def test_headless_config_carries_declarations(tmp_path, monkeypatch):
@@ -228,7 +212,6 @@ def test_headless_config_carries_declarations(tmp_path, monkeypatch):
         MagicMock(side_effect=AssertionError("must use supplied snapshot")),
     )
     monkeypatch.setattr(agent_runner, "load_agents", lambda: {"codex": AgentConfig(binary="codex")})
-    monkeypatch.setattr(agent_runner, "ensure_network", lambda: True)
     for name in (
         "get_shell_mount_args",
 

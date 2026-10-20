@@ -421,8 +421,12 @@ def test_doctor_fail_closed(creation_context, execution_ground, monkeypatch, sit
     )
 
 
-@pytest.mark.parametrize("creator", ["interactive", "headless", "detached"])
-@pytest.mark.parametrize("mode", [docker.DockerMode.NONE, docker.DockerMode.AGENT])
+@pytest.mark.parametrize(("creator", "mode"), [
+    (creator, mode)
+    for creator in ("interactive", "headless", "detached")
+    for mode in (docker.DockerMode.NONE, docker.DockerMode.AGENT)
+    if creator != "headless" or mode is not docker.DockerMode.AGENT
+])
 @pytest.mark.parametrize("channel", ["declaration", "mount", "here"])
 def test_execution_refusal_precedes_creation(
     creation_context,
@@ -464,7 +468,6 @@ def test_execution_refusal_precedes_creation(
         if creator == "detached":
             docker.compose_up_detached(config, options)
         elif creator == "headless":
-            monkeypatch.setattr(agent_runner, "ensure_network", lambda: True)
             monkeypatch.setattr(
                 agent_runner,
                 "load_agents",
@@ -587,7 +590,6 @@ def test_cli_execution_refusal(
     monkeypatch.setattr(
         agent, "workflow_image_compatible", lambda: docker.WorkflowImageCompatibility.COMPATIBLE
     )
-    monkeypatch.setattr(agent_runner, "ensure_network", lambda: True)
     monkeypatch.setattr(
         agent_runner,
         "load_agents",

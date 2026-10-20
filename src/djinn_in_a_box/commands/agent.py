@@ -16,7 +16,6 @@ from rich.table import Table
 from djinn_in_a_box.config.loader import load_agents, load_config
 from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.agent_runner import (
-    AgentNetworkError,
     UnknownAgentError,
     run_headless_agent,
 )
@@ -42,6 +41,7 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     DockerMode,
     MountCollisionError,
+    RunRefusedError,
     get_config_root,
     resolve_container_mounts,
     resolve_docker_mode,
@@ -113,9 +113,7 @@ def _show_run_status(
     else:
         status_line("Mode", "Read-only (plan/analysis)", "status.enabled")
 
-    if docker_mode is DockerMode.AGENT:
-        status_line("Docker", "Enabled (agent daemon)")
-    elif docker_mode is DockerMode.DIRECT:
+    if docker_mode is DockerMode.DIRECT:
         status_line("Docker", "Enabled (DIRECT)", "warning")
     if egress is not None:
         status_line("Firewall", f"Allowlist ({len(egress.rules)} destinations)", soft_wrap=True)
@@ -185,7 +183,10 @@ def run(
     ] = None,
     docker: Annotated[
         bool,
-        typer.Option("--docker", "-d", help="Enable rootless agent Docker daemon"),
+        typer.Option(
+            "--docker", "-d",
+            help="Refused for runs; the rootless agent Docker daemon belongs to the dev",
+        ),
     ] = False,
     docker_direct: Annotated[
         bool,
@@ -240,8 +241,8 @@ def run(
         # Use a specific model with JSON output
         djinn run claude "Refactor this file" --write --model sonnet --json
 
-        # With Docker access and timeout
-        djinn run claude "Build the Docker image" --docker --timeout 300
+        # With a timeout
+        djinn run claude "Review the build setup" --timeout 300
 
         # Restrict outbound traffic to a pinned provider endpoint
         djinn run claude "Explain this code" --allow api.anthropic.com:443
@@ -255,6 +256,14 @@ def run(
     except ValueError as e:
         error(str(e), soft_wrap=allow is not None)
         raise typer.Exit(1) from None
+
+    if docker_mode is DockerMode.AGENT:
+        error(
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        )
+        raise typer.Exit(1)
 
     egress = None
     if allow is not None:
@@ -338,8 +347,8 @@ def run(
             error(str(e))
             console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
-    except AgentNetworkError as e:
-        error(str(e), soft_wrap=egress is not None)
+    except RunRefusedError as e:
+        error(escape(str(e)), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     except RuntimeMountSpecificationError as e:
         error(f"Internal runtime mount construction failed: {e}", soft_wrap=egress is not None)
