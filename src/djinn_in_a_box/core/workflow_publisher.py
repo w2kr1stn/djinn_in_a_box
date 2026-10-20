@@ -2025,7 +2025,12 @@ def _read_directory(
         # cannot make an unrelated view unreadable or shift its fingerprint.
         if is_runtime_residue(relative, residue_prefixes):
             continue
-        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        try:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except OSError as error:
+            raise _ViewEntryError(
+                "View root contains an unreadable or non-regular entry", relative
+            ) from error
         if stat.S_ISDIR(info.st_mode):
             subdirectories.append(name)
             continue
@@ -2039,7 +2044,7 @@ def _read_directory(
             raise _ViewEntryError("OpenCode view contains an unowned path", relative)
         try:
             snapshot = _read_at(directory, name)
-        except PublishError as error:
+        except (PublishError, OSError) as error:
             raise _ViewEntryError(
                 "View root contains an unreadable or non-regular file", relative
             ) from error

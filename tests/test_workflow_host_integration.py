@@ -245,8 +245,8 @@ def test_component_length_limit():
         (
             DriftClass.TARGET_DRIFT,
             "opencode",
-            "Keep wanted edits in the selected source config/codex, then recreate the container: "
-            "`djinn clean`, then `djinn start`.",
+            "Run `djinn config status` on the host and follow its remedy, then recreate the "
+            "container (`djinn clean`, `djinn start`).",
         ),
     ],
 )
@@ -1074,7 +1074,10 @@ def test_canonical_status_caps_items_and_problems(case, monkeypatch):
 
 
 def test_remedy_source_sanitised():
-    assert workflow_remedy(DriftClass.TARGET_DRIFT, "co\ndex[error]", scope="opencode") == (
+    item = DriftEntry(DriftClass.TARGET_DRIFT, PurePosixPath("AGENTS.md"))
+    assert workflow_remedy(
+        DriftClass.TARGET_DRIFT, "co\ndex[error]", scope="opencode", items=(item,)
+    ) == (
         "Keep wanted edits in the selected source config/co?dex?error?, "
         "then recreate the container: "
         "`djinn clean`, then `djinn start`."

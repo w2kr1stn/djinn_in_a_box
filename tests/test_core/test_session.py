@@ -251,14 +251,18 @@ class TestRefreshOpenCodeWorkflow:
             ("source-changed", "Run `djinn config sync`, then retry."),
             (
                 "target-drift",
-                "Keep wanted edits in the selected source config/claude, then recreate "
-                "the container: `djinn clean`, then `djinn start`.",
+                "Run `djinn config status` on the host and follow its remedy, then recreate the "
+                "container (`djinn clean`, `djinn start`).",
             ),
-            ("collision", "Move or remove the conflicting unmanaged workflow item, then retry."),
+            (
+                "collision",
+                "Run `djinn config status` on the host and follow its remedy, then recreate the "
+                "container (`djinn clean`, `djinn start`).",
+            ),
             (
                 "invalid-or-semantic",
-                "Author or edit the artifact natively in the target tool's view, "
-                "or make the source form portable.",
+                "Run `djinn config status` on the host and follow its remedy, then recreate the "
+                "container (`djinn clean`, `djinn start`).",
             ),
         ],
     )
@@ -468,8 +472,8 @@ class TestRefreshOpenCodeWorkflow:
         assert "target-drift" in result.stderr
         assert result.stderr == (
             "OpenCode workflow refresh failed: target-drift. Remedy: "
-            "Keep wanted edits in the selected source config/claude, then recreate the container: "
-            "`djinn clean`, then `djinn start`."
+            "Run `djinn config status` on the host and follow its remedy, then recreate the "
+            "container (`djinn clean`, `djinn start`)."
         )
 
     def test_publisher_refresh_prefers_the_later_lock_diagnostic_over_write_diagnostic(

@@ -150,8 +150,10 @@ def workflow_remedy(
     items: tuple[DriftEntry, ...] = (),
 ) -> str:
     key = kind.value
-    if scope == "opencode" and kind is not DriftClass.SOURCE_CHANGED and any(
-        item.origin in {"seed", "canonical-manifest"} for item in items
+    if (
+        scope == "opencode"
+        and kind not in {DriftClass.CLEAN, DriftClass.SOURCE_CHANGED}
+        and (not items or any(item.origin in {"seed", "canonical-manifest"} for item in items))
     ):
         key = "entrypoint-generic"
     elif any(item.reason == "changed-during-publish" for item in items):
