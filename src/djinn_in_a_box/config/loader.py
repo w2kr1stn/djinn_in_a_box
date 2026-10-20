@@ -124,12 +124,9 @@ def _agents_refusal(path: Path, rule: str) -> ConfigValidationError:
     )
 
 
-def _agents_content_error(path: Path, *lines: str) -> ConfigValidationError:
+def _agents_content_error(*lines: str) -> ConfigValidationError:
     """A file that passed the host-input checks but does not hold valid agent definitions."""
-    first, *rest = (escape_nonprintable(line) for line in lines)
-    where = escape_nonprintable(repr(str(path)))
-    message = [f"Invalid agent definitions in {where}: {first}", *rest]
-    return ConfigValidationError("\n".join(message))
+    return ConfigValidationError("\n".join(escape_nonprintable(line) for line in lines))
 
 
 def _read_agents_file(path: Path) -> bytes:
@@ -221,11 +218,11 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
     try:
         text = _read_agents_file(path).decode("utf-8")
     except UnicodeDecodeError as e:
-        raise _agents_content_error(path, f"not valid UTF-8: {e}") from e
+        raise _agents_content_error(f"Invalid UTF-8 in {path}: {e}") from e
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise _agents_content_error(path, f"invalid TOML syntax: {e}") from e
+    except (ValueError, RecursionError) as e:  # TOMLDecodeError and parser limits
+        raise _agents_content_error(f"Invalid TOML syntax in {path}: {str(e)[:200]}") from e
 
     agents_data: object = data.get("agents")
     if (
@@ -237,7 +234,7 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
         )
     ):
         raise _agents_content_error(
-            path, "expected a non-empty [agents] table of [agents.<name>] tables"
+            f"No agents defined in {path}. Expected [agents.<name>] sections."
         )
 
     try:
@@ -247,7 +244,7 @@ def _load_agents_from_toml(path: Path) -> dict[str, AgentConfig]:
         }
     except ValidationError as e:
         raise _agents_content_error(
-            path, "invalid agent configuration:", *_format_validation_errors(e).splitlines()
+            f"Invalid agent configuration in {path}:", *_format_validation_errors(e).splitlines()
         ) from e
 
 

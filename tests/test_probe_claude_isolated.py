@@ -1,11 +1,13 @@
 """Synthetic CLI events only; real Claude and credentials are never used here."""
 
 import copy
+import errno
 import importlib.util
 import io
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -108,7 +110,7 @@ class FakeCLI:
             "session_id": "session-" + str(len(self.calls)),
             "result": "```json\n" + json.dumps(answer) + "\n```",
         }
-        assert env.get("AGENT_PROMPT", argv[-1]) == probe.QUESTION
+        assert env.get("AGENT_PROMPT", argv[-1]) == probe.probe_question
         self.after_run(cwd, result)
         return subprocess.CompletedProcess(argv, 0, json.dumps(result, indent=2), "")
 
@@ -151,7 +153,7 @@ def test_preset_argv_matches_frozen_definition():
         "--",
         "probe",
     ]
-    assert probe.QUESTION == (
+    assert probe.probe_question == (
         'Return only one JSON object {"claude_md": bool, "agents_md": bool, "decoy": bool}. '
         "For each exact string below, say whether it occurs in the context BEFORE this "
         "message (ignore occurrences in this message). "
@@ -426,9 +428,10 @@ def test_phase_two_commands_safety_and_order(cli, monkeypatch):
             "agents/AGENTS.md",
             "ctl/CLAUDE.md",
         ]
-        assert (root / "ctl" / "CLAUDE.md").read_text() == probe.CLAUDE_CANARY + "\n"
-        assert (root / "agents" / "AGENTS.md").read_text() == probe.AGENTS_CANARY + "\n"
-        assert probe.DECOY not in "".join(p.read_text() for p in root.rglob("*") if p.is_file())
+        assert (root / "ctl" / "CLAUDE.md").read_text() == probe.claude_canary + "\n"
+        assert (root / "agents" / "AGENTS.md").read_text() == probe.agents_canary + "\n"
+        written = "".join(p.read_text() for p in root.rglob("*") if p.is_file())
+        assert probe.decoy_canary not in written
 
     cli.after_run = inspect
     assert probe.phase_two() == [
@@ -452,14 +455,14 @@ def test_phase_two_commands_safety_and_order(cli, monkeypatch):
         "--output-format",
         "json",
         "--",
-        probe.QUESTION,
+        probe.probe_question,
     ]
     assert kwargs["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     command = build_agent_command(DEFAULT_AGENTS["claude-isolated"], json_output=True)
     for index, (argv, kwargs) in enumerate(cli.calls):
         if index:
             assert argv == ["bash", "-c", command]
-            assert kwargs["env"]["AGENT_PROMPT"] == probe.QUESTION
+            assert kwargs["env"]["AGENT_PROMPT"] == probe.probe_question
         assert kwargs["env"]["PROBE_KEEP"] == "inherited"
         assert (
             not {"DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "PULSE_COOKIE"} & kwargs["env"].keys()
@@ -473,6 +476,138 @@ def test_phase_two_commands_safety_and_order(cli, monkeypatch):
         ("session-2", "isolation CLAUDE.md", 2),
         ("session-3", "isolation AGENTS.md", 3),
     ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "BASH_FUNC_claude%%",
+        "BASH_FUNC_helper%%",
+        "BASH_FUNC_without_suffix",
+    ],
+)
+def test_phase_two_env_drops_shell_startup_inputs(monkeypatch, name):
+    monkeypatch.setattr(os, "environ", {"PATH": "/usr/bin:/bin", name: "inherited"})
+    assert probe.phase_two_env() == {"PATH": "/usr/bin:/bin"}
+
+
+def test_phase_two_real_bash_ignores_startup_and_exported_function(tmp_path, monkeypatch):
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    result = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "session_id": "fake-binary-session",
+        "result": json.dumps({"claude_md": False, "agents_md": False, "decoy": False}),
+    }
+    binary = binary_dir / "claude"
+    binary.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(json.dumps(result)) + "\n")
+    binary.chmod(0o700)
+    marker = tmp_path / "startup-ran"
+    startup = tmp_path / "startup.sh"
+    startup.write_text("touch -- " + shlex.quote(str(marker)) + "\n")
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("PATH", f"{binary_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(profile))
+    monkeypatch.setenv("BASH_ENV", str(startup))
+    monkeypatch.setenv("BASH_FUNC_claude%%", "() { echo hijack; }")
+    original_run = subprocess.run
+    replies = []
+    controls = []
+
+    def run(argv, **kwargs):
+        if argv[0] == "claude":
+            controls.append(argv)
+            control = {
+                **result,
+                "result": json.dumps({"claude_md": True, "agents_md": False, "decoy": False}),
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(control), "")
+        assert argv[:2] == ["bash", "-c"]
+        completed = original_run(["/bin/bash", *argv[1:]], **kwargs)
+        replies.append(probe.parse_events(completed.stdout)[1])
+        return completed
+
+    monkeypatch.setattr(probe.subprocess, "run", run)
+    lines = probe.phase_two()
+    assert not marker.exists()
+    assert replies == [result, result]
+    assert len(controls) == 1
+    assert len(lines) == 6 and all(line.startswith("PASS ") for line in lines)
+
+
+@pytest.mark.parametrize("returncode", [0, 23, -9])
+def test_logged_in_exit_status_reaches_evaluator(monkeypatch, tmp_path, returncode):
+    result = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "session_id": "synthetic-session",
+        "result": '{"claude_md":false,"agents_md":false,"decoy":false}',
+    }
+    monkeypatch.setattr(
+        probe,
+        "run_command",
+        lambda *_a: subprocess.CompletedProcess([], returncode, json.dumps(result), ""),
+    )
+    run = probe.observe(["claude"], tmp_path, {}, authenticated=True)
+    assert run.error == (f"unexpected exit status {returncode}" if returncode else "")
+    lines = probe.evaluate_phase_two(run, "isolation CLAUDE.md", "claude_md", False)
+    assert len(lines) == 1
+    assert lines[0].startswith("FAIL " if returncode else "PASS ")
+
+
+@pytest.mark.parametrize("side", [0, 1], ids=["control", "isolation"])
+@pytest.mark.parametrize("returncode", [0, 1, 23, -9])
+def test_credential_free_exit_status(monkeypatch, tmp_path, returncode, side):
+    runs = observations()
+    events = [runs[side].init, runs[side].result]
+    monkeypatch.setattr(
+        probe,
+        "run_command",
+        lambda *_a: subprocess.CompletedProcess([], returncode, "\n".join(map(json.dumps, events))),
+    )
+    run = probe.observe(["claude"], tmp_path, {}, authenticated=False)
+    runs[side] = run._replace(markers=runs[side].markers)
+    assert run.error == ("" if returncode > 0 else f"unexpected exit status {returncode}")
+    failures = [line for line in probe.evaluate_phase_one(*runs) if line.startswith("FAIL ")]
+    label = "control" if side == 0 else "isolation"
+    assert failures == (
+        [] if returncode > 0 else [f"FAIL {label} evidence: unexpected exit status {returncode}"]
+    )
+
+
+@pytest.mark.parametrize("passed", [False, True], ids=["failed", "passed"])
+@pytest.mark.parametrize("offline", [False, True], ids=["full", "offline"])
+def test_main_gates_logged_in_phase(cli, monkeypatch, capsys, passed, offline):
+    first = [
+        "PASS credential-free control",
+        "PASS isolation hooks" if passed else "FAIL isolation hooks: preset retained context",
+    ]
+    called = []
+
+    def phase_two():
+        called.append(True)
+        return ["PASS logged-in phase"]
+
+    monkeypatch.setattr(probe, "phase_one", lambda: list(first))
+    monkeypatch.setattr(probe, "phase_two", phase_two)
+    assert probe.main(["--offline"] if offline else []) == (0 if passed else 1)
+    assert called == ([True] if passed and not offline else [])
+    expected = list(first)
+    if not offline:
+        expected.append(
+            "PASS logged-in phase"
+            if passed else "FAIL logged-in phase skipped: credential-free checks failed"
+        )
+    assert capsys.readouterr().out.splitlines() == expected
 
 
 def snapshot(root):
@@ -501,9 +636,9 @@ def test_post_run_artifacts_fail_without_mutation(tmp_path, kind):
         path = root / "history.jsonl"
         root.mkdir()
         canary = {
-            "claude": probe.CLAUDE_CANARY,
-            "agents": probe.AGENTS_CANARY,
-            "decoy": probe.DECOY,
+            "claude": probe.claude_canary,
+            "agents": probe.agents_canary,
+            "decoy": probe.decoy_canary,
         }[kind]
         path.write_text(json.dumps({"display": canary}) + "\n")
     before = snapshot(root)
@@ -523,21 +658,20 @@ def test_full_run_preserves_profile(cli, tmp_path, monkeypatch, capsys):
     (root / "session-env" / "existing").mkdir(parents=True)
     (root / "unrelated.txt").write_text("keep\n")
     before = snapshot(root)
-    original = Path.open
+    original = os.open
     reads = []
 
-    def guarded_open(path, *args, **kwargs):
-        if path.is_relative_to(root):
-            assert path == history
-            assert not args or args[0] == "r"
-            assert kwargs.get("mode", "r") == "r"
-            reads.append(path)
-        return original(path, *args, **kwargs)
+    def guarded_open(path, flags, *args, **kwargs):
+        if Path(path).is_relative_to(root):
+            assert Path(path) == history
+            assert flags & os.O_ACCMODE == os.O_RDONLY
+            reads.append(Path(path))
+        return original(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(os, "open", guarded_open)
     assert probe.main([]) == 0
     assert reads == [history, history, history]
-    monkeypatch.setattr(Path, "open", original)
+    monkeypatch.setattr(os, "open", original)
     assert snapshot(root) == before
     assert len(cli.calls) == 6
     output = capsys.readouterr().out.splitlines()
@@ -587,12 +721,129 @@ def test_default_profile_root(tmp_path, monkeypatch):
     assert str(path) in probe.check_artifacts(Path("/tmp/x/proj"), "session-test", {}, "control")[0]
 
 
-def test_history_read_failure_is_reported(tmp_path):
+def test_history_read_failure_is_reported(tmp_path, monkeypatch):
     history = tmp_path / "history.jsonl"
-    history.write_bytes(b"\xff")
+    history.write_text("synthetic history\n")
+
+    def failed_read(*_args):
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(os, "read", failed_read)
     assert probe.check_artifacts(
         Path("/tmp/x/proj"), "session-test", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
-    ) == [f"FAIL artifacts control: cannot check {history} (UnicodeDecodeError)"]
+    ) == [f"FAIL artifacts control: cannot check {history} ([Errno 5] Input/output error)"]
+
+
+@pytest.mark.parametrize("kind", ["symlink", "dangling-symlink", "fifo", "hardlink"])
+def test_history_aliases_and_special_files_are_refused(tmp_path, monkeypatch, kind):
+    history = tmp_path / "history.jsonl"
+    target = tmp_path / "synthetic-history.txt"
+    if kind != "dangling-symlink":
+        target.write_text(probe.claude_canary)
+    if kind in {"symlink", "dangling-symlink"}:
+        history.symlink_to(target)
+    elif kind == "fifo":
+        os.mkfifo(history, 0o600)
+    else:
+        history.hardlink_to(target)
+
+    def forbidden_read(*_args):
+        pytest.fail("history must be validated before any bytes are read")
+
+    def timed_out(*_args):
+        pytest.fail("history inspection blocked on a FIFO")
+
+    monkeypatch.setattr(os, "read", forbidden_read)
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.alarm(2)
+    try:
+        with pytest.raises((OSError, ValueError)):
+            probe.count_canaries(history)
+        lines = probe.check_artifacts(
+            tmp_path / "proj", "synthetic-session", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
+        )
+        assert len(lines) == 1
+        assert lines[0].startswith(f"FAIL artifacts control: cannot check {history} (")
+        assert "canary hit" not in lines[0]
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_history_counts_raw_bytes(tmp_path):
+    history = tmp_path / "history.jsonl"
+    history.write_bytes(
+        b"\xff"
+        + (probe.claude_canary * 2 + probe.agents_canary + probe.decoy_canary).encode()
+        + b"\xfe"
+    )
+    assert probe.count_canaries(history) == 4
+    assert probe.check_artifacts(
+        tmp_path / "proj", "synthetic-session", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
+    ) == [f"FAIL artifacts control: 4 canary hit(s) in {history}"]
+
+
+def test_absent_history_passes(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        probe.count_canaries(tmp_path / "history.jsonl")
+    assert probe.check_artifacts(
+        tmp_path / "proj", "synthetic-session", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
+    ) == ["PASS artifacts control"]
+
+
+@pytest.mark.parametrize(
+    "flag", [os.O_RDONLY, os.O_NOFOLLOW, os.O_NONBLOCK, os.O_CLOEXEC],
+    ids=["readonly", "nofollow", "nonblock", "cloexec"],
+)
+def test_history_open_flags(tmp_path, monkeypatch, flag):
+    history = tmp_path / "history.jsonl"
+    history.write_text(probe.claude_canary)
+    original = os.open
+    calls = []
+
+    def checked_open(path, flags, *args, **kwargs):
+        calls.append(path)
+        if flag == os.O_RDONLY:
+            assert flags & os.O_ACCMODE == os.O_RDONLY
+        else:
+            assert flags & flag
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", checked_open)
+    assert probe.count_canaries(history) == 1
+    assert calls == [history]
+
+
+def test_history_reads_checked_descriptor_until_eof(tmp_path, monkeypatch):
+    history = tmp_path / "history.jsonl"
+    history.write_text(probe.claude_canary)
+    original_open, original_stat, original_read = os.open, os.fstat, os.read
+    opened, checked = [], []
+
+    def replaced(path, flags):
+        fd = original_open(path, flags)
+        opened.append(fd)
+        history.rename(tmp_path / "checked-history.txt")
+        history.write_text(probe.decoy_canary * 2)
+        return fd
+
+    def checked_stat(fd):
+        checked.append(fd)
+        return original_stat(fd)
+
+    def short_read(fd, size):
+        assert checked == [fd] == opened
+        return original_read(fd, min(size, 7))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", replaced)
+        patch.setattr(os, "fstat", checked_stat)
+        patch.setattr(os, "read", short_read)
+        assert probe.count_canaries(history) == 1
+    assert len(opened) == 1
+    with pytest.raises(OSError) as exc_info:
+        original_stat(opened[0])
+    assert exc_info.value.errno == errno.EBADF
 
 
 def test_offline_skips_login(cli, monkeypatch):
@@ -727,7 +978,7 @@ def test_version_failure_is_a_failed_check(cli, monkeypatch):
 
 def test_artifact_checks_count_without_printing_history(tmp_path):
     history = tmp_path / "history.jsonl"
-    history.write_text("synthetic private history: " + probe.CLAUDE_CANARY + probe.CLAUDE_CANARY)
+    history.write_text("synthetic private history: " + probe.claude_canary + probe.claude_canary)
     assert probe.check_artifacts(
         Path("/tmp/x/proj"), "session-test", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
     ) == [f"FAIL artifacts control: 2 canary hit(s) in {history}"]
@@ -764,20 +1015,14 @@ def test_artifact_metadata_error_is_not_a_pass(tmp_path, monkeypatch):
 
 def test_history_access_error_is_not_a_pass(tmp_path, monkeypatch):
     history = tmp_path / "history.jsonl"
-    original_stat, original_open = Path.stat, Path.open
-
-    def denied_stat(path, *args, **kwargs):
-        if path == history:
-            raise PermissionError("Permission denied")
-        return original_stat(path, *args, **kwargs)
+    original_open = os.open
 
     def denied_open(path, *args, **kwargs):
         if path == history:
-            raise PermissionError("Permission denied")
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
         return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", denied_stat)
-    monkeypatch.setattr(Path, "open", denied_open)
+    monkeypatch.setattr(os, "open", denied_open)
     assert probe.check_artifacts(
         Path("/tmp/x/proj"), "session-test", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
-    ) == [f"FAIL artifacts control: cannot check {history} (PermissionError)"]
+    ) == [f"FAIL artifacts control: cannot check {history} ([Errno 13] Permission denied)"]

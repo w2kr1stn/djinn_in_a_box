@@ -22,6 +22,7 @@ from djinn_in_a_box.config.loader import (
     save_config,
 )
 from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core.console import escape_nonprintable
 
 
 @pytest.fixture
@@ -216,8 +217,8 @@ def assert_agents_content_error(path: Path, detail: str) -> str:
     with pytest.raises(ConfigValidationError) as exc_info:
         load_agents(path)
     message = str(exc_info.value)
-    assert message.startswith(f"Invalid agent definitions in {str(path)!r}:")
-    assert detail in message
+    assert message.splitlines()[0].startswith(detail)
+    assert escape_nonprintable(str(path)) in message.splitlines()[0]
     assert "chmod go-w" not in message
     assert all(character.isprintable() for line in message.splitlines() for character in line)
     return message
@@ -390,7 +391,7 @@ class TestAgentFileSafety:
 
     def test_invalid_utf8(self, sample_agents_toml: Path) -> None:
         sample_agents_toml.write_bytes(b"\xff")
-        assert_agents_content_error(sample_agents_toml, "not valid UTF-8")
+        assert_agents_content_error(sample_agents_toml, "Invalid UTF-8 in")
 
     @pytest.mark.parametrize(
         "content", ['agents = ["x"]', "[agents]\nx = 1", "[agents]", 'other = "x"'],
@@ -398,17 +399,59 @@ class TestAgentFileSafety:
     )
     def test_invalid_shape(self, sample_agents_toml: Path, content: str) -> None:
         sample_agents_toml.write_text(content)
-        assert_agents_content_error(
-            sample_agents_toml, "expected a non-empty [agents] table of [agents.<name>] tables"
-        )
+        message = assert_agents_content_error(sample_agents_toml, "No agents defined in")
+        assert message.endswith(". Expected [agents.<name>] sections.")
 
     def test_invalid_toml(self, sample_agents_toml: Path) -> None:
         sample_agents_toml.write_text("[agents.")
-        assert_agents_content_error(sample_agents_toml, "invalid TOML syntax")
+        assert_agents_content_error(sample_agents_toml, "Invalid TOML syntax in")
+
+    @pytest.mark.parametrize(
+        "value,parser_error",
+        [("[" * 1200 + '"x"' + "]" * 1200, RecursionError), ("9" * 5000, ValueError)],
+        ids=["nested-array", "large-integer"],
+    )
+    @pytest.mark.parametrize("via_cli", [False, True], ids=["loader", "cli"])
+    def test_parser_limits_are_named_content_errors(
+        self,
+        sample_agents_toml: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+        parser_error: type[Exception],
+        via_cli: bool,
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from djinn_in_a_box.cli.djinn import app
+
+        sample_agents_toml.chmod(0o600)
+        sample_agents_toml.parent.chmod(0o700)
+        sample_agents_toml.write_text('[agents.test]\nbinary = "claude"\nheadless_flags = ' + value)
+        prefix = f"Invalid TOML syntax in {sample_agents_toml}:"
+        if via_cli:
+            monkeypatch.setattr(loader, "AGENTS_FILE", sample_agents_toml)
+            result = CliRunner().invoke(app, ["agents", "--json"])
+            assert result.exit_code == 1
+            assert result.stdout == ""
+            message = result.stderr
+            assert prefix in message
+        else:
+            with pytest.raises(ConfigValidationError) as exc_info:
+                load_agents(sample_agents_toml)
+            message = str(exc_info.value)
+            assert message.startswith(prefix)
+            assert isinstance(exc_info.value.__cause__, parser_error)
+        assert len(message) <= 400
+
+    def test_long_toml_diagnostic_is_bounded(self, sample_agents_toml: Path) -> None:
+        table = "[agents." + "x" * 5000 + "]\n"
+        sample_agents_toml.write_text(table * 2)
+        message = assert_agents_content_error(sample_agents_toml, "Invalid TOML syntax in")
+        assert len(message) <= 400
 
     def test_invalid_model(self, sample_agents_toml: Path) -> None:
         sample_agents_toml.write_text('[agents.broken]\ndescription = "Missing binary"\n')
-        message = assert_agents_content_error(sample_agents_toml, "invalid agent configuration:")
+        message = assert_agents_content_error(sample_agents_toml, "Invalid agent configuration in")
         assert message.splitlines()[1] == "  - binary: Field required"
 
     @pytest.mark.parametrize("explicit", [False, True], ids=["default", "explicit"])
@@ -654,7 +697,7 @@ class TestAgentFileSafety:
             patch.setattr(loader.os, "open", denied)
             assert_agents_refused(path, "Permission denied")
         path.write_text('[agents.broken]\ndescription = "Missing binary"\nheadless_flags = 4\n')
-        message = assert_agents_content_error(path, "invalid agent configuration:")
+        message = assert_agents_content_error(path, "Invalid agent configuration in")
         assert "\\n\\x1b.toml" in message.splitlines()[0]
 
 

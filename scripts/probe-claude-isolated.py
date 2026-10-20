@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -31,17 +32,22 @@ from typing import Any, NamedTuple
 from djinn_in_a_box.config.defaults import DEFAULT_AGENTS
 from djinn_in_a_box.core.agent_runner import build_agent_command
 
-TIMEOUT = 120
-CLAUDE_CANARY = "DJINN-PROBE-CANARY-CLAUDEMD-7319"
-AGENTS_CANARY = "DJINN-PROBE-CANARY-AGENTSMD-7320"
-DECOY = "DJINN-PROBE-DECOY-7399"
-QUESTION = (
+# Module values are lower-case: tests/test_docker.py reads upper-case assignments under
+# scripts/ as environment names, and none of these is one.
+run_timeout = 120
+claude_canary = "DJINN-PROBE-CANARY-CLAUDEMD-7319"
+agents_canary = "DJINN-PROBE-CANARY-AGENTSMD-7320"
+decoy_canary = "DJINN-PROBE-DECOY-7399"
+# Shell startup inputs that would run code before the measured command or replace `claude`.
+shell_startup_variables = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4"})
+desktop_variables = frozenset({"DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "PULSE_COOKIE"})
+probe_question = (
     'Return only one JSON object {"claude_md": bool, "agents_md": bool, "decoy": bool}. '
     "For each exact string below, say whether it occurs in the context BEFORE this "
     "message (ignore occurrences in this message). "
-    f"claude_md: {CLAUDE_CANARY}; agents_md: {AGENTS_CANARY}; decoy: {DECOY}."
+    f"claude_md: {claude_canary}; agents_md: {agents_canary}; decoy: {decoy_canary}."
 )
-MCP_SERVER = """import json
+mcp_server_source = """import json
 import pathlib
 import sys
 
@@ -153,7 +159,7 @@ def setup_phase_one(root: Path) -> None:
         user / "commands" / "probe-cmd.md",
         "---\ndescription: synthetic probe command\n---\nprobe\n",
     )
-    write_file(root / "mcp_probe.py", MCP_SERVER)
+    write_file(root / "mcp_probe.py", mcp_server_source)
     write_file(
         root / "home" / ".claude.json",
         json.dumps(
@@ -180,7 +186,7 @@ def run_command(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=TIMEOUT,
+        timeout=run_timeout,
         check=False,
     )
 
@@ -207,15 +213,27 @@ def parse_events(output: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def observe(
-    argv: list[str], cwd: Path, env: dict[str, str], markers: Path | None = None
+    argv: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    markers: Path | None = None,
+    *,
+    authenticated: bool = True,
 ) -> Observation:
+    """Run once; a logged-in run must exit 0, an unauthenticated one with a failure status."""
     try:
         completed = run_command(argv, cwd, env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Observation({}, {}, error=f"run failed ({type(exc).__name__})")
     init, result = parse_events(completed.stdout)
     found = frozenset(p.name for p in markers.iterdir()) if markers else frozenset()
-    error = "" if result else "no result event"
+    expected_status = completed.returncode == 0 if authenticated else completed.returncode > 0
+    if not result:
+        error = "no result event"
+    elif not expected_status:
+        error = f"unexpected exit status {completed.returncode}"
+    else:
+        error = ""
     return Observation(init, result, found, error)
 
 
@@ -300,10 +318,11 @@ def phase_one() -> list[str]:
             root / "proj",
             env,
             root / "markers",
+            authenticated=False,
         )
         for marker in (root / "markers").iterdir():
             marker.unlink()
-        preset = observe(preset_argv(), root / "proj", env, root / "markers")
+        preset = observe(preset_argv(), root / "proj", env, root / "markers", authenticated=False)
         lines = evaluate_phase_one(control, preset)
         if version.returncode != 0:
             lines.append("FAIL version: claude --version failed")
@@ -320,7 +339,7 @@ def answer_json(result: dict[str, Any]) -> dict[str, Any]:
     if start < 0:
         return {}
     try:
-        answer, _ = json.JSONDecoder().raw_decode(text[start:])
+        answer, _end = json.JSONDecoder().raw_decode(text[start:])
     except json.JSONDecodeError:
         return {}
     return answer if isinstance(answer, dict) else {}
@@ -359,27 +378,50 @@ def check_artifacts(cwd: Path, session_id: Any, env: dict[str, str], label: str)
             lines.append(f"FAIL artifacts {label}: found {path}")
     history = root / "history.jsonl"
     try:
-        text = history.read_text(encoding="utf-8")
-        count = sum(text.count(canary) for canary in (CLAUDE_CANARY, AGENTS_CANARY, DECOY))
-        if count:
-            lines.append(f"FAIL artifacts {label}: {count} canary hit(s) in {history}")
+        count = count_canaries(history)
     except FileNotFoundError:
-        pass
-    except (OSError, UnicodeError) as exc:
-        lines.append(f"FAIL artifacts {label}: cannot check {history} ({type(exc).__name__})")
+        count = 0
+    except (OSError, ValueError) as exc:
+        lines.append(f"FAIL artifacts {label}: cannot check {history} ({exc})")
+        count = 0
+    if count:
+        lines.append(f"FAIL artifacts {label}: {count} canary hit(s) in {history}")
     return lines or [f"PASS artifacts {label}"]
+
+
+def count_canaries(history: Path) -> int:
+    """Count the fixed canaries in the history file itself, never through a link or special file."""
+    fd = os.open(history, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("not a regular single-link file")
+        chunks: list[bytes] = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    canaries = (claude_canary, agents_canary, decoy_canary)
+    return sum(data.count(canary.encode()) for canary in canaries)
+
+
+def phase_two_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in desktop_variables
+        and key not in shell_startup_variables
+        and not key.startswith("BASH_FUNC_")
+    }
 
 
 def phase_two() -> list[str]:
     root = Path(tempfile.mkdtemp(prefix="djinn-probe-"))
     try:
-        write_file(root / "ctl" / "CLAUDE.md", CLAUDE_CANARY + "\n")
-        write_file(root / "agents" / "AGENTS.md", AGENTS_CANARY + "\n")
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in {"DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "PULSE_COOKIE"}
-        }
+        write_file(root / "ctl" / "CLAUDE.md", claude_canary + "\n")
+        write_file(root / "agents" / "AGENTS.md", agents_canary + "\n")
+        env = phase_two_env()
         control_argv = [
             "claude",
             "-p",
@@ -391,7 +433,7 @@ def phase_two() -> list[str]:
             "--output-format",
             "json",
             "--",
-            QUESTION,
+            probe_question,
         ]
         command = build_agent_command(DEFAULT_AGENTS["claude-isolated"], json_output=True)
         runs = [
@@ -407,7 +449,7 @@ def phase_two() -> list[str]:
                 "isolation CLAUDE.md",
                 root / "ctl",
                 ["bash", "-c", command],
-                {**env, "AGENT_PROMPT": QUESTION},
+                {**env, "AGENT_PROMPT": probe_question},
                 "claude_md",
                 False,
             ),
@@ -415,7 +457,7 @@ def phase_two() -> list[str]:
                 "isolation AGENTS.md",
                 root / "agents",
                 ["bash", "-c", command],
-                {**env, "AGENT_PROMPT": QUESTION},
+                {**env, "AGENT_PROMPT": probe_question},
                 "agents_md",
                 False,
             ),
@@ -440,7 +482,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lines = phase_one()
         if not args.offline:
-            lines.extend(phase_two())
+            if any(line.startswith("FAIL ") for line in lines):
+                # A failed credential-free check means the flags may no longer isolate:
+                # never expose the real profile to that CLI.
+                lines.append("FAIL logged-in phase skipped: credential-free checks failed")
+            else:
+                lines.extend(phase_two())
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"FAIL probe: {type(exc).__name__}")
         return 1

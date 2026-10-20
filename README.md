@@ -798,9 +798,10 @@ claude -p --no-session-persistence [--model M] --safe-mode --setting-sources= --
 - A run still writes Claude Code's own app state: `~/.claude.json` with its
   backups, and short-lived session files under `~/.claude/sessions/` that Claude
   Code removes at exit. It writes no transcript, memory or prompt history.
-- The isolation was measured with Claude Code 2.1.304, the dev image's default
-  version. Flag behaviour can change between Claude Code releases, so
-  maintainers rerun the probe below after every Claude Code version bump.
+- The guarantee holds for the measured version, Claude Code 2.1.304, the dev
+  image's default. Flag behaviour can change between Claude Code releases, so
+  rerun the probe below after every change of the Claude Code version, including
+  an update that Claude Code installs by itself in a running container.
 
 To pin the exact definition a pipeline runs with, fingerprint it:
 
@@ -825,8 +826,8 @@ uv run python scripts/probe-claude-isolated.py --offline  # without the login
 The first part runs Claude Code in a temporary home without any login. It
 compares a run without the isolation flags against the preset: tools, MCP
 servers, skills, commands, custom agents, auto-memory, settings and hooks must
-appear in the first run and be absent in the second. The second part uses the
-stored login. It starts a few short isolated Claude Code runs, at most one of
+appear in the first run and be absent in the second. The second part runs only
+when the first part passed, and it uses the stored login. It starts a few short isolated Claude Code runs, at most one of
 them without the isolation flags, and checks that a `CLAUDE.md` and an
 `AGENTS.md` canary stay out of the preset's context; only the `CLAUDE.md`
 canary has a positive control in the same probe. Like any normal run, these
