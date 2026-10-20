@@ -26,7 +26,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import NamedTuple, NoReturn, cast
@@ -1075,15 +1075,24 @@ def _fingerprints(entries: Iterable[Entry]) -> dict[str, str]:
     return {entry.id: entry.fingerprint for entry in entries}
 
 
-def publish(dir_fd: int, export: Sequence[Entry]) -> Published:
+def publish(
+    dir_fd: int, export: Sequence[Entry], *, keep_file_selection: bool = False
+) -> Published:
     """Merge the export, the file and the valid copies, then make the result durable.
 
     Tombstones first, then entries, each only on a change outside ``active``. A destination that
     changed under us (a mirror that ignores the lock) is re-read and re-merged, at most 3 times.
+    ``keep_file_selection`` lets the file's own ``active`` flags win over the export's.
     """
-    selection = {entry.integration_id: entry.id for entry in export if entry.active}
+    exported = {entry.integration_id: entry.id for entry in export if entry.active}
     for _ in range(PUBLISH_ATTEMPTS):
         read = read_carrier(dir_fd)
+        selection = exported
+        if keep_file_selection:
+            selection = {
+                **exported,
+                **{entry.integration_id: entry.id for entry in read.entries if entry.active},
+            }
         result = merge(
             [
                 list(export),
@@ -1408,6 +1417,755 @@ def sync(
         carrier, published.read.copies, conflict_backup, mountinfo, lock_timeout, report
     )
     return report
+
+
+# ---------------------------------------------------------------------------------------------
+# Host APIs: seed, union-only return, tombstones, findings
+# ---------------------------------------------------------------------------------------------
+
+
+def _check_lease(carrier_dir: str | os.PathLike[str], lease: Lease) -> int:
+    """The directory descriptor of ``lease``, after proving that it locks ``carrier_dir``."""
+    dir_fd = lease.dir_fd
+    held = os.fstat(dir_fd)
+    named = os.stat(carrier_dir)
+    if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        raise CredentialsError("lease belongs to another directory")
+    return dir_fd
+
+
+def _own_temp_patterns() -> list[re.Pattern[str]]:
+    return [
+        re.compile(rf"\.{re.escape(name)}\.[0-9a-f]{{{_TEMP_RANDOM_LENGTH}}}\.tmp")
+        for name in (CREDENTIALS_NAME, TOMBSTONES_NAME)
+    ]
+
+
+def _begin_write(carrier_dir: str | os.PathLike[str], lease: Lease) -> int:
+    dir_fd = _check_lease(carrier_dir, lease)
+    remove_stale_own_temps(dir_fd, [CREDENTIALS_NAME, TOMBSTONES_NAME], STALE_TEMP_SECONDS)
+    return dir_fd
+
+
+def _merged_carrier(read: CarrierRead) -> MergeResult:
+    return merge(
+        [read.entries, *[list(copy.entries) for copy in read.copies]],
+        [read.tombstones, *[copy.tombstones for copy in read.copies]],
+    )
+
+
+def materialize_seed(carrier_dir: str | os.PathLike[str], lease: Lease) -> bytes:
+    """The join of the file and its valid copies minus all tombstones, in export format.
+
+    Raises NotUnderstood for an invalid carrier file; the caller then starts without a seed.
+    """
+    read = read_carrier(_check_lease(carrier_dir, lease))
+    selection = {entry.integration_id: entry.id for entry in read.entries if entry.active}
+    return materialize_entries(_merged_carrier(read).entries.values(), selection)
+
+
+class MergeBackSummary(NamedTuple):
+    """Counts only."""
+
+    added: int
+    updated: int
+    tombstoned: int
+    wrote_entries: bool
+    wrote_tombstones: bool
+
+
+def merge_back(
+    carrier_dir: str | os.PathLike[str], final_export: bytes, lease: Lease
+) -> MergeBackSummary:
+    """Union of ``final_export`` with the carrier state; tombstones are respected, never created."""
+    dir_fd = _begin_write(carrier_dir, lease)
+    incoming = parse_entries(final_export, EXPORT_LIMIT)
+    published = publish(dir_fd, incoming, keep_file_selection=True)
+    before = _fingerprints(published.read.entries)
+    after = _fingerprints(published.result.entries.values())
+    return MergeBackSummary(
+        added=sum(1 for identity in after if identity not in before),
+        updated=sum(
+            1 for identity, fp in after.items() if identity in before and before[identity] != fp
+        ),
+        tombstoned=sum(1 for item in incoming if item.id in published.result.tombstones),
+        wrote_entries=published.wrote_entries,
+        wrote_tombstones=published.wrote_tombstones,
+    )
+
+
+class TombstoneReport(NamedTuple):
+    """IDs only: ``added`` are new tombstones, ``unknown`` were found in neither file nor copy."""
+
+    added: tuple[str, ...]
+    unknown: tuple[str, ...]
+    total: int
+
+
+def _known_ids(read: CarrierRead) -> set[str]:
+    return {entry.id for entry in read.entries} | {
+        entry.id for copy in read.copies for entry in copy.entries
+    }
+
+
+def _require_ids(identities: Iterable[str]) -> set[str]:
+    result = set(identities)
+    if not all(_is_id(identity) for identity in result):
+        raise NotUnderstood("an id is not valid")
+    return result
+
+
+def _add_tombstones(dir_fd: int, select: Callable[[CarrierRead], set[str]]) -> TombstoneReport:
+    """Union ``select(read)`` into the tombstone file, atomically; the entries file stays."""
+    for _ in range(PUBLISH_ATTEMPTS):
+        read = read_carrier(dir_fd)
+        existing = set(read.tombstones)
+        wanted = existing | {item for copy in read.copies for item in copy.tombstones}
+        wanted |= select(read)
+        try:
+            if wanted != existing:
+                write_atomic(
+                    dir_fd, TOMBSTONES_NAME, materialize_tombstones(wanted), read.removed_raw
+                )
+        except ChangedOnDisk:
+            continue
+        known = _known_ids(read)
+        return TombstoneReport(
+            added=tuple(sorted(wanted - existing)),
+            unknown=tuple(sorted(item for item in select(read) if item not in known)),
+            total=len(wanted),
+        )
+    raise ChangedOnDisk("carrier changed during publication in every attempt")
+
+
+def tombstone_ids(
+    carrier_dir: str | os.PathLike[str], identities: Iterable[str], lease: Lease
+) -> TombstoneReport:
+    """Report the given IDs as removed everywhere. Unknown IDs are allowed and reported."""
+    wanted = _require_ids(identities)
+    dir_fd = _check_lease(carrier_dir, lease)
+    read_carrier(dir_fd)
+    remove_stale_own_temps(dir_fd, [CREDENTIALS_NAME, TOMBSTONES_NAME], STALE_TEMP_SECONDS)
+    return _add_tombstones(dir_fd, lambda _read: wanted)
+
+
+def tombstone_all(
+    carrier_dir: str | os.PathLike[str], extra_ids: Iterable[str], lease: Lease
+) -> TombstoneReport:
+    """Tombstones := old tombstones, all IDs of the file and its copies, and ``extra_ids``."""
+    extra = _require_ids(extra_ids)
+    dir_fd = _check_lease(carrier_dir, lease)
+    read_carrier(dir_fd)
+    remove_stale_own_temps(dir_fd, [CREDENTIALS_NAME, TOMBSTONES_NAME], STALE_TEMP_SECONDS)
+    return _add_tombstones(dir_fd, lambda read: _known_ids(read) | extra)
+
+
+def clear_carrier_except_tombstones(carrier_dir: str | os.PathLike[str], lease: Lease) -> list[str]:
+    """The names to remove from the carrier so that only the tombstone file stays.
+
+    This module deletes nothing: files, conflict copies, temporary files, subdirectories and
+    mount points are left to the caller's descriptor-contained clearer, which runs under the same
+    lease. An invalid carrier file raises NotUnderstood before any name is returned.
+    """
+    dir_fd = _check_lease(carrier_dir, lease)
+    read_carrier(dir_fd)
+    return [name for name in _list_dir(dir_fd) if name != TOMBSTONES_NAME]
+
+
+# ---------------------------------------------------------------------------------------------
+# Audit sessions
+# ---------------------------------------------------------------------------------------------
+
+SESSION_PREFIX = "djinn-assistant-"
+_SESSION_ID = re.compile(r"[0-9a-f]{32}")
+_CREATING = ".creating-"
+_DELETING = ".deleting-"
+_DJINN_STATE = (".local", "state", "djinn")
+
+
+def default_audit_root() -> str:
+    return os.path.join(os.path.expanduser("~"), *_DJINN_STATE, "opencode-audit")
+
+
+@dataclass(frozen=True)
+class RootPolicy:
+    """Where the path rules start. Tests inject a temporary home and a foreign euid."""
+
+    home: str = field(default_factory=lambda: os.path.expanduser("~"))
+    euid: int = field(default_factory=os.geteuid)
+
+
+def _check_ancestor(status: os.stat_result, policy: RootPolicy) -> None:
+    if status.st_uid not in {policy.euid, 0}:
+        raise Refused("an ancestor belongs to another user")
+    if status.st_mode & 0o022:
+        raise Refused("an ancestor is writable by group or others")
+
+
+def _check_private(descriptor: int, status: os.stat_result, policy: RootPolicy) -> None:
+    if status.st_uid != policy.euid:
+        raise Refused("a private directory belongs to another user")
+    if status.st_mode & 0o077:
+        os.fchmod(descriptor, 0o700)
+
+
+def _open_root(root: str | os.PathLike[str], policy: RootPolicy, *, create: bool) -> int | None:
+    """Walk from the home directory to ``root`` without following a symlink.
+
+    Ancestors must be the user's or root's and not group- or world-writable. From
+    ``~/.local/state/djinn`` on (else from the root itself) directories are the user's, 0700.
+    Returns None for a missing root when ``create`` is false.
+    """
+    home = os.path.abspath(policy.home)
+    absolute = os.path.abspath(root)
+    relative = os.path.relpath(absolute, home)
+    if relative == "." or relative == ".." or relative.startswith(".." + os.sep):
+        raise Refused("root is not below the home directory")
+    parts = relative.split(os.sep)
+    private_at = len(parts) - 1
+    if tuple(parts[: len(_DJINN_STATE)]) == _DJINN_STATE:
+        private_at = len(_DJINN_STATE) - 1
+    descriptor = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        _check_ancestor(os.fstat(descriptor), policy)
+        for index, part in enumerate(parts):
+            try:
+                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    os.close(descriptor)
+                    return None
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+                ops.fsync_dir(descriptor)
+                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise Refused("a path component is a symlink or not a directory") from error
+                raise
+            os.close(descriptor)
+            descriptor = child
+            status = os.fstat(descriptor)
+            if index < private_at:
+                _check_ancestor(status, policy)
+            else:
+                _check_private(descriptor, status, policy)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+class Session:
+    """A private audit session. Holds the lease (flock on the session directory) until closed."""
+
+    def __init__(self, root: str, identity: str, descriptor: int) -> None:
+        self.root = root
+        self.id = identity
+        self._descriptor = descriptor
+
+    @property
+    def path(self) -> str:
+        return os.path.join(self.root, self.id)
+
+    @property
+    def io_path(self) -> str:
+        return os.path.join(self.path, "io")
+
+    @property
+    def data_path(self) -> str:
+        return os.path.join(self.path, "data")
+
+    @property
+    def container_name(self) -> str:
+        return SESSION_PREFIX + self.id
+
+    @property
+    def held(self) -> bool:
+        return self._descriptor >= 0
+
+    def descriptor(self) -> int:
+        if self._descriptor < 0:
+            raise CredentialsError("session lease is no longer held")
+        return self._descriptor
+
+    def close(self) -> None:
+        if self._descriptor >= 0:
+            descriptor, self._descriptor = self._descriptor, -1
+            os.close(descriptor)
+
+    def __enter__(self) -> Session:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def create_audit_session(
+    root: str | os.PathLike[str] | None = None, *, policy: RootPolicy | None = None
+) -> Session:
+    """New session ``<id>`` with ``io/`` and ``data/``; the lease is taken before the rename."""
+    effective = policy or RootPolicy()
+    root_text = os.fspath(root) if root is not None else default_audit_root()
+    root_fd = _open_root(root_text, effective, create=True)
+    if root_fd is None:
+        raise CredentialsError("session root could not be created")
+    try:
+        for _ in range(PUBLISH_ATTEMPTS):
+            identity = os.urandom(16).hex()
+            temporary = _CREATING + identity
+            os.mkdir(temporary, 0o700, dir_fd=root_fd)
+            descriptor = os.open(temporary, _DIRECTORY_FLAGS, dir_fd=root_fd)
+            try:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(descriptor)
+                    continue
+                os.mkdir("io", 0o700, dir_fd=descriptor)
+                os.mkdir("data", 0o700, dir_fd=descriptor)
+                ops.fsync_dir(descriptor)
+                ops.rename(temporary, identity, root_fd)
+                ops.fsync_dir(root_fd)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            return Session(os.path.abspath(root_text), identity, descriptor)
+        raise CredentialsError("session directory is held by another process")
+    finally:
+        os.close(root_fd)
+
+
+def write_seed(session: Session, seed: bytes) -> None:
+    """``io/seed.json`` as 0600, fsynced."""
+    if len(seed) > FILE_LIMIT:
+        raise NotUnderstood("seed exceeds the size limit")
+    _write_io_file(session, "seed.json", seed)
+
+
+def _write_io_file(session: Session, name: str, data: bytes) -> None:
+    io_fd = os.open("io", _DIRECTORY_FLAGS, dir_fd=session.descriptor())
+    try:
+        current = read_private(io_fd, name, EXPORT_LIMIT)
+        write_atomic(io_fd, name, data, current.data if current is not None else None)
+    finally:
+        os.close(io_fd)
+
+
+def _remove_tree(parent_fd: int, name: str) -> None:
+    """Remove ``name`` below ``parent_fd`` without following a symlink."""
+    descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    try:
+        for child in os.listdir(descriptor):
+            status = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(status.st_mode):
+                _remove_tree(descriptor, child)
+            else:
+                os.unlink(child, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _discard_session(root_fd: int, identity: str) -> None:
+    """Rename to ``.deleting-<id>`` (atomic, so a kill leaves a sweepable name), then remove."""
+    marked = _DELETING + identity
+    ops.rename(identity, marked, root_fd)
+    ops.fsync_dir(root_fd)
+    _remove_tree(root_fd, marked)
+    ops.fsync_dir(root_fd)
+
+
+@dataclass
+class RecoveryReport:
+    """Session IDs only. ``kept`` pairs an ID with a fixed, value-free reason."""
+
+    recovered: list[str] = field(default_factory=lambda: cast(list[str], []))
+    kept: list[tuple[str, str]] = field(default_factory=lambda: cast(list[tuple[str, str]], []))
+    removed: list[str] = field(default_factory=lambda: cast(list[str], []))
+
+
+class _Pending(NamedTuple):
+    identity: str
+    descriptor: int
+    owned: bool
+    export: bytes
+
+
+def _try_lease(root_fd: int, name: str) -> int:
+    """Open a session directory and take its lease; BlockingIOError when it is held."""
+    descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=root_fd)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.fstat(descriptor).st_nlink == 0:
+            raise FileNotFoundError(name)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _data_state(session_fd: int) -> str:
+    """absent, empty, database or other, by lstat; the open refuses a symlink or a file."""
+    try:
+        os.stat("data", dir_fd=session_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    descriptor = os.open("data", _DIRECTORY_FLAGS, dir_fd=session_fd)
+    try:
+        names = os.listdir(descriptor)
+        if not names:
+            return "empty"
+        if "opencode.db" in names and stat.S_ISREG(
+            os.stat("opencode.db", dir_fd=descriptor, follow_symlinks=False).st_mode
+        ):
+            return "database"
+        return "other"
+    finally:
+        os.close(descriptor)
+
+
+def _read_final(session_fd: int) -> tuple[bool, bytes | None]:
+    """(final.json exists, its bytes when valid)."""
+    try:
+        io_fd = os.open("io", _DIRECTORY_FLAGS, dir_fd=session_fd)
+    except FileNotFoundError:
+        return False, None
+    try:
+        try:
+            snapshot = read_private(io_fd, "final.json", EXPORT_LIMIT)
+        except CredentialsError:
+            return True, None
+        if snapshot is None:
+            return False, None
+        try:
+            parse_entries(snapshot.data, EXPORT_LIMIT)
+        except CredentialsError:
+            return True, None
+        return True, snapshot.data
+    finally:
+        os.close(io_fd)
+
+
+def _recover_one(
+    session_fd: int,
+    path: str,
+    container: str,
+    export_db: Callable[[str], bytes],
+    container_exists: Callable[[str], bool],
+    stop_container: Callable[[str], None] | None,
+) -> tuple[bytes | None, str | None]:
+    """(export to merge, None) / (None, None) for an empty session / (None, reason) to keep."""
+    try:
+        exists = container_exists(container)
+        if exists and stop_container is not None:
+            stop_container(container)
+            exists = container_exists(container)
+    except Exception:
+        return None, "container state unknown"
+    if exists:
+        return None, "container exists"
+    try:
+        has_final, final = _read_final(session_fd)
+        state = _data_state(session_fd)
+    except (CredentialsError, OSError):
+        return None, "session layout refused"
+    if final is not None:
+        return final, None
+    if state == "database":
+        try:
+            exported = export_db(os.path.join(path, "data"))
+            parse_entries(exported, EXPORT_LIMIT)
+        except Exception:
+            return None, "export failed"
+        return exported, None
+    if has_final:
+        return None, "final export invalid"
+    if state in {"absent", "empty"}:
+        return None, None
+    return None, "data holds no database"
+
+
+def _lock_reason(error: BaseException) -> str:
+    if isinstance(error, LockTimeout):
+        return "carrier lock busy"
+    if isinstance(error, NotUnderstood):
+        return "carrier not understood"
+    if isinstance(error, Refused):
+        return "carrier refused"
+    return "merge failed"
+
+
+def recover_audit_sessions(
+    root: str | os.PathLike[str] | None,
+    carrier_dir: str | os.PathLike[str],
+    export_db: Callable[[str], bytes],
+    container_exists: Callable[[str], bool],
+    own_session: Session | None = None,
+    *,
+    stop_container: Callable[[str], None] | None = None,
+    policy: RootPolicy | None = None,
+    lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+) -> RecoveryReport:
+    """The single recovery function: merge the leftovers of audit sessions, then delete them.
+
+    A session whose lease is held (except ``own_session``, whose lease the caller holds) is
+    skipped. Exports (``export_db``) run before the carrier lock, which this function takes once
+    for all merges; the caller must not hold it. A session is deleted only after its merge was
+    published durably.
+    """
+    effective = policy or RootPolicy()
+    report = RecoveryReport()
+    root_text = os.fspath(root) if root is not None else default_audit_root()
+    root_fd = _open_root(root_text, effective, create=False)
+    if root_fd is None:
+        return report
+    absolute_root = os.path.abspath(root_text)
+    leases: list[int] = []
+    pending: list[_Pending] = []
+    try:
+        for name in sorted(os.listdir(root_fd)):
+            identity = name.removeprefix(_CREATING).removeprefix(_DELETING)
+            if _SESSION_ID.fullmatch(identity) is None:
+                continue
+            status = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(status.st_mode):
+                report.kept.append((identity, "not a directory"))
+                continue
+            owned = own_session is not None and name == own_session.id and own_session.held
+            try:
+                descriptor = (
+                    own_session.descriptor() if owned and own_session else _try_lease(root_fd, name)
+                )
+            except BlockingIOError:
+                report.kept.append((identity, "in use"))
+                continue
+            except FileNotFoundError:
+                continue
+            except (OSError, CredentialsError):
+                report.kept.append((identity, "session layout refused"))
+                continue
+            if not owned:
+                leases.append(descriptor)
+            if name.startswith(_DELETING):
+                _sweep(root_fd, name, report, identity)
+                continue
+            if name.startswith(_CREATING):
+                _sweep_creating(root_fd, name, descriptor, report, identity)
+                continue
+            exported, reason = _recover_one(
+                descriptor,
+                os.path.join(absolute_root, name),
+                SESSION_PREFIX + name,
+                export_db,
+                container_exists,
+                stop_container,
+            )
+            if reason is not None:
+                report.kept.append((identity, reason))
+            elif exported is None:
+                _finish(root_fd, name, report, removed=True)
+            else:
+                pending.append(_Pending(identity, descriptor, owned, exported))
+        if pending:
+            _merge_pending(root_fd, carrier_dir, pending, report, lock_timeout)
+    finally:
+        for descriptor in leases:
+            os.close(descriptor)
+        os.close(root_fd)
+    return report
+
+
+def _finish(root_fd: int, name: str, report: RecoveryReport, *, removed: bool) -> None:
+    try:
+        _discard_session(root_fd, name)
+    except OSError:
+        report.kept.append((name, "removal failed"))
+        return
+    (report.removed if removed else report.recovered).append(name)
+
+
+def _sweep(root_fd: int, name: str, report: RecoveryReport, identity: str) -> None:
+    try:
+        _remove_tree(root_fd, name)
+        ops.fsync_dir(root_fd)
+    except OSError:
+        report.kept.append((identity, "removal failed"))
+        return
+    report.removed.append(identity)
+
+
+def _sweep_creating(
+    root_fd: int, name: str, descriptor: int, report: RecoveryReport, identity: str
+) -> None:
+    try:
+        empty = _data_state(descriptor) in {"absent", "empty"} and not _read_final(descriptor)[0]
+    except (CredentialsError, OSError):
+        empty = False
+    if not empty:
+        report.kept.append((identity, "unfinished session holds data"))
+        return
+    _sweep(root_fd, name, report, identity)
+
+
+def _merge_pending(
+    root_fd: int,
+    carrier_dir: str | os.PathLike[str],
+    pending: list[_Pending],
+    report: RecoveryReport,
+    lock_timeout: float,
+) -> None:
+    try:
+        with carrier_lock(carrier_dir, lock_timeout) as lease:
+            for item in pending:
+                try:
+                    merge_back(carrier_dir, item.export, lease)
+                except (CredentialsError, OSError) as error:
+                    report.kept.append((item.identity, _lock_reason(error)))
+                    continue
+                _finish(root_fd, item.identity, report, removed=False)
+    except (CredentialsError, OSError) as error:
+        done = set(report.recovered) | {name for name, _ in report.kept}
+        for item in pending:
+            if item.identity not in done:
+                report.kept.append((item.identity, _lock_reason(error)))
+
+
+def park_for_restore(
+    root: str | os.PathLike[str] | None,
+    carrier_dir: str | os.PathLike[str],
+    volume_export: bytes,
+    lease: Lease,
+    *,
+    policy: RootPolicy | None = None,
+) -> str:
+    """Write volume export plus current carrier entries as ``io/final.json`` of a new session.
+
+    Runs before the first destructive step of a restore. Tombstones in effect are respected, so
+    a login that was reported removed is not parked. The lease on the session is released again:
+    ``recover_audit_sessions`` merges and deletes it later. Returns the session ID.
+    """
+    dir_fd = _check_lease(carrier_dir, lease)
+    incoming = parse_entries(volume_export, EXPORT_LIMIT)
+    read = read_carrier(dir_fd)
+    selection = {entry.integration_id: entry.id for entry in read.entries if entry.active}
+    union = merge(
+        [incoming, read.entries, *[list(copy.entries) for copy in read.copies]],
+        [read.tombstones, *[copy.tombstones for copy in read.copies]],
+    )
+    data = materialize_entries(union.entries.values(), selection, EXPORT_LIMIT)
+    session = create_audit_session(root, policy=policy)
+    try:
+        _write_io_file(session, "final.json", data)
+    except BaseException:
+        with suppress(OSError):
+            _abandon(session, policy)
+        session.close()
+        raise
+    identity = session.id
+    session.close()
+    return identity
+
+
+def _abandon(session: Session, policy: RootPolicy | None) -> None:
+    root_fd = _open_root(session.root, policy or RootPolicy(), create=False)
+    if root_fd is not None:
+        try:
+            _discard_session(root_fd, session.id)
+        finally:
+            os.close(root_fd)
+
+
+# ---------------------------------------------------------------------------------------------
+# Doctor findings
+# ---------------------------------------------------------------------------------------------
+
+
+class Finding(NamedTuple):
+    """Value-free: ``kind`` is fixed; ``subject`` is a file name, an ID or a session ID."""
+
+    kind: str
+    subject: str
+    detail: str = ""
+
+
+def _try_parse(dir_fd: int, name: str, entries: bool) -> tuple[list[Entry] | list[str], str | None]:
+    try:
+        snapshot = read_private(dir_fd, name, FILE_LIMIT)
+        if snapshot is None:
+            return [], None
+        parsed = parse_entries(snapshot.data) if entries else parse_tombstones(snapshot.data)
+        return parsed, None
+    except CredentialsError as error:
+        return [], error.reason
+
+
+def carrier_findings(
+    carrier_dir: str | os.PathLike[str],
+    sessions_root: str | os.PathLike[str] | None = None,
+    *,
+    policy: RootPolicy | None = None,
+) -> list[Finding]:
+    """Read-only, value-free findings for doctor."""
+    findings: list[Finding] = []
+    try:
+        dir_fd = open_dir(carrier_dir)
+    except (OSError, CredentialsError):
+        dir_fd = -1
+    if dir_fd >= 0:
+        try:
+            findings += _carrier_findings(dir_fd)
+        finally:
+            os.close(dir_fd)
+    findings += _session_findings(sessions_root, policy or RootPolicy())
+    return findings
+
+
+def _carrier_findings(dir_fd: int) -> list[Finding]:
+    findings: list[Finding] = []
+    main, reason = _try_parse(dir_fd, CREDENTIALS_NAME, True)
+    if reason is not None:
+        findings.append(Finding("invalid-file", CREDENTIALS_NAME, reason))
+    _, reason = _try_parse(dir_fd, TOMBSTONES_NAME, False)
+    if reason is not None:
+        findings.append(Finding("invalid-file", TOMBSTONES_NAME, reason))
+    by_id = {entry.id: entry for entry in cast(list[Entry], main)}
+    temps = _own_temp_patterns()
+    for name in _list_dir(dir_fd):
+        holds_entries = _ENTRIES_COPY.fullmatch(name) is not None
+        if holds_entries or _TOMBSTONES_COPY.fullmatch(name) is not None:
+            findings.append(Finding("conflict-copy", name))
+            parsed, reason = _try_parse(dir_fd, name, holds_entries)
+            if reason is not None:
+                findings.append(Finding("invalid-file", name, reason))
+            for candidate in parsed if holds_entries else []:
+                known = by_id.get(cast(Entry, candidate).id)
+                if known is not None and known.fingerprint != cast(Entry, candidate).fingerprint:
+                    findings.append(Finding("differing-value", known.id, known.integration_id))
+        elif any(pattern.fullmatch(name) for pattern in temps):
+            findings.append(Finding("stale-temp", name))
+    return findings
+
+
+def _session_findings(root: str | os.PathLike[str] | None, policy: RootPolicy) -> list[Finding]:
+    root_text = os.fspath(root) if root is not None else default_audit_root()
+    try:
+        root_fd = _open_root(root_text, policy, create=False)
+    except (OSError, CredentialsError) as error:
+        reason = error.reason if isinstance(error, CredentialsError) else "root not readable"
+        return [Finding("audit-root", "", reason)]
+    if root_fd is None:
+        return []
+    try:
+        findings: list[Finding] = []
+        for name in sorted(os.listdir(root_fd)):
+            identity = name.removeprefix(_CREATING).removeprefix(_DELETING)
+            if _SESSION_ID.fullmatch(identity) is None:
+                continue
+            detail = "unfinished" if name != identity else "retained"
+            findings.append(Finding("audit-session", identity, detail))
+        return findings
+    finally:
+        os.close(root_fd)
 
 
 # ---------------------------------------------------------------------------------------------
