@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from djinn_in_a_box.core.docker import ComposeFragment
 
 GENERATION_LABEL = "djinn.git-agent.generation"
+RUN_LABEL = "djinn.run"
 STATE_FILE = "state.json"
 STATE_TMP = "state.tmp"
 CREATOR_LOCK = "creator.lock"
@@ -95,12 +96,20 @@ def stop_owned_process(pid: int, token: str) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+class _DefaultMissing(str):
+    """Distinguish the legacy default from an explicitly supplied substring."""
+
+
+_DEFAULT_MISSING = _DefaultMissing("no such")
+
+
 def inspect_object(
     name: str,
     docker_path: str = DOCKER_EXECUTABLE,
     resource: str = "container",
     *,
     timeout: float = 5,
+    missing: str = _DEFAULT_MISSING,
 ) -> dict[str, Any] | None:
     result = subprocess.run(
         [docker_path, resource, "inspect", name],
@@ -112,8 +121,8 @@ def inspect_object(
         stdin=subprocess.DEVNULL,
     )
     if result.returncode:
-        # The daemon reports "No such container/image: X" but "get X: no such volume".
-        if "no such" in result.stderr.lower():
+        stderr = result.stderr.lower() if missing is _DEFAULT_MISSING else result.stderr
+        if missing in stderr:
             return None
         raise GitSSHError("Docker inspection failed; runtime ownership is unknown")
     try:
