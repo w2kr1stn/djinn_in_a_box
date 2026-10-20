@@ -327,10 +327,12 @@ def discard_workflow_target_drift(
     canonical_root = project_root / "config"
     tools = tuple(inspection.target.tool for inspection in inspections)
     backups: dict[str, tuple[BackedUpEntry, ...]] = {}
-    backup_directory = admission.path
+    # Named in the output only once the stamp directory really exists.
+    backup_directory: Path | None = None
     backup_target: WorkflowDeliveryTarget | None = None
     try:
         with open_backup_root(admission) as directories:
+            backup_directory = admission.path
             # Phase 1: release source-owned records exactly as canonical sync does.
             with canonical_lock(canonical_root, exclusive=True) as lease:
                 build = _snapshot_build(project_root, config.config_sync.source)
@@ -375,7 +377,8 @@ def discard_workflow_target_drift(
                 ) for item in exc.items),
             )
         return WorkflowDiscardResult(
-            failure=failure, backup_directory=backup_directory,
+            failure=failure,
+            backup_directory=backup_directory or _existing_directory(admission.path),
             failed_phase="backup", skipped=("canonical", *tools),
         )
     except (_BuildError, OSError, ValueError) as exc:
@@ -384,7 +387,8 @@ def discard_workflow_target_drift(
             "Correct the backup problem and retry; partial backups have been kept.",
         ),))
         return WorkflowDiscardResult(
-            failure=failure, backup_directory=backup_directory,
+            failure=failure,
+            backup_directory=backup_directory or _existing_directory(admission.path),
             failed_phase="backup", skipped=("canonical", *tools),
         )
 
@@ -428,6 +432,14 @@ def discard_workflow_target_drift(
     return WorkflowDiscardResult(
         synced, backups=entries, backup_directory=backup_directory, notices=tuple(notices)
     )
+
+
+def _existing_directory(path: Path) -> Path | None:
+    """A partially admitted backup stamp is named only if it really exists (no symlink)."""
+    try:
+        return path if stat.S_ISDIR(os.lstat(path).st_mode) else None
+    except OSError:
+        return None
 
 
 def prepare_config_workflow(

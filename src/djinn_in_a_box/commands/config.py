@@ -800,7 +800,12 @@ def config_sync(
         project_root = get_project_root()
         if discard_target_drift:
             config = load_config()
-            admission = admit_backup_root(project_root, config)
+            try:
+                admission = admit_backup_root(project_root, config)
+            except ValueError as exc:
+                # The refusal itself names the component and what to change.
+                error(escape(escape_nonprintable(str(exc))))
+                raise typer.Exit(1) from exc
             with _lifecycle.lifecycle_guard():
                 config = load_config()
                 admission = admit_backup_root(project_root, config)

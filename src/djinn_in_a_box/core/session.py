@@ -838,7 +838,8 @@ def _publisher_refresh_error(stderr: str, *, source: str = "claude") -> str:
                 items=diagnostic.items if diagnostic is not None else (),
             )
             return f"OpenCode workflow refresh failed: {drift.value}{location}. Remedy: {remedy}"
-    tail = escape_nonprintable(lines[0])[:200] if lines else ""
+    last = next((line for line in lines if line), "")
+    tail = escape_nonprintable(last)[:200]
     return "OpenCode workflow refresh failed" + (f": {tail}" if tail else "")
 
 

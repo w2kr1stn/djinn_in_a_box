@@ -102,6 +102,14 @@ def roots(case):
     return tree(case.project / "config"), tree(case.config.config_root)
 
 
+def _stamp_exists(case) -> bool:
+    """The output names the backup directory exactly when the stamp directory exists."""
+    workflow_drift = case.home / ".local/state/djinn/workflow-drift"
+    return workflow_drift.is_dir() and not workflow_drift.is_symlink() and any(
+        entry.is_dir() and not entry.is_symlink() for entry in workflow_drift.iterdir()
+    )
+
+
 def backup_stamp(case):
     stamps = list((case.home / ".local/state/djinn/workflow-drift").iterdir())
     assert len(stamps) == 1
@@ -408,7 +416,7 @@ def test_any_chain_fsync_failure_aborts_before_publish(discard_case, monkeypatch
     result = case.invoke()
     assert result.exit_code == 1, (result.output, result.exception)
     assert hit
-    assert "Backed up to" in result.output
+    assert ("Backed up to" in result.output) == _stamp_exists(case)
     assert roots(case) == before
 
 
@@ -723,7 +731,7 @@ def test_descriptor_walk_rechecks_after_admission(discard_case, monkeypatch, rac
         assert not (case.config.code_dir / "moved/workflow-drift").exists()
     elif race == "moved-workflow":
         assert list((case.config.code_dir / "moved").iterdir()) == []
-    assert "Backed up to" in result.output
+    assert ("Backed up to" in result.output) == _stamp_exists(case)
 
 
 def test_new_backup_entries_fsync_parent_immediately(discard_case, monkeypatch):
