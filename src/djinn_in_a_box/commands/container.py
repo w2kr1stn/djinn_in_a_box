@@ -8,8 +8,10 @@ import re
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 from rich.markup import escape
@@ -654,6 +656,25 @@ clean_app = typer.Typer(
     no_args_is_help=False,
 )
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _with_control_guard(func: Callable[P, R]) -> Callable[P, R]:
+    """Serialize the whole command with restore, backup, clean all and dev transitions."""
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        with contextlib.ExitStack() as guards:
+            try:
+                guards.enter_context(hostctl.control_guard())
+            except (hostctl.HostctlError, OSError) as exc:
+                error(str(exc))
+                raise typer.Exit(1) from exc
+            return func(*args, **kwargs)
+
+    return wrapper
+
 
 @clean_app.callback(invoke_without_command=True)
 @handle_config_errors
@@ -738,6 +759,7 @@ def _protect_opencode_volume(config: AppConfig | None, discard: bool) -> None:
 
 @clean_app.command("volumes")
 @handle_config_errors
+@_with_control_guard
 def clean_volumes(
     credentials: Annotated[
         bool,

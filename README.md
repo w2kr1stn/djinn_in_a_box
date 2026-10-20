@@ -1635,6 +1635,9 @@ List managed volumes and config-root paths:
 djinn clean volumes
 ```
 
+`djinn clean volumes` is serialized with restore, backup, clean all, and dev
+start/stop; a concurrent run fails after at most 15 s with "host control is busy".
+
 Delete cache volumes:
 
 ```sh

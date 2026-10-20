@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -2322,6 +2323,84 @@ def credential_cleanup(mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPat
     exported = json.dumps([entry("database")]).encode()
     monkeypatch.setattr(container, "export_opencode_data_credentials", lambda: exported)
     return config, carrier, exported, oc
+
+
+@pytest.mark.parametrize("existing_tombstones", [False, True])
+def test_selected_logout_is_refused_while_restore_runs(
+    credential_cleanup, monkeypatch, tmp_path, existing_tombstones
+):
+    _, carrier, _, oc = credential_cleanup
+    hostctl = container.hostctl
+    removed = carrier / "credentials.removed.json"
+    if not existing_tombstones:
+        removed.unlink()
+    before = removed.read_bytes() if removed.exists() else None
+    tombstones = MagicMock(wraps=oc.tombstone_ids)
+    monkeypatch.setattr(oc, "tombstone_ids", tombstones)
+    lock = hostctl.state_root() / "control.lock"
+    ready = tmp_path / "restore-holds-the-lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "open(sys.argv[2], 'w').close()\n"
+            "time.sleep(60)\n",
+            str(lock),
+            str(ready),
+        ],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            assert holder.poll() is None and time.monotonic() < deadline
+            time.sleep(0.02)
+        clock = iter(range(0, 10_000, 10))
+        monkeypatch.setattr(hostctl.time, "monotonic", lambda: float(next(clock)))
+        monkeypatch.setattr(hostctl.time, "sleep", lambda _: None)
+        result = runner.invoke(
+            app, ["clean", "volumes", "--credentials", "--opencode-id", "X", "--force"]
+        )
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.exit_code == 1, result.output
+    assert "host control is busy" in result.output
+    assert "recorded as logged out" not in result.output
+    assert (removed.read_bytes() if removed.exists() else None) == before
+    tombstones.assert_not_called()
+
+
+@pytest.mark.parametrize("exception", [container.hostctl.HostctlError, OSError])
+def test_clean_volumes_reports_control_guard_acquisition_failure(monkeypatch, exception):
+    @contextmanager
+    def refused():
+        raise exception("control lock unavailable")
+        yield
+
+    monkeypatch.setattr(container.hostctl, "control_guard", refused)
+    result = runner.invoke(app, ["clean", "volumes"])
+    assert result.exit_code == 1
+    assert "control lock unavailable" in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("exception", [container.hostctl.HostctlError, OSError])
+def test_clean_volumes_preserves_body_exceptions(monkeypatch, exception):
+    failure = exception("command body failed")
+
+    def failed():
+        assert container.hostctl._held.active
+        raise failure
+
+    monkeypatch.setattr(container, "_load_optional_config", failed)
+    result = runner.invoke(app, ["clean", "volumes"])
+    assert result.exception is failure
+    assert "command body failed" not in result.output
+    assert not container.hostctl._held.active
 
 
 def test_credentials_logout_orders_recovery_export_and_single_lease(

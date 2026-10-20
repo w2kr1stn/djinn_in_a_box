@@ -2477,6 +2477,7 @@ def test_restore_parks_before_destruction_and_recovers_after_archives(
 
     def parked(*args):
         assert inside
+        assert hostctl._held.active
         # a session merged between parking and the gate would be missing from the parked copy
         assert _audit_root_is_gated(oc)
         calls.append("park")
@@ -2596,6 +2597,7 @@ def test_an_earlier_audit_session_lands_in_the_restored_carrier(credential_resto
         return RunResult(0)
 
     def carrier_from_backup(*_, inherit_fds=()):
+        assert hostctl._held.active
         assert _audit_root_is_gated(oc)
         root = os.stat(oc.default_audit_root())
         assert [os.path.samestat(os.fstat(fd), root) for fd in inherit_fds] == [True]
