@@ -952,6 +952,11 @@ def _manifest_relative(target_root: Path, manifest_path: Path) -> PurePosixPath:
 _MANIFEST_ORIGIN = "target-manifest"
 
 
+class _TargetReadError(OSError):
+    def __init__(self, error: OSError, path: PurePosixPath) -> None:
+        super().__init__(error.errno, error.strerror or str(error), str(path))
+
+
 def _read_item(
     root: int, path: PurePosixPath, origin: str = "target"
 ) -> _Snapshot | None:
@@ -959,6 +964,15 @@ def _read_item(
     try:
         return _read_relative(root, path)
     except PublishError as error:
+        # _read_at also serves canonical/seed views. Only target reads promote
+        # its I/O refusal to the operational channel, retaining the named item.
+        cause = error.__cause__
+        if (
+            origin in {"target", _MANIFEST_ORIGIN}
+            and error.drift_class is DriftClass.INVALID_OR_SEMANTIC
+            and isinstance(cause, OSError)
+        ):
+            raise _TargetReadError(cause, path) from error
         if error.items:
             raise
         raise PublishError(
@@ -966,6 +980,8 @@ def _read_item(
             lock_error=error.lock_error,
             items=(DriftEntry(error.drift_class, path, origin=origin),),
         ) from error
+    except OSError as error:
+        raise _TargetReadError(error, path) from error
 
 
 def _file_state_of(current: _Snapshot | None) -> BackedUpState:
@@ -2544,7 +2560,9 @@ def _write_error_diagnostic(destination: Path, error: OSError, *, inspect: bool 
     return PUBLISHER_WRITE_ERROR_PREFIX + json.dumps(
         {
             "destination": str(destination),
-            "error": error.strerror or "OS error",
+            "error": (
+                str(error) if isinstance(error, _TargetReadError) else error.strerror or "OS error"
+            ),
             **({"operation": "inspect"} if inspect else {}),
         },
         separators=(",", ":"),

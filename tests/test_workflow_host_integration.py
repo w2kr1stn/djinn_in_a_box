@@ -366,8 +366,8 @@ def test_refresh_labels_seed_and_precedence():
         + WORKFLOW_REMEDIES["opencode-target-drift"].format(source="codex")
     )
     assert error("workflow publisher: target-drift\n" + diagnostic(origin="seed")) == (
-        "OpenCode workflow refresh failed: source-changed in config/opencode/AGENTS.md (seed). "
-        "Remedy: Run `djinn config sync`, then retry."
+        "OpenCode workflow refresh failed: target-drift in config/opencode/AGENTS.md (seed). "
+        "Remedy: " + WORKFLOW_REMEDIES["entrypoint-generic"]
     )
     lock = 'workflow publisher lock-error: {"root":"/config","error":"busy"}'
     write = 'workflow publisher write-error: {"destination":"/runtime","error":"full"}'

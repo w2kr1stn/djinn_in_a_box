@@ -823,8 +823,6 @@ def _publisher_refresh_error(stderr: str, *, source: str = "claude") -> str:
         except ValueError:
             continue
         if drift is not DriftClass.CLEAN:
-            if diagnostic is not None and any(item.origin == "seed" for item in diagnostic.items):
-                drift = DriftClass.SOURCE_CHANGED
             labels = (
                 workflow_item_summary(diagnostic.labels, total=diagnostic.total)
                 if diagnostic is not None
@@ -862,8 +860,8 @@ def container_workflow_image_compatible(container_id: str) -> WorkflowImageCompa
 
 
 _WRITE_REMEDY = (
-    "Check that the workflow destination and its parent directories are writable "
-    "with available space, then retry."
+    "Check that the workflow destination and its contents are readable, and that "
+    "it and its parent directories are writable with available space, then retry."
 )
 _INSPECT_REMEDY = "Check that the workflow destination and its contents are readable, then retry."
 _TARGET_LOCK_REMEDY = (

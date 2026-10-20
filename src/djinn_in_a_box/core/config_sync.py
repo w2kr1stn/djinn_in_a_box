@@ -148,7 +148,11 @@ def workflow_remedy(
     items: tuple[DriftEntry, ...] = (),
 ) -> str:
     key = kind.value
-    if any(item.reason == "changed-during-publish" for item in items):
+    if scope == "opencode" and kind is not DriftClass.SOURCE_CHANGED and any(
+        item.origin in {"seed", "canonical-manifest"} for item in items
+    ):
+        key = "entrypoint-generic"
+    elif any(item.reason == "changed-during-publish" for item in items):
         key = "changed-during-publish"
     elif kind is DriftClass.INVALID_OR_SEMANTIC and any(
         item.key_path is not None and item.path.suffix == ".toml" for item in items

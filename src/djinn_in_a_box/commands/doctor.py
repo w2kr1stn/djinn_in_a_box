@@ -422,8 +422,6 @@ def _opencode_runtime_check(config: AppConfig | None, *, daemon: bool) -> Check:
         12: DriftClass.COLLISION,
         13: DriftClass.INVALID_OR_SEMANTIC,
     }[checked.returncode]
-    if any(item.origin == "seed" for item in diagnostic.items):
-        kind = DriftClass.SOURCE_CHANGED
     detail = f"{kind.value} in {workflow_item_summary(diagnostic.labels, total=diagnostic.total)}"
     remedy = workflow_remedy(
         kind, config.config_sync.source, scope="opencode", items=diagnostic.items

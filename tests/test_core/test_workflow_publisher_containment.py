@@ -400,7 +400,7 @@ def test_name_swapped_after_the_pin_is_never_read(
     assert any(str(path).startswith("/proc/self/fd/") for path, _flags in opened)
 
 
-def test_read_failure_of_a_target_file_is_invalid_without_write_error(
+def test_read_failure_of_a_target_file_preserves_operational_cause_and_item(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     canonical, target, _outside = _roots(tmp_path)
@@ -413,7 +413,9 @@ def test_read_failure_of_a_target_file_is_invalid_without_write_error(
     result = _publish(canonical, target, _view())
 
     assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
-    assert result.write_error is None
+    assert result.write_error is not None
+    assert result.write_error.errno == errno.EIO
+    assert result.write_error.filename == "AGENTS.md"
 
 
 def test_failed_install_leaves_no_temporary_file(

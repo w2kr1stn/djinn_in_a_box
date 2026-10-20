@@ -344,8 +344,8 @@ class TestRefreshOpenCodeWorkflow:
         assert result.returncode == failed.returncode
         assert result.stderr == (
             f"OpenCode workflow refresh failed to publish workflow to {target}: Permission denied. "
-            "Remedy: Check that the workflow destination and its parent directories are writable "
-            "with available space, then retry."
+            "Remedy: Check that the workflow destination and its contents are readable, and that "
+            "it and its parent directories are writable with available space, then retry."
         )
         assert sentinel not in result.stderr
 

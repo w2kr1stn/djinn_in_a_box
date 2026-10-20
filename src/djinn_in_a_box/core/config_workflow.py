@@ -30,6 +30,7 @@ from djinn_in_a_box.core.config_sync import (
     workflow_label_component,
     workflow_remedy,
 )
+from djinn_in_a_box.core.console import escape_nonprintable
 from djinn_in_a_box.core.docker import (
     WorkflowImageCompatibility,
     ensure_host_env,
@@ -162,6 +163,10 @@ class WorkflowPreparationProblem:
     identifier: str
     message: str
     remedy: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "message", escape_nonprintable(self.message))
+        object.__setattr__(self, "remedy", escape_nonprintable(self.remedy))
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,7 +370,10 @@ def discard_workflow_target_drift(
             directories.barrier()
     except PublishError as exc:
         if exc.lock_error is not None:
-            failure = _canonical_lock_failure(canonical_root, exc)
+            if exc.lock_root is not None and exc.lock_root != canonical_root:
+                failure = _publish_lock_failure(exc.lock_root, exc.lock_error)
+            else:
+                failure = _canonical_lock_failure(canonical_root, exc)
         else:
             target = backup_target
             failure = _failure(
@@ -384,7 +392,8 @@ def discard_workflow_target_drift(
     except (_BuildError, OSError, ValueError) as exc:
         failure = WorkflowPreparationResult(False, (WorkflowPreparationProblem(
             "drift-backup-failed", f"Workflow drift backup failed ({exc}).",
-            "Correct the backup problem and retry; partial backups have been kept.",
+            "Check that workflow items are readable and the backup destination is writable, "
+            "then retry; partial backups have been kept.",
         ),))
         return WorkflowDiscardResult(
             failure=failure,
@@ -1080,8 +1089,8 @@ def _publish_write_failure(destination: Path, error: OSError) -> WorkflowPrepara
             WorkflowPreparationProblem(
                 "workflow-publish-failed",
                 f"Failed to publish workflow to {destination}: {error}",
-                "Check that the workflow destination and its parent directories are writable "
-                "with available space, then retry.",
+                "Check that the workflow destination and its contents are readable, and that "
+                "it and its parent directories are writable with available space, then retry.",
             ),
         ),
     )
