@@ -51,7 +51,7 @@ Versioning before and after the first stable release.
 ### Security
 
 - Refuse managed writable binds selected by configuration that overlap host
-  execution inputs or whose path contains `..`: the workspace root (also
+  execution inputs or whose path contains `..` or `:`: the workspace root (also
   delivered to the agent-Docker companion), config-root tool directories (`claude`, `codex`,
   `opencode`, `gh`, `age`), assigned shared/local zone overlay sources, and
   `~/.djinn/sessions`. `djinn start` and `djinn run` check immediately after loading

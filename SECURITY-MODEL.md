@@ -201,7 +201,7 @@ For a running dev container it requires complete inspection and no named causes:
   root (also delivered to the agent-Docker companion), config-root tool directories
   (`claude`, `codex`, `opencode`, `gh`, `age`), assigned shared/local zone overlay
   sources, and `~/.djinn/sessions`, in every Docker mode. Undeterminable inputs or
-  sources refuse creation, as do managed sources whose paths contain `..`.
+  sources refuse creation, as do managed sources whose paths contain `..` or `:`.
   Inaccessible execution inputs make sealing report inspection uncertain (under
   Docker authority see below). The creation check
   applies to pathnames at that point in time and pins no inode: sources and their

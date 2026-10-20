@@ -262,7 +262,7 @@ config-root tool directories (`claude`, `codex`, `opencode`, `gh`, `age`), assig
 shared/local zone overlay sources, and `~/.djinn/sessions`. `djinn start` and
 `djinn run` refuse an overlap immediately after loading the config, before host
 provisioning, in every Docker mode. They also refuse when the execution inputs
-or a source cannot be determined, or a managed source's path contains `..`.
+or a source cannot be determined, or a managed source's path contains `..` or `:`.
 Move the overlapping installation, Python environment, `PATH` directory or Docker
 plugins/config out of that root, or choose another `general.code_dir`,
 `general.config_root` (or `DJINN_CONFIG_ROOT`),

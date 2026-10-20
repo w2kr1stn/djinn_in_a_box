@@ -842,6 +842,7 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
     """Check configurable writable bind sources without provisioning them."""
     check = _execution_input_check()
     problems: list[str] = []
+    reported_uncheckable: set[str] = set()
 
     def config_sources() -> list[Path]:
         root = get_config_root(config)
@@ -893,9 +894,24 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
                     "set it without '..' and retry"
                 )
                 continue
+            if ":" in str(source):
+                problems.append(
+                    f"{family} {source} cannot be checked against host execution inputs "
+                    "(the path contains ':', which Compose splits); "
+                    "set it without ':' and retry"
+                )
+                continue
             cause = check(source)
             if cause is not None:
-                problems.append(f"{family} {source} is mounted writable and {cause}; {remedy}")
+                source_remedy = remedy
+                if cause.startswith("cannot be checked against host execution inputs"):
+                    if cause in reported_uncheckable:
+                        continue
+                    reported_uncheckable.add(cause)
+                    source_remedy = "fix the cause named above and retry"
+                problems.append(
+                    f"{family} {source} is mounted writable and {cause}; {source_remedy}"
+                )
     return problems
 
 

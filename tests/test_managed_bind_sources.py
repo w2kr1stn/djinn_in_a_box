@@ -1,11 +1,13 @@
 """Managed writable sources use the execution-input boundary before creation."""
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
@@ -14,6 +16,7 @@ from djinn_in_a_box.config import loader, zones
 from djinn_in_a_box.config.defaults import DEFAULT_ZONES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import docker, git_diagnostics, host_sealing
+from djinn_in_a_box.core.config_workflow import WorkflowPreparationResult
 from djinn_in_a_box.core.exceptions import ConfigValidationError, MountSpecificationError
 
 LABELS = {
@@ -209,13 +212,46 @@ def test_dotdot_sources_skip_overlap_check(ground, monkeypatch, real_execution_p
     assert all(".." not in call.args[0].parts for call in overlap.call_args_list)
 
 
+@pytest.mark.parametrize("family", ["workspace", "config root", "zones", "sessions"])
+def test_colon_sources_are_refused_without_overlap_check(ground, monkeypatch, family):
+    config, _, _ = ground
+    source_root = config.code_dir.parent / "co:lon"
+    source_root.mkdir()
+    if family == "workspace":
+        config = AppConfig(code_dir=source_root, config_root=config.config_root)
+        sources = [source_root]
+    elif family == "config root":
+        config = AppConfig(
+            code_dir=config.code_dir, config_root=source_root,
+            local_root=config.code_dir.parent / "local",
+            shared_root=config.code_dir.parent / "shared",
+        )
+        sources = [source_root / name for name in SYNC_PATHS["credentials"]]
+    elif family == "zones":
+        config = config.model_copy(update={"shared_root": source_root})
+        sources = [source_root / "claude/notes"]
+    else:
+        monkeypatch.setenv("HOME", str(source_root))
+        sources = [source_root / ".djinn/sessions"]
+    overlap = Mock(wraps=host_sealing.execution_overlap)
+    monkeypatch.setattr(host_sealing, "execution_overlap", overlap)
+    assert docker.managed_bind_problems(config) == [
+        f"{LABELS[family]} {source} cannot be checked against host execution inputs "
+        "(the path contains ':', which Compose splits); set it without ':' and retry"
+        for source in sources
+    ]
+    assert overlap.call_count > 0
+    assert all(":" not in str(call.args[0]) for call in overlap.call_args_list)
+
+
 def test_relative_home_fails_closed(ground, monkeypatch):
     config, _, _ = ground
     monkeypatch.setenv("HOME", "relative-home")
     source = Path("relative-home/.djinn/sessions")
     assert docker.managed_bind_problems(config) == [
         f"Sessions directory {source} is mounted writable and cannot be checked against "
-        f"host execution inputs (non-absolute host path: {source}); {REMEDIES['sessions']}"
+        f"host execution inputs (non-absolute host path: {source}); "
+        "fix the cause named above and retry"
     ]
 
 
@@ -249,6 +285,52 @@ def test_managed_relation_matrix(ground, tmp_path, monkeypatch, relation):
         assert problems == []
     else:
         assert expected("workspace", source, path) in problems
+
+
+def test_compose_writable_sources_match_managed_collector(ground):
+    config, inputs, _ = ground
+    compose = yaml.safe_load((Path(__file__).parents[1] / "docker-compose.yml").read_text())
+    entries = {}
+    for entry in compose["x-common-volumes"]:
+        if not entry.startswith("${") or entry.endswith(":ro"):
+            continue
+        normalized = re.sub(r"\$\{(\w+):\?[^}]*\}", r"${\1}", entry)
+        source, _, target = normalized.partition(":")
+        entries[source] = target
+    assert set(entries) == {
+        "${CODE_DIR}",
+        *(f"${{DJINN_CONFIG_ROOT}}/{name}" for name in SYNC_PATHS["credentials"]),
+        "${HOME}/.djinn/sessions",
+    }
+    assert set(zones.ZONE_CONTAINER_TARGETS) == set(SYNC_PATHS["credentials"])
+    for name, target in zones.ZONE_CONTAINER_TARGETS.items():
+        assert entries[f"${{DJINN_CONFIG_ROOT}}/{name}"] == str(target)
+
+    # Exercise every collector family; zone overlays belong to the credential
+    # entries they overlay, rather than additional static Compose sources.
+    zones.ZONES_FILE.write_text("".join(
+        f'[zones.{name}]\nlocal = ["state"]\nshared = ["notes"]\n'
+        for name in zones.ZONE_CONTAINER_TARGETS
+    ))
+    roots = docker.resolve_zone_roots(config)
+    sources = [
+        ("workspace", "${CODE_DIR}", config.code_dir),
+        *(
+            ("config root", f"${{DJINN_CONFIG_ROOT}}/{name}", config.config_root / name)
+            for name in SYNC_PATHS["credentials"]
+        ),
+        *(
+            ("zones", f"${{DJINN_CONFIG_ROOT}}/{name}", root / name / relative)
+            for name in zones.ZONE_CONTAINER_TARGETS
+            for root, relative in ((roots.local_root, "state"), (roots.shared_root, "notes"))
+        ),
+        ("sessions", "${HOME}/.djinn/sessions", Path.home() / ".djinn/sessions"),
+    ]
+    assert {template for _, template, _ in sources} == set(entries)
+    protect(inputs, config.code_dir.parent)
+    assert docker.managed_bind_problems(config) == [
+        expected(family, source, config.code_dir.parent) for family, _, source in sources
+    ]
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -299,9 +381,51 @@ def test_inventory_failure_is_cached_and_closed(ground, error_type):
     config, _, inventory = ground
     inventory.side_effect = error_type("inventory unavailable")
     problems = docker.managed_bind_problems(config)
-    assert len(problems) == 9
-    assert all("cannot be checked against host execution inputs" in p for p in problems)
+    assert problems == [
+        f"Workspace root {config.code_dir} is mounted writable and cannot be checked against "
+        f"host execution inputs ({error_type('inventory unavailable')}); "
+        "fix the cause named above and retry"
+    ]
     inventory.assert_called_once_with()
+
+
+@pytest.mark.parametrize("inventory_failure", [False, True])
+def test_identical_uncheckable_causes_are_reported_once(ground, monkeypatch, inventory_failure):
+    config, _, inventory = ground
+    if inventory_failure:
+        inventory.side_effect = PermissionError("unavailable")
+    else:
+        monkeypatch.setattr(
+            host_sealing, "execution_overlap", Mock(side_effect=PermissionError("unavailable"))
+        )
+    assert docker.managed_bind_problems(config) == [
+        f"Workspace root {config.code_dir} is mounted writable and cannot be checked against "
+        "host execution inputs (unavailable); fix the cause named above and retry"
+    ]
+    inventory.assert_called_once_with()
+
+
+def test_distinct_uncheckable_causes_keep_neutral_remedies(ground, monkeypatch):
+    config, _, _ = ground
+    original = host_sealing.execution_overlap
+    failures = {
+        config.code_dir: "workspace unreadable",
+        config.config_root / "claude": "credential unreadable",
+    }
+
+    def overlap(source, inputs):
+        if source in failures:
+            raise PermissionError(failures[source])
+        return original(source, inputs)
+
+    monkeypatch.setattr(host_sealing, "execution_overlap", overlap)
+    assert docker.managed_bind_problems(config) == [
+        f"{LABELS[family]} {source} is mounted writable and cannot be checked against "
+        f"host execution inputs ({cause}); fix the cause named above and retry"
+        for family, (source, cause) in zip(
+            ("workspace", "config root"), failures.items(), strict=True
+        )
+    ]
 
 
 @pytest.mark.parametrize("failure", ["relative", "inspection"])
@@ -327,7 +451,7 @@ def test_source_failure_is_closed(ground, monkeypatch, failure):
     )
     assert problems[0] == (
         f"{LABELS['workspace']} {config.code_dir} is mounted writable and cannot be checked "
-        f"against host execution inputs ({cause}); {REMEDIES['workspace']}"
+        f"against host execution inputs ({cause}); fix the cause named above and retry"
     )
 
 
@@ -772,6 +896,103 @@ def test_cli_managed_gate_before_real_workflow(
         spy.assert_not_called()
 
 
+@pytest.mark.parametrize("argv", [["start"], ["run", "claude", "test"]])
+@pytest.mark.parametrize("name", ["proj[old]", "a[/b]"])
+def test_cli_managed_error_preserves_literal_workspace(ground, monkeypatch, argv, name):
+    config, inputs, _ = ground
+    source = config.code_dir.parent / name
+    source.mkdir(parents=True)
+    config = AppConfig(code_dir=source, config_root=config.config_root)
+    protect(inputs, source)
+    for command in (container, agent):
+        monkeypatch.setattr(command, "load_config", lambda: config)
+        monkeypatch.setattr(
+            command, "prepare_config_workflow", Mock(side_effect=AssertionError("workflow reached"))
+        )
+    monkeypatch.setattr(
+        container, "preflight", Mock(side_effect=AssertionError("preflight reached"))
+    )
+    message = expected("workspace", source, source)
+    result = CliRunner().invoke(app, argv)
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert f"Error: {message}" in result.output
+    assert str(source) in result.output
+    assert "MarkupError" not in result.output
+
+
+@pytest.fixture
+def mount_cli(ground, monkeypatch):
+    config, _, _ = ground
+    for command in (container, agent):
+        monkeypatch.setattr(command, "load_config", lambda: config)
+        monkeypatch.setattr(
+            command, "prepare_config_workflow", lambda *a, **kw: WorkflowPreparationResult(True)
+        )
+    monkeypatch.setattr(container, "preflight", lambda *a, **kw: None)
+    monkeypatch.setattr(container, "ensure_network", lambda: True)
+    monkeypatch.setattr(container, "is_container_running", lambda *a: False)
+    monkeypatch.setattr(container, "get_shell_mount_args", lambda *a: [])
+    monkeypatch.setattr(
+        agent, "workflow_image_compatible", lambda: docker.WorkflowImageCompatibility.COMPATIBLE
+    )
+    creators = {}
+    for command, name in (
+        (container, "compose_run"),
+        (container, "compose_up_detached"),
+        (agent, "run_headless_agent"),
+    ):
+        creator = Mock(side_effect=AssertionError("unexpected creator call"))
+        monkeypatch.setattr(command, name, creator)
+        creators[name] = creator
+    return config, creators
+
+
+@pytest.mark.parametrize("argv", [["start"], ["run", "claude", "test"]])
+def test_cli_resolver_error_preserves_literal_mount(mount_cli, argv):
+    config, creators = mount_cli
+    source = config.code_dir.parent / "a[/b]"
+    source.mkdir(parents=True)
+    specification = f"{source}:/home/dev/extra:rw:extra"
+    message = f"Invalid mount specification {specification!r}: expected SRC[:DST[:ro|rw]]"
+    result = CliRunner().invoke(app, [*argv, "--mount", specification])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert f"Error: {message}" in result.output
+    assert str(source) in result.output
+    assert "MarkupError" not in result.output
+    for creator in creators.values():
+        creator.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "argv, creator_name",
+    [
+        (["start"], "compose_run"),
+        (["start", "--detach"], "compose_up_detached"),
+        (["run", "claude", "test"], "run_headless_agent"),
+    ],
+)
+@pytest.mark.parametrize("error_type", [docker.MountCollisionError, MountSpecificationError])
+@pytest.mark.parametrize("name", ["proj[old]", "a[/b]"])
+def test_cli_creator_error_preserves_literal_mount(mount_cli, argv, creator_name, error_type, name):
+    config, creators = mount_cli
+    source = config.code_dir.parent / name
+    source.mkdir(parents=True)
+    message = f"Mount {source} -> /home/dev/extra refused by creator"
+    creators[creator_name].side_effect = error_type(message)
+    result = CliRunner().invoke(app, [*argv, "--mount", str(source)])
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert f"Error: {message}" in result.output
+    assert str(source) in result.output
+    assert "MarkupError" not in result.output
+    creators[creator_name].assert_called_once()
+    for other_name, creator in creators.items():
+        if other_name != creator_name:
+            creator.assert_not_called()
+
+
 def test_workspace_expansion_and_execution_symlink_location(ground, tmp_path):
     config, inputs, _ = ground
     config = config.model_copy(update={"code_dir": Path("~/work")})
@@ -831,7 +1052,7 @@ def test_construction_and_source_failures_use_distinct_remedies(ground, monkeypa
     monkeypatch.setattr(host_sealing, "canonical", canonical)
     assert docker.managed_bind_problems(config) == [
         f"Workspace root {config.code_dir} is mounted writable and cannot be checked against "
-        f"host execution inputs (source unreadable); {REMEDIES['workspace']}",
+        "host execution inputs (source unreadable); fix the cause named above and retry",
         expected_construction("config root", "root failed"),
         expected_construction("zones", "root failed"),
     ]

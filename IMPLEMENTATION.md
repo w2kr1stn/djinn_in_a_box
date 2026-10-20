@@ -1137,8 +1137,9 @@ writable sources without provisioning: the expanded `config.code_dir`,
 `get_config_root(config) / name` for `SYNC_PATHS["credentials"]` (`claude`, `codex`,
 `opencode`, `gh`, `age`), assigned zone overlay sources, and
 the sessions directory under `Path.home() / ".djinn" / "sessions"`.
-A source whose path contains a `..` component is refused as `cannot be checked`
-without calling the overlap check; a relative home still fails closed.
+A source whose path contains a `..` component or `:` (which Compose splits) is
+refused as `cannot be checked` without calling the overlap check; a relative
+home still fails closed.
 One `_execution_input_check()` closure per
 call reuses the declared/invocation inventory and `host_sealing.execution_overlap()`
 predicate, including symmetric overlap, inode aliases, symlink locations and
@@ -1148,6 +1149,9 @@ fail closed. Source construction also contains `OSError`, `ValueError`, `KeyErro
 zone-root, zone-assignment or home-lookup failures become family-specific
 `cannot be checked against host execution inputs (<cause>)` problems. Each problem
 names the family, source or configuration setting, cause and remedy.
+Identical uncheckable causes from the per-source check are reported once, with
+the neutral remedy `fix the cause named above and retry`; overlap remedies and
+construction-error problems are unchanged.
 `validate_managed_bind_sources(config)` raises `MountSpecificationError` with the
 first problem.
 
@@ -1533,7 +1537,9 @@ that prepend the tools library directory only for their real binaries in
 - `start()`: resolves Docker mode, loads config, then calls
   `validate_managed_bind_sources()` immediately after `load_config()`, before
   `preflight()`, `get_config_root()` or `prepare_config_workflow()`. A
-  `MountSpecificationError` is printed through `error()` and exits 1. It then
+  `MountSpecificationError` is printed through `error()` and exits 1; mount errors
+  from this gate, source resolution and the creator are escaped with
+  `rich.markup.escape()` before printing. It then
   preflights, prepares the workflow, ensures `djinn-network`, parses
   repeatable `--mount SRC[:DST[:ro|rw]]` values, and resolves each source with
   `resolve_container_mounts()`. `--here` is placed first at
@@ -1792,7 +1798,9 @@ otherwise the command uses `AgentConfig.default_model` when configured.
 
 `run()` loads app config and calls `validate_managed_bind_sources()` immediately
 after `load_config()`, before `get_config_root()` or `prepare_config_workflow()`.
-It prints a `MountSpecificationError` through `error()` and exits 1. It then
+It prints a `MountSpecificationError` through `error()` and exits 1; mount errors
+from this gate, source resolution and the creator are escaped with
+`rich.markup.escape()` before printing. It then
 runs the shared workflow preparation for Claude/Codex/OpenCode and accepts
 repeatable `--mount SRC[:DST[:ro|rw]]` values; `run_headless_agent()` loads the
 agent definitions, validates the requested agent and ensures the Docker network. Without an
