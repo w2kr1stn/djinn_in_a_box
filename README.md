@@ -166,6 +166,32 @@ include credentials.
 See [credential security](SECURITY-MODEL.md#credentials-backups-and-outbound-traffic)
 for host storage, agent access, encryption and retention limits.
 
+### OpenCode logins
+
+OpenCode 2 keeps its logins (API keys, OAuth tokens, external logins and MCP
+OAuth) in the SQLite database `~/.local/share/opencode/opencode.db`, in the
+`djinn-opencode-data` volume; the former `auth.json` and `mcp-auth.json` files
+are no longer used. Djinn mirrors them into
+`<config-root>/opencode/credentials.json` (the `opencode auth export` format,
+mode `0600`) and lists logins removed everywhere by ID in
+`<config-root>/opencode/credentials.removed.json`, which holds no secrets. The
+dev container syncs at start, every 30 s and at stop, merging the database,
+`credentials.json` and Syncthing conflict copies of both files into the config
+root before updating the database. Which account of a provider is active stays
+per host; it is not synced. A logout inside OpenCode hides that login on this
+host only; other hosts keep it. To log out on this host, or everywhere:
+
+```sh
+opencode auth logout                                   # in the dev container, this host only
+djinn clean volumes --credentials --opencode-id <id>   # every host; repeatable
+```
+
+List IDs with `opencode auth list --format json` inside the dev container. For
+entries OpenCode does not list, such as orphaned or cold MCP logins, use
+`jq -r '.[] | "\(.id) \(.integrationID) \(.label)"' <config-root>/opencode/credentials.json`.
+[Cleanup and Uninstall](#cleanup-and-uninstall) describes logging out every
+OpenCode login at once.
+
 ## Configuration
 
 The main config file is:
@@ -1549,6 +1575,12 @@ Restore asks for confirmation and overwrites the restored volume and config-root
 directory contents. For encrypted backups, `age` prompts for the passphrase at
 the terminal before anything is restored.
 
+`djinn restore` keeps logins created after the backup: before its first
+destructive step it parks the union of the current volume and config root in a
+private recovery session and merges it back after the restore. A restored
+`credentials.removed.json` from before a later logout everywhere can make that
+login reappear.
+
 To back up specific categories:
 
 ```sh
@@ -1613,10 +1645,27 @@ djinn clean volumes --data
 This deletes the root-owned list at `/var/lib/djinn-packages` in `djinn-packages`
 along with the other data volumes.
 
+Before Djinn deletes or overwrites the `djinn-opencode-data` volume
+(`djinn clean volumes --data`, `djinn clean volumes djinn-opencode-data` or
+`djinn restore`) it exports that volume's logins through a one-off container and
+merges them into the config root. If that fails, the volume stays and Djinn names
+the reason; `--discard-unexported-credentials` deletes it anyway and loses logins
+that were only in the volume. `djinn clean all` uses the same export and only
+warns when it fails.
+
 Clear credential directories under the config root:
 
 ```sh
 djinn clean volumes --credentials
+```
+
+Without `--opencode-id` this logs out every OpenCode login everywhere, then
+clears the credential directories; `credentials.removed.json` is kept, and each
+host removes those IDs from its database at its next sync. To log one login out
+everywhere, name its ID:
+
+```sh
+djinn clean volumes --credentials --opencode-id <id>
 ```
 
 Clear the optional `repo-dotfiles` config-root directory:
@@ -1714,6 +1763,14 @@ flush them. Missing credentials require signing in through the normal agent
 setup first. The agent hands host-only build/sync/recreation commands back to you.
 `--rm` removes the assistant session container; approved file edits and Docker
 objects created during repairs persist.
+
+An OpenCode audit gets a private session directory under
+`~/.local/state/djinn/opencode-audit/` (0700, not synced, not backed up). It is
+seeded from the config root, and the audit's database lives in that directory, so
+it survives a crash. At the end Djinn merges new logins and token refreshes back
+by union — an audit never logs out anywhere — and deletes the session; a session
+left over after a crash is recovered by the next `djinn audit` or `djinn start`,
+and `djinn doctor` reports leftovers.
 
 Resolve the latest Claude Code, Codex and OpenCode versions from npm:
 

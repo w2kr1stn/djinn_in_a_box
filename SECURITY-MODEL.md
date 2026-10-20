@@ -741,6 +741,29 @@ prompt. This rests on Claude Code's own flags, measured with Claude Code
 2.1.304; a later release can change them, so the re-probe runs after every
 Claude Code version bump.
 
+OpenCode logins exist in cleartext only in the OpenCode databases,
+`credentials.json` with its conflict copies and their private backup, and the
+audit sessions. `credentials.removed.json` holds IDs only. `opencode auth export`
+prints secrets; Djinn reads it only through a pipe or a private 0600 file, never
+into logs or command lines.
+
+OpenCode credential residual risks:
+
+- A token refresh by a running OpenCode in the few hundred milliseconds between
+  Djinn's last read and its update of the same ID can be lost.
+- A mirror that does not create conflict copies can replace a concurrent file
+  version; logins still in a database are published again.
+- A restored `credentials.removed.json` from before a later logout everywhere can
+  make that login reappear.
+- Two values of one ID without an OAuth expiry difference, including MCP logins
+  with `expires: 0`, are decided by a fixed order, not by intent.
+- Host and container share the carrier lock on native Linux only; under Docker
+  Desktop a host-side and a container-side writer may not exclude each other.
+- If the export fails during `clean`, logins that exist only in the volume's
+  database are not logged out; Djinn warns.
+- An unknown OpenCode value format stops the sync safely until Djinn supports
+  it.
+
 `--firewall` is a container-side IPv4 outbound allowlist, not an exfiltration
 guarantee. Dev has `sudo` and `NET_ADMIN` and can change it. Rules allow DNS,
 established connections, loopback, all RFC1918 internal destinations and resolved

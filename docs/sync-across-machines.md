@@ -135,6 +135,13 @@ does not archive the shared transcript zone or the local zone, including Codex
 SQLite and its durable operational state.
 Cache volumes are not included by default because they are rebuildable.
 
+OpenCode logins travel with the config root: `credentials.json` and
+`credentials.removed.json` are part of that credential/config zone, while the
+`djinn-opencode-data` volume stays local to each host. Syncthing conflict copies
+of both files are merged and then removed from the config root into a private
+backup inside the dev container. A logout stays on the host where you made it;
+log out everywhere with `djinn clean volumes --credentials --opencode-id <id>`.
+
 The `djinn-packages` archive stores the root-owned runtime package list at
 `/var/lib/djinn-packages/packages.txt`, which is the
 install intent rather than installed package files. Restoring the volume restores

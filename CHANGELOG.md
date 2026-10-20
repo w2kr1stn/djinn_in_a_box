@@ -34,6 +34,10 @@ Versioning before and after the first stable release.
   warns about runtime drift after a successful canonical sync (#166).
 - Check every delivery target before preflight changes workflow content, and
   print canonical auto-sync counts even when a later step refuses (#166).
+- Persist and sync OpenCode 2 logins, including MCP OAuth, through
+  `credentials.json` in the config root; audits import them and merge refreshes
+  back, and deleting or restoring the OpenCode data volume exports them first
+  (#162).
 - Require `DJINN_LIVE_DOCKER=1` before probing or running live Docker overlay
   tests; CI opts in on its test step.
 - Persist OpenCode `opencode.json`, `cli.json` and custom themes through the
@@ -169,6 +173,8 @@ Versioning before and after the first stable release.
 ### Removed
 
 - Docker socket proxy service, Compose file and `djinn logs proxy` command.
+- The `auth.json`/`mcp-auth.json` symlink bridge for OpenCode; remove those
+  config-root files by hand (#162).
 
 ### Added
 
