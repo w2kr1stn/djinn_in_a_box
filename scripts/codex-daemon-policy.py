@@ -145,7 +145,11 @@ class Policy:
             if required:
                 raise ValueError(f"{self.current}: selection missing after update") from None
             return None
-        target = Path(os.path.abspath(self.current.parent / os.readlink(self.current)))
+        raw = Path(os.readlink(self.current))
+        # Lexical ".." collapsing would admit a path the filesystem never resolves to.
+        if ".." in raw.parts:
+            raise ValueError(f"{self.current}: link target must not contain '..': {raw}")
+        target = raw if raw.is_absolute() else self.current.parent / raw
         if target.parent != self.releases:
             raise ValueError(f"{self.current}: target must be a direct child of {self.releases}")
         present = admit_directory(target)

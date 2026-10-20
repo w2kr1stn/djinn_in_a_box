@@ -27,6 +27,11 @@ UPDATED = '{"status":"updated","installedVersion":"0.163.0","runningVersion":nul
 PARSE_ERROR = "EOF while parsing a value at line 2 column 0"
 
 
+def test_helper_parses_with_the_image_python_grammar():
+    # The image runs the helper with Debian bookworm's Python 3.11; the suite runs a newer one.
+    ast.parse(SCRIPT.read_text(), feature_version=(3, 11))
+
+
 def module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("codex_daemon_policy", SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -771,13 +776,42 @@ def test_home_argument_is_bound_exactly_including_trailing_slash(home, fake, rel
     assert updates(home) == []
 
 
-def test_selection_normalises_link_target_without_resolving_more_links(home, fake):
+def tree(root: Path) -> list[tuple[str, bool, bytes]]:
+    return sorted(
+        (
+            str(path.relative_to(root)),
+            path.is_symlink(),
+            path.read_bytes() if path.is_file() and not path.is_symlink() else b"",
+        )
+        for path in root.rglob("*")
+    )
+
+
+def test_parent_traversal_in_current_is_refused_without_update_or_prune(home, fake):
+    # The filesystem cannot resolve "not-present/.."; lexical collapsing would accept "keep".
     release(home, "keep")
+    stale = release(home, "stale")
     select(home, "releases/not-present/../keep")
     result = run(home, fake)
-    assert result.returncode == 0, result.stderr
+    assert_warning(result, releases(home).parent / "current")
+    assert "'..'" in result.stderr
     assert updates(home) == []
-    assert (releases(home) / "keep").is_dir()
+    assert (releases(home) / "keep").is_dir() and stale.is_dir()
+
+
+def test_parent_traversal_through_alias_never_deletes_the_real_selection(home, fake):
+    # current resolves to selected/keep through the alias; "keep" is only its lexical spelling.
+    release(home, "keep")
+    selected = releases(home) / "selected"
+    release(home, "selected/subdir")
+    release(home, "selected/keep")
+    (releases(home) / "alias").symlink_to(selected / "subdir")
+    select(home, "releases/alias/../keep")
+    before = tree(releases(home))
+    result = run(home, fake)
+    assert_warning(result, releases(home).parent / "current")
+    assert updates(home) == []
+    assert tree(releases(home)) == before
 
 
 @pytest.mark.parametrize("mode", ["remove-current", "publish-dangling", "publish-no-manifest"])

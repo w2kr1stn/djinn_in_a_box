@@ -450,8 +450,9 @@ def _codex_daemon_checks(roots: ZoneRoots, assignments: ZoneAssignments) -> list
     install = packages / "app-server-daemon"
     releases = install / "releases"
     admitted: set[Path] = set()
-    for path in (home, daemon, packages, install, releases):
-        if path != home and path.parent not in admitted:
+    # Provisioning refuses a symlinked zone root, so the local root is admitted like its children.
+    for path in (roots.local_root, home, daemon, packages, install, releases):
+        if path != roots.local_root and path.parent not in admitted:
             continue
         try:
             info = os.lstat(path)

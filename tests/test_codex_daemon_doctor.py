@@ -83,6 +83,11 @@ def _expected_bytes(path: Path) -> int:
     return path.lstat().st_size + sum(child.lstat().st_size for child in path.rglob("*"))
 
 
+def test_shipped_bounds_match_the_documented_contract() -> None:
+    assert doctor_mod.CODEX_DAEMON_SCAN_MAX_ENTRIES == 200_000
+    assert doctor_mod.CODEX_DAEMON_SETTINGS_MAX_BYTES == 64 * 1024
+
+
 def test_rows_appended_to_zone_checks_use_resolved_local_root(tree: DaemonTree) -> None:
     tree.settings()
     tree.release()
@@ -296,6 +301,7 @@ def test_growing_settings_read_is_bounded(
 @pytest.mark.parametrize(
     "relative",
     [
+        "local-root",
         ".",
         "app-server-daemon",
         "packages",
@@ -311,7 +317,10 @@ def test_directory_components_admitted_without_following_symlinks(
     kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tree.home if relative == "." else tree.home / relative
+    if relative == "local-root":
+        path = tree.roots.local_root
+    else:
+        path = tree.home if relative == "." else tree.home / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / "outside"
     (outside / "release/bin").mkdir(parents=True)
