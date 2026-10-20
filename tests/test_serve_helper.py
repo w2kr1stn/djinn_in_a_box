@@ -216,12 +216,13 @@ class Ctx:
         timing: str | None = None,
         timeout: float = 60.0,
         env: dict[str, str] | None = None,
+        source: str = SOURCE,
     ) -> tuple[int, Json]:
         merged = {**self.env, **(env or {})}
         if timing is not None:
             merged["DJINN_SERVE_TEST_TIMING"] = timing
         proc = subprocess.run(
-            [sys.executable, "-I", "-c", SOURCE, *args],
+            [sys.executable, "-I", "-c", source, *args],
             input=stdin if stdin is not None else "",
             capture_output=True,
             text=True,
@@ -495,6 +496,13 @@ def test_group_liveness_rule(monkeypatch: pytest.MonkeyPatch) -> None:
     stats[10] = fields("Z", "100")  # a zombie leader counts as gone
     members[:] = []
     assert mod.group_state(10, "100") == "gone"
+    members[:] = [150]
+    for state in ("Z", "X"):
+        stats[10] = fields(state, "100")
+        assert mod.group_state(10, "100") == "alive"
+        assert mod.group_state(10, "99") == "stale"
+    stats[10] = ["Z"]
+    assert mod.group_state(10, "100") == "stale"
 
 
 CASES: list[tuple[str, bool, dict[int, str], bool, int | None, str, str | None]] = [
@@ -1074,11 +1082,17 @@ def test_opencode_early_exit_returns_exited_with_clean_tail(ctx: Ctx) -> None:
     assert not (ctx.state / "opencode.json").exists()
 
 
-def start_default_fake(ctx: Ctx, mode: str = "normal") -> tuple[subprocess.Popen[bytes], int]:
+def start_default_fake(
+    ctx: Ctx, mode: str = "normal", executable: str = "opencode.exe"
+) -> tuple[subprocess.Popen[bytes], int]:
     port = free_port()
+    # Python opens a script named serve, preserving the native-shaped /proc argv.
+    (ctx.fake / "serve").write_text(
+        FAKE_OPENCODE.replace("args = sys.argv[1:]", 'args = ["serve", *sys.argv[1:]]')
+    )
     proc = subprocess.Popen(
         [
-            str(ctx.fake / "bin/opencode"),
+            str(ctx.fake / "bin" / executable),
             "serve",
             "--service",
             "--hostname",
@@ -1086,6 +1100,9 @@ def start_default_fake(ctx: Ctx, mode: str = "normal") -> tuple[subprocess.Popen
             "--port",
             str(port),
         ],
+        executable=sys.executable,
+        cwd=ctx.fake,
+        stdin=subprocess.DEVNULL,
         env={**ctx.env, "FAKE_OC_MODE": mode},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1131,8 +1148,11 @@ def test_stale_discovery_spares_unrelated_process(ctx: Ctx) -> None:
         proc.wait()
 
 
-def test_verified_default_service_is_replaced_without_native_stop(ctx: Ctx) -> None:
-    default, _ = start_default_fake(ctx)
+@pytest.mark.parametrize("executable", ["opencode", "opencode.exe"])
+def test_verified_default_service_is_replaced_without_native_stop(
+    ctx: Ctx, executable: str
+) -> None:
+    default, _ = start_default_fake(ctx, executable=executable)
     rc, out = ctx.opencode()
     assert rc == 0 and out["result"] == "started" and out["stopped_previous"] is True, out
     assert wait_for(lambda: default.poll() is not None)
@@ -1261,3 +1281,242 @@ def test_invalid_password_input_is_refused(ctx: Ctx, stdin: str) -> None:
     rc, out = ctx.opencode(stdin=stdin)
     assert rc == 1 and out["code"] == "password", out
     assert ctx.calls("opencode") == [] and not ctx.service_json().exists()
+
+
+def test_reused_zombie_leader_is_stale_and_never_signalled(ctx: Ctx) -> None:
+    rc, out = ctx.opencode(env={"FAKE_OC_MODE": "grandchild"})
+    assert rc == 0, out
+    record = ctx.record("opencode")
+    pid = record["pid"]
+    grandchild_file = ctx.fake / "grandchild.pid"
+    assert wait_for(grandchild_file.exists)
+    grandchild = int(grandchild_file.read_text())
+    os.kill(pid, signal.SIGKILL)
+    assert wait_for(lambda: (mod.proc_stat(pid) or [None])[0] == "Z")
+    record["start"] = str(int(record["start"]) - 1)
+    path = ctx.state / "opencode.json"
+    raw = json.dumps(record)
+    path.write_text(raw)
+    assert ctx.status()["servers"]["opencode"]["state"] == "stopped"
+    assert not path.exists()
+    path.write_text(raw)
+    rc, out = ctx.stop("opencode")
+    assert rc == 0 and out["results"]["opencode"]["result"] == "not-running", out
+    assert is_alive(grandchild)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("state", ["running", "degraded"])
+def test_failed_stop_ours_aborts_before_password_merge(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    rc, out = ctx.opencode("old-password")
+    assert rc == 0, out
+    if state == "degraded":
+        (ctx.fake / "oc-ctl").write_text("close")
+        assert wait_for(lambda: ctx.status()["servers"]["opencode"]["state"] == "degraded")
+    service_before = ctx.service_json().read_bytes()
+    record_path = ctx.state / "opencode.json"
+    record_before = record_path.read_bytes()
+    for key in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    stops = []
+    monkeypatch.setattr(mod, "stop_groups", lambda groups, _deadline: stops.append(groups) or False)
+    spawned = []
+
+    def no_spawn(*args: Any, **kwargs: Any) -> int:
+        spawned.append(args)
+        pytest.fail("replacement spawned after a failed stop")
+
+    monkeypatch.setattr(mod, "spawn", no_spawn)
+    stdout = io.StringIO()
+    code = mod.main(
+        ["opencode-start", "--port", str(ctx.port)],
+        stdin=io.StringIO('{"password":"new-password"}'),
+        stdout=stdout,
+    )
+    reply = json.loads(stdout.getvalue())
+    assert code == 1 and reply["code"] == "spawn", reply
+    assert stops and not spawned
+    assert ctx.service_json().read_bytes() == service_before
+    assert record_path.read_bytes() == record_before
+    assert is_alive(json.loads(record_before)["pid"])
+    ctx.stop("opencode")
+
+
+def test_readiness_failed_cleanup_retains_surviving_record(ctx: Ctx) -> None:
+    source = (
+        SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
+        + """
+stop_groups = lambda *_: False
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    )
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic-password"}',
+        timing="opencode_ready=0.5",
+        env={"FAKE_OC_MODE": "nolisten"},
+        source=source,
+    )
+    assert rc == 1 and out["code"] == "spawn", out
+    record = ctx.record("opencode")
+    assert is_alive(record["pid"])
+    assert ctx.status()["servers"]["opencode"]["state"] == "degraded"
+    assert "could not be stopped" in out["message"]
+    rc, out = ctx.stop("opencode")
+    assert rc == 0 and out["results"]["opencode"]["result"] == "stopped", out
+    assert is_gone(record["pid"])
+
+
+def test_broken_handoff_kills_stubborn_child_group(ctx: Ctx) -> None:
+    source = (
+        SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
+        + """
+# Delay handoff until both stubborn descendants installed their signal handlers.
+wait_leader = _wait_leader
+def ready_child(pid, seconds):
+    ready = wait_leader(pid, seconds)
+    end = time.monotonic() + 5
+    while not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "grandchild.pid")):
+        if time.monotonic() >= end:
+            raise RuntimeError("synthetic child did not become ready")
+        time.sleep(0.01)
+    return ready
+_wait_leader = ready_child
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+reader, writer = os.pipe()
+os.close(reader)
+fd = open_state_dir()
+pid = spawn(fd, "claude", ["claude", "remote-control"], pty_mode=True, handoff=writer)
+os.close(writer)
+os.close(fd)
+_, status = os.waitpid(pid, 0)
+print(json.dumps({"status": status, "pid": pid}))
+"""
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", source],
+        input="",
+        capture_output=True,
+        text=True,
+        env={**ctx.env, "FAKE_CLAUDE_MODE": "stubborn"},
+        cwd=ctx.work,
+        timeout=15,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert os.WIFEXITED(out["status"]) and os.WEXITSTATUS(out["status"]) == 0, out
+    child = ctx.calls("claude")[0]["pid"]
+    grandchild = int((ctx.fake / "grandchild.pid").read_text())
+    assert is_gone(child) and is_gone(grandchild)
+    assert not (ctx.state / "claude.json").exists()
+
+
+@pytest.mark.parametrize("name", ["claude", "opencode"])
+def test_exec_children_reset_sigpipe(ctx: Ctx, name: str) -> None:
+    prefix = """
+import os, signal
+real_exec = os.execvp
+def record_exec(file, argv):
+    with open(os.path.join(os.environ["FAKE_DIR"], "exec-sigpipe"), "w") as stream:
+        stream.write(str(int(signal.getsignal(signal.SIGPIPE))))
+    real_exec(file, argv)
+os.execvp = record_exec
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+"""
+    source = (
+        SOURCE.rsplit('if __name__ == "__main__":', 1)[0]
+        + prefix
+        + ("\nsys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))\n")
+    )
+    args = (
+        ["claude-start", "--prefix", "test"]
+        if name == "claude"
+        else ["opencode-start", "--port", str(ctx.port)]
+    )
+    rc, out = ctx.run(
+        *args,
+        stdin=None if name == "claude" else '{"password":"dummy"}',
+        timing="claude_grace=0.3,opencode_ready=3",
+        source=source,
+    )
+    assert rc == 0, out
+    assert (ctx.fake / "exec-sigpipe").read_text() == str(int(signal.SIG_DFL))
+    ctx.stop(name)
+
+
+@pytest.mark.parametrize(
+    "rule,code",
+    [
+        ("env", "env-root"),
+        ("path", "state-path"),
+        ("remote", "remote-config"),
+        ("extra", "service-config"),
+        ("json", "service-json"),
+        ("safe", None),
+    ],
+)
+def test_opencode_preflight_is_read_only_and_matches_start(
+    ctx: Ctx, rule: str, code: str | None
+) -> None:
+    env = {"XDG_STATE_HOME": "/synthetic/relocated"} if rule == "env" else {}
+    service = ctx.service_json()
+    service.parent.mkdir(parents=True)
+    if rule == "path":
+        service.write_text('{"password":"old"}')
+        target = ctx.fake / "settings"
+        service.parent.rename(target)
+        service.parent.symlink_to(target, target_is_directory=True)
+    else:
+        service.write_text(
+            {"remote": '{"remote":true}', "extra": '{"port":42}', "json": "broken"}.get(
+                rule, '{"password":"old"}'
+            )
+        )
+    before = None if service.is_symlink() else service.read_bytes()
+    ctx.state.rmdir()
+    rc, out = ctx.run("opencode-preflight", env=env)
+    assert rc == (0 if code is None else 1), out
+    assert out == {"ok": True} if code is None else out["code"] == code
+    assert not ctx.state.exists()
+    assert not ctx.calls("opencode")
+    if before is not None:
+        assert service.read_bytes() == before
+    if code is not None:
+        rc, out = ctx.opencode(env=env)
+        assert rc == 1 and out["code"] == code, out
+        assert not ctx.calls("opencode")
+
+
+@pytest.mark.parametrize(
+    "argv,accepted",
+    [
+        (["/native/opencode", "serve", "--service"], True),
+        (["/native/opencode.exe", "serve", "--service", "--port", "1"], True),
+        (["/native/other", "serve", "--service"], False),
+        (["/native/opencode.exe", "serve"], False),
+        (["/native/opencode.exe", "serve", "--other"], False),
+        (["/native/opencode.exe", "pair", "--service"], False),
+        (["/usr/bin/python3", "/native/opencode", "serve", "--service"], False),
+    ],
+)
+def test_default_service_cmdline_exact(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], accepted: bool
+) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "builtins.open", lambda *_a, **_kw: io.BytesIO("\0".join(argv).encode() + b"\0")
+        )
+        assert mod.cmdline_is_opencode_service(12345) is accepted
+
+
+def test_opencode_preflight_refuses_arguments(ctx: Ctx) -> None:
+    rc, out = ctx.run("opencode-preflight", "--unexpected", "value")
+    assert rc == 1 and out["code"] == "usage", out
+    assert not ctx.calls("opencode")

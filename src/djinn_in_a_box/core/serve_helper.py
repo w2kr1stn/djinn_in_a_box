@@ -204,8 +204,11 @@ def group_state(pid: int, start: str) -> str:
     ``pgrp == pid`` and a start time at or after the recorded one.
     """
     fields = proc_stat(pid)
-    if fields is not None and len(fields) > 19 and fields[0] not in ("Z", "X"):
-        return "alive" if fields[19] == start else "stale"
+    if fields is not None:
+        if len(fields) <= 19 or fields[19] != start:
+            return "stale"
+        if fields[0] not in ("Z", "X"):
+            return "alive"
     return "alive" if any(s >= int(start) for s in group_members(pid)) else "gone"
 
 
@@ -256,17 +259,18 @@ def foreign_listener(pid: int | None, port: int) -> bool:
 
 
 def cmdline_is_opencode_service(pid: int) -> bool:
-    """The cmdline of ``pid`` is ``opencode serve --service`` (also behind an interpreter)."""
+    """Require the native OpenCode executable followed by ``serve --service``."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as handle:
             raw = handle.read(65536)
     except OSError:
         return False
     args = raw.decode("utf-8", "replace").split("\0")
-    for index in (0, 1):
-        if len(args) > index + 2 and os.path.basename(args[index]) == "opencode":
-            return args[index + 1] == "serve" and args[index + 2] == "--service"
-    return False
+    return (
+        len(args) > 2
+        and os.path.basename(args[0]) in ("opencode", "opencode.exe")
+        and args[1:3] == ["serve", "--service"]
+    )
 
 
 # ------------------------------------------------------------------------- signals
@@ -502,7 +506,7 @@ def opencode_home() -> str:
 
 
 def check_env_root(home: str) -> None:
-    """Refuse an environment that relocates OpenCode's roots (normalized HOME, no symlink resolution)."""
+    """Refuse relocated OpenCode roots (normalized HOME, no symlink resolution)."""
     if os.path.normpath(os.environ.get("HOME", "")) != home:
         raise HelperError("env-root", "HOME does not name the container user's home directory")
     for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "OPENCODE_CONFIG_DIR"):
@@ -728,6 +732,7 @@ def _wait_leader(pid: int, seconds: float) -> bool:
 def supervise_pty(argv: list[str], handoff: int) -> NoReturn:
     """Run ``argv`` under a PTY; keeps reading it, caps the log, forwards TERM/INT."""
     pending: list[int] = []
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     def on_signal(signum: int, _frame: FrameType | None) -> None:
         pending.append(signum)
@@ -740,6 +745,7 @@ def supervise_pty(argv: list[str], handoff: int) -> NoReturn:
             os.close(handoff)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGINT, signal.SIG_DFL)
+            _reset_signals()
             os.environ.setdefault("TERM", "xterm-256color")
             os.execvp(argv[0], argv)  # nosec B606 - fixed argv, no shell
         except BaseException as exc:
@@ -805,7 +811,6 @@ def spawn(
         os.setsid()
         if os.getpgid(0) != os.getpid():
             os._exit(126)
-        _reset_signals()
         devnull = os.open("/dev/null", os.O_RDONLY)
         os.dup2(devnull, 0)
         os.dup2(logfd, 1)
@@ -813,6 +818,7 @@ def spawn(
         _close_other_fds(handoff)
         if pty_mode and handoff is not None:
             supervise_pty(argv, handoff)
+        _reset_signals()
         os.execvp(argv[0], argv)  # nosec B606 - fixed argv, no shell
     except BaseException as exc:
         with contextlib.suppress(OSError):
@@ -1084,6 +1090,19 @@ def _read_password(stdin: IO[str]) -> str:
     return password
 
 
+def check_opencode_preconditions(home: str) -> None:
+    """The same read-only refusals for preflight and immediately before a start."""
+    check_env_root(home)
+    check_settings_paths(home)
+    check_service_config(read_service_config(home))
+
+
+def cmd_opencode_preflight(args: list[str]) -> dict[str, object]:
+    parse_args(args, ())
+    check_opencode_preconditions(opencode_home())
+    return {"ok": True}
+
+
 def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
     options = parse_args(args, ("--port", "--cors"))
     port_text = options.get("--port", [""])[0]
@@ -1095,9 +1114,7 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
     port = int(port_text)
     home = opencode_home()
     # Nothing is changed before these refusals.
-    check_env_root(home)
-    check_settings_paths(home)
-    check_service_config(read_service_config(home))
+    check_opencode_preconditions(home)
     password = _read_password(stdin)
     deadline = Deadline(timing("deadline"))
     dirfd = open_state_dir()
@@ -1132,7 +1149,11 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
         extra = {"name": "opencode", "stopped_previous": restarted or stopped_default}
         if not deadline.wait(timing("opencode_ready"), settled):
             found = discovery_pid(home)
-            stop_groups([(pid, record.start)], deadline)
+            if not stop_groups([(pid, record.start)], deadline):
+                raise HelperError(
+                    "spawn",
+                    "OpenCode did not become ready and its process group could not be stopped",
+                )
             remove_file(dirfd, "opencode.json")
             if found is not None and found != pid:
                 raise HelperError("not-registered", "another OpenCode service registered itself")
@@ -1160,6 +1181,8 @@ def dispatch(argv: list[str], stdin: IO[str]) -> dict[str, object]:
         return cmd_claude_start(args)
     if command == "opencode-start":
         return cmd_opencode_start(args, stdin)
+    if command == "opencode-preflight":
+        return cmd_opencode_preflight(args)
     raise HelperError("usage", "unknown subcommand")
 
 

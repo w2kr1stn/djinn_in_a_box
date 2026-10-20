@@ -25,9 +25,12 @@ from djinn_in_a_box.core.docker import (
     OPENCODE_CONTAINER_PORT,
     RunResult,
     _run_captured,  # pyright: ignore[reportPrivateUsage]
+    resolve_zone_roots,
     service_container_name,
 )
+from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.host_runtime import private_directory
+from djinn_in_a_box.core.paths import BACKUPS_DIR
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 CLAUDE: Final = "claude"
@@ -252,8 +255,71 @@ def password_path() -> Path:
         raise ServeError(str(exc)) from exc
 
 
-def read_password(path: Path | None = None) -> str:
-    path = password_path() if path is None else path
+def _password_location(path: Path) -> Path:
+    """Walk existing components with lstat; missing components may be created later."""
+    if not path.is_absolute():
+        raise ServeError(
+            "Could not determine a password location: paths must be absolute; refusing."
+        )
+    current = Path("/")
+    for part in path.parts[1:]:
+        current = current.parent if part == ".." else current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise ServeError("Could not inspect the password location; refusing.") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise ServeError("The password location contains a symbolic link; refusing.")
+    return current
+
+
+def _excluded_root(root: Path) -> Path:
+    """Resolve where an excluded root really lies; only missing components stay lexical."""
+    if not root.is_absolute():
+        raise ServeError(
+            "Could not determine an excluded password root: paths must be absolute; refusing."
+        )
+    try:
+        return Path(os.path.realpath(root, strict=os.path.ALLOW_MISSING))
+    except (OSError, ValueError) as exc:
+        raise ServeError("Could not inspect an excluded password root; refusing.") from exc
+
+
+def check_password_location(config: AppConfig, container: ContainerInfo, path: Path) -> Path:
+    """Exclude known synced/backed-up roots and every running-container bind source."""
+    path = _password_location(path)
+    try:
+        zones = resolve_zone_roots(config)
+    except (OSError, ValueError, ZoneConfigurationError) as exc:
+        raise ServeError("Could not determine excluded password roots; refusing.") from exc
+    roots = [zones.config_root, zones.local_root, zones.shared_root, BACKUPS_DIR]
+    mounts: object = container.mounts
+    if container.state != ContainerState.RUNNING or not isinstance(mounts, list):
+        raise ServeError("Could not inspect password bind sources; refusing.")
+    for mount in cast(list[object], mounts):
+        if not isinstance(mount, dict):
+            raise ServeError("Could not inspect password bind sources; refusing.")
+        entry = cast(dict[str, object], mount)
+        if entry.get("Type") not in ("bind", "volume", "tmpfs"):
+            raise ServeError("Could not determine a password mount type; refusing.")
+        if entry["Type"] == "bind":
+            source = entry.get("Source")
+            if not isinstance(source, str):
+                raise ServeError("Could not determine a password bind source; refusing.")
+            roots.append(Path(source))
+    for root in roots:
+        if path.is_relative_to(_excluded_root(root)):
+            raise ServeError(
+                "The OpenCode password location is inside a config, zone, backup or bind source; "
+                "keep XDG_STATE_HOME host-local and outside those roots; refusing."
+            )
+    return path
+
+
+def read_password(config: AppConfig, container: ContainerInfo, path: Path | None = None) -> str:
+    path = check_password_location(config, container, password_path() if path is None else path)
     message = f"OpenCode password file {path} is not a private regular file; fix or delete it"
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -271,8 +337,8 @@ def read_password(path: Path | None = None) -> str:
         raise ServeError(message) from exc
 
 
-def ensure_password() -> str:
-    path = password_path()
+def ensure_password(config: AppConfig, container: ContainerInfo) -> str:
+    path = check_password_location(config, container, password_path())
     try:
         # Repeat hostctl's shared-parent check; do not create the hostctl leaf.
         parent = path.parent.parent
@@ -282,7 +348,7 @@ def ensure_password() -> str:
             raise ServeError("Djinn state parent must be owned by you and not writable by others")
         private_directory(path.parent)
         if path.exists() or path.is_symlink():
-            return read_password(path)
+            return read_password(config, container, path)
         tmp = path.with_name(f".opencode-password.{secrets.token_hex(12)}")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
@@ -295,7 +361,7 @@ def ensure_password() -> str:
                 os.link(tmp, path)
         finally:
             tmp.unlink()
-        return read_password(path)
+        return read_password(config, container, path)
     except (OSError, GitSSHError) as exc:
         raise ServeError(f"Could not create a private OpenCode password file: {path}") from exc
 
@@ -322,7 +388,10 @@ def _nullable(value: object, expected: type) -> bool:
 
 
 def _validate_reply(data: dict[str, Any], args: list[str]) -> None:
-    if args[0] == "status":
+    if args[0] == "opencode-preflight":
+        if data != {"ok": True}:
+            raise ValueError("invalid preflight result")
+    elif args[0] == "status":
         if type(data["busy"]) is not bool or not isinstance(data["pid1_start"], str):
             raise ValueError("invalid status")
         servers = _object(data["servers"])
@@ -374,7 +443,7 @@ def exec_helper(
     if (
         re.fullmatch(r"[0-9a-f]{64}", cid) is None
         or not args
-        or args[0] not in ("status", "stop", "claude-start", "opencode-start")
+        or args[0] not in ("status", "stop", "claude-start", "opencode-start", "opencode-preflight")
     ):
         raise ServeError("Invalid helper invocation", code="protocol")
     if (args[0] == "opencode-start") != (stdin is not None):

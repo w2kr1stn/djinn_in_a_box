@@ -1781,6 +1781,7 @@ exactly one JSON object plus a newline: exit 0 with `ok: true`, or exit 1 with
 | --- | --- |
 | `status` | `pid1_start`, `busy`, and `servers` keyed by `claude` and `opencode`; each row has `state`, `reason`, `pid`, `since`, `last_line`. OpenCode adds `listening`, `discovery_pid_ok`, `foreign_listener`. |
 | `claude-start --prefix <slug>` | `name`, `result`, `pid`, `since`, `log_tail` |
+| `opencode-preflight` | `ok` only; reads environment, settings paths and service allowlist without changing files or processes |
 | `opencode-start --port 4096 [--cors <url>]` | The start fields plus `stopped_previous` |
 | `stop --name <name> [--name <name>]` | `results` keyed by requested name, each with `result` and `pid` |
 
@@ -1806,8 +1807,9 @@ PID 1 start time, working directory, argv tag, start timestamp and server port.
 
 PID 1's changed start time detects a container restart even when `/tmp` survives.
 A reused recorded PID also makes the record stale: status reports `stopped`
-and removes it when it owns the lock, without signalling. With the same PID 1
-and all recorded groups gone, the state is `exited`; the record and last
+and removes it when it owns the lock, without signalling, including when the
+reused PID is a zombie. A matching zombie follows the leaderless-group rule.
+With the same PID 1 and all recorded groups gone, the state is `exited`; the record and last
 sanitized log line remain until the next start/stop. A leaderless group still
 counts as alive when its remaining members have suitable start times.
 
@@ -1827,7 +1829,9 @@ sets a 120×40 terminal and continuously drains it without sending input. One
 inherited pipe hands the child's PID/start time to the helper within 2 s;
 the complete record is written under the lock before startup is reported.
 The supervisor forwards TERM/INT, waits for its child and caps its log at
-1 MiB by truncating to a marker before continuing with fresh output.
+1 MiB by truncating to a marker before continuing with fresh output. It ignores
+SIGPIPE so a broken handoff pipe triggers child-group cleanup; only exec children
+reset SIGPIPE to its default disposition.
 
 OpenCode readiness waits at most 15 s; Claude gets a 5 s grace period. Log tails
 strip ANSI/control characters and retain at most 20 lines. A mutating helper
@@ -1836,7 +1840,8 @@ execution is bounded at 60 s. Stop verifies identity, sends TERM to the recorded
 groups (Claude child then supervisor), waits up to 10 s, then KILL and up to
 2 s more, all within the deadline. PIDs/PGIDs ≤ 1 and the helper's own group are
 excluded from signalling. Servers are not automatically restarted after crashes
-or container restarts.
+or container restarts. A failed readiness cleanup retains the surviving group's
+record and reports the failure, allowing status and a later stop to recover it.
 
 #### OpenCode Replacement and Password Delivery
 
@@ -1851,7 +1856,11 @@ The host generates a stable password once in
 `${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` using a private
 temporary file, fsync and an exclusive hard-link publication. A concurrent
 creator reads the winner. Reads require a user-owned regular file, mode `0600`,
-20–256 bytes and no final symlink. The host state directory reuses
+20–256 bytes. Before creation or reading, an lstat walk refuses symlink components
+of the password path and paths inside the config root, local/shared zone roots, backups
+or running-container bind sources. Those roots count at their resolved location, so a
+symlinked dotfile bind does not refuse; undeterminable roots/sources refuse. Keep `XDG_STATE_HOME` local and
+outside other sync, indexing and backup tools. The host state directory reuses
 `hostctl.state_root(create=False).parent`, with a private `serve` child, and is
 included in host-sealing protection. The password travels only on stdin into
 an atomic mode-`0600` `~/.config/opencode/service.json`; it is never supplied in
@@ -1860,7 +1869,8 @@ reads it from the file and also stores it in its own discovery file in the
 container's writable layer. Neither file is in the synced carrier allowlist.
 
 A pre-existing default service is stopped only after the discovery PID is
-proved to run `opencode serve --service` and own the LISTEN socket named by
+proved to have argv[0] basename `opencode` or `opencode.exe`, followed by
+`serve --service`, and own the LISTEN socket named by
 the discovery URL. Its start time is checked again before KILL. Unprovable or
 stale discovery signals nothing. Djinn never invokes native
 `opencode service stop`, which trusts the discovery PID without these checks.
@@ -1875,10 +1885,12 @@ service again.
 Host checks run in this order: mode/names, config, container inspection,
 detached marker, then (for OpenCode start/pair) exact loopback port binding,
 environment roots and mounts, every attached network, Engine version and Funnel.
-All host start gates finish before password creation or any server start.
+All host start gates and the non-mutating `opencode-preflight` finish before
+password creation or any server start. The start loop ends on its first failure.
 Inspection distinguishes absent from unknown, validates the full container ID
-and uses that ID for every exec. The helper's settings checks above run on
-OpenCode start; pair instead requires helper status `running` and a tailnet URL.
+and uses that ID for every exec. The helper's settings checks above run during
+preflight and again on OpenCode start; pair instead requires helper status
+`running` and a tailnet URL.
 Status/stop do not require the OpenCode exposure gates; non-detached status
 reports unavailability without executing the helper.
 

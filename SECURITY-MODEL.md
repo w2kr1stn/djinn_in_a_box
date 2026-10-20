@@ -169,8 +169,13 @@ proof that Funnel is off. Pairing refuses without a known tailnet URL.
 
 The password is generated once on the host at
 `${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password`, mode `0600`
-under a private directory. Keep it host-local, outside synced/indexed trees;
-Djinn does not sync or back it up. Delete it and run `djinn serve opencode` to
+under a private directory. Before creation or reading, Djinn checks every component
+of the password path without following symlinks and refuses locations inside the
+config root, zone sources, Djinn backups or any running-container bind source, each
+taken at its resolved location. Symlinks in the password path and undeterminable
+locations refuse. Staying outside synced trees and backups also
+requires keeping `XDG_STATE_HOME` host-local, outside other sync, indexing and
+backup tools. Delete it and run `djinn serve opencode` to
 rotate; the running managed server restarts with the new password. Invalid
 existing files refuse rather than silently regenerating. Delivery uses stdin
 into private `~/.config/opencode/service.json`; OpenCode also puts the password

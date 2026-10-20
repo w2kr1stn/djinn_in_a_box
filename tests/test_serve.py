@@ -34,7 +34,7 @@ def inspection():
             "PortBindings": {"4096/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(PORT)}]},
             "NetworkMode": "djinn-network",
         },
-        "Mounts": [{"Destination": "/home/dev/.opencode"}],
+        "Mounts": [{"Type": "volume", "Destination": "/home/dev/.opencode"}],
         "NetworkSettings": {"Networks": {"djinn-network": {"NetworkID": "b" * 64}}},
     }
 
@@ -78,10 +78,13 @@ def tailscale_config(target=None, *, key="box.example.ts.net:443", path="/", fun
 @pytest.fixture
 def host(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setattr(command, "load_config", lambda: AppConfig(code_dir=tmp_path))
+    monkeypatch.delenv("DJINN_CONFIG_ROOT", raising=False)
+    config = AppConfig(code_dir=tmp_path, config_root=tmp_path / "config")
+    monkeypatch.setattr(command, "load_config", lambda: config)
     monkeypatch.setattr(serve.shutil, "which", lambda name: "/test/bin/tailscale")
     data = SimpleNamespace(
         inspect=inspection(),
+        config=config,
         status=status_reply(),
         tailnet=tailscale_config(),
         network={"Name": "djinn-network", "Driver": "bridge", "Options": {}},
@@ -100,6 +103,8 @@ def host(monkeypatch, tmp_path):
             return RunResult(1, json.dumps({"ok": False, **data.error}))
         if args[0] == "status":
             reply = data.status
+        elif args[0] == "opencode-preflight":
+            reply = {"ok": True}
         elif args[0] == "stop":
             reply = {
                 "ok": True,
@@ -355,7 +360,7 @@ def test_engine_version_gate(monkeypatch, version, rc, allowed):
 
 def test_password_travels_only_on_stdin(host, monkeypatch):
     marker = "private-password-marker-123456789"
-    monkeypatch.setattr(serve, "ensure_password", lambda: marker)
+    monkeypatch.setattr(serve, "ensure_password", lambda *_: marker)
     before = os.environ.copy()
     result = runner.invoke(app, ["serve", "opencode"])
     assert result.exit_code == 0, result.output
@@ -431,8 +436,9 @@ def test_password_file_refused(host, monkeypatch, kind):
                 return os.stat_result(fields)
 
             monkeypatch.setattr(serve.os, "fstat", foreign)
-    with pytest.raises(serve.ServeError, match="not a private regular file"):
-        serve.read_password()
+    message = "symbolic link" if kind == "symlink" else "not a private regular file"
+    with pytest.raises(serve.ServeError, match=message):
+        serve.read_password(host.config, serve.detect_container())
 
 
 def test_password_stable_and_exclusive(host, monkeypatch):
@@ -444,9 +450,10 @@ def test_password_stable_and_exclusive(host, monkeypatch):
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(serve.os, "open", opening)
-    first = serve.ensure_password()
+    first = serve.ensure_password(host.config, serve.detect_container())
     assert len(first) >= 40
-    assert serve.ensure_password() == first == serve.read_password()
+    assert serve.ensure_password(host.config, serve.detect_container()) == first
+    assert serve.read_password(host.config, serve.detect_container()) == first
     path = serve.password_path()
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
@@ -465,7 +472,7 @@ def test_password_concurrent_creator_reads_winner(host, monkeypatch):
         raise FileExistsError()
 
     monkeypatch.setattr(serve.os, "link", concurrent)
-    assert serve.ensure_password() == winner
+    assert serve.ensure_password(host.config, serve.detect_container()) == winner
     assert list(serve.password_path().parent.iterdir()) == [serve.password_path()]
 
 
@@ -474,7 +481,7 @@ def test_password_absolute_state_and_parent_permissions(host, monkeypatch):
     state.mkdir(parents=True, mode=0o700)
     state.chmod(0o777)
     with pytest.raises(serve.ServeError, match="not writable by others"):
-        serve.ensure_password()
+        serve.ensure_password(host.config, serve.detect_container())
     monkeypatch.setenv("XDG_STATE_HOME", "relative")
     with pytest.raises(serve.ServeError, match="absolute"):
         serve.password_path()
@@ -887,7 +894,7 @@ def test_untrusted_text_is_printed_literally(host, monkeypatch, payload, site):
     elif site == "password-path":
         payload = str(Path(payload))
         monkeypatch.setattr(serve, "password_path", lambda: Path(payload))
-        monkeypatch.setattr(serve, "ensure_password", lambda: "x" * 40)
+        monkeypatch.setattr(serve, "ensure_password", lambda *_: "x" * 40)
     elif site in ("tailnet-url", "tailnet-reason", "pair-reason"):
         monkeypatch.setattr(
             serve,
@@ -1023,7 +1030,7 @@ def test_password_parent_leaf_must_be_private(host):
     path.mkdir(parents=True, mode=0o700)
     path.chmod(0o755)
     with pytest.raises(serve.ServeError, match="private OpenCode password"):
-        serve.ensure_password()
+        serve.ensure_password(host.config, serve.detect_container())
 
 
 def test_pair_failure_is_a_refusal(host, monkeypatch):
@@ -1077,7 +1084,7 @@ def test_password_is_synced_before_publication(host, monkeypatch):
 
     monkeypatch.setattr(serve.os, "fsync", synced)
     monkeypatch.setattr(serve.os, "link", linked)
-    serve.ensure_password()
+    serve.ensure_password(host.config, serve.detect_container())
     assert events == ["fsync", "link"]
 
 
@@ -1086,3 +1093,222 @@ def test_helper_failure_diagnostics_are_bounded(host, monkeypatch):
     with pytest.raises(serve.ServeError) as caught:
         serve.exec_helper(CID, ["status"])
     assert caught.value.detail == "[/x]" * 50
+
+
+@pytest.mark.parametrize("root_name", ["config", "local", "shared", "backups", "bind"])
+@pytest.mark.parametrize("operation", ["create", "read"])
+def test_password_excluded_roots_refused_before_io(
+    host, monkeypatch, tmp_path, root_name, operation
+):
+    roots = {name: tmp_path / name for name in ("config", "local", "shared", "backups", "bind")}
+    host.config = AppConfig(
+        code_dir=tmp_path,
+        config_root=roots["config"],
+        local_root=roots["local"],
+        shared_root=roots["shared"],
+    )
+    monkeypatch.setattr(serve, "BACKUPS_DIR", roots["backups"])
+    host.inspect["Mounts"] = [
+        {"Type": "bind", "Source": str(roots["bind"]), "Destination": "/data"}
+    ]
+    monkeypatch.setenv("XDG_STATE_HOME", str(roots[root_name] / "state"))
+    path = serve.password_path()
+    if operation == "read":
+        path.parent.mkdir(parents=True)
+        path.write_text("x" * 40)
+        path.chmod(0o600)
+    opened = []
+    monkeypatch.setattr(serve.os, "open", lambda *a, **k: opened.append(a))
+    with pytest.raises(serve.ServeError, match="inside a config, zone, backup or bind source"):
+        if operation == "read":
+            serve.read_password(host.config, serve.detect_container())
+        else:
+            serve.ensure_password(host.config, serve.detect_container())
+    assert not opened
+    assert path.exists() == (operation == "read")
+
+
+@pytest.mark.parametrize("component", ["state", "djinn", "serve", "opencode-password"])
+def test_password_symlink_component_refused(host, tmp_path, component):
+    path = serve.password_path()
+    link = (
+        path
+        if component == "opencode-password"
+        else next(p for p in path.parents if p.name == component)
+    )
+    link.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "target"
+    target.mkdir()
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(serve.ServeError, match="symbolic link"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert path.is_symlink() if component == "opencode-password" else not path.exists()
+
+
+@pytest.mark.parametrize(
+    "mounts",
+    [
+        None,
+        [None],
+        [{}],
+        [{"Type": "unknown"}],
+        [{"Type": "bind"}],
+        [{"Type": "bind", "Source": 1}],
+        [{"Type": "bind", "Source": "relative"}],
+    ],
+)
+def test_password_unknown_bind_sources_refused(host, mounts):
+    host.inspect["Mounts"] = mounts
+    with pytest.raises(serve.ServeError, match="refusing"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()
+
+
+@pytest.mark.parametrize("exception", [PermissionError, ValueError])
+def test_password_uninspectable_component_refused(host, monkeypatch, exception):
+    path = serve.password_path()
+    blocked = path.parent
+    real = Path.lstat
+
+    def refusing(self, *args, **kwargs):
+        if self == blocked:
+            raise exception("cannot inspect")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", refusing)
+    with pytest.raises(serve.ServeError, match="Could not inspect"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "via,target,refused",
+    [
+        ("bind", "dotfile", False),
+        ("bind", "elsewhere", False),
+        ("bind", "state", True),
+        ("bind", "state/djinn", True),
+        ("config-env", "elsewhere", False),
+        ("config-env", "state", True),
+    ],
+)
+def test_password_symlinked_excluded_roots_are_resolved(
+    host, monkeypatch, tmp_path, via, target, refused
+):
+    # Djinn binds dotfiles such as ~/.zshrc; a symlinked root counts where it really lies.
+    destination = tmp_path / target
+    if target == "dotfile":
+        destination.write_text("")
+    else:
+        destination.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(destination)
+    if via == "bind":
+        host.inspect["Mounts"] = [{"Type": "bind", "Source": str(alias), "Destination": "/data"}]
+    else:
+        monkeypatch.setenv("DJINN_CONFIG_ROOT", str(alias))
+    if refused:
+        with pytest.raises(serve.ServeError, match="inside a config"):
+            serve.ensure_password(host.config, serve.detect_container())
+        assert not serve.password_path().exists()
+    else:
+        assert len(serve.ensure_password(host.config, serve.detect_container())) >= 40
+
+
+@pytest.mark.parametrize("kind", ["loop", "nul"])
+def test_password_unresolvable_excluded_root_refused(host, tmp_path, kind):
+    source = tmp_path / "loop"
+    if kind == "loop":
+        source.symlink_to(source)
+    host.inspect["Mounts"] = [
+        {"Type": "bind", "Source": f"{source}\0" if kind == "nul" else str(source)}
+    ]
+    with pytest.raises(serve.ServeError, match="Could not inspect an excluded password root"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()
+
+
+def test_password_safe_sibling_and_nofollow_walk(host, monkeypatch, tmp_path):
+    root = tmp_path / "state"
+    host.config = AppConfig(code_dir=tmp_path, config_root=root)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-local"))
+    assert len(serve.ensure_password(host.config, serve.detect_container())) >= 40
+    # An alias must be inspected before '..' removes it from the lexical path.
+    (tmp_path / "alias").symlink_to(root, target_is_directory=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "alias" / ".." / "other-state"))
+    with pytest.raises(serve.ServeError, match="symbolic link"):
+        serve.ensure_password(host.config, serve.detect_container())
+
+
+@pytest.mark.parametrize("names", [["claude", "opencode"], ["opencode", "claude"]])
+@pytest.mark.parametrize("code", ["env-root", "state-path", "remote-config", "service-config"])
+def test_all_names_helper_preflight_before_password_or_start(host, names, code):
+    host.error = {"code": code, "message": "preflight refusal"}
+    result = runner.invoke(app, ["serve", *names])
+    assert result.exit_code == 1
+    calls = [a[a.index("-c") + 2 :] for a, _ in host.calls if a[1] == "exec"]
+    assert calls == [["opencode-preflight"]]
+    assert not host.direct
+    assert not serve.password_path().exists()
+
+
+@pytest.mark.parametrize("names", [["claude", "opencode"], ["opencode", "claude"]])
+@pytest.mark.parametrize("failure", ["error", "exited"])
+def test_start_stops_at_first_failure(host, monkeypatch, names, failure):
+    calls = []
+
+    def helper(_cid, args, **_kwargs):
+        calls.append(args[0])
+        if args[0] == "opencode-preflight":
+            return {"ok": True}
+        if failure == "error":
+            raise serve.ServeError("cannot spawn", code="spawn")
+        return {"result": "exited", "pid": None, "log_tail": []}
+
+    monkeypatch.setattr(serve, "exec_helper", helper)
+    result = runner.invoke(app, ["serve", *names])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert calls == ["opencode-preflight", f"{names[0]}-start"]
+
+
+@pytest.mark.parametrize("reply", [{"ok": True, "extra": 1}, {"ok": True, "result": "started"}])
+def test_helper_rejects_preflight_schema(host, monkeypatch, reply):
+    monkeypatch.setattr(serve, "_run_captured", lambda *a, **k: RunResult(0, json.dumps(reply)))
+    with pytest.raises(serve.ServeError, match="helper failed"):
+        serve.exec_helper(CID, ["opencode-preflight"])
+
+
+def test_password_double_slash_cannot_bypass_excluded_root(host, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", "/" + str(host.config.config_root / "state"))
+    with pytest.raises(serve.ServeError, match="inside a config"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()
+
+
+def test_password_unknown_container_refused(host):
+    container = serve.ContainerInfo(serve.ContainerState.UNKNOWN, mounts=[])
+    with pytest.raises(serve.ServeError, match="Could not inspect password bind sources"):
+        serve.ensure_password(host.config, container)
+    assert not serve.password_path().exists()
+
+
+def test_password_unknown_zone_roots_refused(host, monkeypatch):
+    from djinn_in_a_box.core.exceptions import ZoneConfigurationError
+
+    def unknown(_config):
+        raise ZoneConfigurationError("cannot determine roots")
+
+    monkeypatch.setattr(serve, "resolve_zone_roots", unknown)
+    with pytest.raises(serve.ServeError, match="Could not determine excluded password roots"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()
+
+
+def test_password_config_root_environment_precedence(host, monkeypatch, tmp_path):
+    root = tmp_path / "relocated-config"
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(root))
+    monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
+    with pytest.raises(serve.ServeError, match="inside a config"):
+        serve.ensure_password(host.config, serve.detect_container())
+    assert not serve.password_path().exists()

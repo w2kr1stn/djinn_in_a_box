@@ -895,9 +895,14 @@ the container address is also reachable by network peers. Read the
 
 The first `djinn serve opencode` generates a password at
 `${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` on the host
-(mode `0600`). It stays host-local, outside the synced config root and Djinn
-backups. Read it locally when a client asks; Djinn prints the file path, never
-the password. An existing file with unsafe ownership, permissions or type, or
+(mode `0600`). Before creating or reading it, Djinn refuses symlinks in that path,
+locations inside the config root, zone sources, Djinn backups or running-container
+bind sources (each at its resolved location), and locations whose safety it cannot
+determine. This keeps it outside
+those synced trees and backups provided you keep `XDG_STATE_HOME` host-local and
+out of other sync, indexing and backup tools. Read it locally when a client asks;
+Djinn prints the file path, never the password. An existing file with unsafe
+ownership, permissions or type, or
 invalid size/encoding, is refused. To rotate, delete this file and run `djinn serve opencode`
 again: Djinn generates a new password and restarts the running server. Attached
 clients must reconnect.

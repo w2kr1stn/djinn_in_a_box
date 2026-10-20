@@ -297,7 +297,9 @@ def serve(
                 raise typer.Exit(1) from None
             raise typer.Exit(result.returncode)
         # All gates for all names complete before any start (including password creation).
-        password = core.ensure_password() if core.OPENCODE in selected else None
+        if core.OPENCODE in selected:
+            core.exec_helper(container.id, ["opencode-preflight"], timeout=15)
+        password = core.ensure_password(config, container) if core.OPENCODE in selected else None
         if core.OPENCODE in selected and tailnet[0] is None:
             _literal(f"Funnel state unknown ({tailnet[1]})")
         failed = False
@@ -314,9 +316,11 @@ def serve(
                 data = core.exec_helper(container.id, args, stdin=stdin)
                 if not _start_result(name, data, port, tailnet):
                     failed = True
+                    break
             except core.ServeError as failure:
                 _helper_failure(name, failure)
                 failed = True
+                break
         if failed:
             raise typer.Exit(1)
     except core.ServeError as failure:
