@@ -244,6 +244,7 @@ def test_observer_desktop_stop_start_remove_and_pinned_path(fake_owner, monkeypa
 def test_empty_identity_pending_guard_refuses_every_path(fake_owner, creator, monkeypatch):
     config, binary, objects, log = fake_owner
     config = config.model_copy(update={"git": GitConfig()})
+    monkeypatch.setattr(docker, "validate_managed_bind_sources", lambda config: None)
     monkeypatch.setattr(docker, "is_background_process_group", lambda: False)
     monkeypatch.setattr(
         docker, "_prepare_companions", lambda *args: pytest.fail("loser touched helpers")

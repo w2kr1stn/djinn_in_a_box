@@ -560,6 +560,7 @@ class TestStartCommand:
         )
         with (
             patch("djinn_in_a_box.commands.container.load_config") as mock_load,
+            patch("djinn_in_a_box.commands.container.validate_managed_bind_sources"),
             patch("djinn_in_a_box.commands.container.preflight"),
             patch(
                 "djinn_in_a_box.commands.container.ensure_network", return_value=True

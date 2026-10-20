@@ -74,6 +74,7 @@ from djinn_in_a_box.core.docker import (
     network_exists,
     resolve_container_mounts,
     resolve_docker_mode,
+    validate_managed_bind_sources,
     volume_exists,
 )
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
@@ -258,6 +259,11 @@ def start(
         raise typer.Exit(1)
 
     config = load_config()
+    try:
+        validate_managed_bind_sources(config)
+    except MountSpecificationError as e:
+        error(str(e))
+        raise typer.Exit(1) from None
     preflight(config, provision_host=False)
 
     config_root = get_config_root(config)
