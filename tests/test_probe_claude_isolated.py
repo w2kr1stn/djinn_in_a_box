@@ -1026,3 +1026,24 @@ def test_history_access_error_is_not_a_pass(tmp_path, monkeypatch):
     assert probe.check_artifacts(
         Path("/tmp/x/proj"), "session-test", {"CLAUDE_CONFIG_DIR": str(tmp_path)}, "control"
     ) == [f"FAIL artifacts control: cannot check {history} ([Errno 13] Permission denied)"]
+
+
+def test_post_run_artifacts_use_the_resolved_working_directory(tmp_path):
+    real = tmp_path / "real" / "proj"
+    real.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path / "real")
+    root = tmp_path / "profile"
+    found = root / "projects" / str(real).replace("/", "-").replace("_", "-").replace(".", "-")
+    found.mkdir(parents=True)
+    env = {"CLAUDE_CONFIG_DIR": str(root)}
+    lines = probe.check_artifacts(alias / "proj", "session-test", env, "c")
+    assert lines == [f"FAIL artifacts c: found {found}"]
+
+
+def test_undecodable_output_is_a_failure_not_a_crash(tmp_path):
+    script = tmp_path / "noisy"
+    script.write_text("#!/bin/sh\nprintf '\\377\\376 not json'\nexit 1\n")
+    script.chmod(0o755)
+    run = probe.observe([str(script)], tmp_path, {"PATH": os.environ["PATH"]}, authenticated=False)
+    assert run.error == "no result event"

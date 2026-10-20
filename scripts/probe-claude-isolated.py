@@ -188,6 +188,7 @@ def run_command(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=run_timeout,
         check=False,
     )
@@ -362,7 +363,8 @@ def evaluate_phase_two(run: Observation, label: str, field: str, expected: bool)
 
 def check_artifacts(cwd: Path, session_id: Any, env: dict[str, str], label: str) -> list[str]:
     root = Path(env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    slug = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    # Claude names the project after the resolved working directory.
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(cwd.resolve()))
     paths = [root / "projects" / slug]
     lines = []
     if isinstance(session_id, str) and session_id and Path(session_id).name == session_id:
