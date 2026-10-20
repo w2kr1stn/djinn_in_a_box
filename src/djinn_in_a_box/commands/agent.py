@@ -119,7 +119,7 @@ def _show_run_status(
 def run(
     agent: Annotated[
         str,
-        typer.Argument(help="Agent to run: claude, codex, opencode"),
+        typer.Argument(help="Agent to run: claude, codex, opencode, claude-isolated"),
     ],
     prompt: Annotated[
         str,
