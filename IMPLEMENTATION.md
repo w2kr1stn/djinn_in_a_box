@@ -220,6 +220,11 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
   host's resolver path. Buildkit's third mode,
   `none`, is not offered: no layer of this image builds without a network. A named
   network buildkit rejects itself.
+- `serve: ServeConfig`: frozen model with unknown keys forbidden;
+  `opencode_host_port` is an integer from 1024 to 65535, default `49380`.
+  `djinn config set serve.opencode_host_port <n>` validates through this model;
+  `djinn config show` includes a Serve table. The setting takes effect when a
+  detached container is created; the container port remains `4096`.
 
 `AppConfig.workspace_target` derives that fixed container path as a plain
 property, excluded from JSON and TOML. Djinn does not infer the mode from the
@@ -935,8 +940,14 @@ hook references, widened mounts and tools with host authority.
 There is no separate authentication service. Every bundled CLI signs in from
 inside a normal `dev` session: the tool prints a URL, the user opens it in the
 host browser and pastes the returned code back into the container. No loopback
-callback is *needed*, so the container requires neither host networking nor a
-published port.
+callback is *needed*, so authentication requires neither host networking nor a
+published port. Separately, `compose_up_detached()` publishes OpenCode for the
+`dev` service using a generated long-syntax Compose entry: `target: 4096`,
+`published: str(config.serve.opencode_host_port)`, `host_ip: 127.0.0.1`,
+`protocol: tcp`. `OPENCODE_CONTAINER_PORT` is defined in `core/docker.py`.
+`compose_run()`, helper services and the base Compose file add no such entry.
+The publication persists while the detached container exists, including when
+no Djinn-managed server runs; see [remote server access](SECURITY-MODEL.md#remote-agent-server-access).
 
 Selecting that flow is not uniform. Claude Code and OpenCode prompt for a pasted
 code by default. Codex is the exception: plain `codex login` starts a
@@ -1637,7 +1648,11 @@ that prepend the tools library directory only for their real binaries in
   entrypoint keeps the container up rather than exiting. `--detach` remains the
   supported way to background a session.
 - `status()`: reports config, containers, known volumes, config-root paths,
-  networks, and agent Docker status.
+  networks, agent Docker status and a compact remote server snapshot from
+  `core/serve.py:collect_snapshot()`. Missing configuration uses `ServeConfig`
+  defaults. Serve query errors become an Unknown line; the quick snapshot uses
+  3 s for container inspection, 5 s for helper execution and 2 s for Tailscale,
+  querying Tailscale only while OpenCode is running.
 - `clean_default()`: `djinn clean` stops and removes containers with
   `compose_down(config=None)`, using best-effort placeholders. `compose_down()`
   refuses outright when the container it would reap is the one the process runs
@@ -1742,6 +1757,153 @@ emits protocol lines on stdout and diagnostics on stderr, exits nonzero on any
 failed lookup or invalid value and writes no files. No arguments retain the
 maintainer Dockerfile rewrite/diff/build guidance and skip-and-continue behavior.
 Upstream default bumps are reviewed through pull requests.
+
+### Remote Server Lifecycle
+
+`commands/serve.py` handles `djinn serve` mode validation, the start/pair gates
+and literal output. `core/serve.py` owns host inspection, password storage,
+helper execution and the snapshot shared by `djinn serve --status` and
+`djinn status`. `core/serve_helper.py` owns container process state. The host
+reads that file as text, caches it and sends it on **every** helper call:
+
+```text
+docker exec [-i] <inspected-container-id> python3 -I -c <source> <subcommand> [args]
+```
+
+The source is at most 100,000 bytes, standard-library-only and compatible with
+the image's Python 3.11. No image or entrypoint change is required. `-i` is used
+only for OpenCode start, with one JSON line containing `password` on stdin
+(4 KiB input cap). Other captured calls have stdin closed. The helper emits
+exactly one JSON object plus a newline: exit 0 with `ok: true`, or exit 1 with
+`ok: false`, `code` and a secret-free `message`.
+
+| Subcommand | Successful reply |
+| --- | --- |
+| `status` | `pid1_start`, `busy`, and `servers` keyed by `claude` and `opencode`; each row has `state`, `reason`, `pid`, `since`, `last_line`. OpenCode adds `listening`, `discovery_pid_ok`, `foreign_listener`. |
+| `claude-start --prefix <slug>` | `name`, `result`, `pid`, `since`, `log_tail` |
+| `opencode-start --port 4096 [--cors <url>]` | The start fields plus `stopped_previous` |
+| `stop --name <name> [--name <name>]` | `results` keyed by requested name, each with `result` and `pid` |
+
+The host validates reply shapes and keeps copies of the helper's frozen enum
+sets; a schema test checks their equality:
+
+| Field | Frozen values |
+| --- | --- |
+| State | `running`, `degraded`, `exited`, `stopped` |
+| Start result | `started`, `already-running`, `restarted`, `exited` |
+| Stop result | `stopped`, `not-running`, `survived` |
+| Error code | `state-dir`, `state-path`, `env-root`, `password`, `service-json`, `service-config`, `remote-config`, `spawn`, `not-registered`, `busy`, `timeout`, `usage` |
+
+#### State and Process Identity
+
+`/tmp/djinn-serve` is outside volumes and binds, mode `0700`, opened with
+`O_DIRECTORY|O_NOFOLLOW` and checked for owner and permissions. Start/stop
+serialize on its `lock` with `flock`; the lock wait is at most 10 s. Status
+tries the lock without waiting and sets `busy` if it is held. Records and logs
+use directory-relative access, `O_NOFOLLOW` and private files; record replacement
+is atomic. Records include leader PID/start time, Claude child PID/start time,
+PID 1 start time, working directory, argv tag, start timestamp and server port.
+
+PID 1's changed start time detects a container restart even when `/tmp` survives.
+A reused recorded PID also makes the record stale: status reports `stopped`
+and removes it when it owns the lock, without signalling. With the same PID 1
+and all recorded groups gone, the state is `exited`; the record and last
+sanitized log line remain until the next start/stop. A leaderless group still
+counts as alive when its remaining members have suitable start times.
+
+OpenCode is `running` only when its process group is alive, its PID owns the
+wildcard IPv4 LISTEN socket and its discovery registration names that PID.
+A live group with a missing listener or registration is `degraded`. Claude
+requires both supervisor and child groups; losing either is `degraded`.
+Starting a degraded server stops its remains before replacing it; starting a
+healthy server is a no-op, except for OpenCode password rotation.
+
+The launch path forks once, then the child calls `setsid()` and verifies it is
+the process-group leader. It keeps the working directory, redirects stdin to
+`/dev/null`, stdout/stderr to the new private log, and closes other descriptors,
+including the lock. OpenCode execs directly without a PTY or runtime log cap.
+Claude's supervisor uses `pty.fork()` for a child in its own session/group,
+sets a 120×40 terminal and continuously drains it without sending input. One
+inherited pipe hands the child's PID/start time to the helper within 2 s;
+the complete record is written under the lock before startup is reported.
+The supervisor forwards TERM/INT, waits for its child and caps its log at
+1 MiB by truncating to a marker before continuing with fresh output.
+
+OpenCode readiness waits at most 15 s; Claude gets a 5 s grace period. Log tails
+strip ANSI/control characters and retain at most 20 lines. A mutating helper
+operation uses one 50 s monotonic deadline including lock wait; start/stop host
+execution is bounded at 60 s. Stop verifies identity, sends TERM to the recorded
+groups (Claude child then supervisor), waits up to 10 s, then KILL and up to
+2 s more, all within the deadline. PIDs/PGIDs ≤ 1 and the helper's own group are
+excluded from signalling. Servers are not automatically restarted after crashes
+or container restarts.
+
+#### OpenCode Replacement and Password Delivery
+
+OpenCode start first checks environment roots, symlink-free settings paths and
+the `service.json` allowlist (`password` only; `remote` has its own refusal
+code). It then reads the stdin password and takes the state lock. A healthy
+server with the same password returns `already-running`; a changed password or
+degraded state stops ours before merging the password. A failed stop aborts
+before that merge.
+
+The host generates a stable password once in
+`${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` using a private
+temporary file, fsync and an exclusive hard-link publication. A concurrent
+creator reads the winner. Reads require a user-owned regular file, mode `0600`,
+20–256 bytes and no final symlink. The host state directory reuses
+`hostctl.state_root(create=False).parent`, with a private `serve` child, and is
+included in host-sealing protection. The password travels only on stdin into
+an atomic mode-`0600` `~/.config/opencode/service.json`; it is never supplied in
+argv, container environment, `opencode service set` or Djinn logs. OpenCode
+reads it from the file and also stores it in its own discovery file in the
+container's writable layer. Neither file is in the synced carrier allowlist.
+
+A pre-existing default service is stopped only after the discovery PID is
+proved to run `opencode serve --service` and own the LISTEN socket named by
+the discovery URL. Its start time is checked again before KILL. Unprovable or
+stale discovery signals nothing. Djinn never invokes native
+`opencode service stop`, which trusts the discovery PID without these checks.
+It starts `opencode serve --service --hostname 0.0.0.0 --port 4096`, optionally
+with `--cors <tailnet-url>`; bind/port are flags, not persistent service settings.
+A registration race fails with `not-registered` after stopping the new group.
+After stop/restart, the next in-container client can start the normal loopback
+service again.
+
+#### Exposure Gates and Tailnet Discovery
+
+Host checks run in this order: mode/names, config, container inspection,
+detached marker, then (for OpenCode start/pair) exact loopback port binding,
+environment roots and mounts, every attached network, Engine version and Funnel.
+All host start gates finish before password creation or any server start.
+Inspection distinguishes absent from unknown, validates the full container ID
+and uses that ID for every exec. The helper's settings checks above run on
+OpenCode start; pair instead requires helper status `running` and a tailnet URL.
+Status/stop do not require the OpenCode exposure gates; non-detached status
+reports unavailability without executing the helper.
+
+Network inspection requires user bridge networks without trusted host
+interfaces or `routed`/`nat-unprotected` gateway modes. The Engine gate compares
+the leading version triple against 28.3.3 and refuses unknown versions. The
+daemon-wide routing/iptables prerequisites cannot be checked through this API;
+see [the residual boundary](SECURITY-MODEL.md#remote-agent-server-access).
+
+`tailnet_state()` only runs `tailscale serve status --json`, with closed stdin
+and a 5 s bound. It traverses the root and recursive `Foreground` layers,
+unioning `AllowFunnel` keys across them before matching handlers or TCP forwards.
+For Funnel detection, any target naming the host port counts regardless of
+scheme, host or path. The HTTPS URL requires a root handler, an HTTP proxy to
+`127.0.0.1`, `localhost` or `[::1]` at that port, and `TCP[port].HTTPS: true`.
+Validated candidates are selected by sorted key; port 443 is omitted in the URL.
+Detected Funnel refuses start/pair and warns in status. Missing/unreadable
+Tailscale status leaves Funnel unknown and allows start with the printed note
+`Funnel state unknown (<reason>)`; pairing still needs a discoverable URL.
+Parsing is fixture-tested; live host configuration is a rollout check.
+
+Pairing runs `opencode pair --url <url>` in the inspected container with closed
+stdin, inherited stdout/stderr and a 30 s bound; pairing output is not captured
+or logged. Helper/log/Tailscale strings are printed literally with control
+characters escaped, and the CLI disables traceback local-variable display.
 
 ## Assistant Audit
 

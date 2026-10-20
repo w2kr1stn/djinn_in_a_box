@@ -110,6 +110,9 @@ Start an interactive development shell:
 djinn start
 ```
 
+For browser or remote agent access, use a detached container and follow
+[Remote Agent Servers](#remote-agent-servers).
+
 Run a headless agent prompt from your current directory:
 
 ```sh
@@ -313,6 +316,7 @@ Supported `djinn config set` keys are:
 | `shell.omp_theme_path` | Optional Oh My Posh theme file mounted read-only | unset |
 | `config_sync.source` | Native global workflow source: `claude`, `codex`, or `opencode` | `claude` |
 | `build.network` | Network for image-build steps: `default` or `host` | `default` |
+| `serve.opencode_host_port` | Host IPv4 loopback port for OpenCode in the detached container; integer 1024–65535 | `49380` |
 | `assistant.agent` | Interactive audit agent: `claude`, `codex`, or `opencode` | `claude` |
 
 `djinn init` asks for the mode first, then the corresponding host directory.
@@ -425,6 +429,8 @@ and reason. Each file is limited to 1 MiB; oversized carrier files warn, are
 skipped and stay protected from write-back for the session. See the
 [OpenCode 2 guide](docs/opencode-v2.md) for the pin, theme selection, local-provider
 template, endpoint declarations and optional plugins.
+For its browser UI, API and remote clients, see
+[Remote Agent Servers](#remote-agent-servers).
 
 ### Tool-Owned Runtime State
 
@@ -772,6 +778,7 @@ value overrides `default_model` for that invocation.
 | --- | --- | --- | --- |
 | `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
+| `djinn serve` | Starts Claude Remote Control or the OpenCode web UI/API inside the running detached container | Uses the container's working directory, mounts and sign-ins | [Remote agent access](#remote-agent-servers), status, stop and OpenCode pairing |
 | `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback checks the selected agent binary on `PATH` and applies workspace checks before launch. Claude, Codex, and OpenCode host fallback receives that agent's confirmed canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
 
@@ -840,6 +847,163 @@ Third-party model providers you configure yourself (OpenRouter, x.ai, and the
 like) are deliberately absent; add the ones you actually use.
 See [outbound traffic limits](SECURITY-MODEL.md#credentials-backups-and-outbound-traffic)
 before using the firewall with sensitive data.
+
+## Remote Agent Servers
+
+`djinn serve <claude|opencode ...>` starts the selected agent server modes
+inside a running detached Djinn container, using its working directory, mounts
+and sign-ins. Repeating a start leaves a healthy server running; servers are
+not automatically restarted after a crash or container restart.
+
+Recreate an existing container once to get the OpenCode port publication:
+
+```sh
+djinn clean
+djinn start --detach
+djinn serve opencode
+djinn serve claude opencode
+djinn serve --status
+djinn serve --pair opencode
+djinn serve --stop opencode
+djinn serve --stop claude opencode
+djinn serve --stop
+```
+
+`--stop` without names stops both servers; stopping an inactive server succeeds.
+Start, `--status`, `--stop` and `--pair` are separate modes. Pairing is available
+only for OpenCode. Start and pair require a detached container; status and stop
+can inspect a running container without the start prerequisites. A Docker
+inspection failure reports an unknown state, rather than treating it as absent.
+
+### OpenCode Web UI and API
+
+OpenCode serves its web UI and API at host
+`http://127.0.0.1:<serve.opencode_host_port>` (default `49380`, container port
+`4096`). Choose another host port before creating the container if needed:
+
+```sh
+djinn config set serve.opencode_host_port 49381
+djinn config show
+```
+
+Changing the setting requires another `djinn clean`, then `djinn start --detach`.
+Djinn refuses a missing or different port binding with
+`The running container does not publish the OpenCode port on 127.0.0.1:<port>.`
+The host loopback publication is reachable by local host users and processes;
+the container address is also reachable by network peers. Read the
+[inbound boundary](SECURITY-MODEL.md#remote-agent-server-access) before enabling it.
+
+The first `djinn serve opencode` generates a password at
+`${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` on the host
+(mode `0600`). It stays host-local, outside the synced config root and Djinn
+backups. Read it locally when a client asks; Djinn prints the file path, never
+the password. An existing file with unsafe ownership, permissions or type, or
+invalid size/encoding, is refused. To rotate, delete this file and run `djinn serve opencode`
+again: Djinn generates a new password and restarts the running server. Attached
+clients must reconnect.
+
+In a browser, open the local URL or the tailnet HTTPS URL and log in with the
+password. Alternatively, run `djinn serve --pair opencode` and open one of its
+one-time links. Pairing requires a running OpenCode server and a known tailnet
+URL. A CLI client connects with `opencode --server <url>` and the password in
+its `OPENCODE_PASSWORD` environment variable. In-container OpenCode sessions
+share the service; after `--stop opencode`, the next client that needs it starts
+OpenCode's ordinary loopback service again.
+
+For tailnet access, the host's administrator creates a Tailscale Serve entry
+once, substituting the configured host port:
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:49380
+```
+
+Djinn never writes Tailscale settings; it only reads
+`tailscale serve status --json` to discover an HTTPS URL such as
+`https://host.tailnet.ts.net`. Never enable Funnel for this entry: both
+`djinn serve opencode` and `djinn serve --pair opencode` refuse detected Funnel,
+and status warns about it. If Tailscale is missing or its status is unreadable,
+starting is allowed with `Funnel state unknown (<reason>)`; review the host
+configuration yourself. Without a discoverable URL, pairing refuses.
+
+Restrict tailnet policy to HTTPS on this host from the intended devices or a
+dedicated device tag. A grant to the whole account includes Djinn's hostctl
+helper node, which is itself an account device. Keep that helper outside the
+grant. The OpenCode password remains the second barrier.
+
+OpenCode provider credentials live in `opencode.db` on the data volume.
+After `djinn clean volumes --data`, the server can still start, but model calls
+fail until you log in again; credential persistence is tracked in
+[#162](https://github.com/w2kr1stn/djinn_in_a_box/issues/162).
+
+### Prerequisites and Refusals
+
+Before the first OpenCode start, check `/etc/docker/daemon.json` on the host:
+`allow-direct-routing` must be absent or `false`, and `iptables` absent or
+`true`. Djinn cannot inspect these daemon-wide settings through Docker's API.
+Keep these defaults; see the [residual routing risk](SECURITY-MODEL.md#remote-agent-server-access).
+
+OpenCode start and pair also check these prerequisites and refuse if they
+cannot verify them:
+
+- Docker Engine server version **28.3.3 or newer**. This includes the fix for
+  [CVE-2025-54388](https://github.com/moby/moby/security/advisories/GHSA-x4rx-4gw3-53p4),
+  where a firewalld reload could expose loopback-published ports. An unknown
+  Engine version also refuses.
+- Exactly the configured IPv4 loopback publication, and only user-defined
+  bridge networks. Host/container network mode and drivers such as macvlan,
+  ipvlan or overlay refuse. Every attached bridge must omit
+  `com.docker.network.bridge.trusted_host_interfaces`; IPv4 and IPv6 gateway
+  modes must be neither `routed` nor `nat-unprotected`.
+- OpenCode's default settings roots under the container's `/home/dev`.
+  Mounts covering, inside or above `~/.config/opencode` or
+  `~/.local/state/opencode` refuse. `HOME` must retain `/home/dev`, and
+  `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `OPENCODE_CONFIG_DIR` must be unset.
+
+On start, the helper also refuses symbolic links in the settings paths and
+requires `~/.config/opencode/service.json` to be absent or contain only
+`password`. Remove every other key inside the container with
+`opencode service unset <key>`, including `remote` (OpenTunnel), `hostname`,
+`port`, `cors`, `env` and `disabled`. These checks precede service changes.
+An old discovery file never suffices to authorize stopping a process: Djinn
+replaces an existing service only after proving its identity.
+
+### Claude Code Remote Control
+
+`djinn serve claude` starts `claude remote-control` in server mode. Generated
+session names start with the host's short name, normalized to lowercase letters,
+digits and hyphens. Sign in to a claude.ai subscription inside the container
+(for example, `claude auth login`) and trust the working directory in an
+interactive Claude session first. API-key authentication does not suffice.
+Claude's login or trust refusal appears in the startup log tail and in status
+if the process exits. See [Claude's requirements](https://code.claude.com/docs/en/remote-control#requirements)
+and the [Remote Control trust boundary](SECURITY-MODEL.md#remote-agent-server-access).
+
+With `--firewall`, the outbound allowlist may lack hosts Remote Control needs;
+this combination has not been measured.
+
+Codex is not part of `djinn serve`. Codex Remote Control currently runs through
+the daemon that the Codex TUI starts itself; `djinn serve codex` follows in
+[#164](https://github.com/w2kr1stn/djinn_in_a_box/issues/164).
+
+### Server Status
+
+`djinn serve --status` shows the detailed table, including OpenCode's local
+endpoint and the tailnet URL or the reason it is unknown. `djinn status` shows
+a compact snapshot in Services, with the local URL for running OpenCode.
+
+| State | Meaning |
+| --- | --- |
+| `running` | The recorded processes have matching identities. OpenCode also owns the listener and service registration; Claude has both its supervisor and child process groups. |
+| `degraded` | Recorded processes remain, but OpenCode lost its listener/registration, or Claude lost its child or supervisor. Run `djinn serve <name>` to stop the remains and restart it. |
+| `exited` | The server ended in this container run. Its last sanitized log line remains visible until the next start or stop. |
+| `stopped` | No current managed server record, or stale state from a container restart or reused PID. Stale state is ignored and cleared when the state lock is available. |
+| `busy (start/stop in progress)` | A start or stop holds the state lock; retry the query after it finishes. This is a snapshot warning, not a server state. |
+
+Status distinguishes a missing container, a container started without `--detach`,
+and Docker errors. It also reports `port not published (recreate once)`, detected
+Funnel, and `note: port 4096 is used by another process` for a foreign listener.
+Stopping a managed server does not remove the port publication or the host's
+Tailscale Serve entry.
 
 ## Docker Access Modes
 
@@ -1371,6 +1535,9 @@ status:
 ```sh
 djinn status
 ```
+
+Services includes the [remote agent server snapshot](#server-status).
+Use `djinn serve --status` for the detailed table and endpoint hints.
 
 Open an interactive installation check or investigate a symptom:
 

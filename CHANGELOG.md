@@ -7,6 +7,20 @@ Versioning before and after the first stable release.
 
 ## [Unreleased]
 
+### Added
+
+- `djinn serve <claude|opencode ...>`, `--status`, `--stop [NAME ...]` and
+  `--pair opencode` run the agent harnesses' server modes inside the running
+  detached container. OpenCode serves its web UI and API on host
+  `127.0.0.1:<port>` (`serve.opencode_host_port`, default 49380) behind a
+  password that `djinn serve` generates once on the host; expose it to your
+  tailnet with your own `tailscale serve` entry (Djinn only reads `tailscale
+  serve status`). Claude Code runs its Remote Control server mode. `djinn
+  serve opencode` refuses Docker Engine older than 28.3.3, networks that allow
+  direct routing to containers, a Tailscale Funnel on the port, and relocated
+  or extra OpenCode service settings. The detached container must be recreated
+  once to publish the port. Codex Remote Control is not part of this (#164).
+
 ### Fixed
 
 - Require `DJINN_LIVE_DOCKER=1` before probing or running live Docker overlay

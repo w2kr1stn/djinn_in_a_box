@@ -111,6 +111,93 @@ steps, including access to loopback-only host services. It applies to the whole
 build, so use it only with trusted Dockerfiles and build inputs. It affects
 build-time networking, not the resulting container's runtime network.
 
+## Remote agent server access
+
+`djinn serve` runs agent server modes inside the detached dev container. See
+[usage and prerequisites](README.md#remote-agent-servers) and the
+[process implementation](IMPLEMENTATION.md#remote-server-lifecycle).
+
+OpenCode listens on `0.0.0.0:4096` inside the container. Detached creation
+publishes it only on host `127.0.0.1:<serve.opencode_host_port>` (default
+`49380`). Every local host user/process can reach that loopback endpoint.
+**The container address is also reachable from the host and every peer on
+`djinn-network`**: agent-docker workloads through their companion, the hostctl
+helper, the audit assistant and anything else attached. Tailnet policy does not
+filter these bridge paths. The API requires the OpenCode password on these
+paths too. The unauthenticated web shell at `/` is a static page that reveals
+only the app version; it does not establish an authenticated API session.
+
+Publication of container port `4096` lasts for the detached container's
+lifetime. Stopping the managed server leaves that mapping and any host
+Tailscale Serve entry in place. A foreign listener accepting connections on
+that container interface/port is therefore reachable through them as well,
+with whatever authentication that listener implements. `djinn serve --status`
+notes `note: port 4096 is used by another process`; it does not stop that process
+or revoke publication. An absent/stale discovery record never authorizes a
+signal: replacing OpenCode's default service requires command-line and socket
+ownership proof, and Djinn never calls native `opencode service stop`.
+
+OpenCode start/pair require Docker Engine **28.3.3 or newer**, an exact IPv4
+loopback publication and only user bridge networks without
+`com.docker.network.bridge.trusted_host_interfaces` or IPv4/IPv6 gateway modes
+`routed`/`nat-unprotected`. Unknown versions or uninspectable networks refuse.
+The version gate includes the fix for
+[CVE-2025-54388](https://github.com/moby/moby/security/advisories/GHSA-x4rx-4gw3-53p4),
+which let a firewalld reload expose published ports via container addresses
+despite loopback publication.
+
+**Host prerequisite:** check `/etc/docker/daemon.json` once before rollout.
+`allow-direct-routing` must be absent or `false`; `iptables` must be absent or
+`true`. These daemon-wide settings are invisible to Djinn through the Docker
+API. Even with the runtime gates, a daemon configured to permit direct routing
+or omit firewall rules can expose OpenCode beyond host loopback and the intended
+tailnet path. This residual risk, and access through the container address,
+remain until the structural container-side restriction tracked in
+[#167](https://github.com/w2kr1stn/djinn_in_a_box/issues/167).
+
+The host administrator owns the HTTPS Tailscale Serve entry and tailnet policy.
+Djinn only reads `tailscale serve status --json`; it never writes either.
+Grant HTTPS to this host only from intended devices or a dedicated tag, rather
+than every device of the account. Djinn's hostctl helper is itself an account
+device and would be included by an account-wide grant. Keep it outside that
+grant; the password remains a second barrier.
+Funnel would expose the service to the public internet, so detected Funnel
+refuses both start and pair and warns in status. Detection covers root and
+`Foreground` configurations with the union of their Funnel flags. Missing or
+unreadable Tailscale status allows start with an unknown-Funnel note; it is not
+proof that Funnel is off. Pairing refuses without a known tailnet URL.
+
+The password is generated once on the host at
+`${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password`, mode `0600`
+under a private directory. Keep it host-local, outside synced/indexed trees;
+Djinn does not sync or back it up. Delete it and run `djinn serve opencode` to
+rotate; the running managed server restarts with the new password. Invalid
+existing files refuse rather than silently regenerating. Delivery uses stdin
+into private `~/.config/opencode/service.json`; OpenCode also puts the password
+in `~/.local/state/opencode/service.json`. Both container copies stay in the
+writable layer, outside binds/volumes. Mounts covering those paths, relocated
+settings roots, symlinked components and service settings other than `password`
+are refused on the applicable host/helper start gates. Agents running as dev
+can read these files: the password protects network access, not against code
+already executing as that user.
+
+The implementation rule is password delivery through stdin and a private file,
+never server argv/environment or Djinn logs. A live leak scan is best-effort
+corroboration, not a proof of absence: oversized/unreadable files, paths outside
+its scanned roots and the captured event window limit its coverage.
+
+Claude Remote Control has a different boundary: it relies on the signed-in
+vendor account and makes outbound HTTPS connections through Anthropic, without
+opening an inbound listener. Remote sessions execute with the container's
+authority, including its mounted files, credentials, tools and any granted
+Docker/host access. Claude's documentation gives a default capacity of **32
+concurrent sessions**, sharing the working directory by default; Djinn passes
+neither a capacity override nor a spawn-mode override. Treat account/device
+access as authority to operate those sessions. See
+[Claude's Remote Control documentation](https://code.claude.com/docs/en/remote-control)
+for connection security and server defaults. `--firewall` coverage of the hosts
+Remote Control needs has not been measured.
+
 ## Host-side workflow publishing
 
 The host CLI reads and writes workflow trees that dev can write: the per-CLI
@@ -564,6 +651,10 @@ not a Djinn promise of fresh MFA. See [policy syntax](https://tailscale.com/docs
 [plan entitlement](https://tailscale.com/pricing).
 
 ## Credentials, backups and outbound traffic
+
+Remote agent access adds the [inbound server boundary and host-local OpenCode
+password](#remote-agent-server-access), alongside the credential and outbound
+limits below.
 
 Per-CLI storage separates files, not agent authority. Credential/config roots
 are ordinary cleartext files protected by host directory permissions (`0700`);
