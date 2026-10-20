@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from contextlib import contextmanager
@@ -358,5 +359,6 @@ def test_lifecycle_exception_is_rendered_literally(discard_case, monkeypatch):
 
 def test_implementation_documents_current_publisher_label():
     root = Path(__file__).resolve().parents[1]
-    line = (root / "IMPLEMENTATION.md").read_text().splitlines()[1508]
-    assert 'djinn.workflow.publisher="2"' in line
+    text = (root / "IMPLEMENTATION.md").read_text()
+    assert 'djinn.workflow.publisher="2"' in text
+    assert re.search(r'djinn\.workflow\.publisher="?(?!2\b)\d', text) is None
