@@ -52,6 +52,7 @@ def test_top_level_commands_are_exact() -> None:
         "agents",
         "session",
         "hostctl",
+        "serve",
     }
 
 
@@ -1103,3 +1104,7 @@ def test_init_force_resets_declarations(tmp_path, monkeypatch):
     config = load_config_file(path)
     assert config.mounts == {} and config.environment == {}
     assert "marker" not in result.output.lower() and "declaration" not in result.output.lower()
+
+
+def test_pretty_exceptions_hide_locals() -> None:
+    assert app.pretty_exceptions_show_locals is False

@@ -596,6 +596,47 @@ def status() -> None:
         status_line("Agent Docker", "Not running", "status.disabled")
 
 
+    # Serve is advisory: a failed snapshot must not break the container status command.
+    from djinn_in_a_box.core import serve as serve_core
+    from djinn_in_a_box.core.console import escape_nonprintable
+
+    try:
+        snapshot = serve_core.collect_snapshot(config, quick=True)
+        if snapshot.container.state == serve_core.ContainerState.UNKNOWN:
+            status_line("Serve", "Unknown (Docker error)", "status.disabled")
+        elif snapshot.container.state == serve_core.ContainerState.ABSENT:
+            status_line("Serve", "Container not running", "status.disabled")
+        elif not snapshot.container.detached:
+            status_line("Serve", "Not available (container not started with --detach)",
+                        "status.disabled")
+        elif snapshot.busy:
+            status_line("Serve", "busy (start/stop in progress)", "status.disabled")
+        else:
+            for name in serve_core.NAMES:
+                row = snapshot.servers[name]
+                label = "OpenCode" if name == serve_core.OPENCODE else "Claude"
+                state = row["state"]
+                value = "Not running"
+                if state == "running":
+                    value = "Running"
+                    if name == serve_core.OPENCODE:
+                        value += (f" - http://127.0.0.1:{snapshot.port}" if snapshot.published
+                                  else " - port not published (recreate once)")
+                elif state == "degraded":
+                    value = f"Degraded: {row['reason']}"
+                elif state == "exited":
+                    value = f"Exited: {row['last_line'] or ''}"
+                status_line(label, escape_nonprintable(value),
+                            "status.enabled" if state == "running" else "status.disabled")
+                if name == serve_core.OPENCODE and row["foreign_listener"]:
+                    status_line(label, "note: port 4096 is used by another process",
+                                "status.disabled")
+            if snapshot.funnel:
+                status_line("Serve", serve_core.FUNNEL_WARNING, "status.disabled")
+    except serve_core.ServeError:
+        status_line("Serve", "Unknown (Docker error)", "status.disabled")
+
+
 clean_app = typer.Typer(
     name="clean",
     help="Manage containers and volumes",
