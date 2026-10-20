@@ -544,10 +544,13 @@ def open_dir(path: str | os.PathLike[str]) -> int:
         raise
 
 
-def read_private(dir_fd: int, name: str, limit: int, *, euid: int | None = None) -> FileRead | None:
+def read_private(
+    dir_fd: int, name: str, limit: int, *, euid: int | None = None, tighten: bool = True
+) -> FileRead | None:
     """Read a regular, own, size-bounded file below ``dir_fd``; None when absent.
 
-    A looser mode is fixed with fchmod 0600 on the descriptor, without rewriting the content.
+    A looser mode is fixed with fchmod 0600 on the descriptor, without rewriting the content,
+    unless ``tighten`` is false (a check that must change nothing).
     Raises Refused for a symlink, FIFO, directory or foreign owner, NotUnderstood for size.
     """
     _require_name(name)
@@ -570,7 +573,7 @@ def read_private(dir_fd: int, name: str, limit: int, *, euid: int | None = None)
             raise Refused("entry belongs to another user")
         if status.st_size > limit:
             raise NotUnderstood("file exceeds the size limit")
-        if status.st_mode & 0o177:
+        if tighten and status.st_mode & 0o177:
             os.fchmod(descriptor, 0o600)
         chunks: list[bytes] = []
         total = 0
@@ -978,6 +981,9 @@ def _apply_step(
         _invalid_step()
     current_export = list(export)
     if step.kind == "update":
+        # Re-read right before the remove: a refresh since the plan, for example while the
+        # carrier lock was awaited, must never be removed before it is published.
+        current_export = runner.export()
         expected = step.before
         current = _find(current_export, identity)
         if expected is None or current is None or current.fingerprint != expected.fingerprint:
@@ -1569,16 +1575,23 @@ def tombstone_all(
     return _add_tombstones(dir_fd, lambda read: _known_ids(read) | extra)
 
 
-def clear_carrier_except_tombstones(carrier_dir: str | os.PathLike[str], lease: Lease) -> list[str]:
-    """The names to remove from the carrier so that only the tombstone file stays.
+def validate_carrier(carrier_dir: str | os.PathLike[str], lease: Lease | None = None) -> None:
+    """Check both carrier files without changing anything, not even a loose mode.
 
-    This module deletes nothing: files, conflict copies, temporary files, subdirectories and
-    mount points are left to the caller's descriptor-contained clearer, which runs under the same
-    lease. An invalid carrier file raises NotUnderstood before any name is returned.
+    Raises Refused for a symlinked, non-regular or foreign entry and NotUnderstood for invalid
+    content. With ``lease`` the check runs on the locked directory, right before a clear.
     """
-    dir_fd = _check_lease(carrier_dir, lease)
-    read_carrier(dir_fd)
-    return [name for name in _list_dir(dir_fd) if name != TOMBSTONES_NAME]
+    dir_fd = _check_lease(carrier_dir, lease) if lease is not None else open_dir(carrier_dir)
+    try:
+        snapshot = read_private(dir_fd, CREDENTIALS_NAME, FILE_LIMIT, tighten=False)
+        if snapshot is not None:
+            parse_entries(snapshot.data)
+        snapshot = read_private(dir_fd, TOMBSTONES_NAME, FILE_LIMIT, tighten=False)
+        if snapshot is not None:
+            parse_tombstones(snapshot.data)
+    finally:
+        if lease is None:
+            os.close(dir_fd)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2104,8 +2117,14 @@ def _try_parse(dir_fd: int, name: str, entries: bool) -> tuple[list[Entry] | lis
             return [], None
         parsed = parse_entries(snapshot.data) if entries else parse_tombstones(snapshot.data)
         return parsed, None
-    except CredentialsError as error:
-        return [], error.reason
+    except (CredentialsError, OSError) as error:
+        return [], _unreadable(error)
+
+
+def _unreadable(error: CredentialsError | OSError) -> str:
+    if isinstance(error, CredentialsError):
+        return error.reason
+    return f"not readable ({error.strerror or type(error).__name__})"
 
 
 def carrier_findings(
@@ -2118,7 +2137,10 @@ def carrier_findings(
     findings: list[Finding] = []
     try:
         dir_fd = open_dir(carrier_dir)
-    except (OSError, CredentialsError):
+    except FileNotFoundError:
+        dir_fd = -1
+    except (OSError, CredentialsError) as error:
+        findings.append(Finding("invalid-file", os.path.basename(carrier_dir), _unreadable(error)))
         dir_fd = -1
     if dir_fd >= 0:
         try:
@@ -2139,7 +2161,12 @@ def _carrier_findings(dir_fd: int) -> list[Finding]:
         findings.append(Finding("invalid-file", TOMBSTONES_NAME, reason))
     by_id = {entry.id: entry for entry in cast(list[Entry], main)}
     temps = _own_temp_patterns()
-    for name in _list_dir(dir_fd):
+    try:
+        names = _list_dir(dir_fd)
+    except OSError as error:
+        findings.append(Finding("invalid-file", ".", _unreadable(error)))
+        names = []
+    for name in names:
         holds_entries = _ENTRIES_COPY.fullmatch(name) is not None
         if holds_entries or _TOMBSTONES_COPY.fullmatch(name) is not None:
             findings.append(Finding("conflict-copy", name))

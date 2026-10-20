@@ -63,7 +63,7 @@ opencode_credentials() {
 
 import_opencode() {
     if [[ -f "$store/seed.json" && ! -L "$store/seed.json" ]]; then
-        opencode_credentials import < "$store/seed.json" ||
+        opencode_credentials import < "$store/seed.json" > /dev/null ||
             printf 'Could not import the credential seed\n' >&2
     fi
 }

@@ -27,6 +27,14 @@ def _isolate_credential_diagnostics(
         oc, "default_audit_root", lambda: str(tmp_path / "home/.local/state/djinn/opencode-audit")
     )
     monkeypatch.setattr(doctor_mod, "_docker_installed", lambda: False)
+    # run_checks inspects the desktop helpers unconditionally; keep these tests off the host daemon.
+    from djinn_in_a_box.core.desktop import DesktopInspection
+
+    monkeypatch.setattr(
+        doctor_mod.docker_core,
+        "inspect_running_desktop",
+        lambda: DesktopInspection(channels=(), raw_sources=(), raw_verified=True),
+    )
 
 
 @pytest.fixture

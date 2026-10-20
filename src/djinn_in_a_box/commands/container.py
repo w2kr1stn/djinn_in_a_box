@@ -6,7 +6,6 @@ import contextlib
 import os
 import re
 import signal
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -684,36 +683,9 @@ def clean_default(ctx: typer.Context) -> None:
 def _validate_opencode_carrier(config: AppConfig | None) -> None:
     """Refuse invalid carrier files before recovery or clearing any other credentials."""
     try:
-        descriptor = opencode_credentials.open_dir(opencode_carrier(config))
+        opencode_credentials.validate_carrier(opencode_carrier(config))
     except FileNotFoundError:
         return
-    try:
-        # The ordinary credential reader also tightens modes; refusal must leave them alone.
-        for name in (opencode_credentials.CREDENTIALS_NAME, opencode_credentials.TOMBSTONES_NAME):
-            try:
-                file_descriptor = os.open(
-                    name,
-                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                    dir_fd=descriptor,
-                )
-            except FileNotFoundError:
-                continue
-            try:
-                status = os.fstat(file_descriptor)
-                if not stat.S_ISREG(status.st_mode):
-                    raise opencode_credentials.Refused("entry is not a regular file")
-                if status.st_uid != os.geteuid():
-                    raise opencode_credentials.Refused("entry belongs to another user")
-                with os.fdopen(file_descriptor, "rb", closefd=False) as handle:
-                    raw = handle.read(opencode_credentials.FILE_LIMIT + 1)
-            finally:
-                os.close(file_descriptor)
-            if name == opencode_credentials.CREDENTIALS_NAME:
-                opencode_credentials.parse_entries(raw)
-            else:
-                opencode_credentials.parse_tombstones(raw)
-    finally:
-        os.close(descriptor)
 
 
 def _logout_opencode(config: AppConfig | None) -> None:
@@ -741,7 +713,7 @@ def _logout_opencode(config: AppConfig | None) -> None:
     with opencode_credentials.carrier_lock(carrier) as lease:
         opencode_credentials.merge_back(carrier, exported, lease)
         opencode_credentials.tombstone_all(carrier, extra_ids, lease)
-        opencode_credentials.clear_carrier_except_tombstones(carrier, lease)
+        opencode_credentials.validate_carrier(carrier, lease)
         if not clear_sync_path(carrier, keep=frozenset({"credentials.removed.json"})):
             raise opencode_credentials.CredentialsError("could not clear the OpenCode carrier")
 

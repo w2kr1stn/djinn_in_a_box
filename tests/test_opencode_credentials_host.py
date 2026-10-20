@@ -1256,7 +1256,7 @@ def test_an_invalid_carrier_file_stops_tombstones_and_clearing_without_a_change(
         elif function == "all":
             oc.tombstone_all(world.carrier, ["cred_b"], lease)
         else:
-            oc.clear_carrier_except_tombstones(world.carrier, lease)
+            oc.validate_carrier(world.carrier, lease)
     assert world.snapshot() == before
 
 
@@ -1319,20 +1319,25 @@ def test_tombstone_writes_retry_against_a_concurrent_writer_at_most_three_times(
     assert calls["n"] == 103
 
 
-def test_clearing_names_everything_but_the_tombstones_and_deletes_nothing(world: World) -> None:
+def test_validation_changes_nothing_not_even_a_loose_mode(world: World) -> None:
     world.put(FILE, [entry("cred_a")])
     world.put(REMOVED, ["cred_a"])
-    world.put(COPY_A, [])
-    (world.carrier / "sub").mkdir()
-    (world.carrier / f".{FILE}.{'c' * 16}.tmp").write_bytes(b"x")
-    (world.carrier / "link").symlink_to("sub")
-    before = sorted(p.name for p in world.carrier.iterdir())
+    world.put(COPY_A, b"{broken")
+    (world.carrier / FILE).chmod(0o644)
+    before = world.snapshot()
+    oc.validate_carrier(world.carrier)
     with locked(world) as lease:
-        names = oc.clear_carrier_except_tombstones(world.carrier, lease)
-    assert names == sorted(
-        [FILE, COPY_A, "sub", "link", f".{FILE}.{'c' * 16}.tmp"],
-    )
-    assert sorted(p.name for p in world.carrier.iterdir()) == before
+        oc.validate_carrier(world.carrier, lease)
+    assert world.snapshot() == before
+    assert mode_of(world.carrier / FILE) == 0o644
+
+
+@pytest.mark.parametrize("name", [FILE, REMOVED])
+def test_validation_refuses_a_symlinked_carrier_file(world: World, name: str) -> None:
+    (world.carrier / "elsewhere.json").write_text("[]\n")
+    (world.carrier / name).symlink_to("elsewhere.json")
+    with pytest.raises(oc.Refused):
+        oc.validate_carrier(world.carrier)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1381,6 +1386,35 @@ def test_invalid_main_files_are_reported(world: World) -> None:
         oc.Finding("invalid-file", FILE, "invalid JSON or UTF-8"),
         oc.Finding("invalid-file", REMOVED, "a tombstone is not a valid id"),
     ]
+
+
+def test_unreadable_carrier_files_are_findings_not_errors(world: World) -> None:
+    assert os.geteuid() != 0
+    world.put(FILE, [entry("cred_a")])
+    world.put(COPY_A, [entry("cred_a")])
+    (world.carrier / FILE).chmod(0o000)
+    (world.carrier / COPY_A).chmod(0o000)
+    try:
+        assert findings(world) == [
+            oc.Finding("invalid-file", FILE, "not readable (Permission denied)"),
+            oc.Finding("conflict-copy", COPY_A),
+            oc.Finding("invalid-file", COPY_A, "not readable (Permission denied)"),
+        ]
+    finally:
+        (world.carrier / FILE).chmod(0o600)
+        (world.carrier / COPY_A).chmod(0o600)
+
+
+def test_an_unreadable_carrier_directory_is_a_finding_not_an_error(world: World) -> None:
+    assert os.geteuid() != 0
+    world.put(FILE, [entry("cred_a")])
+    world.carrier.chmod(0o000)
+    try:
+        assert findings(world) == [
+            oc.Finding("invalid-file", world.carrier.name, "not readable (Permission denied)")
+        ]
+    finally:
+        world.carrier.chmod(0o700)
 
 
 def test_a_refused_session_root_and_a_missing_carrier_are_findings_not_errors(

@@ -671,6 +671,7 @@ def test_the_main_scenario_converges_without_a_crash(world: World) -> None:
         "fake export",
         "fake credential.remove cred_dead",
         "fake export",
+        "fake export",
         "fake credential.remove cred_x",
         "fake export",
         "fake import",
@@ -958,7 +959,8 @@ def test_reactivate_restores_the_selection_against_the_other_hosts_choice(world:
     )
     world.write(FILE, other_choice)
     host.seed_seen_from_db()
-    crashed = world.run(host, env={"FAKE_KILL_AFTER": "2"})
+    # calls: export, re-read before the update, remove of the active cred_x → killed
+    crashed = world.run(host, env={"FAKE_KILL_AFTER": "3"})
     assert crashed.returncode == -signal.SIGKILL
     assert sorted(host.values()) == ["cred_y"]
     assert host.state().reactivate == {"prov_p": "cred_x"}
@@ -1043,6 +1045,37 @@ def test_an_update_stops_when_the_database_entry_changed_since_the_plan(world: W
     assert "update postcondition missed for cred_x" in result.stderr
     assert host.values() == {"cred_x": oauth_value("xr", 9000)}
     assert world.mutating_calls() == ["fake credential.remove cred_dead"]
+    sync_ok(world, host)
+    assert host.values() == {"cred_x": oauth_value("xr", 9000)}
+    assert world.file_values() == {"cred_x": oauth_value("xr", 9000)}
+
+
+def test_a_refresh_after_the_first_export_survives_the_planned_update(world: World) -> None:
+    """The refresh lands while the helper waits for the carrier lock, before its first update."""
+    host = world.host()
+    host.put([entry("cred_x", "prov_p", oauth_value("x1", 1000))])
+    host.seed_seen_from_db()
+    world.write(FILE, [entry("cred_x", "prov_p", oauth_value("x2", 2000))])
+    refreshed = {
+        "entries": [
+            {
+                k: v
+                for k, v in entry("cred_x", "prov_p", oauth_value("xr", 9000)).items()
+                if k != "active"
+            }
+        ],
+        "selection": {},
+    }
+    concurrent = world.root / "concurrent.json"
+    concurrent.write_text(json.dumps(refreshed))
+    result = world.run(
+        host,
+        env={"FAKE_CONCURRENT_AT": "2", "FAKE_CONCURRENT_FILE": str(concurrent)},
+    )
+    assert result.returncode == 1
+    assert "update postcondition missed for cred_x" in result.stderr
+    assert host.values() == {"cred_x": oauth_value("xr", 9000)}
+    assert world.mutating_calls() == []
     sync_ok(world, host)
     assert host.values() == {"cred_x": oauth_value("xr", 9000)}
     assert world.file_values() == {"cred_x": oauth_value("xr", 9000)}
@@ -1138,7 +1171,8 @@ MAIN_SEEN_FPS = {
 
 def test_a_failing_command_aborts_without_confirming_the_state(world: World) -> None:
     host = MAIN.build(world)
-    result = world.run(host, env={"FAKE_FAIL_AT": "4"})
+    # calls: export, remove cred_dead, export, re-read before the update, remove cred_x → fails
+    result = world.run(host, env={"FAKE_FAIL_AT": "5"})
     assert result.returncode == 1
     assert "remove failed (rc 1)" in result.stderr
     assert dict(host.state().seen) == MAIN_SEEN_FPS
@@ -1542,7 +1576,7 @@ def test_the_event_log_sees_both_the_fake_and_the_file_operations(world: World) 
     host = MAIN.build(world)
     events = logged_run(world, host)
     assert sum(e.startswith("ops ") for e in events) > 30
-    assert sum(e.startswith("fake ") for e in events) == 14
+    assert sum(e.startswith("fake ") for e in events) == 15
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2094,7 +2128,7 @@ def test_no_secret_reaches_argv_environment_logs_or_output(world: World) -> None
     )
     assert result.returncode == 0, result.stderr
     counts = [e for e in world.events() if e.startswith("fake sentinel count")]
-    assert len(counts) == 14
+    assert len(counts) == 15
     assert set(counts) == {"fake sentinel count 0"}
     assert hits(result.stdout + result.stderr) == 0
     assert hits("\n".join(world.events())) == 0

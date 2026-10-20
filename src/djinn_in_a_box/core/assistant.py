@@ -481,7 +481,7 @@ def run_audit(occasion: str | None, selected: str | None = None) -> int:
     briefing = (project / "assistant" / "audit-briefing.md").read_text(encoding="utf-8")
     recover_leftover_sessions(project, config)
     session = open_audit_session(config) if agent == "opencode" else None
-    launched = False
+    launched = interrupted = False
     try:
         if session is not None:
             mounts.extend(audit_session_mounts(session))
@@ -510,13 +510,20 @@ def run_audit(occasion: str | None, selected: str | None = None) -> int:
         try:
             return subprocess.run(argv, check=False).returncode
         except KeyboardInterrupt:
+            interrupted = True
             return 130
         finally:
             if session is None:
                 cleanup(name)
     finally:
         if session is not None:
-            finish_session(session.container_name, session, project, config, launched=launched)
+            try:
+                finish_session(session.container_name, session, project, config, launched=launched)
+            except AssistantError as error:
+                # After Ctrl-C the status stays 130; the session was kept for the next recovery.
+                if not interrupted:
+                    raise
+                warning(f"OpenCode audit finalization failed: {error}")
         else:
             # Any audit ends with a recovery, so leftovers whose lease or carrier recovered in the
             # meantime are merged now rather than at the next audit or start.

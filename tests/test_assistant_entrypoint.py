@@ -233,9 +233,17 @@ def test_opencode_failed_export_leaves_no_final_and_no_temporary(tmp_path):
 def test_opencode_failed_import_does_not_stop_the_audit(tmp_path):
     entry, env, store, _, log = prepare_opencode(tmp_path, [credential("cred_one")])
     marker = tmp_path / "ran"
-    r = run_entry(entry, {**env, "FAKE_FAIL_AT": "1"}, f"touch {shlex.quote(str(marker))}")
+    noise = tmp_path / "noise.txt"
+    sentinel = "sentinel-" + secrets.token_hex(8)
+    noise.write_text(sentinel)
+    r = run_entry(
+        entry,
+        {**env, "FAKE_FAIL_AT": "1", "FAKE_STDERR_FILE": str(noise)},
+        f"touch {shlex.quote(str(marker))}",
+    )
     assert r.returncode == 0, r.stderr
     assert "Could not import" in r.stderr and marker.exists()
+    assert sentinel not in r.stdout + r.stderr
     assert (store / "final.json").exists()
 
 

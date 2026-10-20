@@ -477,7 +477,10 @@ def _opencode_credentials_check(config_root: Path) -> Check:
     if "differing-value" in kinds:
         remedies.append("The next dev start merges them.")
     if "invalid-file" in kinds:
-        remedies.append("Inspect and repair the invalid credential files, then retry.")
+        remedies.append(
+            "Inspect and repair the invalid or unreadable credential files "
+            "(owned by you, mode 0600), then retry."
+        )
     if "stale-temp" in kinds:
         remedies.append("The next credential writer removes stale temporary files.")
     return Check(

@@ -1012,6 +1012,22 @@ def test_finalization_runs_after_a_failed_stop(installation, monkeypatch, warnin
     assert f.docker.containers == {}
 
 
+def test_ctrl_c_keeps_status_130_when_the_finalization_fails(
+    installation, monkeypatch, warnings_seen
+):
+    f = installation
+    events = Events(f, monkeypatch)
+    f.docker.interrupt = True
+
+    def broken_stop(name):
+        raise a.AssistantError("stop failed")
+
+    monkeypatch.setattr(a, "stop_container", broken_stop)
+    assert a.run_audit(None, "opencode") == 130
+    assert events.order() == ["RECOVER", "rm", "RECOVER"]
+    assert any("finalization failed: stop failed" in str(item) for item in warnings_seen)
+
+
 def test_prelaunch_failure_still_releases_the_session(installation, monkeypatch):
     f = installation
     events = Events(f, monkeypatch)
