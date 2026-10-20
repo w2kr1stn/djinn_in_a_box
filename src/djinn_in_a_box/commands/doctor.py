@@ -831,41 +831,53 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
                 "" if code_ok else f"Create the {root_label} or fix `general.code_dir`.",
             )
         )
-        root = get_config_root(config)
-        root_ok = root.is_dir()
+        problems = docker_core.managed_bind_problems(config)
         checks.append(
             Check(
-                "Config root",
-                Status.PASS if root_ok else Status.WARN,
-                str(root),
-                "" if root_ok else "Run `djinn init` (it provisions the config root).",
+                "Managed bind sources",
+                Status.FAIL if problems else Status.PASS,
+                "; ".join(problems) if problems else "no overlap with host execution inputs",
             )
         )
-        sops_check = _sops_age_key_check(config, root)
-        if sops_check is not None:
-            checks.append(sops_check)
-
         try:
-            assignments = load_zone_assignments(config)
-            loose = loose_credential_dirs(config, assignments)
+            root = get_config_root(config)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            checks.append(Check("Config root", Status.FAIL, str(exc)))
+        else:
+            root_ok = root.is_dir()
             checks.append(
                 Check(
-                    "Credential and zone dir modes",
-                    Status.PASS if not loose else Status.WARN,
-                    "0700" if not loose else ", ".join(str(path) for path in loose),
-                    "" if not loose else "Run `djinn doctor --fix` to tighten them to 0700.",
+                    "Config root",
+                    Status.PASS if root_ok else Status.WARN,
+                    str(root),
+                    "" if root_ok else "Run `djinn init` (it provisions the config root).",
                 )
             )
-            checks.extend(_zone_diagnostic_checks(config, assignments))
-        except (ConfigValidationError, OSError) as exc:
-            checks.append(
-                Check(
-                    "Zone configuration",
-                    Status.WARN,
-                    str(exc),
-                    "Fix the zone roots or zones.toml, then re-run `djinn doctor`.",
+            sops_check = _sops_age_key_check(config, root)
+            if sops_check is not None:
+                checks.append(sops_check)
+
+            try:
+                assignments = load_zone_assignments(config)
+                loose = loose_credential_dirs(config, assignments)
+                checks.append(
+                    Check(
+                        "Credential and zone dir modes",
+                        Status.PASS if not loose else Status.WARN,
+                        "0700" if not loose else ", ".join(str(path) for path in loose),
+                        "" if not loose else "Run `djinn doctor --fix` to tighten them to 0700.",
+                    )
                 )
-            )
+                checks.extend(_zone_diagnostic_checks(config, assignments))
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                checks.append(
+                    Check(
+                        "Zone configuration",
+                        Status.WARN,
+                        str(exc),
+                        "Fix the zone roots or zones.toml, then re-run `djinn doctor`.",
+                    )
+                )
 
     if config is not None:
         checks.extend(declaration_checks(config))

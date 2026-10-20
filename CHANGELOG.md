@@ -26,6 +26,9 @@ Versioning before and after the first stable release.
   `$` literally instead of letting Compose interpolate them. A `--mount` or
   `--here` source whose resolved path contains `:` is refused instead of being
   split by Compose.
+- `djinn start --detach` delivers zone overlay and read-only shell/SOPS mount
+  paths containing `$` literally. Compose receives `HOME` explicitly so
+  `~/.djinn/sessions` is the directory checked against host execution inputs.
 - `djinn hostctl on --allow-unsealed` opens again for a dev with a Docker socket
   or relocated socket bind, a host-root bind or an unverified `DOCKER_HOST`:
   sealing skips the nested socket/hard-link inventory for such a dev instead of
@@ -47,6 +50,16 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Refuse managed writable binds selected by configuration that overlap host
+  execution inputs or whose path contains `..` or `:`: the workspace root (also
+  delivered to the agent-Docker companion), config-root tool directories (`claude`, `codex`,
+  `opencode`, `gh`, `age`), assigned shared/local zone overlay sources, and
+  `~/.djinn/sessions`. `djinn start` and `djinn run` check immediately after loading
+  config, before host provisioning, in every Docker mode, and fail closed when
+  inputs or a source cannot be determined. `djinn doctor` reports the same check
+  in `Managed bind sources`. Existing setups: move an overlapping installation,
+  Python environment or PATH directory out of the root, or choose another root,
+  before the next start; `djinn doctor` lists them.
 - At container creation, refuse writable declared binds and writable invocation
   `--mount`/`--here` sources that overlap host execution inputs, including
   `djinn run`'s implicit `--here`. Read-only binds, `--mount ...:ro`, and

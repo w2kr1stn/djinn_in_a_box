@@ -143,6 +143,7 @@ class TestRunCommand:
         with (
             patch("djinn_in_a_box.commands.agent.run_headless_agent") as mock_run,
             patch("djinn_in_a_box.commands.agent.load_config") as mock_config,
+            patch("djinn_in_a_box.commands.agent.validate_managed_bind_sources"),
             patch(
                 "djinn_in_a_box.commands.agent.prepare_config_workflow",
                 return_value=WorkflowPreparationResult(True),
@@ -181,6 +182,7 @@ class TestRunCommand:
         with (
             patch("djinn_in_a_box.commands.agent.run_headless_agent", side_effect=unknown),
             patch("djinn_in_a_box.commands.agent.load_config", return_value=object()),
+            patch("djinn_in_a_box.commands.agent.validate_managed_bind_sources"),
             patch(
                 "djinn_in_a_box.commands.agent.workflow_image_compatible",
                 return_value=WorkflowImageCompatibility.COMPATIBLE,

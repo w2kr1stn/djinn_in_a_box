@@ -432,6 +432,7 @@ def test_execution_refusal_precedes_creation(
     mode,
     channel,
 ):
+    monkeypatch.setattr(docker, "validate_managed_bind_sources", lambda config: None)
     inputs, _inventory, _source = execution_ground
     path = next(iter(inputs.values()))[0]
     config = creation_context
@@ -541,6 +542,8 @@ def test_cli_execution_refusal(
     channel,
     failure,
 ):
+    for module in (docker, container, agent):
+        monkeypatch.setattr(module, "validate_managed_bind_sources", lambda config: None)
     inputs, inventory, unrelated = execution_ground
     name, (input_path, *_rest) = next(iter(inputs.items()))
     source = input_path if failure == "overlap" else unrelated

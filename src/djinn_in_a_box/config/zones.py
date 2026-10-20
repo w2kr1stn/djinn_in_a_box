@@ -68,7 +68,7 @@ def _load_zone_overrides(path: Path) -> dict[str, _ZoneLists]:
     try:
         with path.open("rb") as file:
             data = tomllib.load(file)
-    except tomllib.TOMLDecodeError as error:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
         msg = f"Invalid TOML syntax in {path}: {error}"
         raise ZoneConfigurationError(msg) from error
 

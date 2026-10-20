@@ -40,77 +40,36 @@ pytestmark = pytest.mark.skipif(
 def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A live container proves the mounted paths retain the agent's expected layout."""
+    """A live container proves the mounted paths retain the agent's expected layout.
+
+    The zone roots are directories the test process can inspect, as the managed-bind
+    check requires; the Docker daemon must therefore share this filesystem (as in CI).
+    """
     project = tmp_path / "project"
     project.mkdir()
     compose_file = project / "compose.yml"
     project_name = f"djinn-zone-test-{uuid4().hex}"
     service = f"zone-manifest-{uuid4().hex}"
-    volume_names = {
-        "config": f"djinn-zone-config-{uuid4().hex}",
-        "shared": f"djinn-zone-shared-{uuid4().hex}",
-        "local": f"djinn-zone-local-{uuid4().hex}",
+    markers = {
+        "config": {
+            "claude/base/marker": "base",
+            "claude/projects/marker": "shared",
+            "claude/plugins/cache/marker": "local",
+        },
+        "shared": {"claude/projects/marker": "shared"},
+        "local": {"claude/plugins/cache/marker": "local"},
     }
-    created_volumes: list[str] = []
+    for zone, files in markers.items():
+        for relative, content in files.items():
+            marker = tmp_path / zone / relative
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"{content}\n")
     try:
-        mountpoints: dict[str, Path] = {}
-        for zone, name in volume_names.items():
-            created = subprocess.run(
-                ["docker", "volume", "create", name],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-            assert created.returncode == 0, created.stderr
-            created_volumes.append(name)
-            inspected = subprocess.run(
-                ["docker", "volume", "inspect", name, "--format", "{{.Mountpoint}}"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-            assert inspected.returncode == 0, inspected.stderr
-            mountpoints[zone] = Path(inspected.stdout.strip())
-
-        helpers = {
-            "config": (
-                "mkdir -p /data/claude/base /data/claude/projects /data/claude/plugins/cache; "
-                "printf 'base\\n' > /data/claude/base/marker; "
-                "printf 'shared\\n' > /data/claude/projects/marker; "
-                "printf 'local\\n' > /data/claude/plugins/cache/marker"
-            ),
-            "shared": "mkdir -p /data/claude/projects; "
-            "printf 'shared\\n' > /data/claude/projects/marker",
-            "local": "mkdir -p /data/claude/plugins/cache; "
-            "printf 'local\\n' > /data/claude/plugins/cache/marker",
-        }
-        for zone, script in helpers.items():
-            populated = subprocess.run(
-                [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "-v",
-                    f"{volume_names[zone]}:/data",
-                    "alpine:3.20",
-                    "/bin/sh",
-                    "-c",
-                    script,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-            assert populated.returncode == 0, populated.stderr
-
         config = AppConfig(
             code_dir=project,
-            config_root=mountpoints["config"],
-            shared_root=mountpoints["shared"],
-            local_root=mountpoints["local"],
+            config_root=tmp_path / "config",
+            shared_root=tmp_path / "shared",
+            local_root=tmp_path / "local",
         )
         roots = resolve_zone_roots(config)
         compose_file.write_text(
@@ -151,34 +110,9 @@ def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
             timeout=30,
         )
         assert before.returncode == 0, before.stderr
-        base_paths_cleared = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "-v",
-                f"{volume_names['config']}:/data",
-                "alpine:3.20",
-                "/bin/sh",
-                "-c",
-                "rm -f /data/claude/projects/marker /data/claude/plugins/cache/marker",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        assert base_paths_cleared.returncode == 0, base_paths_cleared.stderr
-        source_directories = {
-            roots.shared_root / "claude" / "projects",
-            roots.local_root / "claude" / "plugins" / "cache",
-        }
-        original_is_dir = Path.is_dir
-
-        def docker_host_directory(path: Path) -> bool:
-            return path in source_directories or original_is_dir(path)
-
-        monkeypatch.setattr(Path, "is_dir", docker_host_directory)
+        # Only the zone overlays can supply these markers from now on.
+        (roots.config_root / "claude/projects/marker").unlink()
+        (roots.config_root / "claude/plugins/cache/marker").unlink()
         monkeypatch.setattr(zones_mod, "ZONES_FILE", tmp_path / "zones.toml")
 
         def project_root() -> Path:
@@ -214,13 +148,6 @@ def test_container_view_manifest_preserves_base_overlay_and_nested_overlay(
             check=False,
             timeout=30,
         )
-        for name in created_volumes:
-            subprocess.run(
-                ["docker", "volume", "rm", name],
-                capture_output=True,
-                check=False,
-                timeout=30,
-            )
 
     expected = "base=base\noverlay=shared\nnested-overlay=local\n"
     assert before.stdout == expected

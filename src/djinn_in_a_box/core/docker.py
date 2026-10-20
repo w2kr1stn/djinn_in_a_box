@@ -545,7 +545,7 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
 def _compose_host_env(config: AppConfig | None) -> dict[str, str]:
     """Full host environment for a compose subprocess: inherited env + rendered vars."""
     inherited = {key: value for key, value in os.environ.items() if key not in desktop.MANAGED_ENV}
-    return {**inherited, **build_compose_env(config)}
+    return {**inherited, **build_compose_env(config), "HOME": str(Path.home())}
 
 
 def _run_compose(
@@ -657,33 +657,37 @@ def get_zone_overlay_mount_args(config: AppConfig) -> list[str]:
     return args
 
 
-def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], tuple[Path, ...]]:
-    """Return overlay arguments and every configured overlay target.
-
-    Assigned overlay targets are reserved independently of whether a source
-    currently exists.
-    """
+def _zone_overlay_sources(config: AppConfig) -> list[tuple[Path, Path]]:
+    """Return every assigned overlay source and target, including missing sources."""
     # ``config.zones`` imports root resolution from this module, so retain this
     # import at the runtime boundary rather than creating an import cycle.
     from djinn_in_a_box.config.zones import ZONE_CONTAINER_TARGETS, load_zone_assignments
 
     roots = resolve_zone_roots(config)
     assignments = load_zone_assignments(config)
-    args: list[str] = []
-    targets: list[Path] = []
+    sources: list[tuple[Path, Path]] = []
     zone_roots = {"local": roots.local_root, "shared": roots.shared_root}
     for agent, target_root in ZONE_CONTAINER_TARGETS.items():
         for zone in ("local", "shared"):
             for relative_path in assignments.by_agent[agent][zone]:
-                target = target_root / relative_path
-                targets.append(target)
-                source = zone_roots[zone] / agent / relative_path
-                # Empty and populated assigned directories mount equally.
-                if source.is_symlink() or (source.exists() and not source.is_dir()):
-                    msg = f"Zone overlay source is not a directory: {source}"
-                    raise ZoneConfigurationError(msg)
-                if source.is_dir():
-                    args.extend(["-v", f"{source}:{target}"])
+                sources.append(
+                    (zone_roots[zone] / agent / relative_path, target_root / relative_path)
+                )
+    return sources
+
+
+def _zone_overlay_mount_args_and_targets(config: AppConfig) -> tuple[list[str], tuple[Path, ...]]:
+    """Return overlay arguments and every configured overlay target."""
+    args: list[str] = []
+    targets: list[Path] = []
+    for source, target in _zone_overlay_sources(config):
+        targets.append(target)
+        # Empty and populated assigned directories mount equally.
+        if source.is_symlink() or (source.exists() and not source.is_dir()):
+            msg = f"Zone overlay source is not a directory: {source}"
+            raise ZoneConfigurationError(msg)
+        if source.is_dir():
+            args.extend(["-v", f"{source}:{target}"])
     return args, tuple(targets)
 
 
@@ -832,6 +836,90 @@ def _execution_input_check() -> Callable[[str | Path], str | None]:
         return None
 
     return check
+
+
+def managed_bind_problems(config: AppConfig) -> list[str]:
+    """Check configurable writable bind sources without provisioning them."""
+    check = _execution_input_check()
+    problems: list[str] = []
+    reported_uncheckable: set[str] = set()
+
+    def config_sources() -> list[Path]:
+        root = get_config_root(config)
+        return [root / name for name in SYNC_PATHS["credentials"]]
+
+    families: tuple[tuple[str, str, Callable[[], list[Path]], str], ...] = (
+        (
+            "Workspace root",
+            "general.code_dir",
+            lambda: [config.code_dir.expanduser()],
+            "move that input out of the workspace root or set "
+            "general.code_dir to another directory",
+        ),
+        (
+            "Config-root tool directory",
+            "general.config_root (or DJINN_CONFIG_ROOT)",
+            config_sources,
+            "move that input out of the config root or set general.config_root "
+            "(or DJINN_CONFIG_ROOT) to another directory",
+        ),
+        (
+            "Zone overlay source",
+            "general.shared_root / general.local_root",
+            lambda: [source for source, _target in _zone_overlay_sources(config)],
+            "move that input out of the zone roots or set "
+            "general.shared_root / general.local_root to another directory",
+        ),
+        (
+            "Sessions directory",
+            "~/.djinn/sessions",
+            lambda: [Path.home() / ".djinn" / "sessions"],
+            "move that input out of ~/.djinn/sessions",
+        ),
+    )
+    for family, description, sources, remedy in families:
+        try:
+            paths = sources()
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            problems.append(
+                f"{family} ({description}) cannot be checked against host execution inputs "
+                f"({exc}); fix that setting or file and retry"
+            )
+            continue
+        for source in paths:
+            if ".." in source.parts:
+                problems.append(
+                    f"{family} {source} cannot be checked against host execution inputs "
+                    "(the path contains '..', which Docker and the host resolve differently); "
+                    "set it without '..' and retry"
+                )
+                continue
+            if ":" in str(source):
+                problems.append(
+                    f"{family} {source} cannot be checked against host execution inputs "
+                    "(the path contains ':', which Compose splits); "
+                    "set it without ':' and retry"
+                )
+                continue
+            cause = check(source)
+            if cause is not None:
+                source_remedy = remedy
+                if cause.startswith("cannot be checked against host execution inputs"):
+                    if cause in reported_uncheckable:
+                        continue
+                    reported_uncheckable.add(cause)
+                    source_remedy = "fix that cause and retry"
+                problems.append(
+                    f"{family} {source} is mounted writable and {cause}; {source_remedy}"
+                )
+    return problems
+
+
+def validate_managed_bind_sources(config: AppConfig) -> None:
+    """Refuse creation on the first managed-source overlap or inspection failure."""
+    problems = managed_bind_problems(config)
+    if problems:
+        raise MountSpecificationError(problems[0])
 
 
 def validate_container_mounts(
@@ -2168,6 +2256,7 @@ def compose_run(
         service: Compose service name (default: dev).
         timeout: Timeout in seconds (headless only). Returns exit code 124 on timeout.
     """
+    validate_managed_bind_sources(config)
     # Fail before allocating a TTY: a background start would otherwise degenerate
     # into a SIGTTOU storm that kills the container. Headless runs pass -T and are
     # unaffected.
@@ -2391,6 +2480,7 @@ def compose_up_detached(
     file, so the interactive zsh ending the entrypoint stays alive with nothing
     attached. Attach afterwards with ``djinn enter``.
     """
+    validate_managed_bind_sources(config)
     _validate_desktop_env(env)
     project_root = get_project_root()
     compose_files = get_compose_files(options.docker_mode)
@@ -2434,9 +2524,13 @@ def compose_up_detached(
             escaped_target = str(target).replace("$", "$$")
             volume_specs.append(f"{source}:{escaped_target}" + (":ro" if mount.read_only else ""))
     # Detached startup mounts every assigned overlay so writes reach its host zone.
-    volume_specs.extend(_volume_specs_from_mount_args(zone_overlay_args))
+    volume_specs.extend(
+        spec.replace("$", "$$") for spec in _volume_specs_from_mount_args(zone_overlay_args)
+    )
     runtime_args = [*shell_args, *sops_args]
-    volume_specs.extend(_volume_specs_from_mount_args(runtime_args))
+    volume_specs.extend(
+        spec.replace("$", "$$") for spec in _volume_specs_from_mount_args(runtime_args)
+    )
     # The `-e` half of those same pairs has to ride along, or the sockets (and
     # the SOPS identity) are mounted but unreachable. Explicit `env` wins over
     # the derived values.

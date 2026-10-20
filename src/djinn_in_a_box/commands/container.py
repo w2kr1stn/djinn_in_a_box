@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from djinn_in_a_box.commands.doctor import preflight
@@ -74,6 +75,7 @@ from djinn_in_a_box.core.docker import (
     network_exists,
     resolve_container_mounts,
     resolve_docker_mode,
+    validate_managed_bind_sources,
     volume_exists,
 )
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
@@ -258,6 +260,11 @@ def start(
         raise typer.Exit(1)
 
     config = load_config()
+    try:
+        validate_managed_bind_sources(config)
+    except MountSpecificationError as e:
+        error(escape(str(e)))
+        raise typer.Exit(1) from None
     preflight(config, provision_host=False)
 
     config_root = get_config_root(config)
@@ -283,7 +290,7 @@ def start(
     try:
         mounts = resolve_container_mounts(tuple(mount or ()), here=here)
     except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
-        error(str(e))
+        error(escape(str(e)))
         raise typer.Exit(1) from None
 
     # Print status output (to stderr, matching Bash format)
@@ -361,7 +368,7 @@ def start(
                 shell_mount_args=shell_args,
             )
     except (MountCollisionError, MountSpecificationError) as e:
-        error(str(e))
+        error(escape(str(e)))
         raise typer.Exit(1) from None
     except RuntimeMountSpecificationError as e:
         error(f"Internal runtime mount construction failed: {e}")

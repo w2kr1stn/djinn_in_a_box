@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated, cast
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from djinn_in_a_box.config.loader import load_agents, load_config
@@ -39,6 +40,7 @@ from djinn_in_a_box.core.docker import (
     get_config_root,
     resolve_container_mounts,
     resolve_docker_mode,
+    validate_managed_bind_sources,
     workflow_image_compatible,
 )
 from djinn_in_a_box.core.exceptions import (
@@ -198,6 +200,11 @@ def run(
     checked_config = None
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
     config = load_config()
+    try:
+        validate_managed_bind_sources(config)
+    except MountSpecificationError as e:
+        error(escape(str(e)))
+        raise typer.Exit(1) from None
     checked_config = config
     if agent in {"claude", "codex"}:
         selected_agent = cast(ConfigSyncSource, agent)
@@ -222,7 +229,7 @@ def run(
             tuple(mount or ()), here=here or not mount
         )
     except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
-        error(str(e))
+        error(escape(str(e)))
         raise typer.Exit(1) from None
 
     try:
@@ -259,7 +266,7 @@ def run(
         error(f"Internal runtime mount construction failed: {e}")
         raise typer.Exit(1) from None
     except (MountCollisionError, MountSpecificationError) as e:
-        error(str(e))
+        error(escape(str(e)))
         raise typer.Exit(1) from None
 
     if result.stdout:
