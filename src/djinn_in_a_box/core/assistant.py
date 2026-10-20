@@ -413,6 +413,12 @@ def recover_leftover_sessions(
         return
     for identity, reason in report.kept:
         warning(f"OpenCode audit session {identity} was kept: {reason}")
+    if any(reason == "restore in progress" for _, reason in report.kept):
+        from djinn_in_a_box.core.lock_holders import describe_holders
+
+        holder = describe_holders(credentials.default_audit_root(), exclusive_only=True)
+        if holder:
+            warning(f"OpenCode restore gate: {holder}")
 
 
 def audit_session_mounts(session: credentials.Session) -> list[tuple[Path, Path]]:

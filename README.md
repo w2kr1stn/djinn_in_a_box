@@ -1571,6 +1571,9 @@ Restore the newest backup:
 djinn restore
 ```
 
+After an interrupted restore, lifecycle commands refuse while a restore writer
+still runs, and the refusal names the process.
+
 Restore asks for confirmation and overwrites the restored volume and config-root
 directory contents. For encrypted backups, `age` prompts for the passphrase at
 the terminal before anything is restored.

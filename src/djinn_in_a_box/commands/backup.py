@@ -29,7 +29,7 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import opencode_credentials
+from djinn_in_a_box.core import host_runtime, hostctl, opencode_credentials
 from djinn_in_a_box.core.assistant import (
     credential_error_reason,
     opencode_carrier,
@@ -51,6 +51,7 @@ from djinn_in_a_box.core.docker import (
     restore_volume,
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
+from djinn_in_a_box.core.lock_holders import describe_holders
 from djinn_in_a_box.core.paths import BACKUPS_DIR, get_project_root
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
@@ -432,9 +433,18 @@ def restore(
             for archive in inner_archives
         )
         if preserve_opencode:
-            carrier = opencode_carrier(config)
             try:
                 gate = gates.enter_context(opencode_credentials.restore_gate())
+            except (opencode_credentials.CredentialsError, OSError) as exc:
+                message = (
+                    "Restore refused: OpenCode restore gate could not be held: "
+                    f"{credential_error_reason(exc)}."
+                )
+                holder = describe_holders(opencode_credentials.default_audit_root())
+                error(f"{message} {holder}" if holder else message)
+                raise typer.Exit(1) from None
+            carrier = opencode_carrier(config)
+            try:
                 exported = export_opencode_data_credentials()
                 carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with opencode_credentials.carrier_lock(carrier) as lease:
@@ -452,8 +462,6 @@ def restore(
                     "unexported logins are lost."
                 )
                 try:
-                    if gate is None:
-                        gate = gates.enter_context(opencode_credentials.restore_gate())
                     carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
                     with opencode_credentials.carrier_lock(carrier) as lease:
                         parked = opencode_credentials.park_for_restore(None, carrier, b"[]", lease)
@@ -463,6 +471,11 @@ def restore(
                         f"{credential_error_reason(park_error)}"
                     )
 
+        inherit = (
+            hostctl.held_control_descriptor(),
+            host_runtime.held_creation_descriptor(),
+            *((gate,) if gate is not None else ()),
+        )
         failed = False
         for archive in inner_archives:
             if archive.name.removesuffix(".tar.gz") in PROTECTED_INTERNAL_VOLUMES:
@@ -483,7 +496,7 @@ def restore(
                     continue
                 label = vol_name
                 info(f"  {label}")
-                result = restore_volume(vol_name, declared_dir)
+                result = restore_volume(vol_name, declared_dir, inherit_fds=inherit)
             elif is_sync_archive(archive.name):
                 path_name = extract_sync_path_name(archive.name)
                 label = f"sync/{path_name}"
@@ -492,9 +505,7 @@ def restore(
                     error(f"  {label}: unknown sync path name")
                     failed = True
                     continue
-                result = restore_sync_path(
-                    path_name, staging_dir, config, inherit_fds=() if gate is None else (gate,)
-                )
+                result = restore_sync_path(path_name, staging_dir, config, inherit_fds=inherit)
                 if result.extraction_admitted:
                     try:
                         _harden_restored_sync_directories(
@@ -510,7 +521,7 @@ def restore(
                     continue
                 label = vol_name
                 info(f"  {label}")
-                result = restore_volume(vol_name, staging_dir)
+                result = restore_volume(vol_name, staging_dir, inherit_fds=inherit)
 
             if result.success and hardening_error is None:
                 success(f"  {label}")

@@ -14,10 +14,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 import typer
+from test_restore_lock_holders import fast_clock, flock_holder
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
@@ -1647,7 +1648,7 @@ class TestRestoreCommand:
             mock_restore.return_value = RunResult(0, "", "")
             backup_module.restore()
 
-        mock_restore.assert_called_once_with("djinn-opencode-data", staging_dir)
+        mock_restore.assert_called_once_with("djinn-opencode-data", staging_dir, inherit_fds=ANY)
         mock_subprocess.run.assert_not_called()
         assert not staging_dir.exists()
 
@@ -1695,7 +1696,9 @@ class TestRestoreCommand:
 
             backup_module.restore()
 
-            mock_restore.assert_called_once_with("djinn-opencode-data", staging_dir)
+            mock_restore.assert_called_once_with(
+                "djinn-opencode-data", staging_dir, inherit_fds=ANY
+            )
             mock_subprocess.run.assert_not_called()
 
         assert backups_dir.stat().st_mode & 0o777 == 0o700
@@ -2434,9 +2437,10 @@ def credential_restore(tmp_path, mock_app_config, monkeypatch):
         with tarfile.open(backups / "djinn-backup-2026-10-20.tar.gz", "w:gz") as outer:
             for name in names:
                 archive = tmp_path / f"{name}.tar.gz"
+                archive.parent.mkdir(parents=True, exist_ok=True)
                 with tarfile.open(archive, "w:gz"):
                     pass
-                outer.add(archive, arcname=archive.name)
+                outer.add(archive, arcname=f"{name}.tar.gz")
 
     return config, carrier, exported, archives, oc
 
@@ -2518,7 +2522,7 @@ def test_restore_interruption_keeps_session_for_later_recovery(credential_restor
     config, carrier, _, archives, oc = credential_restore
     archives(["djinn-opencode-data", "djinn-sync-opencode"])
 
-    def volume(*_):
+    def volume(*_, **__):
         return RunResult(0)
 
     def interrupted(*_, **__):
@@ -2550,7 +2554,7 @@ def test_restore_holds_the_parked_session_against_a_concurrent_recovery(
     archives(["djinn-opencode-data", "djinn-sync-opencode"])
     concurrent = []
 
-    def volume(*_):
+    def volume(*_, **__):
         # an audit or start recovers while the restore has not reached the carrier yet
         report = oc.recover_audit_sessions(None, carrier, lambda _: b"[]", lambda _: False)
         concurrent.append(report)
@@ -2590,7 +2594,7 @@ def test_an_earlier_audit_session_lands_in_the_restored_carrier(credential_resto
         final.chmod(0o600)
     concurrent = []
 
-    def volume(*_):
+    def volume(*_, **__):
         # without the gate this merge lands in the carrier the backup is about to replace
         report = oc.recover_audit_sessions(None, carrier, lambda _: b"[]", lambda _: False)
         concurrent.append(report)
@@ -2600,7 +2604,8 @@ def test_an_earlier_audit_session_lands_in_the_restored_carrier(credential_resto
         assert hostctl._held.active
         assert _audit_root_is_gated(oc)
         root = os.stat(oc.default_audit_root())
-        assert [os.path.samestat(os.fstat(fd), root) for fd in inherit_fds] == [True]
+        assert len(inherit_fds) == 3
+        assert os.path.samestat(os.fstat(inherit_fds[2]), root)
         (carrier / "credentials.json").write_text("[]\n")
         return SyncRestoreResult(0, extraction_admitted=True)
 
@@ -2716,17 +2721,19 @@ def test_restore_preservation_failure_refuses_or_discards(
     monkeypatch.setattr(backup_module, "restore_sync_path", destructive)
     args = ["restore"] + (["--discard-unexported-credentials"] if discard else [])
     result = runner.invoke(app, args)
-    assert result.exit_code == (0 if discard else 1), result.output
-    assert ("destroy" in calls) == discard
+    proceed = discard and failure != "gate"
+    assert result.exit_code == (0 if proceed else 1), result.output
+    assert ("destroy" in calls) == proceed
     assert "ungated" not in calls
-    if discard:
+    if proceed:
         assert calls[0] == "park"
         assert "unexported logins are lost" in result.output
         assert "after-backup" in {
             item["id"] for item in json.loads((carrier / "credentials.json").read_text())
         }
     else:
-        assert "--discard-unexported-credentials" in result.output
+        if failure != "gate":
+            assert "--discard-unexported-credentials" in result.output
         assert {
             "export": "image unavailable",
             "park": "parking failed",
@@ -2738,7 +2745,7 @@ def test_restore_preservation_failure_refuses_or_discards(
 def test_restore_recovery_failure_only_warns_and_retains_session(credential_restore, monkeypatch):
     _, _, _, archives, oc = credential_restore
     archives(["djinn-opencode-data"])
-    monkeypatch.setattr(backup_module, "restore_volume", lambda *_: RunResult(0))
+    monkeypatch.setattr(backup_module, "restore_volume", lambda *_, **__: RunResult(0))
 
     def failed(*args, **kwargs):
         raise oc.NotUnderstood("recovery failed")
@@ -2759,7 +2766,7 @@ def test_restore_other_archives_skip_opencode_preservation(credential_restore, m
 
     monkeypatch.setattr(backup_module, "export_opencode_data_credentials", forbidden)
     monkeypatch.setattr(backup_module, "recover_leftover_sessions", forbidden)
-    monkeypatch.setattr(backup_module, "restore_volume", lambda *_: RunResult(0))
+    monkeypatch.setattr(backup_module, "restore_volume", lambda *_, **__: RunResult(0))
     assert runner.invoke(app, ["restore"]).exit_code == 0
 
 
@@ -2772,7 +2779,7 @@ def test_restore_unparkable_carrier_refuses_unless_discarded(
     (carrier / "credentials.json").write_text("{}")
     calls = []
 
-    def destructive(*_):
+    def destructive(*_, **__):
         calls.append("destroy")
         return RunResult(0)
 
@@ -2787,3 +2794,86 @@ def test_restore_unparkable_carrier_refuses_unless_discarded(
         assert "unexported logins are lost" in result.output
     else:
         assert "--discard-unexported-credentials" in result.output
+
+
+@pytest.mark.parametrize("opencode", [False, True])
+def test_restore_children_inherit_exactly_the_held_locks(credential_restore, monkeypatch, opencode):
+    config, _, _, archives, oc = credential_restore
+    config = AppConfig.model_validate(
+        {
+            **config.model_dump(),
+            "mounts": {
+                "journal": {"volume": True, "target": "/home/dev/journal", "backup": "data"}
+            },
+        }
+    )
+    monkeypatch.setattr(backup_module, "load_config", lambda: config)
+    names = (
+        ["djinn-opencode-data", "djinn-sync-opencode"]
+        if opencode
+        else [
+            "djinn-packages",
+            "djinn-sync-claude",
+        ]
+    )
+    archives([*names, "declared-volumes/djinn-journal"])
+    paths = [
+        hostctl.state_root() / "control.lock",
+        host_runtime.runtime_root(create=True) / "creator.lock",
+    ]
+    if opencode:
+        paths.append(Path(oc.default_audit_root()))
+    calls = []
+
+    def restored(name, *args, inherit_fds=()):
+        assert len(inherit_fds) == len(paths)
+        assert all(
+            sum(os.path.samestat(os.fstat(fd), path.stat()) for fd in inherit_fds) == 1
+            for path in paths
+        )
+        calls.append(name)
+        return SyncRestoreResult(0, extraction_admitted=True)
+
+    monkeypatch.setattr(backup_module, "restore_volume", restored)
+    monkeypatch.setattr(backup_module, "restore_sync_path", restored)
+    result = runner.invoke(app, ["restore"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert set(calls) == {
+        "djinn-journal",
+        "djinn-opencode-data" if opencode else "djinn-packages",
+        "opencode" if opencode else "claude",
+    }
+
+
+@pytest.mark.parametrize("discard", [False, True])
+def test_restore_shared_gate_holder_refuses_before_preservation(
+    credential_restore, monkeypatch, discard
+):
+    _, carrier, _, archives, oc = credential_restore
+    archives(["djinn-opencode-data", "djinn-sync-opencode"])
+    with oc.create_audit_session() as session:
+        identity = session.id
+    before = {p.name: p.read_bytes() for p in carrier.iterdir()}
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append("side effect")
+        pytest.fail("a failed restore gate must precede preservation and destruction")
+
+    monkeypatch.setattr(backup_module, "export_opencode_data_credentials", forbidden)
+    monkeypatch.setattr(oc, "park_for_restore", forbidden)
+    monkeypatch.setattr(backup_module, "restore_volume", forbidden)
+    monkeypatch.setattr(backup_module, "restore_sync_path", forbidden)
+    fast_clock(monkeypatch, oc)
+    with flock_holder(Path(oc.default_audit_root()), shared=True) as child:
+        result = runner.invoke(
+            app, ["restore"] + (["--discard-unexported-credentials"] if discard else [])
+        )
+    assert result.exit_code == 1, result.output
+    assert "Restore refused" in result.output
+    assert "audit sessions are being recovered" in result.output
+    assert f"PID {child.pid} (restore-writer) since" in result.output
+    assert f"kill {child.pid}" in result.output
+    assert calls == []
+    assert before == {p.name: p.read_bytes() for p in carrier.iterdir()}
+    assert (Path(oc.default_audit_root()) / identity).is_dir()

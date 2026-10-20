@@ -747,6 +747,12 @@ audit sessions. `credentials.removed.json` holds IDs only. `opencode auth export
 prints secrets; Djinn reads it only through a pipe or a private 0600 file, never
 into logs or command lines.
 
+A restore passes its held lifecycle lock descriptors to every destructive child,
+so its exclusion lasts as long as its last writer. Refusals and `djinn doctor`
+name the holder and explain how to wait or stop that process. If the Docker
+client is also killed, a volume-restore container can keep writing the volume
+on the daemon side after those locks close; it does not write the carrier.
+
 OpenCode credential residual risks:
 
 - A token refresh by a running OpenCode in the few hundred milliseconds between

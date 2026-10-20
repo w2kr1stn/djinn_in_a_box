@@ -3190,7 +3190,7 @@ def backup_volume(name: str, dest_dir: Path) -> RunResult:
     )
 
 
-def restore_volume(name: str, source_dir: Path) -> RunResult:
+def restore_volume(name: str, source_dir: Path, *, inherit_fds: Sequence[int] = ()) -> RunResult:
     if name in PROTECTED_INTERNAL_VOLUMES:
         return RunResult(1, stderr="Hostctl identity must never be restored")
     archive_path = source_dir / f"{name}.tar.gz"
@@ -3213,7 +3213,8 @@ def restore_volume(name: str, source_dir: Path) -> RunResult:
             'rm -rf /data/* /data/.[!.]* && tar xzf "/backup/$1.tar.gz" -C /data',
             "--",
             name,
-        ]
+        ],
+        pass_fds=inherit_fds,
     )
 
 

@@ -36,7 +36,7 @@ from djinn_in_a_box.config.zones import (
     load_zone_assignments,
 )
 from djinn_in_a_box.core import docker as docker_core
-from djinn_in_a_box.core import opencode_credentials, post_mortem
+from djinn_in_a_box.core import host_runtime, hostctl, opencode_credentials, post_mortem
 from djinn_in_a_box.core import session as session_core
 from djinn_in_a_box.core.config_sync import (
     audit_config_sync as audit_workflow_config,
@@ -77,6 +77,7 @@ from djinn_in_a_box.core.exceptions import (
     ConfigValidationError,
     ZoneConfigurationError,
 )
+from djinn_in_a_box.core.lock_holders import describe_holders
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
 from djinn_in_a_box.core.session import (
@@ -1162,6 +1163,29 @@ def declaration_checks(
     return checks
 
 
+def lifecycle_locks_check() -> Check:
+    """Report exclusive lifecycle holders without creating paths or acquiring locks."""
+    try:
+        control_root = hostctl.state_root(create=False)
+    except hostctl.HostctlError as exc:
+        return Check("Lifecycle locks", Status.WARN, str(exc))
+    paths = (
+        ("control.lock", control_root / "control.lock"),
+        ("creator.lock", host_runtime.runtime_root(create=False) / "creator.lock"),
+        ("audit gate", Path(opencode_credentials.default_audit_root())),
+    )
+    holders = [
+        f"{name}: {holder}"
+        for name, path in paths
+        if (holder := describe_holders(path, exclusive_only=True))
+    ]
+    return Check(
+        "Lifecycle locks",
+        Status.WARN if holders else Status.PASS,
+        "; ".join(holders) if holders else "none held",
+    )
+
+
 def run_checks(config: AppConfig | None, config_error: str | None = None) -> list[Check]:
     """Run every diagnostic and return the results (no side effects)."""
     kept, latest, problem = post_mortem.latest()
@@ -1171,6 +1195,8 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             f"{kept} kept; latest {escape_nonprintable(str(latest))}" if latest else "none"
         ),
     )]
+
+    checks.append(lifecycle_locks_check())
 
     installed = _docker_installed()
     checks.append(

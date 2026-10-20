@@ -24,6 +24,7 @@ from djinn_in_a_box.core import agent_docker, post_mortem
 from djinn_in_a_box.core.console import warning
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.git_agent import AgentFilter, agent_keys, start_agent, stop_agent
+from djinn_in_a_box.core.lock_holders import describe_holders
 from djinn_in_a_box.core.ssh_delivery import (
     AGENT_TARGET,
     GIT_ENVIRONMENT,
@@ -43,6 +44,7 @@ STARTUP_SECONDS = 60
 REMOVE_TIMEOUT_SECONDS = 60
 CONTAINER_USER_UID = 1000
 """Must match the ``USER_UID`` build argument used by the dev image."""
+_creation_held = threading.local()
 
 
 def private_directory(path: Path) -> Path:
@@ -139,9 +141,9 @@ def acquire_creation_lock(root: Path) -> int:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         os.close(fd)
-        raise GitSSHError(
-            "another dev container creation is pending; retry after it completes"
-        ) from exc
+        message = "another dev container creation is pending; retry after it completes"
+        holder = describe_holders(root / "creator.lock")
+        raise GitSSHError(f"{message}; {holder}" if holder else message) from exc
     return fd
 
 
@@ -154,9 +156,19 @@ def creation_guard(root: Path | None = None) -> Iterator[Path]:
         root = root or runtime_root(create=True)
         fd = acquire_creation_lock(root)
         try:
+            _creation_held.descriptor = fd
             yield root
         finally:
+            _creation_held.descriptor = None
             os.close(fd)
+
+
+def held_creation_descriptor() -> int:
+    """Return this thread's held creator fd without opening or acquiring anything."""
+    descriptor = getattr(_creation_held, "descriptor", None)
+    if descriptor is None:
+        raise GitSSHError("no creation lock is held by this thread")
+    return descriptor
 
 
 def read_state(root: Path) -> dict[str, Any] | None:

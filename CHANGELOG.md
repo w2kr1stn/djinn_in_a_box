@@ -35,7 +35,8 @@ Versioning before and after the first stable release.
 - Check every delivery target before preflight changes workflow content, and
   print canonical auto-sync counts even when a later step refuses (#166).
 - Serialize `djinn clean volumes` with restore, backup, clean all, and dev
-  start/stop; a concurrent run fails after at most 15 s with "host control is busy".
+  start/stop; a concurrent run fails after at most 15 s with "host control is busy",
+  naming the holding process.
 - Persist and sync OpenCode 2 logins, including MCP OAuth, through
   `credentials.json` in the config root; audits import them and merge refreshes
   back, and deleting or restoring the OpenCode data volume exports them first
