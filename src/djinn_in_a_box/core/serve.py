@@ -30,6 +30,7 @@ from djinn_in_a_box.core.docker import (
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.host_runtime import private_directory
+from djinn_in_a_box.core.host_sealing import volume_bind_source
 from djinn_in_a_box.core.paths import BACKUPS_DIR
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
@@ -315,7 +316,7 @@ def _excluded_root(root: Path) -> Path:
 
 
 def check_password_location(config: AppConfig, container: ContainerInfo, path: Path) -> Path:
-    """Exclude known synced/backed-up roots and every running-container bind source."""
+    """Exclude synced/backed-up roots and running-container bind/volume host storage."""
     path = _password_location(path)
     try:
         zones = resolve_zone_roots(config)
@@ -336,10 +337,25 @@ def check_password_location(config: AppConfig, container: ContainerInfo, path: P
             if not isinstance(source, str):
                 raise ServeError("Could not determine a password bind source; refusing.")
             roots.append(Path(source))
+        elif entry["Type"] == "volume":
+            source = entry.get("Source")
+            if isinstance(source, str) and source:
+                roots.append(Path(source))
+            try:
+                if not isinstance(entry.get("Name"), str) or not entry["Name"]:
+                    raise ValueError("Missing volume name")
+                device = volume_bind_source(entry)
+            except (ValueError, KeyError, OSError, subprocess.SubprocessError, GitSSHError) as exc:
+                raise ServeError(
+                    "Could not determine a password volume's host storage; refusing."
+                ) from exc
+            if device is not None:
+                roots.append(Path(device))
     for root in roots:
         if path.is_relative_to(_excluded_root(root)):
             raise ServeError(
-                "The OpenCode password location is inside a config, zone, backup or bind source; "
+                "The OpenCode password location is inside a config, zone, backup, bind source "
+                "or volume host storage; "
                 "keep XDG_STATE_HOME host-local and outside those roots; refusing."
             )
     return path

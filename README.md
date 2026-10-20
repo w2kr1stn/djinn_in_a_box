@@ -897,7 +897,8 @@ The first `djinn serve opencode` generates a password at
 `${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password` on the host
 (mode `0600`). Before creating or reading it, Djinn refuses symlinks in that path,
 locations inside the config root, zone sources, Djinn backups or running-container
-bind sources (each at its resolved location), and locations whose safety it cannot
+bind sources or volume host storage, including local-driver bind aliases (each at
+its resolved location), and locations whose safety it cannot
 determine. This keeps it outside
 those synced trees and backups provided you keep `XDG_STATE_HOME` host-local and
 out of other sync, indexing and backup tools. Read it locally when a client asks;

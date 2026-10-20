@@ -171,8 +171,9 @@ The password is generated once on the host at
 `${XDG_STATE_HOME:-~/.local/state}/djinn/serve/opencode-password`, mode `0600`
 under a private directory. Before creation or reading, Djinn checks every component
 of the password path without following symlinks and refuses locations inside the
-config root, zone sources, Djinn backups or any running-container bind source, each
-taken at its resolved location. Symlinks in the password path and undeterminable
+config root, zone sources, Djinn backups or any running-container bind source or
+volume host storage, including local-driver bind aliases, each taken at its
+resolved location. Symlinks in the password path and undeterminable
 locations refuse. Staying outside synced trees and backups also
 requires keeping `XDG_STATE_HOME` host-local, outside other sync, indexing and
 backup tools. Delete it and run `djinn serve opencode` to

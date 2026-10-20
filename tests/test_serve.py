@@ -17,8 +17,9 @@ from typer.testing import CliRunner
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands import serve as command
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core import serve
+from djinn_in_a_box.core import host_runtime, serve
 from djinn_in_a_box.core.docker import RunResult
+from djinn_in_a_box.core.host_runtime import inspect_object
 
 CID = "a1" * 32
 PORT = 49380
@@ -34,7 +35,14 @@ def inspection():
             "PortBindings": {"4096/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(PORT)}]},
             "NetworkMode": "djinn-network",
         },
-        "Mounts": [{"Type": "volume", "Destination": "/home/dev/.opencode"}],
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Name": "djinn-opencode-data",
+                "Source": "/var/lib/docker/volumes/djinn-opencode-data/_data",
+                "Destination": "/home/dev/.opencode",
+            }
+        ],
         "NetworkSettings": {"Networks": {"djinn-network": {"NetworkID": "b" * 64}}},
     }
 
@@ -89,6 +97,12 @@ def host(monkeypatch, tmp_path):
         tailnet=tailscale_config(),
         network={"Name": "djinn-network", "Driver": "bridge", "Options": {}},
         network_rc=0,
+        volume={
+            "Driver": "local",
+            "Options": None,
+            "Mountpoint": "/var/lib/docker/volumes/djinn-opencode-data/_data",
+        },
+        volume_calls=[],
         engine="29.9.1",
         calls=[],
         direct=[],
@@ -143,6 +157,9 @@ def host(monkeypatch, tmp_path):
         raise AssertionError(argv)
 
     def direct(argv, **kwargs):
+        if argv[1:3] == ["volume", "inspect"]:
+            data.volume_calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, json.dumps([data.volume]), "")
         data.direct.append((argv, kwargs))
         if "pair" in argv:
             return subprocess.CompletedProcess(argv, data.pair_rc)
@@ -151,6 +168,8 @@ def host(monkeypatch, tmp_path):
 
     monkeypatch.setattr(serve, "_run_captured", captured)
     monkeypatch.setattr(serve.subprocess, "run", direct)
+    # The legacy Compose autouse fixture replaces this; exercise its bounded parser here.
+    monkeypatch.setattr(host_runtime, "inspect_object", inspect_object)
     return data
 
 
@@ -319,7 +338,7 @@ def test_mount_over_opencode_settings_refused(host, destination):
     ],
 )
 def test_process_state_mount_gate(host, names, destination, allowed):
-    host.inspect["Mounts"] = [{"Type": "volume", "Destination": destination}]
+    host.inspect["Mounts"][0]["Destination"] = destination
     result = runner.invoke(app, ["serve", *names])
     assert result.exit_code == (0 if allowed else 1), result.output
     if not allowed:
@@ -1252,13 +1271,180 @@ def test_password_excluded_roots_refused_before_io(
         path.chmod(0o600)
     opened = []
     monkeypatch.setattr(serve.os, "open", lambda *a, **k: opened.append(a))
-    with pytest.raises(serve.ServeError, match="inside a config, zone, backup or bind source"):
+    with pytest.raises(serve.ServeError, match="inside a config, zone, backup, bind source"):
         if operation == "read":
             serve.read_password(host.config, serve.detect_container())
         else:
             serve.ensure_password(host.config, serve.detect_container())
     assert not opened
     assert path.exists() == (operation == "read")
+
+
+@pytest.fixture(params=["create", "read"])
+def password_io(host, monkeypatch, request):
+    path = serve.password_path()
+    if request.param == "read":
+        path.parent.mkdir(parents=True)
+        path.write_text("x" * 40)
+        path.chmod(0o600)
+    opened = MagicMock(wraps=os.open)
+    monkeypatch.setattr(serve.os, "open", opened)
+
+    def access():
+        container = serve.detect_container()
+        if request.param == "read":
+            return serve.read_password(host.config, container)
+        return serve.ensure_password(host.config, container)
+
+    def assert_untouched():
+        opened.assert_not_called()
+        if request.param == "read":
+            assert path.read_text() == "x" * 40
+            assert list(path.parent.iterdir()) == [path]
+        else:
+            assert not path.parent.parent.exists()
+
+    return SimpleNamespace(access=access, assert_untouched=assert_untouched)
+
+
+@pytest.mark.parametrize("storage", ["source", "bind", "rbind"])
+@pytest.mark.parametrize("symlink_root", [False, True], ids=["direct", "resolved"])
+def test_password_volume_storage_refused_before_io(
+    host, password_io, tmp_path, storage, symlink_root
+):
+    root = serve.password_path().parents[2]
+    if symlink_root:
+        alias = tmp_path / "volume-alias"
+        alias.symlink_to(root, target_is_directory=True)
+        root = alias
+    mount = host.inspect["Mounts"][0]
+    if storage == "source":
+        mount["Source"] = str(root)
+        host.volume["Mountpoint"] = str(root)
+    else:
+        host.volume["Options"] = {"type": "none", "o": storage, "device": str(root)}
+    with pytest.raises(serve.ServeError, match="inside a config.*volume host storage"):
+        password_io.access()
+    password_io.assert_untouched()
+
+
+@pytest.mark.parametrize("options", [None, {}], ids=["null-options", "empty-options"])
+@pytest.mark.parametrize("source", ["mountpoint", "", None, 42])
+def test_password_plain_local_volume_accepted(host, password_io, options, source):
+    host.volume["Options"] = options
+    host.inspect["Mounts"][0]["Source"] = (
+        host.volume["Mountpoint"] if source == "mountpoint" else source
+    )
+    assert len(password_io.access()) >= 40
+    assert host.volume_calls
+    for argv, kwargs in host.volume_calls:
+        assert argv[1:] == ["volume", "inspect", "djinn-opencode-data"]
+        assert kwargs["timeout"] == 5
+        assert kwargs["stdin"] == subprocess.DEVNULL
+
+
+@pytest.mark.parametrize("storage", ["source", "bind", "rbind"])
+def test_password_volume_storage_must_be_absolute(host, password_io, storage):
+    if storage == "source":
+        host.inspect["Mounts"][0]["Source"] = "relative-storage"
+    else:
+        host.volume["Options"] = {"type": "none", "o": storage, "device": "relative-storage"}
+    with pytest.raises(serve.ServeError, match="paths must be absolute; refusing"):
+        password_io.access()
+    password_io.assert_untouched()
+
+
+@pytest.mark.parametrize(
+    "driver,options",
+    [
+        ("remote", None),
+        ("local", {"type": "nfs", "o": "addr=192.0.2.1,rw", "device": ":/data"}),
+        ("local", {"type": "none", "o": "rw", "device": "/data"}),
+        ("local", {"type": "none", "o": "bind"}),
+    ],
+    ids=["non-local", "nfs-options", "unknown-options", "malformed-options"],
+)
+def test_password_unknown_volume_storage_refused(host, password_io, driver, options):
+    host.volume.update(Driver=driver, Options=options)
+    with pytest.raises(
+        serve.ServeError,
+        match="^Could not determine a password volume's host storage; refusing\\.$",
+    ):
+        password_io.access()
+    password_io.assert_untouched()
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing-volume", "daemon-unavailable", "invalid-json", "timeout", "missing-binary"]
+)
+def test_password_volume_inspection_failure_refused(host, password_io, monkeypatch, failure):
+    def failed(argv, **kwargs):
+        assert argv[1:] == ["volume", "inspect", "djinn-opencode-data"]
+        assert kwargs["timeout"] == 5
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if failure == "missing-binary":
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        if failure == "missing-volume":
+            return subprocess.CompletedProcess(
+                argv, 1, "", "Error response from daemon: get djinn-opencode-data: no such volume"
+            )
+        if failure == "daemon-unavailable":
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                "",
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+                "Is the docker daemon running?",
+            )
+        return subprocess.CompletedProcess(argv, 0, "not-json", "")
+
+    monkeypatch.setattr(serve.subprocess, "run", failed)
+    with pytest.raises(
+        serve.ServeError,
+        match="^Could not determine a password volume's host storage; refusing\\.$",
+    ):
+        password_io.access()
+    password_io.assert_untouched()
+
+
+@pytest.mark.parametrize(
+    "exception", [ValueError, KeyError, OSError, subprocess.SubprocessError, serve.GitSSHError]
+)
+def test_password_volume_inspection_exceptions_mapped(host, password_io, monkeypatch, exception):
+    monkeypatch.setattr(
+        host_runtime, "inspect_object", MagicMock(side_effect=exception("volume inspection failed"))
+    )
+    with pytest.raises(
+        serve.ServeError,
+        match="^Could not determine a password volume's host storage; refusing\\.$",
+    ):
+        password_io.access()
+    password_io.assert_untouched()
+
+
+@pytest.mark.parametrize("name", ["missing", None, "", 42])
+def test_password_volume_missing_name_refused(host, password_io, name):
+    if name == "missing":
+        del host.inspect["Mounts"][0]["Name"]
+    else:
+        host.inspect["Mounts"][0]["Name"] = name
+    with pytest.raises(
+        serve.ServeError,
+        match="^Could not determine a password volume's host storage; refusing\\.$",
+    ):
+        password_io.access()
+    password_io.assert_untouched()
+    assert not host.volume_calls
+
+
+def test_password_tmpfs_has_no_host_storage(host, password_io):
+    host.inspect["Mounts"] = [
+        {"Type": "tmpfs", "Source": str(serve.password_path().parents[2]), "Destination": "/data"}
+    ]
+    assert len(password_io.access()) >= 40
+    assert not host.volume_calls
 
 
 @pytest.mark.parametrize("component", ["state", "djinn", "serve", "opencode-password"])

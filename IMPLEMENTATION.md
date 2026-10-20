@@ -1874,7 +1874,8 @@ temporary file, fsync and an exclusive hard-link publication. A concurrent
 creator reads the winner. Reads require a user-owned regular file, mode `0600`,
 20–256 bytes. Before creation or reading, an lstat walk refuses symlink components
 of the password path and paths inside the config root, local/shared zone roots, backups
-or running-container bind sources. Those roots count at their resolved location, so a
+or running-container bind sources or volume host storage, including local-driver
+bind aliases. Those roots count at their resolved location, so a
 symlinked dotfile bind does not refuse; undeterminable roots/sources refuse. Keep `XDG_STATE_HOME` local and
 outside other sync, indexing and backup tools. The host state directory reuses
 `hostctl.state_root(create=False).parent`, with a private `serve` child, and is
