@@ -56,6 +56,12 @@ LOCK_REMEDY = (
     "Check that the canonical workflow root is a readable, lockable directory "
     "and that no other Djinn process is stuck on it, then retry."
 )
+WRITE_PROBLEM_IDENTIFIER = "canonical-publish-failed"
+WRITE_REMEDY = (
+    "Check that the canonical workflow root and its parent directories are writable "
+    "with available space, then retry; a partial update may already be in place, so "
+    "rerun `djinn config sync` and check `djinn config status`."
+)
 _TOOLS: tuple[ConfigSyncSource, ...] = ("claude", "codex", "opencode")
 
 _SAFE_STATUS_LABEL = re.compile(r"[^A-Za-z0-9._/:-]")
@@ -281,6 +287,14 @@ def sync_config(
                 preflight_manifest=preflight_manifest,
                 accept_drift=accept_drift,
             )
+            if result.lock_error is not None:
+                return ConfigSyncResult(
+                    False, _lock_failure_audit(source, config_root, result.lock_error)
+                )
+            if result.write_error is not None:
+                return ConfigSyncResult(
+                    False, _write_failure_audit(source, config_root, result.write_error)
+                )
             audit = (
                 _audit_for(source, DriftClass.SOURCE_CHANGED)
                 if result.drift_class is DriftClass.SOURCE_CHANGED
@@ -853,6 +867,23 @@ def _lock_failure_audit(
                 "canonical-lock-failed",
                 f"Canonical workflow lock failed at {config_root}: {error.strerror or 'OS error'}",
                 remedy=LOCK_REMEDY,
+            ),
+        ),
+    )
+
+
+def _write_failure_audit(
+    source: ConfigSyncSource, config_root: Path, error: OSError
+) -> ConfigSyncAudit:
+    return ConfigSyncAudit(
+        source,
+        None,
+        problems=(
+            SyncProblem(
+                WRITE_PROBLEM_IDENTIFIER,
+                f"Failed to publish the canonical workflow at {config_root}: "
+                f"{error.strerror or type(error).__name__}",
+                remedy=WRITE_REMEDY,
             ),
         ),
     )

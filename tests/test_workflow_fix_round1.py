@@ -29,7 +29,7 @@ prepare = host_tests.prepare
 @pytest.mark.parametrize("running", [False, True])
 def test_doctor_reads_shared_identity_at_each_call(case, monkeypatch, running):
     gate = Mock(return_value=WorkflowImageCompatibility.COMPATIBLE)
-    monkeypatch.setattr(session.SessionManager, "workflow_image_compatible", gate)
+    monkeypatch.setattr(session, "container_workflow_image_compatible", gate)
     for identity in ("first-runtime", "second-runtime"):
         monkeypatch.setattr(session, "_DJINN_CONTAINER_NAME", identity)
         discovery = subprocess.CompletedProcess(
@@ -59,7 +59,7 @@ def test_doctor_reads_shared_identity_at_each_call(case, monkeypatch, running):
         )
         if running:
             target = session.SessionTarget(container_id=identity)
-            gate.assert_called_once_with(target)
+            gate.assert_called_once_with(identity)
             assert run.call_args_list[1].args == (
                 session.opencode_publisher_argv(target, check=True),
             )

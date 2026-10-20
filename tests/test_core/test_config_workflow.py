@@ -870,7 +870,7 @@ def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) ->
         ),
     )
 
-    bridged = workflow_module._host_claude_view(  # pyright: ignore[reportPrivateUsage]
+    bridged = workflow_module._delivery_view(  # pyright: ignore[reportPrivateUsage]
         config,
         WorkflowDeliveryTarget("claude", tmp_path / "host-claude"),
         view,

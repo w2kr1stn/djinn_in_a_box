@@ -337,20 +337,7 @@ class SessionManager:
     def workflow_image_compatible(self, target: SessionTarget) -> WorkflowImageCompatibility:
         if target.container_id is None:
             return WorkflowImageCompatibility.UNKNOWN
-        try:
-            container = subprocess.run(
-                [DOCKER_EXECUTABLE, "inspect", target.container_id, "--format", "{{.Image}}"],
-                capture_output=True,
-                text=True,
-                timeout=_EXEC_TIMEOUT,
-                check=False,
-            )
-            if container.returncode != 0 or not container.stdout.strip():
-                return WorkflowImageCompatibility.UNKNOWN
-            image = container.stdout.strip()
-        except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
-            return WorkflowImageCompatibility.UNKNOWN
-        return inspect_workflow_image(image)
+        return container_workflow_image_compatible(target.container_id)
 
     def run_interactive(
         self,
@@ -854,20 +841,52 @@ def _publisher_refresh_error(stderr: str, *, source: str = "claude") -> str:
     return "OpenCode workflow refresh failed"
 
 
-def _publisher_lock_failure(value: str) -> str | None:
-    if not value.startswith(PUBLISHER_LOCK_ERROR_PREFIX):
+def container_workflow_image_compatible(container_id: str) -> WorkflowImageCompatibility:
+    """Workflow-publisher label of the image a container runs; needs no agent config."""
+    try:
+        container = subprocess.run(
+            [DOCKER_EXECUTABLE, "inspect", container_id, "--format", "{{.Image}}"],
+            capture_output=True,
+            text=True,
+            timeout=_EXEC_TIMEOUT,
+            check=False,
+        )
+        if container.returncode != 0 or not container.stdout.strip():
+            return WorkflowImageCompatibility.UNKNOWN
+        image = container.stdout.strip()
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return WorkflowImageCompatibility.UNKNOWN
+    return inspect_workflow_image(image)
+
+
+_WRITE_REMEDY = (
+    "Check that the workflow destination and its parent directories are writable "
+    "with available space, then retry."
+)
+_OPERATIONAL_UNSAFE = re.compile(r"[^A-Za-z0-9._/:,'() -]")
+
+
+def _diagnostic_fields(value: str, prefix: str, first: str) -> tuple[str, str] | None:
+    if not value.startswith(prefix):
         return None
     try:
-        diagnostic = json.loads(value.removeprefix(PUBLISHER_LOCK_ERROR_PREFIX))
+        diagnostic = json.loads(value.removeprefix(prefix))
     except json.JSONDecodeError:
         return None
     if not isinstance(diagnostic, dict):
         return None
     details = cast(dict[str, object], diagnostic)
-    root = details.get("root")
-    error = details.get("error")
-    if not isinstance(root, str) or not isinstance(error, str):
+    place, error = details.get(first), details.get("error")
+    if not isinstance(place, str) or not isinstance(error, str):
         return None
+    return place, error
+
+
+def _publisher_lock_failure(value: str) -> str | None:
+    fields = _diagnostic_fields(value, PUBLISHER_LOCK_ERROR_PREFIX, "root")
+    if fields is None:
+        return None
+    root, error = fields
     return (
         f"OpenCode workflow refresh failed: Canonical workflow lock failed at {root}: {error}. "
         f"Remedy: {LOCK_REMEDY}"
@@ -875,21 +894,27 @@ def _publisher_lock_failure(value: str) -> str | None:
 
 
 def _publisher_write_failure(value: str) -> str | None:
-    if not value.startswith(PUBLISHER_WRITE_ERROR_PREFIX):
+    fields = _diagnostic_fields(value, PUBLISHER_WRITE_ERROR_PREFIX, "destination")
+    if fields is None:
         return None
-    try:
-        diagnostic = json.loads(value.removeprefix(PUBLISHER_WRITE_ERROR_PREFIX))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(diagnostic, dict):
-        return None
-    details = cast(dict[str, object], diagnostic)
-    destination = details.get("destination")
-    error = details.get("error")
-    if not isinstance(destination, str) or not isinstance(error, str):
-        return None
+    destination, error = fields
     return (
         f"OpenCode workflow refresh failed to publish workflow to {destination}: {error}. "
-        "Remedy: Check that the workflow destination and its parent directories are writable "
-        "with available space, then retry."
+        f"Remedy: {_WRITE_REMEDY}"
     )
+
+
+def publisher_operational_failure(stderr: str) -> tuple[str, str] | None:
+    """(sanitised cause, remedy) of a publisher lock/write failure, else None."""
+    lines = tuple(line.strip() for line in reversed(stderr.splitlines()))
+    for line in lines:
+        fields = _diagnostic_fields(line, PUBLISHER_LOCK_ERROR_PREFIX, "root")
+        if fields is not None:
+            cause = f"Canonical workflow lock failed at {fields[0]}: {fields[1]}"
+            return _OPERATIONAL_UNSAFE.sub("?", cause)[:300], LOCK_REMEDY
+    for line in lines:
+        fields = _diagnostic_fields(line, PUBLISHER_WRITE_ERROR_PREFIX, "destination")
+        if fields is not None:
+            cause = f"Failed to publish workflow to {fields[0]}: {fields[1]}"
+            return _OPERATIONAL_UNSAFE.sub("?", cause)[:300], _WRITE_REMEDY
+    return None

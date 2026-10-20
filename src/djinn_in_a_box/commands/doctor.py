@@ -80,7 +80,6 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
 from djinn_in_a_box.core.session import (
-    SessionManager,
     SessionTarget,
     opencode_publisher_argv,
     parse_publisher_drift_items,
@@ -381,8 +380,7 @@ def _opencode_runtime_check(config: AppConfig | None, *, daemon: bool) -> Check:
         if discovered.returncode != 0 or discovered.stdout.strip() != "true":
             return unavailable
         target = SessionTarget(container_id=container_name)
-        manager = SessionManager("workflow-check")
-        compatibility = manager.workflow_image_compatible(target)
+        compatibility = session_core.container_workflow_image_compatible(container_name)
         if compatibility is not docker_core.WorkflowImageCompatibility.COMPATIBLE:
             detail = (
                 "rebuild and recreate required"
@@ -404,8 +402,11 @@ def _opencode_runtime_check(config: AppConfig | None, *, daemon: bool) -> Check:
         return unavailable
     if checked.returncode == 0:
         return Check(name, Status.PASS, "clean; container-local; rebuilt at every djinn start")
+    operational = session_core.publisher_operational_failure(checked.stderr)
+    if operational is not None:
+        return Check(name, Status.WARN, f"check unavailable ({operational[0]})", operational[1])
     diagnostic = parse_publisher_drift_items(checked.stderr)
-    if checked.returncode not in {10, 11, 12, 13} or diagnostic is None:
+    if checked.returncode not in {10, 11, 12, 13} or diagnostic is None or not diagnostic.items:
         return unavailable
     kind = {
         10: DriftClass.SOURCE_CHANGED,

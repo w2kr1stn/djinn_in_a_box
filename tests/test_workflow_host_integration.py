@@ -434,9 +434,9 @@ def test_doctor_running_check(case, monkeypatch, exit_code, stderr, expected):
 
     monkeypatch.setattr(doctor.subprocess, "run", run)
     monkeypatch.setattr(
-        session.SessionManager,
-        "workflow_image_compatible",
-        lambda self, target: WorkflowImageCompatibility.COMPATIBLE,
+        session,
+        "container_workflow_image_compatible",
+        lambda container_id: WorkflowImageCompatibility.COMPATIBLE,
     )
     row = doctor._opencode_runtime_check(case[2], daemon=True)
     assert row.detail == expected
@@ -496,9 +496,9 @@ def test_doctor_image_gate_before_exec(case, monkeypatch):
     run = Mock(return_value=subprocess.CompletedProcess([], 0, "true", ""))
     monkeypatch.setattr(doctor.subprocess, "run", run)
     monkeypatch.setattr(
-        session.SessionManager,
-        "workflow_image_compatible",
-        lambda self, target: WorkflowImageCompatibility.INCOMPATIBLE,
+        session,
+        "container_workflow_image_compatible",
+        lambda container_id: WorkflowImageCompatibility.INCOMPATIBLE,
     )
     row = doctor._opencode_runtime_check(case[2], daemon=True)
     assert (row.status, row.detail) == (doctor.Status.WARN, "rebuild and recreate required")

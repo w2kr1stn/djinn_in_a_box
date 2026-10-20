@@ -40,6 +40,7 @@ from djinn_in_a_box.core.paths import CONFIG_DIR, get_project_root
 from djinn_in_a_box.core.workflow_drift_backup import BackupAdmission, open_backup_root
 from djinn_in_a_box.core.workflow_publisher import (
     CANONICAL_MANIFEST_NAME,
+    CHANGED_DURING_PUBLISH,
     RUNTIME_MANIFEST_NAME,
     BackedUpEntry,
     BackedUpState,
@@ -271,6 +272,10 @@ def inspection_failure(
         return _publish_lock_failure(
             inspection.target.destination_root, inspection.result.lock_error
         )
+    if inspection.result.write_error is not None:
+        return _publish_write_failure(
+            inspection.target.destination_root, inspection.result.write_error
+        )
     return _publish_failure(inspection.result, config, inspection.target, inspection.view)
 
 
@@ -280,6 +285,9 @@ class WorkflowDiscardResult:
     failure: WorkflowPreparationResult | None = None
     backups: tuple[tuple[str, BackedUpEntry], ...] = ()
     backup_directory: Path | None = None
+    failed_phase: str | None = None
+    completed: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
 
 
 def discard_workflow_target_drift(
@@ -313,6 +321,7 @@ def discard_workflow_target_drift(
         return WorkflowDiscardResult(sync=sync_config(project_root, config_path=config_path))
 
     canonical_root = project_root / "config"
+    tools = tuple(inspection.target.tool for inspection in inspections)
     backups: dict[str, tuple[BackedUpEntry, ...]] = {}
     backup_directory = admission.path
     backup_target: WorkflowDeliveryTarget | None = None
@@ -326,6 +335,8 @@ def discard_workflow_target_drift(
                         failure=_audit_failure(ConfigSyncAudit(build.source, None,
                                                                problems=build.problems)),
                         backup_directory=backup_directory,
+                        failed_phase="backup",
+                        skipped=("canonical", *tools),
                     )
                 preflight_manifest = _release_manifest_records(
                     canonical_root, build.source, build.fingerprint
@@ -358,13 +369,19 @@ def discard_workflow_target_drift(
                     origin=item.origin,
                 ) for item in exc.items),
             )
-        return WorkflowDiscardResult(failure=failure, backup_directory=backup_directory)
+        return WorkflowDiscardResult(
+            failure=failure, backup_directory=backup_directory,
+            failed_phase="backup", skipped=("canonical", *tools),
+        )
     except (_BuildError, OSError, ValueError) as exc:
         failure = WorkflowPreparationResult(False, (WorkflowPreparationProblem(
             "drift-backup-failed", f"Workflow drift backup failed ({exc}).",
             "Correct the backup problem and retry; partial backups have been kept.",
         ),))
-        return WorkflowDiscardResult(failure=failure, backup_directory=backup_directory)
+        return WorkflowDiscardResult(
+            failure=failure, backup_directory=backup_directory,
+            failed_phase="backup", skipped=("canonical", *tools),
+        )
 
     entries = tuple((label, entry) for label, items in backups.items() for entry in items)
 
@@ -379,14 +396,21 @@ def discard_workflow_target_drift(
         project_root, config_path=config_path, accept_drift=authorization("config")
     )
     if not synced.success or not synced.audit.clean:
-        return WorkflowDiscardResult(synced, backups=entries, backup_directory=backup_directory)
-    for inspection in inspections:
+        return WorkflowDiscardResult(
+            synced, backups=entries, backup_directory=backup_directory,
+            failed_phase="canonical", skipped=tools,
+        )
+    for index, inspection in enumerate(inspections):
         result = _deliver_target(
             config, project_root, inspection.target, config_path, False, None,
             accept_drift=authorization(inspection.target.tool),
         )
         if not result.success:
-            return WorkflowDiscardResult(synced, result, entries, backup_directory)
+            return WorkflowDiscardResult(
+                synced, result, entries, backup_directory,
+                failed_phase=f"runtime {inspection.target.tool}",
+                completed=("canonical", *tools[:index]), skipped=tools[index + 1:],
+            )
     return WorkflowDiscardResult(synced, backups=entries, backup_directory=backup_directory)
 
 
@@ -856,9 +880,6 @@ def _delivery_view(
     )
 
 
-_host_claude_view = _delivery_view
-
-
 def _claude_bridge_path() -> Path:
     return get_project_root() / "templates/claude/CLAUDE.md"
 
@@ -936,15 +957,24 @@ def _publish_failure(
         items=result.drift_items,
     )
     if host and result.drift_class is DriftClass.TARGET_DRIFT and view is not None:
+        # Only real managed file or carrier-key drift has a restore source. Manifest
+        # entries are ownership metadata (never to be deleted or replaced by hand) and
+        # a changed-during-publish refusal asks for a retry, not for an edit.
         actions = tuple(
-            _host_restore_action(config, target, view, item) for item in result.drift_items[:5]
+            _host_restore_action(config, target, view, item)
+            for item in [i for i in result.drift_items if _has_host_restore_action(i)][:5]
         )
-        problem = failure.problems[0]
-        failure = replace(
-            failure,
-            problems=(replace(problem, message=problem.message + " " + "; ".join(actions)),),
-        )
+        if actions:
+            problem = failure.problems[0]
+            failure = replace(
+                failure,
+                problems=(replace(problem, message=problem.message + " " + "; ".join(actions)),),
+            )
     return failure
+
+
+def _has_host_restore_action(item: DriftEntry) -> bool:
+    return item.origin == "target" and item.reason != CHANGED_DURING_PUBLISH
 
 
 def _host_restore_action(

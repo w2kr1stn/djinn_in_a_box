@@ -29,6 +29,7 @@ from djinn_in_a_box.config.models import (
 from djinn_in_a_box.core.config_lock import ConfigDirectoryLockError, config_directory_lock
 from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
+    WRITE_PROBLEM_IDENTIFIER,
     ConfigSyncAudit,
     DriftClass,
     DriftEntry,
@@ -44,11 +45,21 @@ from djinn_in_a_box.core.config_sync import (
     sync_config as synchronize_workflow_config,
 )
 from djinn_in_a_box.core.config_workflow import (
+    WorkflowDiscardResult,
     discard_workflow_target_drift,
     inspect_workflow_targets,
     inspection_failure,
 )
-from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
+from djinn_in_a_box.core.console import (
+    blank,
+    console,
+    error,
+    escape_nonprintable,
+    info,
+    rule,
+    success,
+    warning,
+)
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
     ensure_host_env,
@@ -739,8 +750,8 @@ def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
             f"Problem: {_status_label(problem.identifier)} "
             f"({_status_location(problem.tool, problem.relative_path)})"
         )
-        if problem.identifier == _LOCK_PROBLEM_IDENTIFIER:
-            line += f": {problem.message}"
+        if problem.identifier in {_LOCK_PROBLEM_IDENTIFIER, WRITE_PROBLEM_IDENTIFIER}:
+            line += f": {escape_nonprintable(problem.message)}"
         console.print(Text(line))
 
     if len(audit.problems) > 5:
@@ -801,21 +812,34 @@ def config_sync(
                           else resolve_zone_roots(config).config_root / label),
                 )
                 action = "was missing" if entry.backup_path is None else "backed up"
-                console.print(Text(f"{location}: {action}"))
+                console.print(Text(escape_nonprintable(f"{location}: {action}")))
             if discarded.backup_directory is not None:
-                console.print(Text(f"Backed up to {discarded.backup_directory}"))
+                console.print(
+                    Text(escape_nonprintable(f"Backed up to {discarded.backup_directory}"))
+                )
             elif discarded.failure is None:
                 info("no target drift")
             if discarded.failure is not None:
                 for problem in discarded.failure.problems:
-                    console.print(Text(f"{problem.message} Remedy: {problem.remedy}"))
+                    console.print(
+                        Text(escape_nonprintable(f"{problem.message} Remedy: {problem.remedy}"))
+                    )
+            if discarded.failed_phase is not None:
+                _print_discard_incomplete(discarded)
+                if discarded.failure is None and discarded.sync is not None:
+                    _print_workflow_audit(discarded.sync.audit)
+                raise typer.Exit(1)
+            if discarded.failure is not None:
                 raise typer.Exit(1)
             assert discarded.sync is not None
             result = discarded.sync
         else:
             result = synchronize_workflow_config(project_root)
     except (OSError, TypeError, ValueError) as exc:
-        error(f"Configuration synchronization could not start ({exc}).")
+        error(
+            "Configuration synchronization could not start "
+            f"({escape(escape_nonprintable(str(exc)))})."
+        )
         warning("Run `djinn config status`, correct the reported problem, and retry.")
         raise typer.Exit(1) from exc
 
@@ -830,6 +854,26 @@ def config_sync(
     _print_runtime_inspections(get_project_root(), after_sync=True)
 
 
+def _print_discard_incomplete(discarded: WorkflowDiscardResult) -> None:
+    phase = escape_nonprintable(str(discarded.failed_phase))
+    console.print(Text(f"Discard incomplete: failed during {phase}."))
+    if discarded.completed:
+        console.print(Text(f"Completed: {', '.join(discarded.completed)}."))
+    if discarded.skipped:
+        console.print(
+            Text(f"Skipped: {', '.join(discarded.skipped)}; runtime repair is incomplete.")
+        )
+    elif discarded.failed_phase != "backup":
+        console.print(Text("Runtime repair may be incomplete."))
+    if discarded.backup_directory is not None:
+        console.print(
+            Text(escape_nonprintable(f"Backups were kept in {discarded.backup_directory}."))
+        )
+    console.print(
+        Text("Fix the cause above, then rerun `djinn config sync --discard-target-drift`.")
+    )
+
+
 def _print_runtime_inspections(project_root: Path, *, after_sync: bool = False) -> bool:
     config = load_config()
     clean = True
@@ -840,7 +884,11 @@ def _print_runtime_inspections(project_root: Path, *, after_sync: bool = False) 
         failure = inspection_failure(inspection, config).problems[0]
         if after_sync:
             warning(escape(f"{failure.message} Run `djinn config status`"))
-        elif inspection.result is not None:
+        elif (
+            inspection.result is not None
+            and inspection.result.write_error is None
+            and inspection.result.lock_error is None
+        ):
             result = inspection.result
             labels = tuple(
                 workflow_item_label(
@@ -852,10 +900,12 @@ def _print_runtime_inspections(project_root: Path, *, after_sync: bool = False) 
                 )
                 for item in result.drift_items
             )
-            console.print(
-                Text(f"Drift: {result.drift_class.value} ({workflow_item_summary(labels)})")
-            )
+            summary = workflow_item_summary(labels)
+            location = f" ({summary})" if summary else ""
+            console.print(Text(f"Drift: {result.drift_class.value}{location}"))
             console.print(Text(f"Remedy: {failure.remedy}"))
         else:
+            # Operational failure or unchecked runtime: the cause, not a drift class.
             console.print(Text(f"Runtime: {failure.message}"))
+            console.print(Text(f"Remedy: {failure.remedy}"))
     return clean
