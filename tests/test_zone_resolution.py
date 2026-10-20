@@ -788,6 +788,17 @@ def test_malformed_or_schema_invalid_zones_file_raises_a_named_error(
         load_zone_assignments(_config(tmp_path), path=zones_file)
 
 
+def test_invalid_utf8_zones_file_raises_a_named_configuration_error(tmp_path: Path) -> None:
+    zones_file = tmp_path / "zones.toml"
+    zones_file.write_bytes(b"\xff")
+
+    with pytest.raises(ZoneConfigurationError) as exc:
+        load_zone_assignments(_config(tmp_path), path=zones_file)
+
+    assert isinstance(exc.value.__cause__, UnicodeDecodeError)
+    assert str(exc.value) == f"Invalid TOML syntax in {zones_file}: {exc.value.__cause__}"
+
+
 @pytest.mark.parametrize("name", SYNC_PATHS["credentials"])
 def test_credential_root_link_preserves_outside_mode_and_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str

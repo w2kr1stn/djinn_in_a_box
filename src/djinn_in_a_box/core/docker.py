@@ -847,6 +847,12 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
         root = get_config_root(config)
         return [root / name for name in SYNC_PATHS["credentials"]]
 
+    def sessions_sources() -> list[Path]:
+        home = Path.home()
+        if home.is_absolute():
+            home = Path(os.path.realpath(home))
+        return [home / ".djinn" / "sessions"]
+
     families: tuple[tuple[str, str, Callable[[], list[Path]], str], ...] = (
         (
             "Workspace root",
@@ -872,7 +878,7 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
         (
             "Sessions directory",
             "~/.djinn/sessions",
-            lambda: [Path.home() / ".djinn" / "sessions"],
+            sessions_sources,
             "move that input out of ~/.djinn/sessions",
         ),
     )
@@ -881,8 +887,8 @@ def managed_bind_problems(config: AppConfig) -> list[str]:
             paths = sources()
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             problems.append(
-                f"{family} {description} is mounted writable and "
-                f"cannot be checked against host execution inputs ({exc}); {remedy}"
+                f"{family} ({description}) cannot be checked against host execution inputs "
+                f"({exc}); fix that setting or file and retry"
             )
             continue
         for source in paths:

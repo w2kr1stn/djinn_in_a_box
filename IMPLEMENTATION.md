@@ -1136,7 +1136,9 @@ The same module owns the repeatable user-mount contract:
 writable sources without provisioning: the expanded `config.code_dir`,
 `get_config_root(config) / name` for `SYNC_PATHS["credentials"]` (`claude`, `codex`,
 `opencode`, `gh`, `age`), assigned zone overlay sources, and
-`Path.home() / ".djinn" / "sessions"`. One `_execution_input_check()` closure per
+the sessions directory under `Path(os.path.realpath(home)) / ".djinn" / "sessions"`
+when `home = Path.home()` is absolute; a relative home is kept unchanged and fails
+closed. One `_execution_input_check()` closure per
 call reuses the declared/invocation inventory and `host_sealing.execution_overlap()`
 predicate, including symmetric overlap, inode aliases, symlink locations and
 missing suffixes. Relative or uninspectable sources and undeterminable inputs
@@ -1789,9 +1791,9 @@ otherwise the command uses `AgentConfig.default_model` when configured.
 `run()` loads app config and calls `validate_managed_bind_sources()` immediately
 after `load_config()`, before `get_config_root()` or `prepare_config_workflow()`.
 It prints a `MountSpecificationError` through `error()` and exits 1. It then
-loads agent config, validates the requested agent, runs the shared workflow
-preparation for Claude/Codex/OpenCode, accepts repeatable
-`--mount SRC[:DST[:ro|rw]]` values, and ensures the Docker network. Without an
+runs the shared workflow preparation for Claude/Codex/OpenCode and accepts
+repeatable `--mount SRC[:DST[:ro|rw]]` values; `run_headless_agent()` loads the
+agent definitions, validates the requested agent and ensures the Docker network. Without an
 explicit mount it keeps the implicit current-directory mount at
 `/home/dev/workspace`; with explicit mounts it uses their resolved targets and
 the first target as the workdir. It then calls
