@@ -9,6 +9,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Raise the default OpenCode version to 2.1.1; a fresh build with the previous
+  default 2.0.26 failed in OpenCode's npm postinstall. Maintainers now build
+  once with the defaults alone after any default bump (#176).
 - Name offending workflow roots, files and carrier keys in delivery refusals.
   `djinn config status` and doctor's `Config workflow` check now inspect start
   runtime roots read-only; runtime drift makes status exit `1`. Plain sync
@@ -125,8 +128,8 @@ Versioning before and after the first stable release.
 - Require image label `djinn.workflow.publisher=2` for workflow delivery;
   older or unlabeled images refuse with `Rebuild/recreate required.` (#166).
 - Move dev and audit OpenCode installs to npm
-  [`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
-  (published 2026-10-08).
+  [`@opencode/cli@2.1.1`](https://www.npmjs.com/package/@opencode/cli/v/2.1.1)
+  (published 2026-10-20).
 - Restore refuses unknown sync-path names. Backup and restore block dev container
   creation while they run. Clearing fails when an entry other than an empty mount
   placeholder cannot be removed.

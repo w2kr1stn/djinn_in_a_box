@@ -1675,8 +1675,8 @@ copies the stdlib-only `workflow_publisher.py` to
 `/home/dev/settings-copy.py`. The Dockerfile also sets
 `djinn.workflow.publisher="2"`; Compose starts and OpenCode session refreshes
 check that label before doing workflow work. OpenCode is installed from npm as
-[`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
-(published 2026-10-08), with the numeric `OPENCODE_VERSION` pin. Node agents are installed through
+[`@opencode/cli@2.1.1`](https://www.npmjs.com/package/@opencode/cli/v/2.1.1)
+(published 2026-10-20), with the numeric `OPENCODE_VERSION` pin. Node agents are installed through
 fnm. The final image PATH is `~/.cache/djinn-tools/bin`,
 `~/.local/share/fnm/aliases/default/bin`, `~/.local/bin`, `~/.local/share/fnm`,
 then the base system paths, so every process resolves optional tools and agents
@@ -1853,7 +1853,10 @@ cache/log locations follow operator configuration (default `~/.npm`).
 emits protocol lines on stdout and diagnostics on stderr, exits nonzero on any
 failed lookup or invalid value and writes no files. No arguments retain the
 maintainer Dockerfile rewrite/diff/build guidance and skip-and-continue behavior.
-Upstream default bumps are reviewed through pull requests.
+Upstream default bumps are reviewed through pull requests. After any default
+bump, the maintainer builds once with the defaults alone (no local
+`agent-versions.toml` record) and commits the bump only after that build
+succeeds; CI does not build the image.
 
 ## Assistant Audit
 

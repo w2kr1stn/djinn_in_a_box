@@ -1,7 +1,7 @@
 # OpenCode 2 in Djinn
 
-The dev image pins [`@opencode/cli@2.0.26` on npm](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
-(published 2026-10-08); the audit image verifies the native npm archive against
+The dev image pins [`@opencode/cli@2.1.1` on npm](https://www.npmjs.com/package/@opencode/cli/v/2.1.1)
+(published 2026-10-20); the audit image verifies the native npm archive against
 the registry's `sha512` integrity before extracting the same version.
 `OPENCODE_VERSION` is the numeric Dockerfile pin; `djinn update` resolves
 `@opencode/cli`, and a higher local `agent-versions.toml` pin wins for both images.

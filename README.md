@@ -1495,6 +1495,10 @@ djinn build
 
 Maintainers bump upstream defaults with `scripts/update-agents.sh` in a
 development checkout and submit the Dockerfile changes through a pull request.
+After any default bump, by script or by hand, build once with the defaults
+alone: move `~/.config/djinn_in_a_box/agent-versions.toml` aside so no higher
+local version replaces a default, run `djinn build`, and commit the bump only
+after that build succeeds. CI does not build the image.
 The script's `--print` mode resolves versions without editing files.
 
 ## Typical Workflows
