@@ -237,8 +237,9 @@ def test_restore_creates_only_missing_root_before_clear_and_extract(
         assert path == target and path.is_dir()
         calls.append("clear")
 
-    def extract(argv: list[str]) -> docker_mod.RunResult:
+    def extract(argv: list[str], **kwargs: Any) -> docker_mod.RunResult:
         assert argv == ["tar", "xzf", str(staging / "djinn-sync-claude.tar.gz"), "-C", str(target)]
+        assert kwargs == {"pass_fds": ()}
         calls.append("extract")
         return docker_mod.RunResult(1, stdout="partial", stderr="tar failed")
 
@@ -316,7 +317,7 @@ def test_sync_operations_handle_tree_beyond_recursion_limit(
     staging.mkdir()
     (staging / "djinn-sync-claude.tar.gz").write_bytes(b"dummy archive")
 
-    def extract(_argv: list[str]) -> docker_mod.RunResult:
+    def extract(_argv: list[str], **_: Any) -> docker_mod.RunResult:
         assert list(target.iterdir()) == []
         return docker_mod.RunResult(0)
 
@@ -3664,9 +3665,32 @@ def test_restore_sync_path_admits_every_configured_name(
     assert result.success
     assert result.extraction_admitted
     assert (root / name).is_dir()
-    extract.assert_called_once_with([
-        "tar", "xzf", str(staging / f"djinn-sync-{name}.tar.gz"), "-C", str(root / name),
-    ])
+    extract.assert_called_once_with(
+        ["tar", "xzf", str(staging / f"djinn-sync-{name}.tar.gz"), "-C", str(root / name)],
+        pass_fds=(),
+    )
+
+
+def test_restore_sync_path_hands_inherited_descriptors_to_the_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "djinn-sync-opencode.tar.gz").touch()
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(tmp_path / "config"))
+    with patch.object(docker_mod, "_run_captured", return_value=docker_mod.RunResult(0)) as extract:
+        assert restore_sync_path("opencode", staging, inherit_fds=(7,)).success
+    assert extract.call_args.kwargs == {"pass_fds": (7,)}
+
+
+def test_run_captured_keeps_only_passed_descriptors_open_in_the_child(tmp_path: Path) -> None:
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    probe = [sys.executable, "-c", "import os, sys; os.fstat(int(sys.argv[1]))", str(descriptor)]
+    try:
+        assert docker_mod._run_captured(probe, pass_fds=(descriptor,)).success
+        assert not docker_mod._run_captured(probe).success
+    finally:
+        os.close(descriptor)
 
 
 def test_security_model_names_guarded_backup_restore_pathname_exception() -> None:

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from enum import Enum
@@ -381,6 +381,7 @@ def _run_captured(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> RunResult:
     try:
         # A prompt (e.g. Compose asking to recreate a volume) must not wait on the terminal.
@@ -393,6 +394,7 @@ def _run_captured(
             env=env,
             check=False,
             timeout=timeout,
+            pass_fds=tuple(pass_fds),
         )
         return RunResult(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
     except FileNotFoundError as e:
@@ -3487,9 +3489,17 @@ class SyncRestoreResult(RunResult):
 
 
 def restore_sync_path(
-    path_name: str, source_dir: Path, config: AppConfig | None = None
+    path_name: str,
+    source_dir: Path,
+    config: AppConfig | None = None,
+    *,
+    inherit_fds: Sequence[int] = (),
 ) -> SyncRestoreResult:
-    """Extract djinn-sync-<name>.tar.gz into ${DJINN_CONFIG_ROOT}/<name>/."""
+    """Extract djinn-sync-<name>.tar.gz into ${DJINN_CONFIG_ROOT}/<name>/.
+
+    ``inherit_fds`` stay open in the extracting process, so a lock held on them lasts until the
+    carrier is written even if this process dies first.
+    """
     if path_name not in {name for names in SYNC_PATHS.values() for name in names}:
         return SyncRestoreResult(returncode=1, stderr=f"Unknown sync path name: {path_name}")
     archive = source_dir / f"{_SYNC_ARCHIVE_PREFIX}{path_name}.tar.gz"
@@ -3521,7 +3531,7 @@ def restore_sync_path(
             returncode=1, stderr=f"Failed to clear {target}: {error}{remedy}"
         )
 
-    result = _run_captured(["tar", "xzf", str(archive), "-C", str(target)])
+    result = _run_captured(["tar", "xzf", str(archive), "-C", str(target)], pass_fds=inherit_fds)
     return SyncRestoreResult(
         returncode=result.returncode, stdout=result.stdout, stderr=result.stderr,
         extraction_admitted=True,

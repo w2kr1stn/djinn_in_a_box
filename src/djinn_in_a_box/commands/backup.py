@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -380,6 +381,9 @@ def restore(
     decrypt_dir: Path | None = None
     # Held until the archives are restored, so a concurrent recovery cannot merge it early.
     parked: opencode_credentials.Session | None = None
+    # While held, no audit-session recovery merges into the carrier this restore overwrites.
+    gates = ExitStack()
+    gate: int | None = None
 
     try:
         archive_to_extract = backup_file
@@ -430,6 +434,7 @@ def restore(
         if preserve_opencode:
             carrier = opencode_carrier(config)
             try:
+                gate = gates.enter_context(opencode_credentials.restore_gate())
                 exported = export_opencode_data_credentials()
                 carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with opencode_credentials.carrier_lock(carrier) as lease:
@@ -447,6 +452,8 @@ def restore(
                     "unexported logins are lost."
                 )
                 try:
+                    if gate is None:
+                        gate = gates.enter_context(opencode_credentials.restore_gate())
                     carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
                     with opencode_credentials.carrier_lock(carrier) as lease:
                         parked = opencode_credentials.park_for_restore(None, carrier, b"[]", lease)
@@ -485,7 +492,9 @@ def restore(
                     error(f"  {label}: unknown sync path name")
                     failed = True
                     continue
-                result = restore_sync_path(path_name, staging_dir, config)
+                result = restore_sync_path(
+                    path_name, staging_dir, config, inherit_fds=() if gate is None else (gate,)
+                )
                 if result.extraction_admitted:
                     try:
                         _harden_restored_sync_directories(
@@ -513,6 +522,7 @@ def restore(
                 error(f"  {label}: {detail}")
                 failed = True
 
+        gates.close()
         if preserve_opencode:
             recover_leftover_sessions(get_project_root(), config, parked)
 
@@ -523,6 +533,7 @@ def restore(
         success(f"Restore complete: {len(inner_archives)} item(s)")
 
     finally:
+        gates.close()
         if parked is not None:
             parked.close()
         if decrypt_dir is not None:

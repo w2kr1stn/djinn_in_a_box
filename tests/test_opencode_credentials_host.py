@@ -1159,6 +1159,61 @@ def test_a_recovery_during_the_restore_leaves_the_parked_copy_alone(world: World
     assert world.ids() == ["cred_new", "cred_old"]
 
 
+def test_while_the_restore_gate_is_held_no_session_is_merged_or_swept(world: World) -> None:
+    world.put(FILE, [entry("cred_old", "prov_o")])
+    finished = world.finished_session(final=[entry("cred_audit", "prov_x")])
+    (world.root / (".deleting-" + "4" * 32)).mkdir(mode=0o700)
+    before = world.snapshot()
+    with oc.restore_gate(world.root, policy=world.policy):
+        report = world.recover()
+        assert report.recovered == [] and report.removed == []
+        assert set(report.kept) == {
+            (finished, "restore in progress"),
+            ("4" * 32, "restore in progress"),
+        }
+        assert world.snapshot() == before
+        assert world.sessions() == sorted([".deleting-" + "4" * 32, finished])
+    report = world.recover()
+    assert report.recovered == [finished] and report.removed == ["4" * 32]
+    assert world.ids() == ["cred_audit", "cred_old"]
+
+
+def test_the_restore_gate_lasts_while_a_child_that_inherited_it_runs(world: World) -> None:
+    identity = world.finished_session(final=[entry("cred_x", "prov_x")])
+    with oc.restore_gate(world.root, policy=world.policy) as gate:
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            pass_fds=(gate,),
+        )
+    assert child.stdin is not None
+    try:
+        # the host CLI has let go; the extracting child still writes the carrier
+        assert world.recover().kept == [(identity, "restore in progress")]
+    finally:
+        child.stdin.close()
+        child.wait(timeout=10)
+    assert world.recover().recovered == [identity]
+
+
+def test_the_restore_gate_waits_for_a_running_recovery_then_gives_up(world: World) -> None:
+    world.root.mkdir(parents=True, mode=0o700)
+    recovery = os.open(world.root, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(recovery, fcntl.LOCK_SH)
+    try:
+        started = time.monotonic()
+        with (
+            pytest.raises(oc.LockTimeout),
+            oc.restore_gate(world.root, policy=world.policy, timeout=0.3),
+        ):
+            pass
+        assert time.monotonic() - started >= 0.3
+    finally:
+        os.close(recovery)
+    with oc.restore_gate(world.root, policy=world.policy, timeout=0.3):
+        pass
+
+
 def test_a_kill_between_parking_and_the_restore_loses_nothing(world: World, driver: Driver) -> None:
     world.put(FILE, [entry("cred_old", "prov_o"), entry("cred_new", "prov_n")])
     driver.export.write_bytes(export_of(entry("cred_vol", "prov_v")))

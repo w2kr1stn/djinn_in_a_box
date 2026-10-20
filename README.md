@@ -1577,9 +1577,14 @@ the terminal before anything is restored.
 
 `djinn restore` keeps logins created after the backup: before its first
 destructive step it parks the union of the current volume and config root in a
-private recovery session and merges it back after the restore. A restored
-`credentials.removed.json` from before a later logout everywhere can make that
-login reappear.
+private recovery session and merges it back after the restore. If that export or
+parking fails, the restore stops before it changes anything;
+`--discard-unexported-credentials` restores anyway and loses logins that were
+only in the volume. While the restore writes, audits and starts leave every
+recovery session alone; the restore merges them all once it is done. If that
+merge fails, the restore only warns and the sessions stay for the next audit or
+start. A restored `credentials.removed.json` from before a later logout
+everywhere can make that login reappear.
 
 To back up specific categories:
 
@@ -1645,13 +1650,14 @@ djinn clean volumes --data
 This deletes the root-owned list at `/var/lib/djinn-packages` in `djinn-packages`
 along with the other data volumes.
 
-Before Djinn deletes or overwrites the `djinn-opencode-data` volume
-(`djinn clean volumes --data`, `djinn clean volumes djinn-opencode-data` or
-`djinn restore`) it exports that volume's logins through a one-off container and
-merges them into the config root. If that fails, the volume stays and Djinn names
-the reason; `--discard-unexported-credentials` deletes it anyway and loses logins
-that were only in the volume. `djinn clean all` uses the same export and only
-warns when it fails.
+Before Djinn deletes the `djinn-opencode-data` volume
+(`djinn clean volumes --data` or `djinn clean volumes djinn-opencode-data`) it
+exports that volume's logins through a one-off container and merges them into the
+config root. If that fails, the volume stays and Djinn names the reason;
+`--discard-unexported-credentials` deletes it anyway and loses logins that were
+only in the volume. `djinn clean all` uses the same export and only warns when it
+fails. `djinn restore` parks these logins instead of merging them first; see
+[Backup and Restore](#backup-and-restore).
 
 Clear credential directories under the config root:
 

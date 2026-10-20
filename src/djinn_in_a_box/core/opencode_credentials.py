@@ -1941,6 +1941,18 @@ def recover_audit_sessions(
     root_fd = _open_root(root_text, effective, create=False)
     if root_fd is None:
         return report
+    try:
+        fcntl.flock(root_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # A restore is overwriting the carrier: any merge now would be lost with it.
+        try:
+            for name in sorted(os.listdir(root_fd)):
+                identity = name.removeprefix(_CREATING).removeprefix(_DELETING)
+                if _SESSION_ID.fullmatch(identity) is not None:
+                    report.kept.append((identity, "restore in progress"))
+        finally:
+            os.close(root_fd)
+        return report
     absolute_root = os.path.abspath(root_text)
     leases: list[int] = []
     pending: list[_Pending] = []
@@ -2050,6 +2062,39 @@ def _merge_pending(
         for item in pending:
             if item.identity not in done:
                 report.kept.append((item.identity, _lock_reason(error)))
+
+
+@contextmanager
+def restore_gate(
+    root: str | os.PathLike[str] | None = None,
+    *,
+    policy: RootPolicy | None = None,
+    timeout: float = LOCK_TIMEOUT_SECONDS,
+) -> Iterator[int]:
+    """Keep every audit-session recovery out while a restore overwrites the carrier.
+
+    Holds an exclusive flock on the audit root; recoveries take it shared and skip while it is
+    held. Yields the locked descriptor: pass it to every child process that writes the carrier,
+    so the gate lasts until that writer ends even if the host CLI is killed. Raises LockTimeout
+    if running recoveries do not finish in time.
+    """
+    root_text = os.fspath(root) if root is not None else default_audit_root()
+    root_fd = _open_root(root_text, policy or RootPolicy(), create=True)
+    if root_fd is None:
+        raise CredentialsError("audit root could not be created")
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockTimeout("audit sessions are being recovered") from None
+                time.sleep(_LOCK_POLL_SECONDS)
+        yield root_fd
+    finally:
+        os.close(root_fd)
 
 
 def park_for_restore(

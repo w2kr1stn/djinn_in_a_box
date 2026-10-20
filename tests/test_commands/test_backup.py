@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -2476,10 +2477,12 @@ def test_restore_parks_before_destruction_and_recovers_after_archives(
 
     def parked(*args):
         assert inside
+        # a session merged between parking and the gate would be missing from the parked copy
+        assert _audit_root_is_gated(oc)
         calls.append("park")
         return park(*args)
 
-    def restored(name, *_):
+    def restored(name, *_, **__):
         assert calls[0] == "park"
         calls.append(name)
         if name == "opencode":
@@ -2517,7 +2520,7 @@ def test_restore_interruption_keeps_session_for_later_recovery(credential_restor
     def volume(*_):
         return RunResult(0)
 
-    def interrupted(*_):
+    def interrupted(*_, **__):
         # Simulate interruption after the destructive clear and before carrier extraction.
         (carrier / "credentials.json").unlink()
         raise RuntimeError("restore interrupted")
@@ -2552,7 +2555,7 @@ def test_restore_holds_the_parked_session_against_a_concurrent_recovery(
         concurrent.append(report)
         return RunResult(0)
 
-    def carrier_from_backup(*_):
+    def carrier_from_backup(*_, **__):
         (carrier / "credentials.json").write_text("[]\n")
         return SyncRestoreResult(0, extraction_admitted=True)
 
@@ -2561,10 +2564,55 @@ def test_restore_holds_the_parked_session_against_a_concurrent_recovery(
     result = runner.invoke(app, ["restore"])
     assert result.exit_code == 0, result.output
     assert [len(report.recovered) for report in concurrent] == [0]
-    assert [reason for _, reason in concurrent[0].kept] == ["in use"]
+    assert [reason for _, reason in concurrent[0].kept] == ["restore in progress"]
     assert {item["id"] for item in json.loads((carrier / "credentials.json").read_text())} == {
         "after-backup",
         "database-only",
+    }
+    assert not list(Path(oc.default_audit_root()).iterdir())
+
+
+def test_an_earlier_audit_session_lands_in_the_restored_carrier(credential_restore, monkeypatch):
+    _, carrier, _, archives, oc = credential_restore
+    archives(["djinn-opencode-data", "djinn-sync-opencode"])
+    # an audit whose merge failed left its final export behind
+    with oc.create_audit_session() as left:
+        earlier = {
+            "id": "earlier-audit",
+            "integrationID": "provider-audit",
+            "label": os.urandom(8).hex(),
+            "active": False,
+            "value": {"type": "key", "key": os.urandom(24).hex()},
+        }
+        final = Path(left.io_path) / "final.json"
+        final.write_text(json.dumps([earlier]))
+        final.chmod(0o600)
+    concurrent = []
+
+    def volume(*_):
+        # without the gate this merge lands in the carrier the backup is about to replace
+        report = oc.recover_audit_sessions(None, carrier, lambda _: b"[]", lambda _: False)
+        concurrent.append(report)
+        return RunResult(0)
+
+    def carrier_from_backup(*_, inherit_fds=()):
+        assert _audit_root_is_gated(oc)
+        root = os.stat(oc.default_audit_root())
+        assert [os.path.samestat(os.fstat(fd), root) for fd in inherit_fds] == [True]
+        (carrier / "credentials.json").write_text("[]\n")
+        return SyncRestoreResult(0, extraction_admitted=True)
+
+    monkeypatch.setattr(backup_module, "restore_volume", volume)
+    monkeypatch.setattr(backup_module, "restore_sync_path", carrier_from_backup)
+    result = runner.invoke(app, ["restore"])
+    assert result.exit_code == 0, result.output
+    assert concurrent[0].recovered == []
+    assert dict(concurrent[0].kept)[left.id] == "restore in progress"
+    assert [reason for _, reason in concurrent[0].kept] == ["restore in progress"] * 2
+    assert {item["id"] for item in json.loads((carrier / "credentials.json").read_text())} == {
+        "after-backup",
+        "database-only",
+        "earlier-audit",
     }
     assert not list(Path(oc.default_audit_root()).iterdir())
 
@@ -2613,7 +2661,18 @@ def test_a_second_restore_is_refused_while_one_runs(credential_restore, monkeypa
     assert not root.exists() or not list(root.iterdir())
 
 
-@pytest.mark.parametrize("failure", ["export", "park"])
+def _audit_root_is_gated(oc) -> bool:
+    probe = os.open(oc.default_audit_root(), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(probe)
+    return False
+
+
+@pytest.mark.parametrize("failure", ["export", "park", "gate"])
 @pytest.mark.parametrize("discard", [False, True])
 def test_restore_preservation_failure_refuses_or_discards(
     credential_restore, monkeypatch, failure, discard
@@ -2622,6 +2681,16 @@ def test_restore_preservation_failure_refuses_or_discards(
     archives(["djinn-opencode-data", "djinn-sync-opencode"])
     calls = []
     original = oc.park_for_restore
+    original_gate = oc.restore_gate
+    gates = []
+
+    @contextmanager
+    def gate():
+        gates.append("gate")
+        if failure == "gate" and len(gates) == 1:
+            raise oc.LockTimeout("audit sessions are being recovered")
+        with original_gate() as descriptor:
+            yield descriptor
 
     def export():
         if failure == "export":
@@ -2634,18 +2703,20 @@ def test_restore_preservation_failure_refuses_or_discards(
         calls.append("park")
         return original(root, path, data, lease)
 
-    def destructive(*_):
-        calls.append("destroy")
+    def destructive(*_, **__):
+        calls.append("destroy" if _audit_root_is_gated(oc) else "ungated")
         return SyncRestoreResult(0, extraction_admitted=True)
 
     monkeypatch.setattr(backup_module, "export_opencode_data_credentials", export)
     monkeypatch.setattr(oc, "park_for_restore", park)
+    monkeypatch.setattr(oc, "restore_gate", gate)
     monkeypatch.setattr(backup_module, "restore_volume", destructive)
     monkeypatch.setattr(backup_module, "restore_sync_path", destructive)
     args = ["restore"] + (["--discard-unexported-credentials"] if discard else [])
     result = runner.invoke(app, args)
     assert result.exit_code == (0 if discard else 1), result.output
     assert ("destroy" in calls) == discard
+    assert "ungated" not in calls
     if discard:
         assert calls[0] == "park"
         assert "unexported logins are lost" in result.output
@@ -2654,7 +2725,11 @@ def test_restore_preservation_failure_refuses_or_discards(
         }
     else:
         assert "--discard-unexported-credentials" in result.output
-        assert ("image unavailable" if failure == "export" else "parking failed") in result.output
+        assert {
+            "export": "image unavailable",
+            "park": "parking failed",
+            "gate": "audit sessions are being recovered",
+        }[failure] in result.output
         assert not calls
 
 
