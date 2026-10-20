@@ -110,6 +110,11 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- `djinn hostctl check [HOST]` shows target SSH approval banners in the owner's
+  host terminal through the gated helper relay, with frozen peer trust and
+  isolated temporary OpenSSH configuration. `on` adds a check hint, and `status`
+  ends with a passive summary of window time, sealing, relay peers and the next
+  action (#130).
 - Host-private post-mortem records before recovery removes unexpectedly stopped
   containers, plus hostctl teardown observations. Records keep bounded log tails
   and final state under `~/.local/state/djinn/post-mortem/` (last 10 / 8 MiB);

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type stream struct {
@@ -114,51 +115,94 @@ func readDestination(conn net.Conn) (string, uint16, error) {
 
 func socksReply(conn net.Conn, code byte) { _, _ = conn.Write([]byte{5, code, 0, 1, 0, 0, 0, 0, 0, 0}) }
 
-func rawConnect(conn net.Conn, destination string) error {
-	if _, err := conn.Write([]byte{5, 1, 0}); err != nil {
+var errSOCKSGreeting = errors.New("SOCKS greeting refused")
+var errSOCKSReply = errors.New("malformed SOCKS response")
+var errSOCKSAddress = errors.New("malformed SOCKS address")
+
+type socksRefusal struct{ code byte }
+
+func (e *socksRefusal) Error() string { return "SOCKS CONNECT refused" }
+
+func selectorAddress(selector string) ([]byte, error) {
+	if len(selector) == 0 || len(selector) > 255 || strings.ContainsFunc(selector, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) {
+		return nil, errSOCKSAddress
+	}
+	if ip := net.ParseIP(selector); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return append([]byte{1}, v4...), nil
+		}
+		return append([]byte{4}, ip.To16()...), nil
+	}
+	return append([]byte{3, byte(len(selector))}, []byte(selector)...), nil
+}
+
+func socksConnect(conn net.Conn, selector string) error {
+	address, err := selectorAddress(selector)
+	if err != nil {
+		return err
+	}
+	if _, err = conn.Write([]byte{5, 1, 0}); err != nil {
 		return err
 	}
 	var greeting [2]byte
-	if _, err := io.ReadFull(conn, greeting[:]); err != nil {
+	if _, err = io.ReadFull(conn, greeting[:]); err != nil {
 		return err
 	}
 	if greeting != [2]byte{5, 0} {
-		return errors.New("raw SOCKS greeting refused")
+		return errSOCKSGreeting
 	}
-	ip := net.ParseIP(destination)
-	request := []byte{5, 1, 0, 4}
-	if v4 := ip.To4(); v4 != nil {
-		request[3] = 1
-		ip = v4
-	}
-	request = append(request, ip...)
-	request = append(request, 0, 22)
-	if _, err := conn.Write(request); err != nil {
+	frame := append([]byte{5, 1, 0}, address...)
+	frame = append(frame, 0, 22)
+	if _, err = conn.Write(frame); err != nil {
 		return err
 	}
-	var response [4]byte
-	if _, err := io.ReadFull(conn, response[:]); err != nil {
+	var reply [4]byte
+	if _, err = io.ReadFull(conn, reply[:]); err != nil {
 		return err
 	}
-	if response[0] != 5 || response[1] != 0 || response[2] != 0 {
-		return errors.New("raw SOCKS CONNECT refused")
+	if reply[0] != 5 || reply[2] != 0 {
+		return errSOCKSReply
 	}
 	size := 0
-	switch response[3] {
+	switch reply[3] {
 	case 1:
 		size = 4
 	case 4:
 		size = 16
 	case 3:
 		var length [1]byte
-		if _, err := io.ReadFull(conn, length[:]); err != nil {
+		if _, err = io.ReadFull(conn, length[:]); err != nil {
 			return err
+		}
+		if length[0] == 0 {
+			return errSOCKSAddress
 		}
 		size = int(length[0])
 	default:
+		return errSOCKSAddress
+	}
+	if _, err = io.CopyN(io.Discard, conn, int64(size+2)); err != nil {
+		return err
+	}
+	if reply[1] != 0 {
+		return &socksRefusal{code: reply[1]}
+	}
+	return nil
+}
+
+func rawConnect(conn net.Conn, destination string) error {
+	err := socksConnect(conn, destination)
+	var refused *socksRefusal
+	switch {
+	case errors.Is(err, errSOCKSGreeting):
+		return errors.New("raw SOCKS greeting refused")
+	case errors.Is(err, errSOCKSReply), errors.As(err, &refused):
+		return errors.New("raw SOCKS CONNECT refused")
+	case errors.Is(err, errSOCKSAddress):
 		return errors.New("malformed raw SOCKS response")
 	}
-	_, err := io.CopyN(io.Discard, conn, int64(size+2))
 	return err
 }
 

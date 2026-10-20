@@ -8,20 +8,25 @@ import io
 import json
 import os
 import pwd
+import re
+import secrets
+import shutil
+import signal
 import socket
 import stat
 import subprocess
+import sys
 import tarfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.config.ssh import HostctlConfig, duration_minutes
+from djinn_in_a_box.config.ssh import HostctlConfig, HostctlHost, duration_minutes, ssh_token
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
 from djinn_in_a_box.core import post_mortem
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
@@ -817,6 +822,211 @@ def snapshot() -> dict[str, Any]:
             or process_token(value.get("observer_pid", -1)) != value.get("observer_token")
         )
     return result
+
+
+CHECK_NO_TERMINAL = "hostctl check requires a terminal on stdin and stderr"
+CHECK_NO_SSH = "ssh client not found on host PATH"
+CHECK_NOT_OPEN = "hostctl window is not open or did not answer; run djinn hostctl status"
+CHECK_TRUST = "cached peer trust does not match the helper generation"
+CHECK_OPENING = "opening configuration does not match the helper generation"
+CHECK_INCOMPLETE = "hostctl check state is incomplete; run djinn doctor"
+
+
+def _stdio_is_terminal() -> bool:
+    """Both streams the owner needs for the approval prompt; stdout may be redirected."""
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+@contextlib.contextmanager
+def _signals_as_interrupt() -> Iterator[None]:
+    """Treat SIGTERM/SIGHUP like Ctrl-C so cleanup runs; handlers are restored afterwards."""
+
+    def interrupt(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous: dict[int, Any] = {}
+    try:
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            previous[number] = signal.signal(number, interrupt)
+    except ValueError:  # not the main thread: nothing to convert
+        pass
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler if handler is not None else signal.SIG_DFL)
+
+
+def _live_helper() -> tuple[str, str]:
+    """Exact helper ID and generation of a running, admitted, unpaused window."""
+    helper = inspect_helper()
+    if helper is None or not helper.get("State", {}).get("Running"):
+        raise HostctlError(CHECK_NOT_OPEN)
+    identity = str(helper.get("Id") or "")
+    gen = generation(helper)
+    if not re.fullmatch(r"[0-9a-f]{64}", identity) or not re.fullmatch(r"[0-9a-f]{32}", gen):
+        raise HostctlError(CHECK_INCOMPLETE)
+    try:
+        output = command("exec", identity, SUPERVISOR, "status", gen)
+    except HostctlError:
+        raise HostctlError(CHECK_NOT_OPEN) from None
+    try:
+        decoded: Any = json.loads(output)
+    except ValueError:
+        raise HostctlError(CHECK_INCOMPLETE) from None
+    live = cast(dict[str, Any], decoded)
+    if (
+        not isinstance(decoded, dict)
+        or live.get("generation") != gen
+        or not isinstance(live.get("admission"), bool)
+        or not isinstance(live.get("paused"), bool)
+    ):
+        raise HostctlError(CHECK_INCOMPLETE)
+    if not live["admission"] or live["paused"]:
+        raise HostctlError(CHECK_NOT_OPEN)
+    return identity, gen
+
+
+def _frozen_peer(host: HostctlHost, peer: Any) -> dict[str, Any]:
+    from djinn_in_a_box.core.ssh_delivery import GitSSHError, public_blob, tailnet_ip
+
+    if not isinstance(peer, dict):
+        raise HostctlError(CHECK_INCOMPLETE)
+    value = cast(dict[str, Any], peer)
+    ip, canonical, keys = value.get("ip"), value.get("host_key_alias"), value.get("keys")
+    if value.get("address") != host.address or not isinstance(ip, str):
+        raise HostctlError(CHECK_INCOMPLETE)
+    if not isinstance(canonical, str) or not isinstance(keys, list) or not keys:
+        raise HostctlError(CHECK_INCOMPLETE)
+    try:
+        tailnet_ip(ip)
+        ssh_token(canonical)
+        for key in cast(list[Any], keys):
+            if not isinstance(key, str):
+                raise HostctlError(CHECK_INCOMPLETE)
+            public_blob(key)
+    except (GitSSHError, ValueError):
+        raise HostctlError(CHECK_INCOMPLETE) from None
+    return {
+        "address": host.address,
+        "ip": ip,
+        "host_key_alias": canonical,
+        "keys": [" ".join(str(key).split()[:2]) for key in cast(list[Any], keys)],
+    }
+
+
+def _check_targets(host: str | None, gen: str) -> tuple[HostctlConfig, dict[str, Any]]:
+    """Selected declarations and validated peers, solely from this opening's frozen state."""
+    try:
+        trust = cached_trust()
+    except (HostctlError, ValueError, OSError):
+        raise HostctlError(CHECK_INCOMPLETE) from None
+    if trust is None or trust.get("generation") != gen:
+        raise HostctlError(CHECK_TRUST)
+    try:
+        opening: Any = json.loads((state_root(create=False) / "opening.json").read_text())
+    except FileNotFoundError:
+        raise HostctlError(CHECK_OPENING) from None
+    except (ValueError, OSError):
+        raise HostctlError(CHECK_INCOMPLETE) from None
+    if not isinstance(opening, dict):
+        raise HostctlError(CHECK_INCOMPLETE)
+    frozen_opening = cast(dict[str, Any], opening)
+    if frozen_opening.get("generation") != gen:
+        raise HostctlError(CHECK_OPENING)
+    try:
+        config = HostctlConfig.model_validate(frozen_opening.get("config"))
+    except ValueError:
+        raise HostctlError(CHECK_INCOMPLETE) from None
+    if not config.hosts:
+        raise HostctlError(CHECK_INCOMPLETE)
+    if host is not None and host not in config.hosts:
+        raise HostctlError(f"unknown hostctl alias: {host}")
+    selected = [host] if host is not None else list(config.hosts)
+    peers: Any = trust.get("peers")
+    if not isinstance(peers, dict):
+        raise HostctlError(CHECK_INCOMPLETE)
+    frozen = {
+        alias: _frozen_peer(config.hosts[alias], cast(dict[str, Any], peers).get(alias))
+        for alias in selected
+    }
+    return HostctlConfig(hosts={alias: config.hosts[alias] for alias in selected}), {
+        "peers": frozen
+    }
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    # O_CREAT|O_EXCL already fails on any existing path, a planted symlink included (POSIX).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(text)
+
+
+def _remove_tree(path: Path) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except KeyboardInterrupt:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+
+
+def _run_check_ssh(ssh: str, config_path: Path, alias: str) -> int:
+    """The owner's terminal is inherited: nothing is captured, read or timed out here."""
+    try:
+        argv = [ssh, "-F", str(config_path), "-T", "-n", alias, "true"]
+        return subprocess.run(argv, check=False).returncode
+    except OSError:
+        raise HostctlError("ssh client could not be started") from None
+
+
+def check_hosts(host: str | None, report: Callable[[str], None]) -> int:
+    """Run one host-terminal SSH check per selected frozen alias; 0 only if all succeed."""
+    from djinn_in_a_box.core.ssh_delivery import host_check_files
+
+    if not _stdio_is_terminal():
+        raise HostctlError(CHECK_NO_TERMINAL)
+    found = shutil.which("ssh")
+    if found is None:
+        raise HostctlError(CHECK_NO_SSH)
+    ssh = os.path.abspath(found)
+    with _signals_as_interrupt():
+        with control_guard():
+            helper_id, gen = _live_helper()
+            selected, frozen = _check_targets(host, gen)
+        path = state_root() / f"check-{gen}-{secrets.token_hex(8)}"
+        try:
+            os.mkdir(path, 0o700)
+            os.chmod(path, 0o700)
+            files = host_check_files(
+                selected,
+                frozen,
+                docker=DOCKER_EXECUTABLE,
+                helper_id=helper_id,
+                supervisor=SUPERVISOR,
+                generation=gen,
+                directory=path,
+            )
+            for name, text in files.items():
+                _write_private_file(path / name, text)
+            failed = False
+            for alias in selected.hosts:
+                report(f"Checking {alias}...")
+                try:
+                    code = _run_check_ssh(ssh, path / "config", alias)
+                except KeyboardInterrupt:
+                    report(f"{alias}: check interrupted")
+                    raise
+                if code == 0:
+                    report(f"{alias}: approved and reachable")
+                else:
+                    report(f"{alias}: check failed (ssh exit {code})")
+                    failed = True
+            return 1 if failed else 0
+        finally:
+            _remove_tree(path)
+            if os.path.lexists(path):
+                report(f"Could not remove {path}; it holds only public SSH configuration")
 
 
 def delete_state_locked() -> None:

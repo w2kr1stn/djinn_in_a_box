@@ -225,7 +225,9 @@ def write_public_files(directory: Path, files: dict[str, str]) -> None:
 def tailnet_ip(value: str) -> str:
     address = ipaddress.ip_address(value)
     networks = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
-    if not any(address in network for network in networks):
+    # A scope suffix (`addr%zone`) is never a tailnet address and must not reach ssh_config.
+    scoped = isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None
+    if scoped or not any(address in network for network in networks):
         raise GitSSHError("peer has a non-tailnet address")
     return str(address)
 
@@ -285,31 +287,103 @@ def peer_snapshot(config: HostctlConfig, status: dict[str, Any], generation: str
     return {"generation": generation, "peers": resolved, "routes": routes}
 
 
-def tailnet_files(config: HostctlConfig, snapshot: dict[str, Any] | None) -> dict[str, str]:
+def _tailnet_render(
+    config: HostctlConfig,
+    snapshot: dict[str, Any] | None,
+    *,
+    proxy_command: str,
+    known_hosts: str,
+    host_check: bool,
+) -> tuple[str, str]:
+    """Shared renderer: container delivery (default) and the host check profile."""
     blocks: list[str] = []
     known: list[str] = []
     peers: dict[str, Any] = snapshot.get("peers", {}) if snapshot else {}
     for alias, host in config.hosts.items():
         peer: dict[str, Any] = peers.get(alias) or {}
         if peer.get("address") != host.address:
+            if host_check:
+                raise GitSSHError(f"{alias}: frozen peer trust does not match the declaration")
             peer = {}
         hostname = peer.get("ip", host.address)
         canonical = peer.get("host_key_alias", host.address.lower().rstrip("."))
-        blocks.append(
-            f"Host {alias}\n    HostName {hostname}\n    HostKeyAlias {canonical}\n"
-            f"    User {host.user}\n    ProxyCommand /usr/local/bin/djinn-hostctl-connect %h %p\n"
-            "    StrictHostKeyChecking yes\n    UpdateHostKeys no\n"
-            "    UserKnownHostsFile /home/dev/.ssh/tailnet_known_hosts\n"
-            "    GlobalKnownHostsFile /dev/null\n    IdentityAgent none\n"
-            "    IdentityFile none\n    PubkeyAuthentication no\n    ForwardAgent no\n"
-            "    ForwardX11 no\n    ForwardX11Trusted no\n    ClearAllForwardings yes\n"
-            "    PermitLocalCommand no\n    ControlMaster no\n    ControlPersist no\n"
-        )
+        credentials = ["IdentitiesOnly yes"] if host_check else ["IdentityFile none"]
+        check_only = ["PasswordAuthentication no"] if host_check else []
+        log_level = ["LogLevel INFO"] if host_check else []
+        options = [
+            f"HostName {hostname}",
+            f"HostKeyAlias {canonical}",
+            f"User {host.user}",
+            f"ProxyCommand {proxy_command}",
+            "StrictHostKeyChecking yes",
+            "UpdateHostKeys no",
+            f"UserKnownHostsFile {known_hosts}",
+            "GlobalKnownHostsFile /dev/null",
+            "IdentityAgent none",
+            *credentials,
+            "PubkeyAuthentication no",
+            *check_only,
+            "ForwardAgent no",
+            "ForwardX11 no",
+            "ForwardX11Trusted no",
+            "ClearAllForwardings yes",
+            "PermitLocalCommand no",
+            "ControlMaster no",
+            "ControlPersist no",
+            *log_level,
+        ]
+        blocks.append(f"Host {alias}\n" + "".join(f"    {option}\n" for option in options))
         known.extend(f"{canonical} {key}\n" for key in peer.get("keys", []))
-    return {
-        "tailnet_config": "\n".join(blocks),
-        "tailnet_known_hosts": "".join(dict.fromkeys(known)),
-    }
+    return "\n".join(blocks), "".join(dict.fromkeys(known))
+
+
+def tailnet_files(config: HostctlConfig, snapshot: dict[str, Any] | None) -> dict[str, str]:
+    rendered, known = _tailnet_render(
+        config,
+        snapshot,
+        proxy_command="/usr/local/bin/djinn-hostctl-connect %h %p",
+        known_hosts="/home/dev/.ssh/tailnet_known_hosts",
+        host_check=False,
+    )
+    return {"tailnet_config": rendered, "tailnet_known_hosts": known}
+
+
+def ssh_config_path(path: str) -> str:
+    """Quote a path for an ssh_config argument that ssh token- and env-expands."""
+    if any(char in path for char in "$\n\r\0"):
+        raise GitSSHError("private check path contains an unsupported character")
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{escaped}"'
+
+
+def host_proxy_command(docker: str, helper_id: str, supervisor: str, generation: str) -> str:
+    """ProxyCommand for the host check: POSIX-quoted fixed operands and `%h` as the only token."""
+    operands = [docker, "exec", "-i", helper_id, supervisor, "connect", generation]
+    if any(char in operand for operand in operands for char in "\n\r\0"):
+        raise GitSSHError("check proxy operand contains an unsupported character")
+    quoted = (shlex.quote(operand.replace("%", "%%")) for operand in operands)
+    return " ".join(quoted) + ' "%h"'
+
+
+def host_check_files(
+    config: HostctlConfig,
+    snapshot: dict[str, Any],
+    *,
+    docker: str,
+    helper_id: str,
+    supervisor: str,
+    generation: str,
+    directory: Path,
+) -> dict[str, str]:
+    """Isolated OpenSSH profile for `hostctl check`: frozen selected peers only."""
+    rendered, known = _tailnet_render(
+        config,
+        snapshot,
+        proxy_command=host_proxy_command(docker, helper_id, supervisor, generation),
+        known_hosts=ssh_config_path(str(directory / "known_hosts")),
+        host_check=True,
+    )
+    return {"config": rendered, "known_hosts": known}
 
 
 def with_tailnet(
