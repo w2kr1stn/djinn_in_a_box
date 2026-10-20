@@ -838,7 +838,8 @@ def _publisher_refresh_error(stderr: str, *, source: str = "claude") -> str:
                 items=diagnostic.items if diagnostic is not None else (),
             )
             return f"OpenCode workflow refresh failed: {drift.value}{location}. Remedy: {remedy}"
-    return "OpenCode workflow refresh failed"
+    tail = escape_nonprintable(lines[0])[:200] if lines else ""
+    return "OpenCode workflow refresh failed" + (f": {tail}" if tail else "")
 
 
 def container_workflow_image_compatible(container_id: str) -> WorkflowImageCompatibility:
@@ -863,10 +864,17 @@ _WRITE_REMEDY = (
     "Check that the workflow destination and its parent directories are writable "
     "with available space, then retry."
 )
+_INSPECT_REMEDY = "Check that the workflow destination and its contents are readable, then retry."
+_TARGET_LOCK_REMEDY = (
+    "Check that the workflow destination is a readable, lockable directory "
+    "and that no other Djinn process is stuck on it, then retry."
+)
 _OPERATIONAL_UNSAFE = re.compile(r"[^A-Za-z0-9._/:,'() -]")
 
 
-def _diagnostic_fields(value: str, prefix: str, first: str) -> tuple[str, str] | None:
+def _diagnostic_fields(
+    value: str, prefix: str, first: str
+) -> tuple[str, str, dict[str, object]] | None:
     if not value.startswith(prefix):
         return None
     try:
@@ -879,42 +887,54 @@ def _diagnostic_fields(value: str, prefix: str, first: str) -> tuple[str, str] |
     place, error = details.get(first), details.get("error")
     if not isinstance(place, str) or not isinstance(error, str):
         return None
-    return place, error
+    return escape_nonprintable(place), escape_nonprintable(error), details
 
 
-def _publisher_lock_failure(value: str) -> str | None:
+def _publisher_lock_problem(value: str) -> tuple[str, str] | None:
     fields = _diagnostic_fields(value, PUBLISHER_LOCK_ERROR_PREFIX, "root")
     if fields is None:
         return None
-    root, error = fields
+    root, error, details = fields
+    if details.get("scope") == "target":
+        return f"Failed to lock the workflow destination {root}: {error}", _TARGET_LOCK_REMEDY
+    return f"Canonical workflow lock failed at {root}: {error}", LOCK_REMEDY
+
+
+def _publisher_write_problem(value: str) -> tuple[str, str] | None:
+    fields = _diagnostic_fields(value, PUBLISHER_WRITE_ERROR_PREFIX, "destination")
+    if fields is None:
+        return None
+    destination, error, details = fields
+    if details.get("operation") == "inspect":
+        return f"Failed to inspect workflow destination {destination}: {error}", _INSPECT_REMEDY
+    return f"Failed to publish workflow to {destination}: {error}", _WRITE_REMEDY
+
+
+def _publisher_lock_failure(value: str) -> str | None:
+    problem = _publisher_lock_problem(value)
+    if problem is None:
+        return None
     return (
-        f"OpenCode workflow refresh failed: Canonical workflow lock failed at {root}: {error}. "
-        f"Remedy: {LOCK_REMEDY}"
+        f"OpenCode workflow refresh failed: {problem[0]}. Remedy: {problem[1]}"
     )
 
 
 def _publisher_write_failure(value: str) -> str | None:
-    fields = _diagnostic_fields(value, PUBLISHER_WRITE_ERROR_PREFIX, "destination")
-    if fields is None:
+    problem = _publisher_write_problem(value)
+    if problem is None:
         return None
-    destination, error = fields
     return (
-        f"OpenCode workflow refresh failed to publish workflow to {destination}: {error}. "
-        f"Remedy: {_WRITE_REMEDY}"
+        f"OpenCode workflow refresh failed to {problem[0].removeprefix('Failed to ')}. "
+        f"Remedy: {problem[1]}"
     )
 
 
 def publisher_operational_failure(stderr: str) -> tuple[str, str] | None:
     """(sanitised cause, remedy) of a publisher lock/write failure, else None."""
     lines = tuple(line.strip() for line in reversed(stderr.splitlines()))
-    for line in lines:
-        fields = _diagnostic_fields(line, PUBLISHER_LOCK_ERROR_PREFIX, "root")
-        if fields is not None:
-            cause = f"Canonical workflow lock failed at {fields[0]}: {fields[1]}"
-            return _OPERATIONAL_UNSAFE.sub("?", cause)[:300], LOCK_REMEDY
-    for line in lines:
-        fields = _diagnostic_fields(line, PUBLISHER_WRITE_ERROR_PREFIX, "destination")
-        if fields is not None:
-            cause = f"Failed to publish workflow to {fields[0]}: {fields[1]}"
-            return _OPERATIONAL_UNSAFE.sub("?", cause)[:300], _WRITE_REMEDY
+    for parser in (_publisher_lock_problem, _publisher_write_problem):
+        for line in lines:
+            problem = parser(line)
+            if problem is not None:
+                return _OPERATIONAL_UNSAFE.sub("?", problem[0])[:300], problem[1]
     return None

@@ -306,7 +306,10 @@ def _config_workflow_check(config: AppConfig | None) -> Check:
     labels += tuple(workflow_item_label(item.tool, item.relative_path) for item in audit.problems)
     runtime_kinds: list[str] = []
     for inspection in inspections:
-        if inspection.result is not None and not inspection.clean:
+        if (
+            inspection.result is not None and not inspection.clean
+            and inspection.result.lock_error is None and inspection.result.write_error is None
+        ):
             runtime_kinds.append(inspection.result.drift_class.value)
             labels += tuple(
                 workflow_item_label(
@@ -343,7 +346,12 @@ def _config_workflow_check(config: AppConfig | None) -> Check:
         + "".join(
             f"; {problem.message}"
             for problem in runtime_problems
-            if problem.identifier == "runtime-not-checked"
+            if problem.identifier in {
+                "runtime-not-checked", "workflow-lock-failed", "workflow-inspect-failed",
+            } or any(
+                inspection.problem is not None and inspection.problem == problem
+                for inspection in inspections
+            )
         ),
         " ".join(dict.fromkeys([remedy, *(p.remedy for p in runtime_problems)])),
     )

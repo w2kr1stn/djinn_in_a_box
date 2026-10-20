@@ -1672,7 +1672,7 @@ The Python `djinn` CLI and its parser dependencies run on the host. The image
 copies the stdlib-only `workflow_publisher.py` to
 `/home/dev/workflow-publisher.py` and `settings-copy.py` to
 `/home/dev/settings-copy.py`. The Dockerfile also sets
-`djinn.workflow.publisher="1"`; Compose starts and OpenCode session refreshes
+`djinn.workflow.publisher="2"`; Compose starts and OpenCode session refreshes
 check that label before doing workflow work. OpenCode is installed from npm as
 [`@opencode/cli@2.0.26`](https://www.npmjs.com/package/@opencode/cli/v/2.0.26)
 (published 2026-10-08), with the numeric `OPENCODE_VERSION` pin. Node agents are installed through

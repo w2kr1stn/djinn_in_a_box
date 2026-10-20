@@ -802,8 +802,12 @@ def config_sync(
             config = load_config()
             admission = admit_backup_root(project_root, config)
             with _lifecycle.lifecycle_guard():
+                config = load_config()
+                admission = admit_backup_root(project_root, config)
                 _lifecycle.guard_no_containers_running("discarding target drift")
                 discarded = discard_workflow_target_drift(project_root, config, admission)
+            for notice in discarded.notices:
+                console.print(Text(escape_nonprintable(notice)))
             for label, entry in discarded.backups:
                 location = workflow_item_label(
                     None if label == "config" else label,

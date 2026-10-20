@@ -273,9 +273,12 @@ def inspection_failure(
             inspection.target.destination_root, inspection.result.lock_error
         )
     if inspection.result.write_error is not None:
-        return _publish_write_failure(
-            inspection.target.destination_root, inspection.result.write_error
-        )
+        return WorkflowPreparationResult(False, (WorkflowPreparationProblem(
+            "workflow-inspect-failed",
+            f"Failed to inspect workflow destination {inspection.target.destination_root}: "
+            f"{inspection.result.write_error}",
+            "Check that the workflow destination and its contents are readable, then retry.",
+        ),))
     return _publish_failure(inspection.result, config, inspection.target, inspection.view)
 
 
@@ -288,6 +291,7 @@ class WorkflowDiscardResult:
     failed_phase: str | None = None
     completed: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
+    notices: tuple[str, ...] = ()
 
 
 def discard_workflow_target_drift(
@@ -343,7 +347,7 @@ def discard_workflow_target_drift(
                 )
                 backups["config"] = backup_target_drift(
                     build.canonical, canonical_root, canonical_root,
-                    canonical_root / CANONICAL_MANIFEST_NAME, directories.root("config"),
+                    canonical_root / CANONICAL_MANIFEST_NAME, lambda: directories.root("config"),
                     canonical_lease=lease, preflight_manifest=preflight_manifest,
                 )
             for inspection in inspections:
@@ -353,7 +357,8 @@ def discard_workflow_target_drift(
                 backup_target = target
                 backups[target.tool] = backup_target_drift(
                     inspection.view, canonical_root, target.destination_root,
-                    target.destination_root / RUNTIME_MANIFEST_NAME, directories.root(target.tool),
+                    target.destination_root / RUNTIME_MANIFEST_NAME,
+                    lambda tool=target.tool: directories.root(tool),
                 )
             directories.barrier()
     except PublishError as exc:
@@ -400,7 +405,15 @@ def discard_workflow_target_drift(
             synced, backups=entries, backup_directory=backup_directory,
             failed_phase="canonical", skipped=tools,
         )
+    completed = ["canonical"]
+    notices: list[str] = []
     for index, inspection in enumerate(inspections):
+        if inspection.view is None:
+            notices.append(
+                f"Runtime {inspection.target.tool} ({inspection.target.destination_root}) "
+                "was not delivered because it does not exist yet; djinn start will provision it."
+            )
+            continue
         result = _deliver_target(
             config, project_root, inspection.target, config_path, False, None,
             accept_drift=authorization(inspection.target.tool),
@@ -409,9 +422,12 @@ def discard_workflow_target_drift(
             return WorkflowDiscardResult(
                 synced, result, entries, backup_directory,
                 failed_phase=f"runtime {inspection.target.tool}",
-                completed=("canonical", *tools[:index]), skipped=tools[index + 1:],
+                completed=tuple(completed), skipped=tools[index + 1:], notices=tuple(notices),
             )
-    return WorkflowDiscardResult(synced, backups=entries, backup_directory=backup_directory)
+        completed.append(inspection.target.tool)
+    return WorkflowDiscardResult(
+        synced, backups=entries, backup_directory=backup_directory, notices=tuple(notices)
+    )
 
 
 def prepare_config_workflow(

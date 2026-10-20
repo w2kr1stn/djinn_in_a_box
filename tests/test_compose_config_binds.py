@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import posixpath
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -23,8 +25,8 @@ _ALLOWED_RW = frozenset(
 )
 
 
-def _compose() -> dict[str, Any]:
-    return yaml.safe_load((_ROOT / "docker-compose.yml").read_text())
+def _compose(path: Path | None = None) -> dict[str, Any]:
+    return yaml.safe_load((path or _ROOT / "docker-compose.yml").read_text())
 
 
 def _binds(compose: dict[str, Any]) -> list[tuple[str, str, bool]]:
@@ -50,7 +52,8 @@ def _binds(compose: dict[str, Any]) -> list[tuple[str, str, bool]]:
 def _writable_config_binds(compose: dict[str, Any]) -> list[str]:
     return [
         f"{source}:{target}"
-        for source, target, read_only in _binds(compose)
+        for raw_source, target, read_only in _binds(compose)
+        for source in ("./" + posixpath.normpath(raw_source),)
         if (source == "./config" or source.startswith("./config/"))
         and not read_only
         and f"{source}:{target}" not in _ALLOWED_RW
@@ -58,14 +61,36 @@ def _writable_config_binds(compose: dict[str, Any]) -> list[str]:
 
 
 def test_config_binds_are_read_only_except_the_default_source() -> None:
-    compose = _compose()
-    checked = [
-        source
-        for source, _, read_only in _binds(compose)
-        if (source == "./config" or source.startswith("./config/")) and read_only
-    ]
+    paths = sorted(_ROOT.glob("docker-compose*.yml"))
+    assert paths
+    checked = []
+    for path in paths:
+        compose = _compose(path)
+        checked.extend(
+            source for source, _, read_only in _binds(compose)
+            if posixpath.normpath(source).split("/")[0] == "config" and read_only
+        )
+        assert _writable_config_binds(compose) == [], path.name
     assert checked
-    assert _writable_config_binds(compose) == []
+
+
+@pytest.mark.parametrize("source", ["./config", "config", "./config/", "config/",
+                                    "config/opencode", "./config/opencode/"])
+def test_writable_config_source_spellings_are_refused(source: str) -> None:
+    compose = {"services": {"dev": {"volumes": [f"{source}:/workflow"]}}}
+    assert _writable_config_binds(compose)
+
+
+def test_every_compose_overlay_is_audited(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(f"{__name__}._ROOT", tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  dev:\n    volumes: [./config/opencode:/workflow:ro]\n"
+    )
+    (tmp_path / "docker-compose.extra.yml").write_text(
+        "services:\n  dev:\n    volumes: [config/codex/:/workflow]\n"
+    )
+    with pytest.raises(AssertionError, match="docker-compose.extra.yml"):
+        test_config_binds_are_read_only_except_the_default_source()
 
 
 def test_long_syntax_writable_config_bind_is_refused() -> None:

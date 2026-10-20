@@ -12,7 +12,7 @@ import re
 import stat
 import sys
 import tomllib
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -134,6 +134,7 @@ class PublishResult:
     drift_items: tuple[DriftEntry, ...] = ()
     discarded: tuple[DriftEntry, ...] = ()
     """Accepted target-drift entries a successful publish overwrote or removed."""
+    lock_root: Path | None = None
 
     @property
     def success(self) -> bool:
@@ -221,11 +222,13 @@ class PublishError(RuntimeError):
         drift_class: DriftClass,
         *,
         lock_error: OSError | None = None,
+        lock_root: Path | None = None,
         items: Sequence[DriftEntry] = (),
     ) -> None:
         super().__init__(drift_class)
         self.drift_class = drift_class
         self.lock_error = lock_error
+        self.lock_root = lock_root
         self.items = tuple(items)
 
 
@@ -471,7 +474,8 @@ def publish_workflow_view(
             )
     except PublishError as error:
         return PublishResult(
-            error.drift_class, lock_error=error.lock_error, drift_items=error.items
+            error.drift_class, lock_error=error.lock_error, drift_items=error.items,
+            lock_root=error.lock_root,
         )
     except OSError as error:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
@@ -539,7 +543,8 @@ def inspect_workflow_view(
         return PublishResult(DriftClass.CLEAN)
     except PublishError as error:
         return PublishResult(
-            error.drift_class, lock_error=error.lock_error, drift_items=error.items
+            error.drift_class, lock_error=error.lock_error, drift_items=error.items,
+            lock_root=error.lock_root,
         )
     except OSError as error:
         return PublishResult(DriftClass.INVALID_OR_SEMANTIC, write_error=error)
@@ -552,7 +557,7 @@ def backup_target_drift(
     canonical_root: Path,
     target_root: Path,
     manifest_path: Path,
-    backup_dir_fd: int,
+    backup_dir_fd: int | Callable[[], int],
     *,
     canonical_lease: CanonicalLockLease | None = None,
     preflight_manifest: bytes | None = None,
@@ -566,6 +571,7 @@ def backup_target_drift(
     to the target; any backup write or fsync error propagates as OSError.
     A canonical tree needs an exclusive lease (`preflight_manifest` as for
     publish); a runtime root is read under shared canonical and target locks.
+    A directory factory is called only after target drift is found under lock.
     """
     desired = _validate_view(view)
     manifest_relative = _manifest_relative(target_root, manifest_path)
@@ -573,7 +579,8 @@ def backup_target_drift(
     expected_manifest = CANONICAL_MANIFEST_NAME if canonical_target else RUNTIME_MANIFEST_NAME
     if manifest_relative != PurePosixPath(expected_manifest):
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
-    _require_private_directory(backup_dir_fd)
+    if not callable(backup_dir_fd):
+        _require_private_directory(backup_dir_fd)
     with _canonical_lease(canonical_root, canonical_lease, exclusive=canonical_target) as lease:
         if canonical_target:
             if not _holds_directory(lease.descriptor, target_root):
@@ -606,7 +613,7 @@ def _backup_locked(
     view: WorkflowView,
     target_root: int,
     manifest_relative: PurePosixPath,
-    backup_dir: int,
+    backup_dir: int | Callable[[], int],
     preflight_manifest: bytes | None,
     *,
     canonical_target: bool,
@@ -625,6 +632,11 @@ def _backup_locked(
         target_tool=target_tool,
     )
     _raise_worst([item for item in findings if item.entry.kind is not DriftClass.TARGET_DRIFT])
+    if not findings:
+        return ()
+    if callable(backup_dir):
+        backup_dir = backup_dir()
+        _require_private_directory(backup_dir)
     touched: list[tuple[int, int]] = []
     backed_up: list[BackedUpEntry] = []
     copied: set[PurePosixPath] = set()
@@ -833,8 +845,13 @@ def _publish_locked(
 
 @contextmanager
 def _target_lock(root: Path, *, exclusive: bool = True) -> Iterator[int]:
-    with _locked_directory(_open_directory(root), exclusive) as descriptor:
-        yield descriptor
+    try:
+        with _locked_directory(_open_directory(root), exclusive) as descriptor:
+            yield descriptor
+    except PublishError as error:
+        if error.lock_error is not None:
+            error.lock_root = root
+        raise
 
 
 @contextmanager
@@ -846,9 +863,16 @@ def _present_target_lock(root: Path, *, exclusive: bool) -> Iterator[int | None]
         yield None
         return
     except OSError as error:
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
-    with _locked_directory(descriptor, exclusive) as locked:
-        yield locked
+        raise PublishError(
+            DriftClass.INVALID_OR_SEMANTIC, lock_error=error, lock_root=root
+        ) from error
+    try:
+        with _locked_directory(descriptor, exclusive) as locked:
+            yield locked
+    except PublishError as error:
+        if error.lock_error is not None:
+            error.lock_root = root
+        raise
 
 
 @contextmanager
@@ -2084,7 +2108,9 @@ def _open_directory(path: Path) -> int:
     try:
         return os.open(path, _DIRECTORY_FLAGS)
     except OSError as error:
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC, lock_error=error) from error
+        raise PublishError(
+            DriftClass.INVALID_OR_SEMANTIC, lock_error=error, lock_root=path
+        ) from error
 
 
 def _same_directory(first: Path, second: Path) -> bool:
@@ -2514,21 +2540,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _write_error_diagnostic(destination: Path, error: OSError) -> str:
+def _write_error_diagnostic(destination: Path, error: OSError, *, inspect: bool = False) -> str:
     return PUBLISHER_WRITE_ERROR_PREFIX + json.dumps(
         {
             "destination": str(destination),
             "error": error.strerror or "OS error",
+            **({"operation": "inspect"} if inspect else {}),
         },
         separators=(",", ":"),
     )
 
 
-def _lock_error_diagnostic(root: Path, error: OSError) -> str:
+def _lock_error_diagnostic(root: Path, error: OSError, *, target: bool = False) -> str:
     return PUBLISHER_LOCK_ERROR_PREFIX + json.dumps(
         {
             "root": str(root),
             "error": error.strerror or "OS error",
+            **({"scope": "target"} if target else {}),
         },
         separators=(",", ":"),
     )
@@ -2575,7 +2603,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if personal_args[:1] == ["personal-carrier"]:
         return _personal_main(personal_args[1:])
     arguments = _parse_args(argv)
-    lock_error: OSError | None = None
     items: tuple[DriftEntry, ...] = ()
     if arguments.fragment:
         result = PublishResult(DriftClass.INVALID_OR_SEMANTIC)
@@ -2624,22 +2651,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                         source_profile=arguments.profile,
                     )
         except PublishError as error:
-            lock_error = error.lock_error
             items = error.items
-            result = PublishResult(error.drift_class)
+            result = PublishResult(
+                error.drift_class, lock_error=error.lock_error, lock_root=error.lock_root
+            )
     if not result.success:
         print(f"workflow publisher: {result.drift_class.value}", file=sys.stderr)
         if result.write_error is not None:
             print(
-                _write_error_diagnostic(Path(arguments.target), result.write_error),
+                _write_error_diagnostic(
+                    Path(arguments.target), result.write_error, inspect=arguments.check
+                ),
                 file=sys.stderr,
             )
-        # Two sources: a PublishError that reached this frame, and one
-        # publish_workflow_view already converted into the result field.
-        lock_error = lock_error or result.lock_error
-        if lock_error is not None:
+        if result.lock_error is not None:
+            root = result.lock_root or Path(arguments.canonical_root)
             print(
-                _lock_error_diagnostic(Path(arguments.canonical_root), lock_error),
+                _lock_error_diagnostic(
+                    root, result.lock_error, target=root != Path(arguments.canonical_root)
+                ),
                 file=sys.stderr,
             )
         for line in _drift_item_lines(items or result.drift_items, arguments):

@@ -240,7 +240,8 @@ def test_status_printer_reports_write_error_without_drift_label(case, monkeypatc
     printer = config_command._print_runtime_inspections  # pyright: ignore[reportPrivateUsage]
     assert printer(project) is False
     text = "\n".join(lines)
-    assert "Runtime: Failed to publish workflow to" in text and "denied" in text
+    assert "Runtime: Failed to inspect workflow destination" in text and "denied" in text
+    assert "readable" in text and "writable" not in text
     assert "Drift:" not in text and "()" not in text
 
     lines.clear()

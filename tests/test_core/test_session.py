@@ -225,7 +225,9 @@ class TestRefreshOpenCodeWorkflow:
 
     def test_failure_output_is_sanitized(self, session_mgr: SessionManager) -> None:
         sentinel = "PRIVATE-CONTAINER-OUTPUT"
-        failed = MagicMock(returncode=9, stdout=sentinel, stderr=sentinel)
+        failed = MagicMock(
+            returncode=9, stdout=sentinel, stderr="Traceback: earlier detail\nexec failed\x1b[31m"
+        )
 
         with (
             patch.object(
@@ -240,7 +242,7 @@ class TestRefreshOpenCodeWorkflow:
             )
 
         assert result.returncode == 9
-        assert result.stderr == "OpenCode workflow refresh failed"
+        assert result.stderr == "OpenCode workflow refresh failed: exec failed\\x1b[31m"
         assert sentinel not in repr(result)
 
     @pytest.mark.parametrize(

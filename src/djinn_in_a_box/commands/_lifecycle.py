@@ -4,9 +4,10 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 
 import typer
+from rich.markup import escape
 
 from djinn_in_a_box.core import host_runtime, hostctl
-from djinn_in_a_box.core.console import error
+from djinn_in_a_box.core.console import error, escape_nonprintable
 from djinn_in_a_box.core.docker import get_running_containers
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
@@ -33,6 +34,6 @@ def lifecycle_guard() -> Iterator[None]:
             guards.enter_context(hostctl.control_guard())
             guards.enter_context(host_runtime.creation_guard())
         except (hostctl.HostctlError, GitSSHError, OSError) as exc:
-            error(str(exc))
+            error(escape(escape_nonprintable(str(exc))))
             raise typer.Exit(1) from exc
         yield
