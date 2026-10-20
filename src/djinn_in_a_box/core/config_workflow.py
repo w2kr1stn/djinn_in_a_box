@@ -6,7 +6,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
@@ -18,9 +18,15 @@ from djinn_in_a_box.core.config_sync import (
     ConfigSyncAudit,
     DriftClass,
     SyncProblem,
+    _BuildError,  # pyright: ignore[reportPrivateUsage]
+    _snapshot_build,  # pyright: ignore[reportPrivateUsage]
     audit_config_sync,
     load_canonical_delivery_view,
     sync_config,
+    workflow_item_label,
+    workflow_item_summary,
+    workflow_label_component,
+    workflow_remedy,
 )
 from djinn_in_a_box.core.docker import (
     WorkflowImageCompatibility,
@@ -33,12 +39,14 @@ from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CanonicalLockLease,
     CarrierFragment,
+    DriftEntry,
     ManifestItem,
     PublishedFile,
     PublishError,
     PublishResult,
     WorkflowView,
     canonical_lock,
+    inspect_workflow_view,
     load_strict_json,
     publish_workflow_view,
     runtime_residue_prefixes,
@@ -152,6 +160,111 @@ class WorkflowPreparationProblem:
 class WorkflowPreparationResult:
     success: bool
     problems: tuple[WorkflowPreparationProblem, ...] = ()
+    notices: tuple[str, ...] = ()
+
+
+
+def start_workflow_targets(config: AppConfig) -> tuple[WorkflowDeliveryTarget, ...]:
+    root = get_config_root(config)
+    return tuple(WorkflowDeliveryTarget(tool, root / tool) for tool in ("claude", "codex"))
+
+
+def print_workflow_notices(result: WorkflowPreparationResult) -> None:
+    from djinn_in_a_box.core.console import info
+
+    for notice in result.notices:
+        info(notice)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowTargetInspection:
+    target: WorkflowDeliveryTarget
+    result: PublishResult | None = None
+    problem: WorkflowPreparationProblem | None = None
+    view: WorkflowView | None = None
+
+    @property
+    def clean(self) -> bool:
+        return self.problem is None and self.result is not None and self.result.success
+
+
+def inspect_workflow_targets(
+    project_root: Path,
+    config: AppConfig,
+    targets: tuple[WorkflowDeliveryTarget, ...] | None = None,
+    *,
+    compose: bool = True,
+) -> tuple[WorkflowTargetInspection, ...]:
+    selected = start_workflow_targets(config) if targets is None else targets
+    selected = tuple(t for t in selected if not _compose_claude_target(config, t, compose))
+    if not selected:
+        return ()
+    try:
+        with canonical_lock(project_root / "config", exclusive=False) as lease:
+            build = _snapshot_build(project_root, config.config_sync.source)
+            if build.problems:
+                problem = _audit_failure(
+                    ConfigSyncAudit(build.source, None, problems=build.problems)
+                ).problems[0]
+                problem = replace(
+                    problem, identifier="runtime-not-checked",
+                    message=f"not checked ({workflow_label_component(problem.identifier)}: "
+                    f"{problem.message})",
+                )
+                return tuple(WorkflowTargetInspection(t, problem=problem) for t in selected)
+            inspections: list[WorkflowTargetInspection] = []
+            for target in selected:
+                # Missing roots are not provisioned by an inspection.
+                problem = _prepare_target(replace(target, provision=True), provision=False)
+                if problem is not None:
+                    inspections.append(WorkflowTargetInspection(target, problem=problem))
+                    continue
+                if not target.destination_root.exists():
+                    inspections.append(
+                        WorkflowTargetInspection(target, PublishResult(DriftClass.CLEAN))
+                    )
+                    continue
+                view = _delivery_view(config, target, build.views[target.tool])
+                if view is None:
+                    problem = _failure(DriftClass.INVALID_OR_SEMANTIC.value).problems[0]
+                    inspections.append(WorkflowTargetInspection(target, problem=problem))
+                    continue
+                result = inspect_workflow_view(
+                    view,
+                    project_root / "config",
+                    target.destination_root,
+                    target.destination_root / RUNTIME_MANIFEST_NAME,
+                    canonical_lease=lease,
+                )
+                inspections.append(WorkflowTargetInspection(target, result, view=view))
+            return tuple(inspections)
+    except PublishError as error:
+        if error.lock_error is not None:
+            problem = _canonical_lock_failure(project_root / "config", error).problems[0]
+        else:
+            problem = _failure(error.drift_class.value).problems[0]
+        return tuple(WorkflowTargetInspection(t, problem=problem) for t in selected)
+    except (_BuildError, OSError, ValueError) as error:
+        reason = error.drift.value if isinstance(error, _BuildError) else type(error).__name__
+        problem = WorkflowPreparationProblem(
+            "runtime-not-checked",
+            f"not checked ({workflow_label_component(reason)})",
+            CANONICAL_REMEDY,
+        )
+        return tuple(WorkflowTargetInspection(t, problem=problem) for t in selected)
+
+
+def inspection_failure(
+    inspection: WorkflowTargetInspection, config: AppConfig
+) -> WorkflowPreparationResult:
+    if inspection.problem is not None:
+        return WorkflowPreparationResult(False, (inspection.problem,))
+    assert inspection.result is not None
+    if inspection.result.lock_error is not None:
+        return _publish_lock_failure(
+            inspection.target.destination_root, inspection.result.lock_error
+        )
+    return _publish_failure(inspection.result, config, inspection.target, inspection.view)
 
 
 def prepare_config_workflow(
@@ -219,12 +332,22 @@ def prepare_config_workflow(
             )
 
     audit = audit_config_sync(project_root, config_path=config_path)
+    if not audit.clean and not _auto_repairable(audit):
+        return _audit_failure(audit)
+    for inspection in inspect_workflow_targets(
+        project_root, config, targets, compose=require_compose_host_env
+    ):
+        if not inspection.clean:
+            return inspection_failure(inspection, config)
+    notices: tuple[str, ...] = ()
     if not audit.clean:
-        if not _auto_repairable(audit):
-            return _audit_failure(audit)
         synced = sync_config(project_root, config_path=config_path)
         if not synced.success or not synced.audit.clean:
             return _audit_failure(synced.audit)
+        notices = (
+            "Synchronized source changes into the canonical workflow: "
+            f"{len(synced.changed_paths)} changed, {len(synced.removed_paths)} removed.",
+        )
 
     for target in targets:
         if _compose_claude_target(config, target, require_compose_host_env):
@@ -232,13 +355,13 @@ def prepare_config_workflow(
         gated = target.destination_root != get_config_root(config) / target.tool
         target_problem = _prepare_target(target, provision=not gated)
         if target_problem is not None:
-            return WorkflowPreparationResult(False, (target_problem,))
+            return WorkflowPreparationResult(False, (target_problem,), notices)
         result = _deliver_target(
             config, project_root, target, config_path, gated, confirm_host_workflow
         )
         if not result.success:
-            return result
-    return WorkflowPreparationResult(True)
+            return replace(result, notices=notices + result.notices)
+    return WorkflowPreparationResult(True, notices=notices)
 
 
 def _load_delivery(
@@ -253,7 +376,7 @@ def _load_delivery(
     )
     if not loaded.success or loaded.view is None:
         return _audit_failure(loaded.audit)
-    view = _host_claude_view(config, target, loaded.view)
+    view = _delivery_view(config, target, loaded.view)
     if view is None:
         return _failure("invalid-or-semantic")
     items = frozenset(
@@ -291,7 +414,7 @@ def _deliver_target(
             if isinstance(delivery, WorkflowPreparationResult):
                 return delivery
             if not gated or delivery.items == confirmed:
-                return _publish_delivery(delivery, canonical_root, target, lease)
+                return _publish_delivery(delivery, canonical_root, target, lease, config=config)
     except PublishError as error:
         return _canonical_lock_failure(canonical_root, error)
     except OSError:
@@ -330,7 +453,9 @@ def _deliver_target(
                 return _host_workflow_changed()
             if delivery.items != review.items:
                 return _host_workflow_changed()
-            result = _publish_delivery(delivery, canonical_root, target, lease, confirming=True)
+            result = _publish_delivery(
+                delivery, canonical_root, target, lease, config=config, confirming=True
+            )
     except PublishError as error:
         return _canonical_lock_failure(canonical_root, error)
     except OSError:
@@ -359,6 +484,7 @@ def _publish_delivery(
     target: WorkflowDeliveryTarget,
     lease: CanonicalLockLease,
     *,
+    config: AppConfig,
     confirming: bool = False,
 ) -> WorkflowPreparationResult:
     # A failed publication after confirmation can leave the (empty) destination created
@@ -384,7 +510,7 @@ def _publish_delivery(
     if not published.success:
         if confirming and published.drift_class is DriftClass.SOURCE_CHANGED:
             return _host_workflow_changed()
-        return _publish_failure(published)
+        return _publish_failure(published, config, target, delivery.view)
     return WorkflowPreparationResult(True)
 
 
@@ -568,13 +694,13 @@ def _prepare_missing_target(target: WorkflowDeliveryTarget) -> WorkflowPreparati
     return None
 
 
-def _host_claude_view(
-    config: AppConfig, target: WorkflowDeliveryTarget, view: WorkflowView
+def _delivery_view(
+    config: AppConfig, target: WorkflowDeliveryTarget, build_view: WorkflowView
 ) -> WorkflowView | None:
     if target.tool != "claude" or target.destination_root == get_config_root(config) / "claude":
-        return view
+        return build_view
     fragments: list[CarrierFragment] = []
-    for fragment in view.fragments:
+    for fragment in build_view.fragments:
         replacement = _CLAUDE_HOOK_REWRITES.get(fragment.key_path)
         if fragment.carrier_path.as_posix() == "settings.json" and replacement is not None:
             if fragment.value_json == replacement[0]:
@@ -587,13 +713,16 @@ def _host_claude_view(
         _claude_bridge_path().read_bytes(),
     )
     return WorkflowView(
-        view.source,
-        (*view.files, bridge),
+        build_view.source,
+        (*build_view.files, bridge),
         tuple(fragments),
-        view.source_fingerprint,
-        view.target_tool,
-        view.native_only_paths,
+        build_view.source_fingerprint,
+        build_view.target_tool,
+        build_view.native_only_paths,
     )
+
+
+_host_claude_view = _delivery_view
 
 
 def _claude_bridge_path() -> Path:
@@ -610,29 +739,107 @@ def _auto_repairable(audit: ConfigSyncAudit) -> bool:
 
 def _audit_failure(audit: ConfigSyncAudit) -> WorkflowPreparationResult:
     if audit.problems:
-        return _sync_problem_failure(audit.problems[0])
+        labels = tuple(workflow_item_label(p.tool, p.relative_path) for p in audit.problems)
+        return _sync_problem_failure(audit.problems[0], labels=labels)
     drift = next(
         (item.kind for item in audit.drifts if item.kind is not DriftClass.CLEAN),
         DriftClass.INVALID_OR_SEMANTIC,
     )
-    return _failure(drift.value)
+    labels = tuple(
+        workflow_item_label(item.tool, item.relative_path, item.key_path)
+        for item in audit.drifts if item.relative_path is not None
+    )
+    return _failure(
+        drift.value,
+        labels=labels,
+        source=audit.configured_source,
+        items=tuple(
+            DriftEntry(
+                item.kind,
+                item.relative_path,
+                item.key_path,
+                reason=item.reason,
+            )
+            for item in audit.drifts if item.relative_path is not None
+        ),
+    )
 
 
-def _sync_problem_failure(problem: SyncProblem) -> WorkflowPreparationResult:
+def _sync_problem_failure(
+    problem: SyncProblem, *, labels: tuple[str, ...] = ()
+) -> WorkflowPreparationResult:
+    locations = labels or (workflow_item_label(problem.tool, problem.relative_path),)
     return WorkflowPreparationResult(
         False,
         (
             WorkflowPreparationProblem(
                 problem.identifier,
-                problem.message,
+                f"{problem.message} ({workflow_item_summary(locations)})",
                 problem.remedy or CANONICAL_REMEDY,
             ),
         ),
     )
 
 
-def _publish_failure(result: PublishResult) -> WorkflowPreparationResult:
-    return _failure(result.drift_class.value)
+def _publish_failure(
+    result: PublishResult,
+    config: AppConfig,
+    target: WorkflowDeliveryTarget,
+    view: WorkflowView | None = None,
+) -> WorkflowPreparationResult:
+    host = target.destination_root != get_config_root(config) / target.tool
+    labels = tuple(
+        workflow_item_label(
+            target.tool, item.path, item.key_path, root=target.destination_root, origin=item.origin
+        )
+        for item in result.drift_items
+    )
+    failure = _failure(
+        result.drift_class.value,
+        labels=labels,
+        source=config.config_sync.source,
+        scope="host" if host else "start",
+        items=result.drift_items,
+    )
+    if host and result.drift_class is DriftClass.TARGET_DRIFT and view is not None:
+        actions = tuple(
+            _host_restore_action(config, target, view, item) for item in result.drift_items[:5]
+        )
+        problem = failure.problems[0]
+        failure = replace(
+            failure,
+            problems=(replace(problem, message=problem.message + " " + "; ".join(actions)),),
+        )
+    return failure
+
+
+def _host_restore_action(
+    config: AppConfig, target: WorkflowDeliveryTarget, view: WorkflowView, item: DriftEntry
+) -> str:
+    label = workflow_item_label(target.tool, item.path, item.key_path, root=target.destination_root)
+    files = {file.relative_path: file for file in view.files}
+    fragments = {(fragment.carrier_path, fragment.key_path) for fragment in view.fragments}
+    path = workflow_label_component(item.path)
+    root = workflow_label_component(target.destination_root)
+    if item.key_path is not None:
+        key = ".".join(workflow_label_component(part) for part in item.key_path)
+        if (item.path, item.key_path) not in fragments:
+            return f"{label}: remove {key} from {root}/{path}"
+        action = f"{label}: restore the value of {key} in config/{target.tool}/{path}"
+        if target.tool == "claude" and item.key_path in _CLAUDE_HOOK_REWRITES:
+            action += " with ~/.claude/ in place of ~/.claude_seed/"
+        return action
+    if item.path not in files:
+        return f"{label}: remove {root}/{path}"
+    if target.tool == "claude" and path == "CLAUDE.md":
+        source = "templates/claude/CLAUDE.md of the Djinn installation"
+    else:
+        tool = target.tool
+        source = f"config/{tool}/{path}"
+    action = f"{label}: restore from {source}"
+    if files[item.path].executable:
+        action += "; keep the executable bit"
+    return action
 
 
 def _canonical_lock_failure(canonical_root: Path, error: PublishError) -> WorkflowPreparationResult:
@@ -688,25 +895,27 @@ def _publish_write_failure(destination: Path, error: OSError) -> WorkflowPrepara
     )
 
 
-def _failure(identifier: str) -> WorkflowPreparationResult:
+def _failure(
+    identifier: str,
+    *,
+    labels: tuple[str, ...] = (),
+    source: str = "claude",
+    scope: str = "start",
+    items: tuple[DriftEntry, ...] = (),
+) -> WorkflowPreparationResult:
     try:
         drift = DriftClass(identifier)
     except ValueError:
         drift = DriftClass.INVALID_OR_SEMANTIC
-    remedies = {
-        DriftClass.SOURCE_CHANGED: "Run `djinn config sync`, then retry.",
-        DriftClass.TARGET_DRIFT: "Restore or move the modified managed workflow item, then retry.",
-        DriftClass.COLLISION: "Move or remove the conflicting unmanaged workflow item, then retry.",
-        DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
-        DriftClass.CLEAN: "",
-    }
+    summary = workflow_item_summary(labels)
+    location = f" in {summary}" if summary else ""
     return WorkflowPreparationResult(
         False,
         (
             WorkflowPreparationProblem(
                 drift.value,
-                f"Workflow preflight blocked: {drift.value}.",
-                remedies[drift],
+                f"Workflow preflight blocked: {drift.value}{location}.",
+                workflow_remedy(drift, source, scope=scope, items=items),
             ),
         ),
     )

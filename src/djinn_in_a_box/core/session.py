@@ -13,13 +13,18 @@ import stat
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from djinn_in_a_box.config.declarations import validate_environment
-from djinn_in_a_box.config.loader import load_agents
+from djinn_in_a_box.config.loader import load_agents, load_config
 from djinn_in_a_box.config.models import AgentConfig
-from djinn_in_a_box.core.config_sync import CANONICAL_REMEDY, LOCK_REMEDY
+from djinn_in_a_box.core.config_sync import (
+    LOCK_REMEDY,
+    workflow_item_label,
+    workflow_item_summary,
+    workflow_remedy,
+)
 from djinn_in_a_box.core.console import escape_nonprintable
 from djinn_in_a_box.core.docker import (
     WorkflowImageCompatibility,
@@ -30,9 +35,11 @@ from djinn_in_a_box.core.docker import (
 )
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.workflow_publisher import (
+    PUBLISHER_DRIFT_ITEMS_PREFIX,
     PUBLISHER_LOCK_ERROR_PREFIX,
     PUBLISHER_WRITE_ERROR_PREFIX,
     DriftClass,
+    DriftEntry,
 )
 
 log = logging.getLogger(__name__)
@@ -94,13 +101,104 @@ _HOST_GIT_KEYS = re.compile(
     r"precomposeunicode|symlinks)|extensions\.(objectformat|refstorage)|"
     r"remote\.[^/].*\.(url|pushurl|fetch)|branch\..+\.(remote|merge)|user\.(name|email)"
 )
-_PUBLISHER_REMEDIES: dict[DriftClass, str] = {
-    DriftClass.SOURCE_CHANGED: "Run `djinn config sync`, then retry.",
-    DriftClass.TARGET_DRIFT: "Restore or move the modified managed workflow item, then retry.",
-    DriftClass.COLLISION: "Move or remove the conflicting unmanaged workflow item, then retry.",
-    DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
-    DriftClass.CLEAN: "",
-}
+
+
+@dataclass(frozen=True, slots=True)
+class PublisherDriftItems:
+    items: tuple[DriftEntry, ...]
+    labels: tuple[str, ...]
+    total: int
+    truncated: bool
+
+
+def parse_publisher_drift_items(stderr: str) -> PublisherDriftItems | None:
+    lines = [
+        line.removeprefix(PUBLISHER_DRIFT_ITEMS_PREFIX)
+        for line in stderr.splitlines()
+        if line.startswith(PUBLISHER_DRIFT_ITEMS_PREFIX)
+    ]
+    if not lines:
+        return None
+    try:
+        raw: object = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    payload = cast(dict[str, object], raw)
+    records, total, truncated = payload.get("items"), payload.get("total"), payload.get("truncated")
+    if not isinstance(records, list) or type(total) is not int or type(truncated) is not bool:
+        return None
+    records = cast(list[object], records)
+    if total < len(records) or truncated != (total > len(records)):
+        return None
+    items: list[DriftEntry] = []
+    labels: list[str] = []
+    for raw_record in records:
+        if not isinstance(raw_record, dict):
+            return None
+        record = cast(dict[str, object], raw_record)
+        if not {"class", "origin", "root", "path", "key", "reason"} <= record.keys():
+            return None
+        kind, origin, root, path, key, reason = (
+            record[name] for name in ("class", "origin", "root", "path", "key", "reason")
+        )
+        if not all(isinstance(value, str) for value in (kind, origin, root, path)):
+            return None
+        if origin not in {"target", "target-manifest", "seed", "canonical-manifest"}:
+            return None
+        if reason is not None and not isinstance(reason, str):
+            return None
+        if key is not None and (
+            not isinstance(key, list)
+            or not all(isinstance(part, str) for part in cast(list[object], key))
+        ):
+            return None
+        try:
+            drift = DriftClass(cast(str, kind))
+        except ValueError:
+            return None
+        key_path = tuple(cast(list[str], key)) if key is not None else None
+        # Only display sanitised values. No path here is opened or executed.
+        label = workflow_item_label(
+            "opencode",
+            path,
+            key_path,
+            origin=cast(str, origin),
+            opencode_runtime=True,
+        )
+        items.append(
+            DriftEntry(drift, PurePosixPath(cast(str, path)), key_path, cast(str, origin), reason)
+        )
+        labels.append(label)
+    return PublisherDriftItems(tuple(items), tuple(labels), total, truncated)
+
+
+def opencode_publisher_argv(target: SessionTarget, *, check: bool = False) -> list[str]:
+    if target.container_id is None:
+        raise ValueError("OpenCode container unavailable")
+    command = [
+        DOCKER_EXECUTABLE,
+        "exec",
+        target.container_id,
+        "python3",
+        "/home/dev/workflow-publisher.py",
+        "--view",
+        "/home/dev/.opencode/seed",
+        "--canonical-root",
+        "/home/dev/.djinn-canonical",
+        "--target",
+        "/home/dev/.config/opencode",
+        "--manifest",
+        "/home/dev/.config/opencode/.djinn-workflow-state.json",
+        "--ignore",
+        "opencode.json",
+        "--profile",
+        "opencode",
+    ]
+    if check:
+        command.append("--check")
+    return command
 
 
 def _validate_session_environment(env: object) -> dict[str, str]:
@@ -213,28 +311,11 @@ class SessionManager:
         if image_compatibility is not WorkflowImageCompatibility.COMPATIBLE:
             msg = f"Unhandled workflow image compatibility: {image_compatibility!r}"
             raise AssertionError(msg)
-        command = [
-            DOCKER_EXECUTABLE,
-            "exec",
-            target.container_id,
-            "python3",
-            "/home/dev/workflow-publisher.py",
-            "--view",
-            "/home/dev/.opencode/seed",
-            "--canonical-root",
-            "/home/dev/.djinn-canonical",
-            "--target",
-            "/home/dev/.config/opencode",
-            "--manifest",
-            "/home/dev/.config/opencode/.djinn-workflow-state.json",
-            "--ignore",
-            "opencode.json",
-            "--profile",
-            "opencode",
-        ]
+        command = opencode_publisher_argv(target)
         try:
             result = subprocess.run(
                 command,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=_EXEC_TIMEOUT,
@@ -247,7 +328,9 @@ class SessionManager:
         if result.returncode != 0:
             return SessionResult(
                 returncode=result.returncode,
-                stderr=_publisher_refresh_error(result.stderr),
+                stderr=_publisher_refresh_error(
+                    result.stderr, source=load_config().config_sync.source
+                ),
             )
         return SessionResult(returncode=0)
 
@@ -737,23 +820,37 @@ def _host_network_destination(value: str) -> bool:
     return re.fullmatch(r"(?:[^/@:\s]+@)?[^/@:\s]+:[^\s]+", value) is not None
 
 
-def _publisher_refresh_error(stderr: str) -> str:
-    for line in reversed(stderr.splitlines()):
-        value = line.strip()
-        lock_failure = _publisher_lock_failure(value)
-        if lock_failure is not None:
-            return lock_failure
-        write_failure = _publisher_write_failure(value)
-        if write_failure is not None:
-            return write_failure
-        for drift in DriftClass:
-            if drift is DriftClass.CLEAN:
-                continue
-            if value == f"workflow publisher: {drift.value}":
-                return (
-                    f"OpenCode workflow refresh failed: {drift.value}. "
-                    f"Remedy: {_PUBLISHER_REMEDIES[drift]}"
-                )
+def _publisher_refresh_error(stderr: str, *, source: str = "claude") -> str:
+    lines = tuple(line.strip() for line in reversed(stderr.splitlines()))
+    for parser in (_publisher_lock_failure, _publisher_write_failure):
+        for line in lines:
+            failure = parser(line)
+            if failure is not None:
+                return failure
+    diagnostic = parse_publisher_drift_items(stderr)
+    for line in lines:
+        if not line.startswith("workflow publisher: "):
+            continue
+        try:
+            drift = DriftClass(line.removeprefix("workflow publisher: "))
+        except ValueError:
+            continue
+        if drift is not DriftClass.CLEAN:
+            if diagnostic is not None and any(item.origin == "seed" for item in diagnostic.items):
+                drift = DriftClass.SOURCE_CHANGED
+            labels = (
+                workflow_item_summary(diagnostic.labels, total=diagnostic.total)
+                if diagnostic is not None
+                else ""
+            )
+            location = f" in {labels}" if labels else ""
+            remedy = workflow_remedy(
+                drift,
+                source,
+                scope="opencode",
+                items=diagnostic.items if diagnostic is not None else (),
+            )
+            return f"OpenCode workflow refresh failed: {drift.value}{location}. Remedy: {remedy}"
     return "OpenCode workflow refresh failed"
 
 

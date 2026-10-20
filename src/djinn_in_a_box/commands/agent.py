@@ -21,6 +21,7 @@ from djinn_in_a_box.core.agent_runner import build_agent_command as build_agent_
 from djinn_in_a_box.core.config_workflow import (
     WorkflowDeliveryTarget,
     prepare_config_workflow,
+    print_workflow_notices,
 )
 from djinn_in_a_box.core.console import (
     console,
@@ -218,10 +219,11 @@ def run(
         require_compose_host_env=True,
         container_image_compatibility=workflow_image_compatible(),
     )
+    print_workflow_notices(workflow)
     if not workflow.success:
         problem = workflow.problems[0]
-        error(problem.message)
-        warning(problem.remedy)
+        error(escape(problem.message))
+        warning(escape(problem.remedy))
         raise typer.Exit(1)
 
     try:

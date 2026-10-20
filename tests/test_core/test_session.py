@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from djinn_in_a_box.config.declarations import RESERVED_ENVIRONMENT
-from djinn_in_a_box.config.models import AgentConfig
+from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.docker import WorkflowImageCompatibility
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.session import SessionManager, SessionResult, SessionTarget
@@ -77,9 +77,12 @@ def mock_agents() -> dict[str, AgentConfig]:
 
 
 @pytest.fixture
-def session_mgr(mock_agents: dict[str, AgentConfig], tmp_path: Path) -> SessionManager:
+def session_mgr(
+    mock_agents: dict[str, AgentConfig], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> SessionManager:
     """Create a SessionManager with mocked agents."""
     _init_inert_repo(tmp_path)
+    monkeypatch.setattr(f"{_SESSION_MODULE}.load_config", lambda: AppConfig(code_dir=tmp_path))
     with patch(f"{_SESSION_MODULE}.load_agents", return_value=mock_agents):
         return SessionManager("testproject")
 
@@ -213,6 +216,7 @@ class TestRefreshOpenCodeWorkflow:
                 "--profile",
                 "opencode",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=10.0,
@@ -242,10 +246,18 @@ class TestRefreshOpenCodeWorkflow:
     @pytest.mark.parametrize(
         ("code", "expected"),
         [
-            ("source-changed", "Run `djinn config sync`"),
-            ("target-drift", "modified managed workflow item"),
-            ("collision", "conflicting unmanaged workflow item"),
-            ("invalid-or-semantic", "Author or edit the artifact natively"),
+            ("source-changed", "Run `djinn config sync`, then retry."),
+            (
+                "target-drift",
+                "Keep wanted edits in the selected source config/claude, then recreate "
+                "the container: `djinn clean`, then `djinn start`.",
+            ),
+            ("collision", "Move or remove the conflicting unmanaged workflow item, then retry."),
+            (
+                "invalid-or-semantic",
+                "Author or edit the artifact natively in the target tool's view, "
+                "or make the source form portable.",
+            ),
         ],
     )
     def test_publisher_classes_have_one_content_free_remedy(
@@ -269,8 +281,7 @@ class TestRefreshOpenCodeWorkflow:
                 SessionTarget(container_id="container-id")
             )
 
-        assert code in result.stderr
-        assert expected in result.stderr
+        assert result.stderr == f"OpenCode workflow refresh failed: {code}. Remedy: {expected}"
 
     def test_publisher_write_error_reports_destination_io(
         self, session_mgr: SessionManager, tmp_path: Path
@@ -453,7 +464,11 @@ class TestRefreshOpenCodeWorkflow:
             )
 
         assert "target-drift" in result.stderr
-        assert "modified managed workflow item" in result.stderr
+        assert result.stderr == (
+            "OpenCode workflow refresh failed: target-drift. Remedy: "
+            "Keep wanted edits in the selected source config/claude, then recreate the container: "
+            "`djinn clean`, then `djinn start`."
+        )
 
     def test_publisher_refresh_prefers_the_later_lock_diagnostic_over_write_diagnostic(
         self, session_mgr: SessionManager

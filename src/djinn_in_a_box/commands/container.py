@@ -36,8 +36,9 @@ from djinn_in_a_box.core.agent_versions import (
 )
 from djinn_in_a_box.core.banner import banner
 from djinn_in_a_box.core.config_workflow import (
-    WorkflowDeliveryTarget,
     prepare_config_workflow,
+    print_workflow_notices,
+    start_workflow_targets,
 )
 from djinn_in_a_box.core.console import (
     blank,
@@ -267,20 +268,17 @@ def start(
         raise typer.Exit(1) from None
     preflight(config, provision_host=False)
 
-    config_root = get_config_root(config)
     workflow = prepare_config_workflow(
         get_project_root(),
-        (
-            WorkflowDeliveryTarget("claude", config_root / "claude"),
-            WorkflowDeliveryTarget("codex", config_root / "codex"),
-        ),
+        start_workflow_targets(config),
         config_snapshot=config,
         require_compose_host_env=True,
     )
+    print_workflow_notices(workflow)
     if not workflow.success:
         problem = workflow.problems[0]
-        error(problem.message)
-        warning(problem.remedy)
+        error(escape(problem.message))
+        warning(escape(problem.remedy))
         raise typer.Exit(1)
 
     if not ensure_network():

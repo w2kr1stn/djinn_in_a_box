@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, cast, get_args
 
 import typer
 from pydantic import ValidationError
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -30,6 +30,11 @@ from djinn_in_a_box.core.config_sync import (
     CANONICAL_REMEDY,
     ConfigSyncAudit,
     DriftClass,
+    DriftEntry,
+    workflow_item_label,
+    workflow_item_summary,
+    workflow_label_component,
+    workflow_remedy,
 )
 from djinn_in_a_box.core.config_sync import (
     audit_config_sync as audit_workflow_config,
@@ -37,6 +42,7 @@ from djinn_in_a_box.core.config_sync import (
 from djinn_in_a_box.core.config_sync import (
     sync_config as synchronize_workflow_config,
 )
+from djinn_in_a_box.core.config_workflow import inspect_workflow_targets, inspection_failure
 from djinn_in_a_box.core.console import blank, console, error, info, rule, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
@@ -702,22 +708,8 @@ def config_path() -> None:
     console.print(str(CONFIG_FILE), highlight=False)
 
 
-_SAFE_STATUS_LABEL = re.compile(r"[^A-Za-z0-9._/:-]")
-_DRIFT_REMEDIES: dict[DriftClass, str] = {
-    DriftClass.SOURCE_CHANGED: "Run `djinn config sync` or retry after source changes settle.",
-    DriftClass.TARGET_DRIFT: "Revert or adopt the managed change via the sync flow.",
-    DriftClass.COLLISION: "Move or remove the conflicting unmanaged file.",
-    DriftClass.INVALID_OR_SEMANTIC: CANONICAL_REMEDY,
-}
-
-
-def _status_label(value: object) -> str:
-    return _SAFE_STATUS_LABEL.sub("?", str(value))[:160]
-
-
-def _status_location(tool: object | None, path: object | None) -> str:
-    parts = [_status_label(item) for item in (tool, path) if item is not None]
-    return ":".join(parts) if parts else "global"
+_status_label = workflow_label_component
+_status_location = workflow_item_label
 
 
 def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
@@ -727,20 +719,26 @@ def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
     console.print(f"Manifest source: {_status_label(active)}")
     console.print(f"State: {'clean' if audit.clean else 'action-required'}")
 
-    for drift in audit.drifts:
+    for drift in audit.drifts[:5]:
         console.print(
-            f"Drift: {_status_label(drift.kind.value)} "
-            f"({_status_location(drift.tool, drift.relative_path)})"
+            Text(
+                f"Drift: {_status_label(drift.kind.value)} "
+                f"({_status_location(drift.tool, drift.relative_path, drift.key_path)})"
+            )
         )
-    for problem in audit.problems:
+    if len(audit.drifts) > 5:
+        console.print(f"and {len(audit.drifts) - 5} more")
+    for problem in audit.problems[:5]:
         line = (
             f"Problem: {_status_label(problem.identifier)} "
             f"({_status_location(problem.tool, problem.relative_path)})"
         )
         if problem.identifier == _LOCK_PROBLEM_IDENTIFIER:
             line += f": {problem.message}"
-        console.print(line)
+        console.print(Text(line))
 
+    if len(audit.problems) > 5:
+        console.print(f"and {len(audit.problems) - 5} more")
     if not audit.clean:
         operational_remedy = next(
             (problem.remedy for problem in audit.problems if problem.remedy is not None), None
@@ -754,9 +752,14 @@ def _print_workflow_audit(audit: ConfigSyncAudit) -> None:
             remedy = (
                 CANONICAL_REMEDY
                 if drift is None
-                else _DRIFT_REMEDIES.get(drift, CANONICAL_REMEDY)
+                else workflow_remedy(
+                    drift, audit.configured_source,
+                    items=tuple(DriftEntry(item.kind, item.relative_path or PurePosixPath("."),
+                                          item.key_path, reason=item.reason)
+                                for item in audit.drifts),
+                )
             )
-        console.print(f"Remedy: {remedy}")
+        console.print(Text(f"Remedy: {remedy}"))
 
 
 @handle_config_errors
@@ -764,7 +767,8 @@ def config_status() -> None:
     """Inspect workflow source, drift, and validation without modifying files."""
     audit = audit_workflow_config(get_project_root())
     _print_workflow_audit(audit)
-    if not audit.clean:
+    runtime_clean = _print_runtime_inspections(get_project_root())
+    if not audit.clean or not runtime_clean:
         raise typer.Exit(1)
 
 
@@ -786,3 +790,35 @@ def config_sync() -> None:
         "Configuration synchronized "
         f"({len(result.changed_paths)} changed, {len(result.removed_paths)} removed)."
     )
+    _print_runtime_inspections(get_project_root(), after_sync=True)
+
+
+def _print_runtime_inspections(project_root: Path, *, after_sync: bool = False) -> bool:
+    config = load_config()
+    clean = True
+    for inspection in inspect_workflow_targets(project_root, config):
+        if inspection.clean:
+            continue
+        clean = False
+        failure = inspection_failure(inspection, config).problems[0]
+        if after_sync:
+            warning(escape(f"{failure.message} Run `djinn config status`"))
+        elif inspection.result is not None:
+            result = inspection.result
+            labels = tuple(
+                workflow_item_label(
+                    inspection.target.tool,
+                    item.path,
+                    item.key_path,
+                    root=inspection.target.destination_root,
+                    origin=item.origin,
+                )
+                for item in result.drift_items
+            )
+            console.print(
+                Text(f"Drift: {result.drift_class.value} ({workflow_item_summary(labels)})")
+            )
+            console.print(Text(f"Remedy: {failure.remedy}"))
+        else:
+            console.print(Text(f"Runtime: {failure.message}"))
+    return clean

@@ -102,7 +102,7 @@ def test_host_runtime_publisher_syncs_selected_view_and_state_manifest(
     files = {item["path"]: item for item in manifest["items"] if "key_path" not in item}
     expected = {"AGENTS.md": b"shared workflow\n"}
     if tool == "claude":
-        expected["CLAUDE.md"] = b"@AGENTS.md\n"
+        expected["CLAUDE.md"] = workflow_module._claude_bridge_path().read_bytes()
     assert set(files) == set(expected)
     for name, content in expected.items():
         assert (host_root / name).read_bytes() == content
@@ -1010,7 +1010,7 @@ def test_host_first_review_and_cached_confirmation(host_case, monkeypatch):
         leases.append("exit")
 
     def save(*args):
-        assert leases == ["enter", "exit", "enter", "exit"]
+        assert leases == ["enter", "exit", "enter", "exit", "enter", "exit"]
         assert (target.destination_root / RUNTIME_MANIFEST_NAME).exists()
         return original_save(*args)
 
@@ -1024,7 +1024,7 @@ def test_host_first_review_and_cached_confirmation(host_case, monkeypatch):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
             os.close(descriptor)
-        assert leases == ["enter", "exit"]
+        assert leases == ["enter", "exit", "enter", "exit"]
         assert not target.destination_root.parent.exists()
         assert not workflow_module.HOST_WORKFLOW_TRUST_FILE.exists()
         reviews.append(review)
@@ -1117,6 +1117,7 @@ def test_host_refusal_creates_nothing(host_case):
 
 def test_host_cached_confirmation_still_rejects_target_drift(host_case):
     assert _host_prepare(host_case, lambda review: True).success
+    (host_case[2].destination_root / "AGENTS.md").unlink()
     (host_case[2].destination_root / "AGENTS.md").write_text("host-owned edit\n")
     before = _host_state(host_case)
     result = _host_prepare(host_case, lambda review: pytest.fail("cached trust prompted"))
@@ -1854,7 +1855,7 @@ def test_host_confirmation_reload_lock_failure_keeps_mapping(host_case, monkeypa
     before = _host_state(host_case)
     result = _host_prepare(host_case, confirm)
     assert result.problems[0].identifier == "canonical-lock-failed"
-    assert result.problems[0].message == "lease failed"
+    assert result.problems[0].message == "lease failed (config)"
     assert result.problems[0].remedy == "Retry lock."
     assert _host_state(host_case) == before
 
@@ -1899,3 +1900,98 @@ def test_host_missing_target_is_rejected_before_review(tmp_path):
     assert result.problems[0].identifier == "target-missing"
     assert not root.parent.exists()
     assert not workflow_module.HOST_WORKFLOW_TRUST_FILE.exists()
+
+
+@pytest.mark.parametrize(
+    "offender", ["instructions", "bridge", "hook", "retired-file", "retired-key", "executable"]
+)
+def test_host_printed_restore_actions_work_without_deleting_manifest(host_case, offender):
+    project, config_path, target = host_case
+    source = project / "config/claude"
+    ready = source / "ready_notify_hook.py"
+    ready.write_text("print('ready')\n")
+    retired = source / "agents/retired.md"
+    retired.parent.mkdir()
+    retired.write_text("---\nname: retired\ndescription: Old agent\n---\n\nRetire me.\n")
+    settings = json.loads((source / "settings.json").read_bytes())
+    settings["hooks"]["Stop"] = json.loads(
+        workflow_module._CLAUDE_HOOK_REWRITES[("hooks", "Stop")][0]
+    )
+    (source / "settings.json").write_text(json.dumps(settings))
+    assert _host_prepare(host_case, lambda review: True).success
+    root = target.destination_root
+    manifest = root / RUNTIME_MANIFEST_NAME
+    manifest_before = manifest.read_bytes()
+    personal = json.loads((root / "settings.json").read_bytes())
+    personal["personal"] = {"keep": True}
+    if offender in {"hook", "retired-key"}:
+        event = "PreToolUse" if offender == "hook" else "Stop"
+        personal["hooks"][event] = [{"hooks": [{"type": "command", "command": "echo edit"}]}]
+    (root / "settings.json").write_text(json.dumps(personal))
+    path = {
+        "instructions": "AGENTS.md",
+        "bridge": "CLAUDE.md",
+        "retired-file": "agents/retired.md",
+        "executable": "security_reminder_hook.py",
+    }.get(offender)
+    if path is not None:
+        (root / path).unlink()
+        (root / path).write_text("wanted edit\n")
+    # Follow the first advice: move the wanted edit into the selected source, then sync.
+    (source / "AGENTS.md").write_text("source includes wanted edit\n")
+    (source / "context/guide.md").write_text("another source update\n")
+    retired.unlink()
+    del settings["hooks"]["Stop"]
+    ready.unlink()
+    (source / "settings.json").write_text(json.dumps(settings))
+    from djinn_in_a_box.core.config_sync import sync_config
+
+    assert sync_config(project, config_path=config_path).success
+    result = _host_prepare(host_case, lambda review: pytest.fail("drift prompted"))
+    assert result.problems[0].identifier == "target-drift"
+    message = result.problems[0].message
+    assert manifest.read_bytes() == manifest_before
+    if offender == "retired-file":
+        assert message.endswith(
+            f"claude:agents/retired.md ({root}): remove {root}/agents/retired.md"
+        )
+        (root / "agents/retired.md").unlink()
+    elif offender == "retired-key":
+        assert message.endswith(
+            f"claude:settings.json[hooks.Stop] ({root}): "
+            f"remove hooks.Stop from {root}/settings.json"
+        )
+        del personal["hooks"]["Stop"]
+        (root / "settings.json").write_text(json.dumps(personal))
+    elif offender == "hook":
+        assert message.endswith(
+            f"claude:settings.json[hooks.PreToolUse] ({root}): "
+            "restore the value of hooks.PreToolUse "
+            "in config/claude/settings.json with ~/.claude/ in place of ~/.claude_seed/"
+        )
+        personal["hooks"]["PreToolUse"] = json.loads(
+            workflow_module._CLAUDE_HOOK_REWRITES[("hooks", "PreToolUse")][1]
+        )
+        (root / "settings.json").write_text(json.dumps(personal))
+    else:
+        assert path is not None
+        restore = workflow_module._claude_bridge_path() if offender == "bridge" else source / path
+        expected_source = (
+            "templates/claude/CLAUDE.md of the Djinn installation"
+            if offender == "bridge"
+            else f"config/claude/{path}"
+        )
+        suffix = "; keep the executable bit" if offender == "executable" else ""
+        assert message.endswith(f"claude:{path} ({root}): restore from {expected_source}{suffix}")
+        (root / path).unlink()
+        (root / path).write_bytes(restore.read_bytes())
+        if offender == "executable":
+            (root / path).chmod(0o700)
+    assert manifest.read_bytes() == manifest_before
+    assert _host_prepare(host_case, lambda review: True).success
+    assert (root / "AGENTS.md").read_text() == "source includes wanted edit\n"
+    assert (root / "context/guide.md").read_text() == "another source update\n"
+    assert not (root / "agents/retired.md").exists()
+    delivered = json.loads((root / "settings.json").read_bytes())
+    assert "Stop" not in delivered["hooks"]
+    assert delivered["personal"] == {"keep": True}

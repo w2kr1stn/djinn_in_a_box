@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 from rich.console import Console
+from rich.text import Text
 from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
@@ -634,13 +635,25 @@ class TestStartCommand:
     ) -> None:
         start_mocks["workflow"].return_value = WorkflowPreparationResult(
             False,
-            (WorkflowPreparationProblem("blocked", "Workflow blocked.", "Resolve drift."),),
+            (WorkflowPreparationProblem(
+                "blocked", "Workflow blocked in a.toml[error].", "Resolve drift in a.toml[error]."
+            ),),
+            ("Synchronized source changes into the canonical workflow: 2 changed, 1 removed.",),
         )
 
         with pytest.raises(typer.Exit) as exc_info:
             container.start()
 
         assert exc_info.value.exit_code == 1
+        assert "Workflow blocked in a.toml[error]." in (
+            " ".join(Text.from_ansi(start_mocks["err_output"].getvalue()).plain.split())
+        )
+        assert "Synchronized source changes into the canonical workflow: 2 changed, 1 removed." in (
+            " ".join(Text.from_ansi(start_mocks["err_output"].getvalue()).plain.split())
+        )
+        assert "Resolve drift in a.toml[error]." in (
+            " ".join(Text.from_ansi(start_mocks["err_output"].getvalue()).plain.split())
+        )
         start_mocks["network"].assert_not_called()
         start_mocks["run"].assert_not_called()
 
