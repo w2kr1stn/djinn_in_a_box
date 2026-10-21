@@ -1051,7 +1051,8 @@ def test_dead_filter_is_rebound_in_place_and_published(gitted, quick_filter, cap
     assert len(kills) == 1 and len(gitted.servers) == 2
     old, new = gitted.servers
     assert old.stop.is_set() and new.clients is old.clients
-    assert new.identity != old.identity
+    # A new instance bound in place; the filesystem may reuse the inode number.
+    assert new is not old and new.exported == old.exported and new.identity is not None
     stamps = rebind_stamps(capsys)
     state = gitted.state()
     assert state is not None and state["filter_rebinds"] == stamps and len(stamps) == 1
