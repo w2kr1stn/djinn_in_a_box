@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -431,13 +432,20 @@ def audit_session_mounts(session: credentials.Session) -> list[tuple[Path, Path]
     ]
 
 
-def open_audit_session(config: AppConfig | None) -> credentials.Session:
-    """Create the session and write its seed. Without a usable carrier the audit has no seed."""
+@contextlib.contextmanager
+def _audit_admission() -> Iterator[None]:
+    """Hold host control for an OpenCode audit's admission; a busy guard refuses the audit."""
     with contextlib.ExitStack() as guards:
         try:
             guards.enter_context(hostctl.control_guard())
         except (hostctl.HostctlError, OSError) as error:
             raise AssistantError(f"Could not start the OpenCode audit: {_reason(error)}") from error
+        yield
+
+
+def open_audit_session(config: AppConfig | None) -> credentials.Session:
+    """Create the session and write its seed. Without a usable carrier the audit has no seed."""
+    with _audit_admission():
         try:
             session = credentials.create_audit_session()
         except (credentials.CredentialsError, OSError) as error:
@@ -492,6 +500,11 @@ def run_audit(occasion: str | None, selected: str | None = None) -> int:
     socket, platform = local_daemon()
     mounts = session_mounts(project, config, agent, socket)
     briefing = (project / "assistant" / "audit-briefing.md").read_text(encoding="utf-8")
+    if agent == "opencode":
+        # A running lifecycle command refuses the audit within the guard deadline, before the
+        # leftover recovery below can wait on a carrier that command holds.
+        with _audit_admission():
+            pass
     recover_leftover_sessions(project, config)
     session = open_audit_session(config) if agent == "opencode" else None
     launched = interrupted = False

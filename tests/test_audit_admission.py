@@ -358,3 +358,21 @@ def test_audit_busy_deadline_reports_real_control_holder(audit_start, monkeypatc
         assert "Could not start the OpenCode audit: host control is busy" in result.output
         assert f"held by PID {child.pid} (restore-writer) since " in result.output
         assert session_paths() == before
+
+
+def test_busy_lifecycle_refuses_the_audit_before_leftover_recovery(audit_start, monkeypatch):
+    from test_restore_lock_holders import flock_holder
+
+    def recovery(*args, **kwargs):
+        raise AssertionError("leftover recovery ran before the admission check")
+
+    monkeypatch.setattr(assistant, "recover_leftover_sessions", recovery)
+    path = hostctl.state_root() / "control.lock"
+    path.touch(mode=0o600)
+    with flock_holder(path) as child:
+        fast_control_clock(monkeypatch)
+        result = CliRunner().invoke(app, ["audit", "--agent", "opencode"])
+    assert not isinstance(result.exception, AssertionError), result.exception
+    assert result.exit_code == 1, result.output
+    assert "Could not start the OpenCode audit: host control is busy" in result.output
+    assert f"held by PID {child.pid} (restore-writer) since " in result.output
