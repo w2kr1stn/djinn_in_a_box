@@ -158,7 +158,7 @@ def acquire_creation_lock(root: Path) -> int:
     except BlockingIOError as exc:
         os.close(fd)
         message = "another dev container creation is pending; retry after it completes"
-        holder = describe_holders(root / "creator.lock")
+        holder = describe_holders(root / CREATOR_LOCK)
         raise GitSSHError(f"{message}; {holder}" if holder else message) from exc
     return fd
 
