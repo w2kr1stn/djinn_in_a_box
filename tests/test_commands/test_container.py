@@ -2756,6 +2756,12 @@ def test_selected_ids_only_add_tombstones(credential_cleanup, monkeypatch, ids):
     assert ("Unknown OpenCode credential ID unknown" in result.output) == (ids == ["unknown"])
 
 
+def _plain(output: str) -> str:
+    """CLI text without ANSI codes, panel borders or wrapping; CI forces a colored terminal."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", text).split())
+
+
 @pytest.mark.parametrize(
     "args,code",
     [
@@ -2781,9 +2787,9 @@ def test_selected_ids_require_credentials_and_valid_charset(
     assert result.exit_code == code
     assert (carrier / "credentials.removed.json").read_text() == before
     assert (
-        "requires --credentials" in result.output
+        "requires --credentials" in _plain(result.output)
         if code == 2
-        else "id is not valid" in result.output
+        else "id is not valid" in _plain(result.output)
     )
 
 
@@ -2798,7 +2804,7 @@ def test_selected_ids_confirmation_and_help(credential_cleanup, monkeypatch):
     assert result.exit_code == 1
     assert "every host" in result.output
     assert "file" not in json.loads((carrier / "credentials.removed.json").read_text())
-    help_text = runner.invoke(app, ["clean", "volumes", "--help"]).output
+    help_text = _plain(runner.invoke(app, ["clean", "volumes", "--help"]).output)
     for text in ("opencode auth list --format json", "jq -r", "integrationID", "credentials.json"):
         assert text in help_text
 
