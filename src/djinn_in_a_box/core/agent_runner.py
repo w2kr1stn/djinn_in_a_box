@@ -15,6 +15,7 @@ from djinn_in_a_box.core.docker import (
     RunResult,
     compose_run,
     ensure_network,
+    validate_egress_inputs,
 )
 from djinn_in_a_box.core.egress import EgressPlan
 
@@ -82,6 +83,9 @@ def run_headless_agent(
         agent_config = agent_configs[agent]
     except KeyError:
         raise UnknownAgentError(agent, tuple(sorted(agent_configs))) from None
+
+    if egress is not None:
+        validate_egress_inputs(checked_config, resolved_mounts, {"AGENT_PROMPT": prompt})
 
     if not ensure_network():
         raise AgentNetworkError

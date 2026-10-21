@@ -20,6 +20,7 @@ env_bin='/usr/bin/env'
 bash_bin='/bin/bash'
 firewall_script='/usr/local/bin/init-firewall.sh'
 setpriv_bin='/usr/bin/setpriv'
+zsh_bin='/bin/zsh'
 entrypoint_path='/home/dev/entrypoint.sh'
 dev_user='dev'
 dev_home='/home/dev'
@@ -41,4 +42,4 @@ fi
 export HOME="$dev_home" USER="$dev_user" LOGNAME="$dev_user"
 export PATH="$saved_path"
 exec "$setpriv_bin" --bounding-set=-net_admin,-net_raw --inh-caps=-all \
-    --reuid="$dev_uid" --regid="$dev_gid" --init-groups -- "$entrypoint_path" "$@"
+    --reuid="$dev_uid" --regid="$dev_gid" --init-groups -- "$zsh_bin" -f "$entrypoint_path" "$@"

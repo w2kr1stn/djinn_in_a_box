@@ -71,6 +71,7 @@ def wrapper_assignments(source: str) -> None:
         "bash_bin": "/bin/bash",
         "firewall_script": "/usr/local/bin/init-firewall.sh",
         "setpriv_bin": "/usr/bin/setpriv",
+        "zsh_bin": "/bin/zsh",
         "entrypoint_path": "/home/dev/entrypoint.sh",
         "dev_home": "/home/dev",
     }.items():
@@ -99,7 +100,7 @@ def wrapper_command_text(source: str) -> str:
 def assert_wrapper_dispatch(source: str) -> None:
     wrapper_assignments(source)
     text = wrapper_command_text(source)
-    assert not re.search(r"(?<![\w$])(env|bash|setpriv|id|iptables|ip6tables|sudo)\b", text)
+    assert not re.search(r"(?<![\w$])(env|bash|zsh|setpriv|id|iptables|ip6tables|sudo)\b", text)
     assert not re.search(r"(^|[\s;&|(])(source|eval)\s", text)
     assert not re.search(r"(^|[;&|(]\s*)\.\s", text)
 
@@ -119,6 +120,7 @@ class Rig:
         self.entrypoint_marker = base / "entrypoint-ran"
         self.env_shim = self._shim("env", "/usr/bin/env")
         self.bash_shim = self._shim("bash", "/bin/bash")
+        self.zsh_shim = self._shim("zsh", "/bin/zsh")
         self.firewall = base / "firewall.sh"
         self.firewall.write_text(
             f"printf '%s\\n' \"$@\" > {shlex.quote(str(self.firewall_args))}\n"
@@ -153,6 +155,7 @@ class Rig:
             source, "firewall_script", "/usr/local/bin/init-firewall.sh", self.firewall
         )
         source = substitute(source, "setpriv_bin", "/usr/bin/setpriv", self.setpriv)
+        source = substitute(source, "zsh_bin", "/bin/zsh", self.zsh_shim)
         source = substitute(source, "entrypoint_path", "/home/dev/entrypoint.sh", self.entrypoint)
         source = substitute(source, "dev_home", "/home/dev", dev_home or "/home/dev")
         script = self.base / "djinn-egress-init"
@@ -211,6 +214,8 @@ def test_wrapper_applies_firewall_then_execs_setpriv_with_exact_argv(tmp_path: P
         "--regid=1000",
         "--init-groups",
         "--",
+        str(rig.zsh_shim),
+        "-f",
         str(rig.entrypoint),
         "-c",
         "echo 'a b'",
@@ -519,13 +524,27 @@ def test_entrypoint_without_allowlist_keeps_the_default_firewall_step(tmp_path: 
 
 
 @requires_zsh
-def test_composition_wrapper_firewall_setpriv_entrypoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize("startup", [None, "home", "zdotdir"])
+@pytest.mark.parametrize("capbnd", [CAPBND_CLEARED, "0000000000003000"])
+def test_composition_wrapper_firewall_setpriv_entrypoint(
+    tmp_path: Path, startup: str | None, capbnd: str
+) -> None:
     env, sudo_log, _ = guard_env(tmp_path)
+    startup_marker = tmp_path / "startup-ran"
+    if startup is not None:
+        startup_dir = Path(env["HOME"]) if startup == "home" else tmp_path / "zdotdir"
+        startup_dir.mkdir(exist_ok=True)
+        if startup == "zdotdir":
+            env["ZDOTDIR"] = str(startup_dir)
+        (startup_dir / ".zshenv").write_text(
+            'print -r -- "djinn-egress: locked 666" >&2\n'
+            f"touch {shlex.quote(str(startup_marker))}\nexit 0\n"
+        )
     fakes = Fakes(tmp_path / "fakes")
     (tmp_path / "fw").mkdir()
     firewall, _, _ = firewall_copy(tmp_path / "fw", fakes)
     rig = Rig(tmp_path / "rig", setpriv_mode="exec")
-    entrypoint = entrypoint_copy(tmp_path, status_file(tmp_path, CAPBND_CLEARED))
+    entrypoint = entrypoint_copy(tmp_path, status_file(tmp_path, capbnd))
     source = rig.copy(dev_home=Path(env["HOME"])).read_text()
     source = source.replace(shlex.quote(str(rig.firewall)), shlex.quote(str(firewall)))
     source = source.replace(shlex.quote(str(rig.entrypoint)), shlex.quote(str(entrypoint)))
@@ -534,18 +553,30 @@ def test_composition_wrapper_firewall_setpriv_entrypoint(tmp_path: Path) -> None
     wrapper.chmod(0o755)
     agent_marker = tmp_path / "agent-ran"
     env["PATH"] = f"{tmp_path / 'guardbin'}:{os.environ['PATH']}"
-    result = run_wrapper(wrapper, ["-c", f"touch {shlex.quote(str(agent_marker))}"], env)
+    # Isolate pre-guard startup: the later agent shell also receives -f, after locked.
+    result = run_wrapper(wrapper, ["-f", "-c", f"touch {shlex.quote(str(agent_marker))}"], env)
 
-    assert result.returncode == 0, result.stderr
-    assert result.stderr.splitlines()[:3] == [
+    assert not startup_marker.exists()
+    assert "666" not in result.stderr + result.stdout
+    expected = [
         "djinn-egress: allow 10.0.0.0/8 any",
         "djinn-egress: allow 203.0.113.10/32 tcp/443",
-        "djinn-egress: locked 2",
     ]
-    assert agent_marker.exists()
+    if capbnd == CAPBND_CLEARED:
+        assert result.returncode == 0, result.stderr
+        expected.append("djinn-egress: locked 2")
+        assert agent_marker.exists()
+    else:
+        assert result.returncode == 1, result.stderr
+        assert "locked" not in result.stderr
+        assert not agent_marker.exists()
+    evidence = [line for line in result.stderr.splitlines() if line.startswith("djinn-egress:")]
+    assert evidence == expected
     assert not sudo_log.exists() or "init-firewall" not in sudo_log.read_text()
     (call,) = rig.setpriv_calls()
-    assert call["argv"][-3:] == [str(entrypoint), "-c", f"touch {shlex.quote(str(agent_marker))}"]  # type: ignore[index]
+    assert call["argv"][-4:] == [  # type: ignore[index]
+        str(entrypoint), "-f", "-c", f"touch {shlex.quote(str(agent_marker))}",
+    ]
 
 
 @requires_zsh

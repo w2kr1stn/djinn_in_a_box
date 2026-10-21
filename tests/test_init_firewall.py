@@ -648,6 +648,25 @@ def expected_default_trace(domains: list[str], failing_at: str | None = None) ->
     return trace
 
 
+EXPECTED_DEFAULT_DOMAINS = [
+    "deb.debian.org",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "api.anthropic.com",
+    "api.openai.com",
+    "opencode.ai",
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "nodejs.org",
+    "fnm.vercel.app",
+    "astral.sh",
+    "platform.claude.com",
+    "auth.openai.com",
+]
+
+
 def default_domains() -> list[str]:
     script = FIREWALL.read_text()
     array = re.search(r"(?ms)^ALLOWED_DOMAINS=\((.*?)^\)", script)
@@ -657,7 +676,8 @@ def default_domains() -> list[str]:
 
 
 def test_default_mode_call_sequence_is_unchanged(tmp_path: Path) -> None:
-    domains = default_domains()
+    domains = EXPECTED_DEFAULT_DOMAINS
+    assert default_domains() == domains
     code, calls, stderr = default_mode_trace(tmp_path, FIREWALL)
 
     assert code == 0, stderr
@@ -670,7 +690,8 @@ def test_default_mode_call_sequence_is_unchanged(tmp_path: Path) -> None:
 
 
 def test_default_mode_still_aborts_when_a_lookup_fails(tmp_path: Path) -> None:
-    domains = default_domains()
+    domains = EXPECTED_DEFAULT_DOMAINS
+    assert default_domains() == domains
     victim = domains[3]
     code, calls, stderr = default_mode_trace(tmp_path, FIREWALL, failing=(victim,))
 

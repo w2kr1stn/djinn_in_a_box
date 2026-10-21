@@ -110,9 +110,12 @@ def _show_run_status(
     elif docker_mode is DockerMode.DIRECT:
         status_line("Docker", "Enabled (DIRECT)", "warning")
     if egress is not None:
-        status_line("Firewall", f"Allowlist ({len(egress.rules)} destinations)")
+        status_line("Firewall", f"Allowlist ({len(egress.rules)} destinations)", soft_wrap=True)
         for entry, rules in egress.entries:
-            status_line("Egress", f"{entry} -> {', '.join(rule.describe() for rule in rules)}")
+            status_line(
+                "Egress", f"{entry} -> {', '.join(rule.describe() for rule in rules)}",
+                soft_wrap=True,
+            )
     elif firewall:
         status_line("Firewall", "Enabled")
     if json_output:
@@ -215,18 +218,18 @@ def run(
     try:
         docker_mode = resolve_docker_mode(docker, docker_direct)
     except ValueError as e:
-        error(str(e))
+        error(str(e), soft_wrap=allow is not None)
         raise typer.Exit(1) from None
 
     egress = None
     if allow is not None:
         if docker_mode is not DockerMode.NONE:
-            error("--allow cannot be combined with --docker or --docker-direct")
+            error("--allow cannot be combined with --docker or --docker-direct", soft_wrap=True)
             raise typer.Exit(1)
         try:
             egress = plan_egress(allow)
         except EgressSpecificationError as e:
-            error(escape(str(e)))
+            error(escape(str(e)), soft_wrap=True)
             raise typer.Exit(1) from None
 
     checked_config = None
@@ -235,7 +238,8 @@ def run(
     try:
         validate_managed_bind_sources(config)
     except MountSpecificationError as e:
-        error(escape(str(e)))
+        message = escape_nonprintable(str(e)) if egress is not None else str(e)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     checked_config = config
     if agent in {"claude", "codex"}:
@@ -253,7 +257,7 @@ def run(
     print_workflow_notices(workflow)
     if not workflow.success:
         problem = workflow.problems[0]
-        error(escape(problem.message))
+        error(escape(problem.message), soft_wrap=egress is not None)
         warning(escape(problem.remedy))
         raise typer.Exit(1)
 
@@ -262,7 +266,8 @@ def run(
             tuple(mount or ()), here=here or not mount
         )
     except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
-        error(escape(str(e)))
+        message = escape_nonprintable(str(e)) if egress is not None else str(e)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
 
     try:
@@ -291,20 +296,20 @@ def run(
             ),
         )
     except UnknownAgentError as e:
-        error(str(e))
+        error(str(e), soft_wrap=egress is not None)
         console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
     except AgentNetworkError as e:
-        error(str(e))
+        error(str(e), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     except RuntimeMountSpecificationError as e:
-        error(f"Internal runtime mount construction failed: {e}")
+        error(f"Internal runtime mount construction failed: {e}", soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     except (MountCollisionError, MountSpecificationError, EgressSpecificationError) as e:
         message = str(e)
         if egress is not None:
             message = escape_nonprintable(message)
-        error(escape(message))
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
 
     if result.stdout:

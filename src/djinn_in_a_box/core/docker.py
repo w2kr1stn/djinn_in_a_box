@@ -2456,16 +2456,18 @@ def inspect_running_desktop(
     )
 
 
-def _validate_egress_inputs(
-    declarations: ResolvedDeclarations,
+def validate_egress_inputs(
+    config: AppConfig,
     mounts: tuple[ContainerMount, ...],
     env: dict[str, str] | None,
 ) -> None:
+    """Check run-controlled hooks and targets without provisioning runtime resources."""
+    declarations = inspect_declarations(config.mounts, config.environment)
     hook_names = {
         "GLIBC_TUNABLES", "GCONV_PATH", "LOCPATH", "NLSPATH", "BASH_ENV", "ENV",
-        "BASHOPTS", "SHELLOPTS",
+        "BASHOPTS", "SHELLOPTS", "ZDOTDIR",
     }
-    for key in (*declarations.environment, *(env or {})):
+    for key in (*config.environment, *(env or {})):
         if key in hook_names or key.startswith(("LD_", "BASH_FUNC_")):
             raise EgressSpecificationError(
                 escape_nonprintable(
@@ -2473,7 +2475,9 @@ def _validate_egress_inputs(
                 )
             )
     targets = [(f"--mount {mount.source}", mount.target) for mount in mounts]
-    targets.extend((f"mounts.{mount.name}", mount.target) for mount in declarations.mounts)
+    targets.extend(
+        (f"mounts.{name}", Path(mount.target)) for name, mount in declarations.mounts.items()
+    )
     for setting, path in targets:
         target = _resolve_image_aliases(_normalize_mount_target(path))
         if target in (Path("/"), Path("/home"), Path("/home/dev")) or any(
@@ -2584,7 +2588,7 @@ def compose_run(
     )
 
     if options.egress is not None:
-        _validate_egress_inputs(declarations, mounts, env)
+        validate_egress_inputs(config, mounts, env)
 
     if options.docker_mode is not DockerMode.AGENT or service != "dev":
         for mount in mounts:

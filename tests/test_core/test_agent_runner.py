@@ -270,3 +270,30 @@ def test_default_runner_has_no_allowlist(runner_mocks):
     options = runner_mocks["compose"].call_args.args[1]
     assert options.egress is None
     assert options.firewall_enabled is False
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_runner_checks_allowlist_inputs_before_network_and_ready(runner_mocks, allow):
+    from unittest.mock import Mock
+
+    from djinn_in_a_box.core.egress import plan_egress
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    config = runner_mocks["app_config"].model_copy(update={"environment": {"ZDOTDIR": ""}})
+    ready = Mock()
+    if allow:
+        with pytest.raises(EgressSpecificationError, match="ZDOTDIR"):
+            run_headless_agent(
+                "codex", "inspect", egress=plan_egress(["8.8.8.8"]),
+                resolved_mounts=(), app_config=config, on_ready=ready,
+            )
+        runner_mocks["network"].assert_not_called()
+        ready.assert_not_called()
+        runner_mocks["compose"].assert_not_called()
+    else:
+        run_headless_agent(
+            "codex", "inspect", resolved_mounts=(), app_config=config, on_ready=ready,
+        )
+        runner_mocks["network"].assert_called_once()
+        ready.assert_called_once_with(())
+        runner_mocks["compose"].assert_called_once()

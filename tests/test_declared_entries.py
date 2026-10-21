@@ -386,3 +386,16 @@ def test_egress_environment_is_reserved_in_config(tmp_path, value):
         result.require_valid()
     with pytest.raises(ValueError, match="DJINN_EGRESS_ALLOW.*reserved"):
         AppConfig(code_dir=tmp_path, environment={"DJINN_EGRESS_ALLOW": value})
+
+
+@pytest.mark.parametrize("key", ["USER", "LOGNAME"])
+def test_host_config_accepts_identity_environment(tmp_path, key):
+    from djinn_in_a_box.config.loader import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(f'[general]\ncode_dir = "{tmp_path}"\n[environment]\n{key} = "x"\n')
+    config = load_config(path)
+    assert config.environment == {key: "x"}
+    result = resolve(tmp_path, environment=config.environment)
+    result.require_valid()
+    assert result.environment == {key: "x"}

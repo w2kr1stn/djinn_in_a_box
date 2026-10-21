@@ -3592,6 +3592,8 @@ def test_startup_environment_class_guard():
             )
     # These names are local script/Python constants, never caller environment.
     exceptions = {
+        # The wrapper sets dev identity post-drop, overrides config and never reads it.
+        "USER", "LOGNAME",
         "_OUTPUT_LIB_DEFAULT",
         "_MCP_REGISTER_DIR",
         "_OUTPUT_LIB",
@@ -3903,6 +3905,7 @@ def test_egress_detached_refused_without_subprocess(egress_compose):
 
 
 _EGRESS_HOOKS = [
+    "ZDOTDIR",
     "LD_PRELOAD",
     "LD_AUDIT",
     "LD_LIBRARY_PATH",
@@ -4028,13 +4031,15 @@ def test_hook_caller_environment_unchanged_without_egress(egress_compose, key):
 
 @pytest.mark.parametrize("key", _EGRESS_HOOKS)
 @pytest.mark.parametrize("source", ["config", "caller"])
-def test_egress_hook_class_guard(key, source):
+def test_egress_hook_class_guard(tmp_path, key, source):
     from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
-    declarations = docker_mod.ResolvedDeclarations([], {key: ""} if source == "config" else {}, [])
+    config = AppConfig(code_dir=tmp_path).model_copy(
+        update={"environment": {key: ""} if source == "config" else {}}
+    )
     with pytest.raises(EgressSpecificationError, match=key):
-        docker_mod._validate_egress_inputs(
-            declarations,
+        docker_mod.validate_egress_inputs(
+            config,
             (),
             {key: ""} if source == "caller" else {},
         )
@@ -4065,36 +4070,37 @@ def test_egress_hook_class_guard(key, source):
     ],
 )
 @pytest.mark.parametrize("source", ["runtime", "declared"])
-def test_egress_mount_class_guard(target, source):
+def test_egress_mount_class_guard(tmp_path, target, source):
     from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
-    mount = docker_mod.ResolvedDeclaration("input", "bind", "/input", Path(target), True)
-    declarations = docker_mod.ResolvedDeclarations([mount] if source == "declared" else [], {}, [])
+    config = AppConfig(code_dir=tmp_path, mounts={
+        "input": {"source": "/input", "target": target, "read_only": True},
+    } if source == "declared" else {})
     runtime = (ContainerMount(Path("/input"), Path(target), True),) if source == "runtime" else ()
     with pytest.raises(EgressSpecificationError, match="input.*target.*shadows"):
-        docker_mod._validate_egress_inputs(declarations, runtime, {})
+        docker_mod.validate_egress_inputs(config, runtime, {})
 
 
 @pytest.mark.parametrize(
     "target",
     ["/home/dev/workspace", "/home/dev/input", "/home/other", "/opt", "/usr-other", "/run-other"],
 )
-def test_egress_mount_class_positive_controls(target):
-    docker_mod._validate_egress_inputs(
-        docker_mod.ResolvedDeclarations([], {}, []),
+def test_egress_mount_class_positive_controls(tmp_path, target):
+    docker_mod.validate_egress_inputs(
+        AppConfig(code_dir=tmp_path),
         (ContainerMount(Path("/input"), Path(target)),),
         {},
     )
 
 
 @pytest.mark.parametrize("source", ["hook", "mount"])
-def test_egress_setting_errors_are_single_line(source):
+def test_egress_setting_errors_are_single_line(tmp_path, source):
     from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
     env = {"LD_POISON\nname": ""} if source == "hook" else {}
     mounts = (ContainerMount(Path("/input\nsource"), Path("/etc/input\nname")),)
     with pytest.raises(EgressSpecificationError) as exc:
-        docker_mod._validate_egress_inputs(docker_mod.ResolvedDeclarations([], {}, []),
+        docker_mod.validate_egress_inputs(AppConfig(code_dir=tmp_path),
                                          mounts if source == "mount" else (), env)
     assert len(str(exc.value).splitlines()) == 1
     assert "\\n" in str(exc.value)
