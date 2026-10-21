@@ -53,6 +53,7 @@ OPENCODE_PORT: Final = 4096
 OPENCODE_INTERNAL_PORT: Final = 4097
 RELAY_LIMIT: Final = 64
 RELAY_BUFFER: Final = 64 * 1024
+RELAY_LOG_SOURCES: Final = 256
 TEST_BACKEND_ENV: Final = "DJINN_SERVE_TEST_BACKEND_PORT"
 TEST_RELAY_ENV: Final = "DJINN_SERVE_TEST_RELAY_PORT"
 TEST_ROUTE4_ENV: Final = "DJINN_SERVE_TEST_ROUTE4"
@@ -247,10 +248,13 @@ def socket_inodes(pid: int) -> set[int]:
     return inodes
 
 
-def listener_inodes(port: int, *, wildcard_v4: bool, address: str | None = None) -> set[int]:
+def listener_inodes(
+    port: int, *, wildcard_v4: bool, address: str | None = None, non_loopback: bool = False
+) -> set[int]:
     """LISTEN inodes on ``port``; optionally filter the proc-format local address.
 
     ``wildcard_v4`` restricts the result to 0.0.0.0, excluding IPv6.
+    ``non_loopback`` excludes loopback, including IPv4-mapped loopback addresses.
     """
     inodes: set[int] = set()
     for table in ("tcp",) if wildcard_v4 else ("tcp", "tcp6"):
@@ -269,6 +273,15 @@ def listener_inodes(port: int, *, wildcard_v4: bool, address: str | None = None)
             if wildcard_v4 and local != "00000000":
                 continue
             if int(hexport, 16) == port and fields[9].isdigit():
+                if non_loopback:
+                    packed = bytes.fromhex(local)
+                    # proc IPv6 addresses contain four little-endian 32-bit words.
+                    packed = b"".join(packed[i : i + 4][::-1] for i in range(0, len(packed), 4))
+                    ip = ipaddress.ip_address(packed)
+                    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+                        ip = ip.ipv4_mapped
+                    if ip.is_loopback:
+                        continue
                 inodes.add(int(fields[9]))
     return inodes
 
@@ -956,6 +969,8 @@ def run_relay(
     last_flush, last_attempt = float("-inf"), float("-inf")
     write_failed = False
     logged: dict[str, float] = {}
+    last_suppressed = float("-inf")
+    accept_retry_at: float | None = None
 
     def persist(force: bool = False) -> None:
         nonlocal persisted, last_flush, last_attempt, size, write_failed
@@ -994,14 +1009,20 @@ def run_relay(
         connections.discard(conn)
 
     def refuse(client: socket.socket, source: str, reason: str) -> None:
-        nonlocal count, size
+        nonlocal count, size, last_suppressed
         count += 1
         now = time.monotonic()
-        # Expiring entries bounds memory without retaining an authorization cache.
+        # The source cap bounds both retained state and expiry work.
         for key in list(logged):
             if now - logged[key] >= timing("relay_log_interval"):
                 del logged[key]
         if source not in logged:
+            if len(logged) >= RELAY_LOG_SOURCES:
+                if now - last_suppressed >= timing("relay_log_interval"):
+                    size = _write_log(b"refusal log suppressed: too many sources\n", size)
+                    last_suppressed = now
+                client.close()
+                return
             if reason == "not gateway":
                 local = client.getsockname()[0]
                 reason = (
@@ -1029,11 +1050,24 @@ def run_relay(
         persist()
         selector.register(listener, selectors.EVENT_READ, None)
         while not stopping:
+            if accept_retry_at is not None and time.monotonic() >= accept_retry_at:
+                selector.register(listener, selectors.EVENT_READ, None)
+                accept_retry_at = None
             for key, events in selector.select(0.1):
                 if key.data is None:
                     try:
                         client, peer = listener.accept()
-                    except OSError:
+                    except (BlockingIOError, InterruptedError):
+                        continue
+                    except OSError as exc:
+                        if exc.errno == errno.ECONNABORTED:
+                            continue
+                        selector.unregister(listener)
+                        accept_retry_at = time.monotonic() + 1.0
+                        error = errno.errorcode.get(exc.errno or 0, "unknown")
+                        size = _write_log(
+                            f"accept failed ({error}); pausing new connections\n".encode(), size
+                        )
                         continue
                     source, reason = admission(peer)
                     if reason is not None:
@@ -1801,25 +1835,21 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
                 raise HelperError("spawn", "the running OpenCode server could not be stopped")
             remove_file(dirfd, "opencode.json")
             restarted = True
-        merge_password(home, password)
+        foreign_message = (
+            "foreign listener on relay port; stop it or recreate the container "
+            "(a djinn serve from before the update)"
+        )
+        if listener_inodes(port, wildcard_v4=False, non_loopback=True):
+            raise HelperError("spawn", foreign_message)
         stopped_default = stop_default_service(home, deadline)
         if foreign_listener(None, port):
-            raise HelperError(
-                "spawn",
-                "foreign listener on relay port; stop it or recreate the container "
-                "(a djinn serve from before the update)",
-            )
+            raise HelperError("spawn", foreign_message)
         internal = backend_port()
-        backend_listeners = set[int]().union(
-            *(
-                listener_inodes(internal, wildcard_v4=False, address=address)
-                for address in ("0100007F", "00000000", "0" * 32)
-            )
-        )
-        if backend_listeners:
+        if listener_inodes(internal, wildcard_v4=False):
             raise HelperError(
                 "spawn", "foreign listener on OpenCode backend port 127.0.0.1:" + str(internal)
             )
+        merge_password(home, password)
         argv = [
             "opencode",
             "serve",

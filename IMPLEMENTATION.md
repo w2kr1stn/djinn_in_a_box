@@ -2056,14 +2056,18 @@ container's writable layer. Neither file is in the synced carrier allowlist.
 A pre-existing default service is stopped only after the discovery PID is
 proved to have argv[0] basename `opencode` or `opencode.exe`, followed by
 `serve --service`, and own the LISTEN socket named by
-the discovery URL. Its start time is checked again before KILL. Unprovable or
-stale discovery signals nothing. Djinn never invokes native
+the discovery URL. Before password changes or default-service signals, a
+non-loopback listener on relay port 4096 refuses with the stop/recreate hint;
+this includes wildcard and IPv4-mapped addresses. Verified loopback default
+services can still be replaced. The service's start time is checked again before
+KILL. Unprovable or stale discovery signals nothing. Djinn never invokes native
 `opencode service stop`, which trusts the discovery PID without these checks.
 It starts `opencode serve --service --hostname 127.0.0.1 --port 4097`, optionally
 with `--cors <tailnet-url>`; bind/port are flags, not persistent service settings.
 Discovery names `127.0.0.1:4097`. A registration race fails with `not-registered`
-after stopping the new pair. A foreign listener on port 4096 (any address) or
-`127.0.0.1:4097` refuses before spawning.
+after stopping the new pair. After default-service replacement, any remaining
+listener on port 4096 or backend port 4097, at any IPv4 or IPv6 address, refuses
+before password changes or spawning.
 After stop/restart, the next in-container client can start the normal loopback
 service again.
 
@@ -2117,11 +2121,17 @@ limit refusals. Backend connect timeout is 5 s, idle timeout is 30 minutes with
 no bytes in either direction, and buffers are capped at 64 KiB per direction.
 Half-closes propagate. SIGPIPE stays ignored; EPIPE, reset and timeout close
 only the affected connection. TERM/INT close listener and connections and exit 0.
+Persistent accept errors pause new accepts for one second while established
+streams keep flowing, with one capped diagnostic per pause. Would-block,
+interrupted and aborted accepts retry without a pause.
 
-Only refused source IPs and reasons are logged, with userland-proxy/direct-routing
+Refusal logs contain only source IPs and reasons, with userland-proxy/direct-routing
 and non-default-network hints where applicable; no content is logged. Refusal
 logs are rate-limited to the first per source per minute and capped like the
-other managed logs. Every refusal increments the count independently of log
+other managed logs. The source map holds at most 256 entries; after expiry,
+new sources beyond that cap are counted without a source log line, with at
+most one `refusal log suppressed: too many sources` line per minute.
+Every refusal increments the count independently of log
 rate limiting, starting at zero on each relay start. Private
 `opencode-relay.count` is atomically replaced at most once per second and on
 exit, with a heartbeat at least every 10 s. Status trusts a count only when its

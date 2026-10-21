@@ -18,6 +18,7 @@ import importlib.util
 import io
 import json
 import os
+import resource
 import signal
 import socket
 import stat
@@ -1332,12 +1333,22 @@ def test_opencode_early_exit_returns_exited_with_clean_tail(ctx: Ctx) -> None:
 
 
 def start_default_fake(
-    ctx: Ctx, mode: str = "normal", executable: str = "opencode.exe"
+    ctx: Ctx,
+    mode: str = "normal",
+    executable: str = "opencode.exe",
+    *,
+    port: int | None = None,
+    hostname: str = "127.0.0.1",
+    source: str = FAKE_OPENCODE,
 ) -> tuple[subprocess.Popen[bytes], int]:
-    port = free_port()
+    port = free_port() if port is None else port
+    if ":" in hostname:
+        source = source.replace(
+            "listener = socket.socket()", "listener = socket.socket(socket.AF_INET6)"
+        )
     # Python opens a script named serve, preserving the native-shaped /proc argv.
     (ctx.fake / "serve").write_text(
-        FAKE_OPENCODE.replace("args = sys.argv[1:]", 'args = ["serve", *sys.argv[1:]]')
+        source.replace("args = sys.argv[1:]", 'args = ["serve", *sys.argv[1:]]')
     )
     proc = subprocess.Popen(
         [
@@ -1345,7 +1356,7 @@ def start_default_fake(
             "serve",
             "--service",
             "--hostname",
-            "127.0.0.1",
+            hostname,
             "--port",
             str(port),
         ],
@@ -1408,6 +1419,100 @@ def test_verified_default_service_is_replaced_without_native_stop(
     assert [c["argv"] for c in ctx.calls("opencode")].count(["service", "stop"]) == 0
     assert ctx.status()["servers"]["opencode"]["state"] == "running"
     ctx.stop("opencode")
+
+
+@pytest.mark.parametrize("hostname", ["127.4.5.6", "::1", "::ffff:127.4.5.6"])
+@pytest.mark.parametrize("port_name", ["port", "backend"])
+def test_verified_loopback_default_on_managed_port_is_replaced(
+    ctx: Ctx, hostname: str, port_name: str
+) -> None:
+    default, _ = start_default_fake(ctx, port=getattr(ctx, port_name), hostname=hostname)
+    rc, out = ctx.opencode()
+    assert rc == 0 and out["result"] == "started" and out["stopped_previous"] is True, out
+    assert wait_for(lambda: default.poll() is not None)
+    assert ctx.status()["servers"]["opencode"]["state"] == "running"
+    ctx.stop("opencode")
+
+
+@pytest.mark.parametrize("hostname", ["0.0.0.0", "::", "::ffff:0.0.0.0"])
+def test_legacy_wildcard_service_refused_without_changes(ctx: Ctx, hostname: str) -> None:
+    source = FAKE_OPENCODE.replace(
+        "args = sys.argv[1:]",
+        """def record_signal(signum, _frame):
+    with open(os.path.join(fake, "legacy-signals"), "a") as fh:
+        fh.write(str(signum) + "\\n")
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, record_signal)
+args = sys.argv[1:]""",
+    )
+    legacy, _ = start_default_fake(ctx, port=ctx.port, hostname=hostname, source=source)
+    old_record = json.loads(
+        mod.encode_record(
+            mod.Record(
+                legacy.pid,
+                mod.proc_start(legacy.pid),
+                mod.pid1_start(),
+                str(ctx.work),
+                "opencode-serve",
+                mod.now_iso(),
+                port=ctx.port,
+            )
+        )
+    )
+    for key in ("relay_pid", "relay_start"):
+        del old_record[key]
+    (ctx.state / "opencode.json").write_text(json.dumps(old_record))
+    assert mod.decode_record(json.dumps(old_record).encode()) is None
+    assert mod.cmdline_is_opencode_service(legacy.pid)
+    assert mod.listener_inodes(ctx.port, wildcard_v4=False) & mod.socket_inodes(legacy.pid)
+    entry = ctx.status()["servers"]["opencode"]
+    assert entry["state"] == "stopped" and entry["foreign_listener"] is True
+    ctx.service_json().parent.mkdir(parents=True)
+    before = b'{ "password": "old-password" }\n'
+    ctx.service_json().write_bytes(before)
+    calls = ctx.calls("opencode")
+    rc, out = ctx.opencode(timing="opencode_ready=0.3,stop_wait=0.1,kill_wait=0.1")
+    assert rc == 1 and out["code"] == "spawn", out
+    assert out["message"] == (
+        "foreign listener on relay port; stop it or recreate the container "
+        "(a djinn serve from before the update)"
+    )
+    assert legacy.poll() is None and not (ctx.fake / "legacy-signals").exists()
+    assert ctx.service_json().read_bytes() == before
+    assert ctx.calls("opencode") == calls
+    assert not (ctx.state / "opencode-relay.log").exists()
+    legacy.kill()
+    legacy.wait()
+
+
+@pytest.mark.parametrize(
+    ("table", "address", "non_loopback"),
+    [
+        ("tcp", "00000000", True),
+        ("tcp", "0100007F", False),
+        ("tcp", "0605047F", False),
+        ("tcp", "0100000A", True),
+        ("tcp6", "0" * 32, True),
+        ("tcp6", "00000000000000000000000001000000", False),
+        ("tcp6", "0000000000000000FFFF000000000000", True),
+        ("tcp6", "0000000000000000FFFF00000605047F", False),
+        ("tcp6", "0000000000000000FFFF00000100000A", True),
+        ("tcp6", "B80D0120000000000000000001000000", True),
+    ],
+)
+def test_non_loopback_listener_proc_addresses(
+    monkeypatch: pytest.MonkeyPatch, table: str, address: str, non_loopback: bool
+) -> None:
+    def proc_table(path: str, **_kwargs: Any) -> io.StringIO:
+        assert path in ("/proc/net/tcp", "/proc/net/tcp6")
+        row = f"0: {address}:1000 0:0000 0A 0:0 00:0 0 1000 0 123\n"
+        return io.StringIO("header\n" + (row if path.endswith("/" + table) else ""))
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.open", proc_table)
+        assert mod.listener_inodes(4096, wildcard_v4=False, non_loopback=True) == (
+            {123} if non_loopback else set()
+        )
 
 
 def test_never_calls_native_service_stop(ctx: Ctx) -> None:
@@ -2492,6 +2597,30 @@ def relay(
         monkeypatch.setattr(mod.socket, "socket", PartialSocket)
         monkeypatch.setattr(mod, "RELAY_BUFFER", 1024)
         settings = "relay_idle=3,relay_heartbeat=0.1,relay_flush=0.03"
+    if settings == "low-fd":
+        real_run = mod.run_relay
+
+        def low_fd_relay(*args: Any, **kwargs: Any) -> None:
+            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (32, hard))
+            real_run(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "run_relay", low_fd_relay)
+        settings = "relay_idle=10,relay_heartbeat=0.1,relay_flush=0.03"
+    if settings.startswith("accept-error-"):
+        error = getattr(errno, settings.removeprefix("accept-error-"))
+        real_accept = socket.socket.accept
+        parent_pid = os.getpid()
+        flag = ctx.fake / "accept-error"
+
+        def fail_accept_once(sock: socket.socket) -> tuple[socket.socket, Any]:
+            if os.getpid() != parent_pid and flag.exists():
+                flag.unlink()
+                raise OSError(error, "injected accept error")
+            return real_accept(sock)
+
+        monkeypatch.setattr(mod.socket.socket, "accept", fail_accept_once)
+        settings = "relay_idle=10,relay_heartbeat=0.1,relay_flush=0.03"
     monkeypatch.setenv(mod.TEST_TIMING_ENV, settings)
     backend = socket.socket()
     backend.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2801,6 +2930,117 @@ def test_relay_refusal_log_rate_limit_expires(relay: RelayHarness) -> None:
     assert wait_for(lambda: log.read_text().count("refused 127.0.0.3") == 2)
 
 
+def test_relay_refusal_log_sources_are_capped(relay: RelayHarness) -> None:
+    assert mod.RELAY_LOG_SOURCES == 256
+    attempts = 300
+    for index in range(attempts):
+        with relay.client(f"127.1.{index // 256}.{index % 256}") as client:
+            refused(client)
+    for _ in range(3):
+        with relay.client("127.1.0.0") as client:
+            refused(client)
+    assert wait_for(lambda: relay.count()["refused"] == attempts + 3)
+    lines = (relay.ctx.state / "opencode-relay.log").read_text().splitlines()
+    assert sum(line.startswith("refused ") for line in lines) == 256
+    assert sum(line.startswith("refused 127.1.0.0 (") for line in lines) == 1
+    assert lines.count("refusal log suppressed: too many sources") == 1
+    assert len(lines) == 257
+
+
+@pytest.mark.parametrize("relay", ["relay_log_interval=2"], indirect=True)
+def test_relay_refusal_log_source_cap_expires(relay: RelayHarness) -> None:
+    log = relay.ctx.state / "opencode-relay.log"
+    for _ in range(2):
+        for index in range(257):
+            with relay.client(f"127.1.{index // 256}.{index % 256}") as client:
+                refused(client)
+        time.sleep(2.1)
+    assert wait_for(lambda: relay.count()["refused"] == 514)
+    lines = log.read_text().splitlines()
+    assert sum(line.startswith("refused ") for line in lines) == 512
+    assert lines.count("refusal log suppressed: too many sources") == 2
+
+
+@pytest.mark.parametrize(
+    ("relay", "error"),
+    [
+        (f"accept-error-{name}", name)
+        for name in ("EAGAIN", "EINTR", "ECONNABORTED", "ENFILE", "ENOBUFS", "ENOMEM")
+    ],
+    indirect=["relay"],
+)
+def test_relay_accept_errors_retry_without_blocking_streams(
+    relay: RelayHarness, error: str
+) -> None:
+    with relay.client() as client, relay.target() as target:
+        (relay.ctx.fake / "accept-error").touch()
+        started = time.monotonic()
+        with relay.client() as pending:
+            assert wait_for(lambda: not (relay.ctx.fake / "accept-error").exists(), 1)
+            client.sendall(b"established stream")
+            assert target.recv(99) == b"established stream"
+            assert time.monotonic() - started < 0.5
+            with relay.target() as resumed:
+                pending.sendall(b"new stream")
+                assert resumed.recv(99) == b"new stream"
+        lines = (relay.ctx.state / "opencode-relay.log").read_text().splitlines()
+        if error in ("ENFILE", "ENOBUFS", "ENOMEM"):
+            assert time.monotonic() - started >= 0.9
+            assert lines == [f"accept failed ({error}); pausing new connections"]
+        else:
+            assert lines == []
+            assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize("relay", ["low-fd"], indirect=True)
+def test_relay_accept_fd_exhaustion_pauses_without_blocking_streams(relay: RelayHarness) -> None:
+    clients: list[socket.socket] = []
+    targets: list[socket.socket] = []
+    log = relay.ctx.state / "opencode-relay.log"
+    try:
+        for _ in range(32):
+            clients.append(relay.client())
+            relay.backend.settimeout(0.15)
+            try:
+                targets.append(relay.target())
+            except TimeoutError:
+                break
+        else:
+            pytest.fail("relay did not exhaust its lowered fd limit")
+        diagnostic = "accept failed (EMFILE); pausing new connections"
+        assert wait_for(lambda: diagnostic in log.read_text(), 1)
+        assert len(targets) >= 1 and len(clients) == len(targets) + 1
+        fields = REAL_PROC_STAT(relay.pid)
+        assert fields is not None
+        before_cpu = sum(int(fields[index]) for index in (11, 12))
+        started = time.monotonic()
+        clients[0].sendall(b"during pause")
+        assert targets[0].recv(99) == b"during pause"
+        targets[0].sendall(b"still forwarding")
+        assert clients[0].recv(99) == b"still forwarding"
+        assert time.monotonic() - started < 0.5
+        time.sleep(0.35)
+        fields = REAL_PROC_STAT(relay.pid)
+        assert fields is not None
+        cpu_seconds = (sum(int(fields[index]) for index in (11, 12)) - before_cpu) / os.sysconf(
+            "SC_CLK_TCK"
+        )
+        assert cpu_seconds < 0.15, f"busy accept loop: {cpu_seconds:.2f} CPU seconds"
+        assert log.read_text().count(diagnostic) == 1
+        for sock in (*clients[:-1], *targets):
+            sock.close()
+        relay.backend.settimeout(3)
+        with relay.target() as resumed:
+            clients[-1].sendall(b"accepted after freeing descriptors")
+            assert resumed.recv(99) == b"accepted after freeing descriptors"
+            resumed.sendall(b"recovered")
+            assert clients[-1].recv(99) == b"recovered"
+        assert log.read_text().count(diagnostic) == 1
+    finally:
+        for sock in (*clients, *targets):
+            sock.close()
+
+
 @pytest.mark.parametrize("failure", ["malformed", "unreadable", "none", "two"])
 def test_relay_undetermined_gateway_log_and_no_backend(relay: RelayHarness, failure: str) -> None:
     path = Path(relay.ctx.env[mod.TEST_ROUTE4_ENV])
@@ -2876,6 +3116,28 @@ def test_foreign_listener_refused_before_spawn(ctx: Ctx, port_name: str) -> None
     if port_name == "port":
         assert "stop it or recreate the container" in out["message"]
     assert not ctx.calls("opencode")
+
+
+@pytest.mark.parametrize("address", ["::ffff:127.0.0.1", "::", "::ffff:0.0.0.0", "::1"])
+def test_backend_ipv6_listener_refused_before_spawn_and_password_merge(
+    ctx: Ctx, address: str
+) -> None:
+    ctx.service_json().parent.mkdir(parents=True)
+    before = b'{ "password": "old-password" }\n'
+    ctx.service_json().write_bytes(before)
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        listener.bind((address, ctx.backend))
+        listener.listen()
+        rc, out = ctx.opencode(timing="opencode_ready=0.3,stop_wait=1")
+    assert rc == 1 and out["code"] == "spawn", out
+    assert out["message"] == (
+        "foreign listener on OpenCode backend port 127.0.0.1:" + str(ctx.backend)
+    )
+    assert ctx.calls("opencode") == []
+    assert ctx.service_json().read_bytes() == before
+    assert not (ctx.state / "opencode.json").exists()
+    assert not (ctx.state / "opencode-relay.log").exists()
 
 
 def test_pair_publication_ack_and_descriptor_ownership(ctx: Ctx) -> None:

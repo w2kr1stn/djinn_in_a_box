@@ -95,10 +95,11 @@ INVENTORY = [
     ("core/opencode_credentials.py", "tombstone_ids", "remove_stale_own_temps", "primitive"),
     ("core/opencode_credentials.py", "tombstone_all", "remove_stale_own_temps", "primitive"),
     ("core/docker.py", "restore_sync_path", "clear_directory", "primitive"),
-    # The serve helper writes its own records and the runtime ~/.config/opencode/service.json;
-    # the credential carrier is ~/.opencode, which it never opens.
+    # The serve helper writes its own records, the relay counter and the runtime
+    # ~/.config/opencode/service.json; the credential carrier is ~/.opencode, which it never opens.
     ("core/serve_helper.py", "save_record", "write_atomic", "not-carrier"),
     ("core/serve_helper.py", "merge_password", "write_atomic", "not-carrier"),
+    ("core/serve_helper.py", "run_relay.persist", "write_atomic", "not-carrier"),
     ("core/docker.py", "clear_sync_path", "clear_directory", "primitive"),
     ("core/docker.py", "clear_sync_path", "clear_directory", "primitive"),
 ]
