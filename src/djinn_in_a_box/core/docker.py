@@ -25,6 +25,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Required, TypedDict, cast
 from uuid import uuid4
 
+from rich.markup import escape
+
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
 
@@ -2695,14 +2697,25 @@ def _run_preflight(
     args: list[str], config: AppConfig, project_root: Path, host_env: dict[str, str],
 ) -> dict[str, Any]:
     """Resolve exactly the guest invocation and require its isolated default network."""
-    result = RunResult(1)
     try:
         result = _run_compose(
             [*args, "config", "--format", "json"], config=config, cwd=project_root,
             timeout=30, env=host_env,
         )
-        if not result.success:
-            raise ValueError("Compose resolution failed")
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        raise RunRefusedError(
+            f"Compose could not resolve the run configuration: {exc}; refusing"
+        ) from exc
+    if not result.success:
+        line = next(
+            (line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()),
+            "Compose resolution failed",
+        )
+        raise RunRefusedError(
+            f"Compose could not resolve the run configuration (rc={result.returncode}): "
+            f"{line}; refusing"
+        )
+    try:
         resolved = json.loads(result.stdout)
         service = resolved["services"]["dev"]
         networks = service["networks"]
@@ -2806,7 +2819,7 @@ def _remove_run(identifier: str, grace: int) -> bool:
         finally:
             for message in warnings:
                 with suppress(Exception):
-                    warning(message)
+                    warning(escape(message))
 
 
 def compose_run(

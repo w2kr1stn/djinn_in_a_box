@@ -278,8 +278,28 @@ def test_preflight_failed_resolution(guest_compose, rc):
     config, response, _ = guest_compose
     response.returncode = rc
     response.success = False
-    with pytest.raises(docker.RunRefusedError, match=f"rc={rc}"):
+    with pytest.raises(docker.RunRefusedError) as caught:
         docker._run_preflight([], config, Path("/project"), {})
+    assert str(caught.value) == (
+        f"Compose could not resolve the run configuration (rc={rc}): "
+        "Compose resolution failed; refusing"
+    )
+
+
+def test_preflight_resolution_reports_last_error(guest_compose):
+    config, response, _ = guest_compose
+    response.returncode = 15
+    response.success = False
+    diagnostic = 'service "dev" refers to undefined network missing: invalid compose project'
+    response.stderr = (
+        'WARN[0000] The "X" variable is not set. Defaulting to a blank string.\n'
+        f'\n{diagnostic}\n  \n'
+    )
+    with pytest.raises(docker.RunRefusedError) as caught:
+        docker._run_preflight([], config, Path("/project"), {})
+    assert str(caught.value) == (
+        f"Compose could not resolve the run configuration (rc=15): {diagnostic}; refusing"
+    )
 
 
 @pytest.mark.parametrize("exc", [
@@ -289,8 +309,11 @@ def test_preflight_failed_resolution(guest_compose, rc):
 def test_preflight_converts_unexpected_failures(guest_compose, monkeypatch, exc):
     config, _, _ = guest_compose
     monkeypatch.setattr(docker, "_run_compose", Mock(side_effect=exc))
-    with pytest.raises(docker.RunRefusedError):
+    with pytest.raises(docker.RunRefusedError) as caught:
         docker._run_preflight([], config, Path("/project"), {})
+    assert str(caught.value) == (
+        f"Compose could not resolve the run configuration: {exc}; refusing"
+    )
 
 
 def test_preflight_refusal_starts_no_container(guest):
@@ -395,6 +418,24 @@ def test_cleanup_rejects_foreign_identity(guest, capsys, field):
     assert "check it, then remove it or run `djinn clean`" in message
 
 
+@pytest.mark.parametrize("message", ["[/var/lib/docker]", "[bold]boom"])
+def test_cleanup_warnings_preserve_daemon_text(guest, capsys, message):
+    _, _, objects, log = guest
+    write_json(objects, {NAME: run_object()})
+    diagnostic = f"Error response from daemon: {message}"
+    behavior(guest, errors={
+        f"stop -t 10 {DOCKER_ID}": diagnostic,
+        f"rm -f {DOCKER_ID}": diagnostic,
+    })
+    assert not docker._remove_run(RUN_ID, 10)
+    stderr = capsys.readouterr().err
+    assert stderr.count(message) == 2
+    assert "Could not stop" in stderr and "may still exist" in stderr
+    assert NAME in stderr and "djinn clean" in stderr
+    assert ["stop", "-t", "10", DOCKER_ID] in calls(log)
+    assert ["rm", "-f", DOCKER_ID] in calls(log)
+
+
 def test_warning_failure_cannot_interrupt_cleanup(guest, monkeypatch):
     _, _, objects, log = guest
     write_json(objects, {NAME: run_object()})
@@ -430,7 +471,8 @@ def test_cleanup_warning_preserves_run_result(guest, capsys, rc):
     assert "djinn clean" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP], ids=["term", "hup"])
+@pytest.mark.parametrize("number", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP],
+                         ids=["int", "term", "hup"])
 @pytest.mark.parametrize("phase", ["preflight", "run"])
 def test_signal_real_cli_cleans_up(guest, tmp_path, number, phase):
     _, binary, objects, log = guest
@@ -454,7 +496,7 @@ def test_signal_real_cli_cleans_up(guest, tmp_path, number, phase):
 '''))
     # The real CLI runs in-process in this child; only external preparation is stubbed.
     wrapper = '''
-import os, pwd, sys
+import os, pwd, signal, sys
 sys.path = [entry for entry in sys.path if entry not in ("", os.getcwd())]
 from pathlib import Path
 from types import SimpleNamespace
@@ -468,6 +510,7 @@ agent.prepare_config_workflow = lambda *a, **k: SimpleNamespace(success=True, no
 agent.workflow_image_compatible = lambda: True
 docker.get_shell_mount_args = lambda *a: []
 from djinn_in_a_box.cli.djinn import app
+signal.signal(signal.SIGINT, signal.default_int_handler)
 app()
 '''
     environment = {

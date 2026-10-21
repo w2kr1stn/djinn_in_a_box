@@ -1495,8 +1495,9 @@ same argument prefix, captured host environment and project cwd feed
 30 s timeout. It requires exactly the `default` service network, no
 `network_mode`, and a top-level default network named `djinn-in-a-box_default`
 with only `name` and empty `ipam`. Resolution errors or any other network
-configuration raise `RunRefusedError`; the diagnostic identifies the Compose
-version/fragment causes, return code and first stderr line.
+configuration raise `RunRefusedError`. Resolution failures report the actual
+return code and last non-empty stderr line, or the exception if Compose could
+not run. Network/JSON failures retain the Compose version/fragment diagnostic.
 
 `_guest_source_check()` checks protected sources before execution-input
 validation, then checks every bind in the resolved Compose configuration plus
@@ -1524,8 +1525,9 @@ pinning the Docker ID for stop and force-removal. The initial inspect retries
 once; failed identity checks authorize no removal. Stop errors do not prevent
 a force-remove attempt on the verified ID. Warnings are collected until cleanup
 finishes, and output errors cannot interrupt it. `core/signals.py` supplies
-`signals_as_interrupt()` around launch/cleanup and `signals_ignored()` during
-removal; previous handlers are restored and non-main threads are unchanged.
+`signals_as_interrupt()` around temporary override creation, preflight, launch
+and cleanup, and `signals_ignored()` during removal; previous handlers are
+restored and non-main threads are unchanged.
 Non-dev services retain their existing headless path.
 
 ## Hostctl helper
