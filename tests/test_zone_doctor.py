@@ -31,8 +31,12 @@ def test_doctor_tests_cannot_reach_the_real_docker_cli(
     zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(doctor_mod, "_opencode_runtime_check", _REAL_OPENCODE_RUNTIME_CHECK)
-    with pytest.raises(AssertionError, match="doctor test reached the real Docker CLI"):
+    # The first call of the real row is a read-only `docker container inspect`; it must be refused
+    # too, not only the later `docker exec`.
+    with pytest.raises(AssertionError, match="doctor test reached the real Docker CLI") as refused:
         doctor_mod.run_checks(zone_config)
+    assert "'container', 'inspect'" in str(refused.value)
+    assert "'exec'" not in str(refused.value)
 
 
 def test_drift_accounts_for_intermediate_assignment_segments(zone_config: AppConfig) -> None:
