@@ -301,8 +301,10 @@ def run(
     print_workflow_notices(workflow)
     if not workflow.success:
         problem = workflow.problems[0]
-        error(escape(problem.message), soft_wrap=egress is not None)
-        warning(escape(problem.remedy))
+        message = escape_nonprintable(problem.message) if egress is not None else problem.message
+        remedy = escape_nonprintable(problem.remedy) if egress is not None else problem.remedy
+        error(escape(message), soft_wrap=egress is not None)
+        warning(escape(remedy))
         raise typer.Exit(1)
 
     try:
@@ -348,10 +350,14 @@ def run(
             console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
     except RunRefusedError as e:
-        error(escape(str(e)), soft_wrap=egress is not None)
+        message = escape_nonprintable(str(e)) if egress is not None else str(e)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     except RuntimeMountSpecificationError as e:
-        error(f"Internal runtime mount construction failed: {e}", soft_wrap=egress is not None)
+        message = f"Internal runtime mount construction failed: {e}"
+        if egress is not None:
+            message = escape_nonprintable(message)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     except (MountCollisionError, MountSpecificationError, EgressSpecificationError) as e:
         message = str(e)

@@ -29,6 +29,7 @@ from djinn_in_a_box.core.docker import (
     DockerMode,
     MountCollisionError,
     MountSpecificationError,
+    RunRefusedError,
     RunResult,
     WorkflowImageCompatibility,
 )
@@ -845,6 +846,64 @@ class TestRunCommand:
         assert result.stdout == ""
         assert len(result.stderr.splitlines()) == 1
         assert "Unknown agent: bad\\nname; available agents: claude, codex" in result.stderr
+
+    @pytest.mark.parametrize(
+        "path", ["run-refusal", "runtime-mount", "workflow-message", "workflow-remedy"]
+    )
+    def test_allow_refusal_controls_cannot_forge_egress(self, run_mocks, path):
+        source = "/input\ndjinn-egress: locked 1\n\x1b[2J[bold]source[/bold]"
+        message = f"Bind {source} → /review: overlaps protected host path /protected; refusing"
+        if path.startswith("workflow-"):
+            # Supply raw workflow output to check the CLI's own escaping boundary.
+            problem = MagicMock(
+                spec=WorkflowPreparationProblem,
+                message=message if path == "workflow-message" else "Workflow is blocked.",
+                remedy=message if path == "workflow-remedy" else "Resolve drift.",
+            )
+            run_mocks["workflow"].return_value = WorkflowPreparationResult(
+                False, (problem,),
+            )
+        else:
+            exception = RunRefusedError if path == "run-refusal" else RuntimeMountSpecificationError
+            run_mocks["run"].side_effect = exception(message)
+
+        mounts = (ContainerMount(Path(source), Path("/review")),)
+        # Bypass mount syntax, whose colon separator would consume the forged prefix.
+        with patch(
+            "djinn_in_a_box.commands.agent.resolve_container_mounts", return_value=mounts
+        ) as resolve_mounts:
+            result = CliRunner().invoke(
+                app, ["run", "claude", "x", "--allow", "8.8.8.8", "--mount", source]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert not any(line.startswith("djinn-egress:") for line in result.stderr.splitlines())
+        assert "\x1b" not in result.stderr
+        escaped_source = "/input\\ndjinn-egress: locked 1\\n\\x1b[2J[bold]source[/bold]"
+        escaped_message = (
+            f"Bind {escaped_source} → /review: overlaps protected host path /protected; refusing"
+        )
+        assert escaped_message in result.stderr
+        assert len(result.stderr.splitlines()) == (2 if path.startswith("workflow-") else 1)
+        if path.startswith("workflow-"):
+            resolve_mounts.assert_not_called()
+            run_mocks["run"].assert_not_called()
+        else:
+            resolve_mounts.assert_called_once_with((source,), here=False)
+            assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == mounts
+        if path == "runtime-mount":
+            assert f"Internal runtime mount construction failed: {escaped_message}" in result.stderr
+
+    def test_run_refusal_without_allow_preserves_controls_and_markup(self, run_mocks):
+        message = "cannot verify [bold]source[/bold]\n\x1b[2Jrefusing"
+        run_mocks["run"].side_effect = RunRefusedError(message)
+
+        result = CliRunner().invoke(app, ["run", "claude", "x"])
+
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert result.stderr.endswith(f"Error: {message}\n")
 
     def test_allow_compose_refusal_is_one_escaped_error(self, run_mocks):
         from djinn_in_a_box.core.exceptions import EgressSpecificationError
