@@ -1222,22 +1222,26 @@ generation, confirmed dev removal or replacement, a stopped Git-only dev without
 resources, a changed dedicated-agent key set, a confirmed dead dedicated agent,
 an exhausted filter rebind allowance, an agent Docker companion resume failure,
 an unexpected loop error, or failed startup before attachment. Replacement leaves
-foreign resources intact. A companion resume failure attempts to stop dev before ending.
+foreign resources intact. A companion resume failure attempts a dev stop (verified when it can be) before ending.
 The agent is never restarted without host-terminal key loading.
 
 The protocol filter retries transient accept and client-thread startup errors.
 A dead filter thread is rebound at the same exported socket path under the guard,
 after checking the generation. At most five rebinds are allowed in a rolling
-300 seconds; failed attempts count. Each rebind logs its UTC time and publishes
-the last five times in `state.json` as `filter_rebinds`. A failed state publication
+300 seconds; failed attempts count. Every rebind attempt, successful or failed,
+logs its UTC time and outcome in `observer.log` and publishes the last five times
+in `state.json` as `filter_rebinds`. A failed state publication
 retries without creating another filter or consuming another rebind allowance.
 
 Terminal causes are `dev-replaced`, `key-set-changed`, `agent-exited`,
 `filter-failed`, `companion-resume-failed` and `observer-error`, corresponding to
 the replacement, changed keys, dead agent, exhausted rebinds, failed companion
 resume and unexpected loop error above. They populate `state.json`'s optional
-`observer_exit` object with `code`, host-only `detail` (including any rebind times)
-and UTC `time`.
+`observer_exit` object with `code`, host-only `detail` (the fixed cause text plus a
+truncated error, at most 512 characters), UTC `time` and `rebinds` (the last five
+rebind attempt times). The same cause is also written first as a flushed UTC line in
+`observer.log`, before the post-mortem record, the guard and cleanup, so it survives
+a busy guard or a failing recorder.
 Except for dev replacement, the observer also writes `export/observer-exit`,
 visible read-only in dev at `/run/djinn-git-agent/observer-exit`. That file contains
 the UTC time, generic cause and host recovery hint, without paths, keys or

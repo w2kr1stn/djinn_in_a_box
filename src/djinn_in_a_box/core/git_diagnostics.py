@@ -339,7 +339,14 @@ def git_diagnostics(config: AppConfig) -> list[GitDiagnostic]:
                     and actual[2] == state["generation"]
                 )
                 if not live:
-                    if actual is None or not actual[1]:
+                    # Only an absent dev, or a stopped dev of this ID and generation, is ours to
+                    # reclaim; any other dev (running or stopped) is a replacement.
+                    reclaimable = actual is None or (
+                        not actual[1]
+                        and actual[0] == state.get("dev_id", actual[0])
+                        and actual[2] == state["generation"]
+                    )
+                    if reclaimable:
                         detail = (
                             "stale runtime state (observer not running, dev not running); "
                             "the next start reclaims it"

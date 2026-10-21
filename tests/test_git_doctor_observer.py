@@ -118,8 +118,7 @@ def test_dead_attached_observer_fails_with_cause_or_missing_cause(observer_docto
 @pytest.mark.parametrize("cause", [None, "agent-exited"])
 @pytest.mark.parametrize(
     "actual",
-    [None, ("dev-1", False, "generation-1"), ("dev-2", False, "generation-1"),
-     ("dev-1", False, "generation-2")],
+    [None, ("dev-1", False, "generation-1")],
 )
 def test_dead_observer_with_no_running_dev_warns_of_reclaim(observer_doctor, actual, cause):
     row, probes = observer_doctor(live=False, actual=actual, cause=cause)
@@ -133,7 +132,9 @@ def test_dead_observer_with_no_running_dev_warns_of_reclaim(observer_doctor, act
 
 @pytest.mark.parametrize("cause", [None, "dev-replaced", "future-cause"])
 @pytest.mark.parametrize(
-    "actual", [("dev-2", True, "generation-1"), ("dev-1", True, "generation-2")],
+    "actual",
+    [("dev-2", True, "generation-1"), ("dev-1", True, "generation-2"),
+     ("dev-2", False, "generation-1"), ("dev-1", False, "generation-2")],
 )
 def test_dead_observer_with_other_dev_id_or_generation_warns(observer_doctor, actual, cause):
     row, probes = observer_doctor(live=False, actual=actual, cause=cause)
@@ -270,7 +271,8 @@ def test_shared_cause_texts_are_the_delivery_contract():
         "agent-exited": "the dedicated Git ssh-agent exited; Git delivery ended",
         "filter-failed": "the Git agent filter could not be kept serving; Git delivery ended",
         "companion-resume-failed": (
-            "the agent Docker companion could not be resumed; dev was stopped (fail closed)"
+            "the agent Docker companion could not be resumed; "
+            "a dev stop was attempted (fail closed)"
         ),
         "observer-error": "the host observer ended on an unexpected error",
     }

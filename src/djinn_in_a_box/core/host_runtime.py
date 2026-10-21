@@ -59,7 +59,7 @@ OBSERVER_EXIT_CAUSES = {
     "agent-exited": "the dedicated Git ssh-agent exited; Git delivery ended",
     "filter-failed": "the Git agent filter could not be kept serving; Git delivery ended",
     "companion-resume-failed": (
-        "the agent Docker companion could not be resumed; dev was stopped (fail closed)"
+        "the agent Docker companion could not be resumed; a dev stop was attempted (fail closed)"
     ),
     "observer-error": "the host observer ended on an unexpected error",
 }
@@ -823,6 +823,7 @@ _OBSERVER_RETRY = (GitSSHError, OSError, ValueError, subprocess.SubprocessError)
 FILTER_REBINDS = 5
 FILTER_REBIND_WINDOW_SECONDS = 300
 OBSERVER_NOTE_SECONDS = 60
+OBSERVER_DETAIL_CHARS = 512
 OBSERVER_CLOSE_SECONDS = 30
 OBSERVER_SIGNALLED_CLOSE_SECONDS = 2
 
@@ -851,6 +852,27 @@ def _serve_filter(
     return server, worker
 
 
+def _say(message: str) -> None:
+    """Diagnostics are best effort: a full disk under observer.log must not end the observer."""
+    with contextlib.suppress(Exception):
+        print(message, file=sys.stderr, flush=True)
+
+
+def _warn(message: str) -> None:
+    with contextlib.suppress(Exception):
+        warning(message)
+
+
+def _terminal_line(code: str, error: str | None, rebinds: list[str]) -> None:
+    """The cause survives in observer.log whatever the other channels do (flushed, bounded)."""
+    line = f"{_utc()} observer-exit: {code}: {OBSERVER_EXIT_CAUSES[code]}"
+    if error:
+        line += f"; error: {' '.join(error.split())[:200]}"
+    if rebinds:
+        line += "; filter rebinds: " + ", ".join(rebinds[-FILTER_REBINDS:])
+    _say(line)
+
+
 def _publish_observer_exit(root: Path, generation: str, code: str, error: str | None,
                            rebinds: list[str]) -> bool:
     """Under the guard: the cause into state.json, then the dev-visible file; best effort.
@@ -861,16 +883,17 @@ def _publish_observer_exit(root: Path, generation: str, code: str, error: str | 
     if fresh is None or fresh["generation"] != generation:
         return False
     when = _utc()
-    detail = OBSERVER_EXIT_CAUSES[code]
+    fixed = OBSERVER_EXIT_CAUSES[code]
+    detail = fixed
     if error:
-        detail += f": {error}"
-    if rebinds:
-        detail += "; filter rebound at " + ", ".join(rebinds)
-    fresh["observer_exit"] = {"code": code, "detail": detail[:512], "time": when}
+        detail = f"{fixed}: {error}"[:OBSERVER_DETAIL_CHARS]  # the fixed text always fits whole
+    fresh["observer_exit"] = {
+        "code": code, "detail": detail, "time": when, "rebinds": rebinds[-FILTER_REBINDS:],
+    }
     try:
         save_state(root, fresh)
     except _OBSERVER_RETRY as exc:
-        print(f"{_utc()} observer-exit: state cause not written: {exc}", file=sys.stderr)
+        _say(f"{_utc()} observer-exit: state cause not written: {exc}")
     if code == "dev-replaced":
         return True
     target, temporary = observer_exit_paths(root)
@@ -886,7 +909,7 @@ def _publish_observer_exit(root: Path, generation: str, code: str, error: str | 
             )
         temporary.replace(target)
     except OSError as exc:
-        print(f"{_utc()} observer-exit: cause file not written: {exc}", file=sys.stderr)
+        _say(f"{_utc()} observer-exit: cause file not written: {exc}")
     return True
 
 
@@ -937,7 +960,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
         now = time.monotonic()
         if reason != noted[0] or now - noted[1] >= OBSERVER_NOTE_SECONDS:
             noted = (reason, now)
-            print(f"{_utc()} observer: {reason}; retrying", file=sys.stderr, flush=True)
+            _say(f"{_utc()} observer: {reason}; retrying")
 
     try:
         while not stop.wait(0.25):
@@ -1097,12 +1120,14 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                                                 root=records_root,
                                             )
                                 settled[service] = target
-                            running = target
-                            if not running and server is not None:
+                            if not target and server is not None:
+                                # Git shutdown completes before the stop is committed; a failure
+                                # keeps target != running, so the next tick repeats it.
                                 server.stop.set()
                                 server.retire_path()
                                 stop_owned_process(state["agent_pid"], state["agent_token"])
                                 server = None
+                            running = target
                             if not running and not fresh["resources"]:
                                 break  # Preserve Git-only release-on-stop semantics.
                         if server is not None and worker is not None:
@@ -1118,16 +1143,18 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                                 rebind_marks.append(now)  # A failed rebind counts too.
                                 server.stop.set()
                                 server.retire_path()
+                                when = _utc()
+                                pending.append(when)  # every attempt has a time and a place
+                                rebind_times = [*rebind_times, when][-FILTER_REBINDS:]
                                 try:
                                     server, worker = _serve_filter(root, allowed, server.clients)
                                 except (OSError, RuntimeError) as exc:
-                                    note(f"filter rebind failed: {type(exc).__name__}: {exc}")
-                                    continue
-                                when = _utc()
-                                print(f"{when} observer: Git agent filter rebound",
-                                      file=sys.stderr, flush=True)
-                                pending.append(when)
-                                rebind_times = [*rebind_times, when][-FILTER_REBINDS:]
+                                    _say(
+                                        f"{when} observer: Git agent filter rebind failed: "
+                                        f"{type(exc).__name__}: {exc}"
+                                    )
+                                else:
+                                    _say(f"{when} observer: Git agent filter rebound")
                             if pending:
                                 latest = read_state(root)
                                 if latest is None or latest["generation"] != generation:
@@ -1147,6 +1174,9 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
         failure = f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        if exit_code is not None:
+            with contextlib.suppress(Exception):
+                _terminal_line(exit_code, failure, rebind_times)
         if server is not None:
             server.stop.set()
         if worker is not None:
@@ -1181,7 +1211,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                 guarded = True
             except retry as exc:
                 if time.monotonic() >= limit:
-                    warning(f"Observer cleanup preserved resources: {exc}")
+                    _warn(f"Observer cleanup preserved resources: {exc}")
                     break
                 time.sleep(0.25)
         if guarded:
@@ -1197,7 +1227,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                         ):
                             server.retire_path()
                     except retry as exc:
-                        print(f"{_utc()} observer-exit: not published: {exc}", file=sys.stderr)
+                        _say(f"{_utc()} observer-exit: not published: {exc}")
                     if cleanup_owned(
                         root, generation, docker_path,
                         incident="observer-cleanup", records_root=records_root,
@@ -1218,7 +1248,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                         ):
                             clear_state(root, generation)
                 except retry as exc:
-                    warning(f"Observer cleanup preserved resources: {exc}")
+                    _warn(f"Observer cleanup preserved resources: {exc}")
 
 
 def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) -> None:
