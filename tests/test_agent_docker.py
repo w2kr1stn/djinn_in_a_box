@@ -405,16 +405,12 @@ def test_companion_stop_subprocess_outlasts_grace(fake_owner, evidence, monkeypa
                 raise RuntimeError("restart readiness failed")
 
             monkeypatch.setattr(docker, "resume_agent_docker", failed_resume)
-            with pytest.raises(RuntimeError, match="restart readiness failed"):
-                host_runtime.observe(
-                    root, host_runtime.acquire_creation_lock(root), str(binary),
-                    host_runtime.post_mortem.records_root(create=False),
-                )
-        else:
-            host_runtime.observe(
-                root, host_runtime.acquire_creation_lock(root), str(binary),
-                host_runtime.post_mortem.records_root(create=False),
-            )
+        # Issue #199: the resume failure is the deliberate fail-closed end; observe returns
+        # after stopping dev instead of raising the resume error.
+        host_runtime.observe(
+            root, host_runtime.acquire_creation_lock(root), str(binary),
+            host_runtime.post_mortem.records_root(create=False),
+        )
     elif path == "clean":
         monkeypatch.setattr(docker, "COMPOSE_PROJECT", project)
         monkeypatch.setattr(docker, "is_own_container", lambda *args: False)

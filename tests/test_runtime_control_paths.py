@@ -16,7 +16,8 @@ CONTROL_FILES = {
     "LOADED": "loaded",
     "OBSERVER_LOG": "observer.log",
 }
-SUBTREE_PATHS = {"public", "export", "private", "private/agent.sock", "export/auth.sock"}
+SUBTREE_PATHS = {"public", "export", "private", "private/agent.sock", "export/auth.sock",
+                 "export/observer-exit"}
 
 
 def test_runtime_control_paths_use_constants():

@@ -207,7 +207,13 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
             fake_docker.unlink()
         else:
             observed_dev(fake_docker, runtime, dev_id="dev-2")
-        wait_for_absence(root / "state.json")
+        if transition == "replaced":
+            # A replacement is foreign: its state is kept with the recorded cause (issue #199).
+            observer.wait(timeout=8)
+            record = json.loads((root / "state.json").read_text())
+            assert record["observer_exit"]["code"] == "dev-replaced"
+        else:
+            wait_for_absence(root / "state.json")
         assert not (root / "export/auth.sock").exists()
     finally:
         if observer is not None:
@@ -410,7 +416,8 @@ def test_startup_deadline_releases_pending_runtime(git_inputs, monkeypatch):
     host_runtime.observe(
         root, lock_fd, host_runtime.DOCKER_EXECUTABLE, post_mortem.records_root(create=False)
     )
-    assert observations == ["djinn", "djinn"]
+    # Issue #199: the deadline is checked before any inspection; only the cleanup inspects.
+    assert observations == ["djinn"]
     assert stopped == [(123456, "fake")]
     assert not (root / "state.json").exists()
     with pytest.raises(OSError):

@@ -721,20 +721,9 @@ def test_observer_stop_verified_outcomes(fake_owner, monkeypatch, site, outcome)
             post_mortem.records_root(create=True).joinpath("provenance.json").unlink(missing_ok=True)
             raise RuntimeError("resume refused")
         monkeypatch.setattr(docker, "resume_agent_docker", failed_resume)
-    if outcome in {"running", "stopped", "unclear"} or site == "resume-dev":
-        with pytest.raises((GitSSHError, RuntimeError, subprocess.TimeoutExpired)) as caught:
-            observe_ticks(
-                owner, binary, monkeypatch, transition, ticks=3 if site == "resume-dev" else 2
-            )
-        if outcome == "stopped":
-            assert caught.value is error
-        else:
-            assert str(caught.value) == (
-                "resume refused"
-                if outcome in {"success", "already-stopped"} else "operation refused"
-            )
-    else:
-        observe_ticks(owner, binary, monkeypatch, transition)
+    # Issue #199: a failed stop step is retried on the next tick instead of ending the
+    # observer; the resume failure is the deliberate fail-closed end (stop dev, then return).
+    observe_ticks(owner, binary, monkeypatch, transition, ticks=3 if site == "resume-dev" else 2)
     assert cleanup_calls == [True]
     assert marker_roots == ([] if outcome == "already-stopped" else [supplied_root])
     assert markers() == expected

@@ -29,6 +29,7 @@ LOG_TAIL_LINES = 200
 LOG_TAIL_BYTES = 64 * 1024
 RECORD_SECONDS = 15
 STRING_BYTES = 2 * 1024
+DETAIL_ITEMS = 5
 MARKER_LIMIT = 128
 _PROVENANCE_NAME = "provenance.json"
 CGROUP_BASE = Path("/sys/fs/cgroup")
@@ -366,7 +367,10 @@ def _snapshot(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _key(
-    subjects: list[dict[str, Any]], observed: dict[str, Any] | None, generation: str | None
+    subjects: list[dict[str, Any]],
+    observed: dict[str, Any] | None,
+    generation: str | None,
+    incident: str = "",
 ) -> str:
     if subjects:
         material = "\n".join(sorted(f"{s['id']}|{s['State']['FinishedAt']}" for s in subjects))
@@ -374,7 +378,7 @@ def _key(
         assert observed is not None
         material = (
             f"observed|{generation or ''}|{observed.get('expected_id') or ''}|"
-            f"{observed.get('actual_id') or 'absent'}"
+            f"{observed.get('actual_id') or 'absent'}{incident}"
         )
     return hashlib.sha256(material.encode()).hexdigest()[:12]
 
@@ -415,6 +419,7 @@ def record(
     runtime_generation: str | None = None,
     hostctl_generation: str | None = None,
     root: Path | None = None,
+    detail: dict[str, str | list[str]] | None = None,
 ) -> RecordResult | None:
     """Collect only the caller's candidates; diagnostics never escape into teardown."""
     try:
@@ -493,9 +498,22 @@ def record(
             "subjects": subjects,
             "errors": errors,
         }
+        if detail is not None:
+            data["detail"] = {
+                name: [_cap(item) for item in value[:DETAIL_ITEMS]]
+                if isinstance(value, list)
+                else _cap(value)
+                for name, value in detail.items()
+            }
         if "deadline" in errors.values():
             data["incomplete"] = "deadline"
-        key = _key(subjects, observation, hostctl_generation)
+        # Two observer exits are two incidents unless generation and cause agree as well.
+        incident = (
+            f"|{runtime_generation or ''}|{observation['state'] if observation else ''}"
+            if trigger == "observer-exit"
+            else ""
+        )
+        key = _key(subjects, observation, hostctl_generation, incident)
         payload = _serialize(data)
         with _lock(directory, deadline):
             matched = next(

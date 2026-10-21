@@ -438,6 +438,55 @@ def test_observation_key(fake_docker):
         )
 
 
+def observer_exit(fake, state="key-set-changed", expected="dev", actual=None, **kwargs):
+    observed = {"state": state, "expected_id": expected, "actual_id": actual}
+    return pm.record("observer-exit", docker_path=fake.binary, candidates=[], observed=observed,
+                     **kwargs)
+
+
+def test_detail_is_optional_capped_and_bounded(fake_docker):
+    plain = observer_exit(fake_docker, runtime_generation="g1")
+    assert "detail" not in document(plain)
+    none = observer_exit(fake_docker, runtime_generation="g2", detail=None)
+    assert "detail" not in document(none)
+    long = "é" * pm.STRING_BYTES
+    capped = document(observer_exit(
+        fake_docker, runtime_generation="g3",
+        detail={"text": long, "rebinds": [long, "b", "c", "d", "e", "f"]},
+    ))["detail"]
+    assert len(capped["text"].encode()) <= pm.STRING_BYTES
+    assert len(capped["rebinds"]) == 5
+    assert all(len(item.encode()) <= pm.STRING_BYTES for item in capped["rebinds"])
+    stamps = [f"2026-10-21T10:00:0{index}+00:00" for index in range(5)]
+    exact = document(observer_exit(
+        fake_docker, runtime_generation="g4", detail={"rebinds": stamps}
+    ))["detail"]
+    assert exact == {"rebinds": stamps}
+
+
+def test_existing_callers_keep_shape_and_key(fake_docker):
+    observed = {"state": "absent", "expected_id": "expected", "actual_id": None}
+    first = capture(fake_docker, [], observed=observed, runtime_generation="a")
+    assert "detail" not in document(first)
+    # Another runtime generation does not split a non-observer-exit record (key unchanged).
+    assert capture(fake_docker, [], observed=observed, runtime_generation="b").path == first.path
+
+
+def test_observer_exit_incidents_are_distinct_but_repeats_deduplicate(fake_docker):
+    first = observer_exit(fake_docker, runtime_generation="g1", expected=None)
+    assert observer_exit(fake_docker, runtime_generation="g1", expected=None).path == first.path
+    again = observer_exit(
+        fake_docker, runtime_generation="g1", expected=None, detail={"rebinds": ["2026-10-21"]}
+    )
+    assert again.path == first.path  # the detail is not part of the incident identity
+    other_code = observer_exit(
+        fake_docker, state="agent-exited", runtime_generation="g1", expected=None
+    )
+    other_generation = observer_exit(fake_docker, runtime_generation="g2", expected=None)
+    assert len({first.path, other_code.path, other_generation.path}) == 3
+    assert len(admitted()) == 3
+
+
 def test_two_process_writers_recheck_dedup_under_lock(fake_docker, evidence, tmp_path):
     inventory(fake_docker, dev=evidence)
     root = pm.records_root(create=True)

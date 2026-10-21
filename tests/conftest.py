@@ -223,7 +223,7 @@ def _isolate_legacy_compose_subprocess_tests(request, monkeypatch, tmp_path):
     dedicated = {"test_git_runtime", "test_desktop", "test_desktop_runtime", "test_desktop_live",
                  "test_hostctl", "test_hostctl_observer", "test_hostctl_doctor",
                  "test_agent_docker", "test_agent_docker_p2", "test_post_mortem", "test_guest_run",
-                 "test_guest_sources"}
+                 "test_guest_sources", "test_observer_tolerance"}
     if request.module.__name__.split(".")[-1] in dedicated:
         return
     from djinn_in_a_box.core import docker

@@ -55,6 +55,10 @@ class HostctlError(RuntimeError):
     pass
 
 
+class HostctlBusy(HostctlError):  # noqa: N818
+    """Host control is held by another process (raised only by ``control_guard``'s busy path)."""
+
+
 def state_root(*, create: bool = True) -> Path:
     from djinn_in_a_box.core.host_runtime import private_directory
 
@@ -73,7 +77,7 @@ def state_root(*, create: bool = True) -> Path:
 
 
 @contextlib.contextmanager
-def control_guard() -> Iterator[None]:
+def control_guard(*, timeout: float = 15) -> Iterator[None]:
     """Short, reentrant transition lock shared with dev transitions and clean."""
     if getattr(_held, "active", False):
         yield
@@ -88,11 +92,11 @@ def control_guard() -> Iterator[None]:
                 break
             except BlockingIOError:
                 if deadline is None:
-                    deadline = time.monotonic() + 15
+                    deadline = time.monotonic() + timeout
                 if time.monotonic() >= deadline:
                     message = "host control is busy; retry after the transition completes"
-                    holder = describe_holders(root / "control.lock")
-                    raise HostctlError(f"{message}; {holder}" if holder else message) from None
+                    holder = describe_holders(root / "control.lock") if timeout > 0 else None
+                    raise HostctlBusy(f"{message}; {holder}" if holder else message) from None
                 time.sleep(0.05)
         _held.active = True
         _held.descriptor = fd

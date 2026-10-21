@@ -35,6 +35,11 @@ Versioning before and after the first stable release.
 - `djinn serve --status` shows the OpenCode endpoint, tailnet and relay details on
   separate lines instead of one line with literal `\n`, which narrow terminals
   truncated (#167).
+- Keep Git delivery through observer lock conflicts and transient inspection or
+  filter errors; bound filter rebinds and record terminal causes in host state,
+  post-mortem records and a dev-visible `observer-exit` file. Doctor fails when
+  the attached running dev loses its observer or filter, and warns after rebinds
+  (#199).
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).
