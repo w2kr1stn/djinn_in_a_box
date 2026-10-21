@@ -23,8 +23,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
-- An OpenCode `djinn audit` waits at most 15 s at start for a running lifecycle
-  command, then refuses and names the holding process (#162).
+- An OpenCode `djinn audit` started while a lifecycle command runs is refused
+  after at most 15 s, naming the holding process; recovering old audit sessions
+  can additionally wait up to 30 s for the carrier (#162).
 - Raise the default OpenCode version to 2.1.1; a fresh build with the previous
   default 2.0.26 failed in OpenCode's npm postinstall. Maintainers now build
   once with the defaults alone after any default bump (#176).
