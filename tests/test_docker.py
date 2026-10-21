@@ -3877,7 +3877,14 @@ def test_egress_real_override_and_default_compose_contract(egress_compose):
     assert not {"user", "entrypoint", "extra_hosts"}.intersection(default["services"]["dev"])
     assert "DJINN_EGRESS_ALLOW" not in default["services"]["dev"]["environment"]
     assert "ENABLE_FIREWALL=false" in observed[-1][0]
-    discover.assert_called_once_with()
+    discover.assert_not_called()
+    helper.assert_not_called()
+    assert not any(name.startswith("desktop-") for name in default.get("volumes", {}))
+    assert not any(name.startswith("desktop-") for name in default["services"])
+    assert all(
+        default["services"]["dev"]["environment"][name] is None
+        for name in docker_mod.desktop.MANAGED_ENV
+    )
 
 
 @pytest.mark.parametrize(

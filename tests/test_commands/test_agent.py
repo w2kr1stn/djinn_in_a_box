@@ -706,6 +706,30 @@ class TestRunCommand:
         run_mocks["workflow"].assert_not_called()
         run_mocks["run"].assert_not_called()
 
+    def test_allow_docker_combination_precedes_resolution(self, run_mocks):
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test", "--allow", "x", "--docker"],
+        )
+        assert result.exit_code == 1
+        assert "--allow cannot be combined with --docker or --docker-direct" in result.stderr
+        assert result.stdout == ""
+        run_mocks["load_config"].assert_not_called()
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    def test_docker_without_allow_keeps_guest_refusal(self, run_mocks):
+        result = CliRunner().invoke(app, ["run", "claude", "test", "--docker"])
+        assert result.exit_code == 1
+        assert (
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        ) in result.stderr
+        assert result.stdout == ""
+        run_mocks["load_config"].assert_not_called()
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
     @pytest.mark.parametrize("entry", ["*", "", "éxample.com", "10.0.0.1/8"])
     def test_allow_validation_precedes_workflow(self, run_mocks, entry):
         result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", entry])
@@ -901,13 +925,13 @@ class TestRunCommand:
         run_mocks["run"].assert_not_called()
 
     @pytest.mark.parametrize("path", [
-        "docker-conflict", "docker-mode", "workflow", "unknown-agent", "network",
+        "docker-conflict", "docker-mode", "workflow", "unknown-agent", "run-refusal",
         "runtime-mount", "runner-refusal",
     ])
     def test_allow_error_paths_disable_hard_wrap(self, run_mocks, monkeypatch, path):
         from djinn_in_a_box.commands import agent as agent_command
-        from djinn_in_a_box.core.agent_runner import AgentNetworkError
         from djinn_in_a_box.core.console import err_console
+        from djinn_in_a_box.core.docker import RunRefusedError
         from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
         monkeypatch.setattr(err_console, "width", 80)
@@ -927,7 +951,7 @@ class TestRunCommand:
         else:
             exceptions = {
                 "unknown-agent": UnknownAgentError(message, ("claude",)),
-                "network": AgentNetworkError(message),
+                "run-refusal": RunRefusedError(message),
                 "runtime-mount": RuntimeMountSpecificationError(message),
                 "runner-refusal": EgressSpecificationError(message),
             }
@@ -1005,7 +1029,8 @@ class TestRunCommand:
                   return_value=WorkflowImageCompatibility.COMPATIBLE),
             patch.object(agent_runner, "load_agents",
                          return_value={"claude": AgentConfig(binary="claude")}),
-            patch.object(agent_runner, "ensure_network", return_value=True) as network,
+            patch.object(docker, "ensure_network",
+                         side_effect=AssertionError("dev network touched")) as network,
             patch.object(docker, "git_runtime",
                          side_effect=AssertionError("runtime allocated")) as runtime,
             patch.object(docker.subprocess, "run",

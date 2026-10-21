@@ -178,6 +178,43 @@ def test_identity_fragment_and_frozen_inputs(guest, monkeypatch):
     assert ["rm", "-f", identity] in calls(log)
 
 
+def test_egress_guest_preflight_and_launch_share_fragment(guest, monkeypatch):
+    from djinn_in_a_box.core.egress import plan_egress
+
+    config, _, _, _ = guest
+    plan = plan_egress(["api.example:443"], resolve=lambda _: ["8.8.8.8"])
+    invocations = []
+    execute = subprocess.run
+
+    def run(argv, **kwargs):
+        if "compose" in argv:
+            phase = "config" if "config" in argv else "run"
+            paths = [Path(argv[i + 1]) for i, value in enumerate(argv) if value == "-f"]
+            override = paths[-1]
+            fragment = json.loads(override.read_text())
+            service = fragment["services"]["dev"]
+            assert service["user"] == "0:0"
+            assert service["entrypoint"] == ["/usr/local/bin/djinn-egress-init"]
+            assert service["extra_hosts"] == ["api.example:8.8.8.8"]
+            assert service["environment"]["DJINN_EGRESS_ALLOW"] == "8.8.8.8/32:443"
+            invocations.append((phase, override, fragment))
+        return execute(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = docker.compose_run(
+        config, docker.ContainerOptions(egress=plan, firewall_enabled=True),
+        interactive=False, command="agent",
+    )
+    assert result.returncode == 0
+    (preflight, preflight_path, preflight_fragment), (launch, launch_path, launch_fragment) = (
+        invocations
+    )
+    assert (preflight, launch) == ("config", "run")
+    assert preflight_path == launch_path
+    assert preflight_fragment == launch_fragment
+    assert not preflight_path.exists()
+
+
 @pytest.mark.parametrize("mode", [docker.DockerMode.NONE, docker.DockerMode.DIRECT])
 def test_compose_overlay_is_guest_only(mode):
     assert not any("docker-compose.run.yml" in arg for arg in docker.get_compose_files(mode))

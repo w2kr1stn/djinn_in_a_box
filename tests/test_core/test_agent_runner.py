@@ -256,27 +256,32 @@ def test_default_runner_has_no_allowlist(runner_mocks):
 
 
 @pytest.mark.parametrize("allow", [False, True])
-def test_runner_checks_allowlist_inputs_before_network_and_ready(runner_mocks, allow):
+def test_runner_checks_allowlist_inputs_before_ready_and_launch(runner_mocks, monkeypatch, allow):
     from unittest.mock import Mock
 
+    from djinn_in_a_box.core import docker
     from djinn_in_a_box.core.egress import plan_egress
     from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
     config = runner_mocks["app_config"].model_copy(update={"environment": {"ZDOTDIR": ""}})
     ready = Mock()
+    network = Mock(side_effect=AssertionError("dev network touched"))
+    runtime = Mock(side_effect=AssertionError("dev runtime touched"))
+    monkeypatch.setattr(docker, "ensure_network", network)
+    monkeypatch.setattr(docker, "git_runtime", runtime)
     if allow:
         with pytest.raises(EgressSpecificationError, match="ZDOTDIR"):
             run_headless_agent(
                 "codex", "inspect", egress=plan_egress(["8.8.8.8"]),
                 resolved_mounts=(), app_config=config, on_ready=ready,
             )
-        runner_mocks["network"].assert_not_called()
         ready.assert_not_called()
         runner_mocks["compose"].assert_not_called()
     else:
         run_headless_agent(
             "codex", "inspect", resolved_mounts=(), app_config=config, on_ready=ready,
         )
-        runner_mocks["network"].assert_called_once()
         ready.assert_called_once_with(())
         runner_mocks["compose"].assert_called_once()
+    network.assert_not_called()
+    runtime.assert_not_called()

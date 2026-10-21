@@ -257,14 +257,6 @@ def run(
         error(str(e), soft_wrap=allow is not None)
         raise typer.Exit(1) from None
 
-    if docker_mode is DockerMode.AGENT:
-        error(
-            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
-            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
-            "`djinn start --docker` and work there."
-        )
-        raise typer.Exit(1)
-
     egress = None
     if allow is not None:
         if docker_mode is not DockerMode.NONE:
@@ -275,6 +267,14 @@ def run(
         except EgressSpecificationError as e:
             error(escape(str(e)), soft_wrap=True)
             raise typer.Exit(1) from None
+
+    if docker_mode is DockerMode.AGENT:
+        error(
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        )
+        raise typer.Exit(1)
 
     checked_config = None
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
