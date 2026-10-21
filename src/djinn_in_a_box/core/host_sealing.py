@@ -683,12 +683,12 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         # A run with Docker authority affects sealing even on a separate network.
         socket_paths = {str(path) for path in sockets} | {"/var/run/docker.sock"}
         for other_id in hostctl.command("ps", "-q").split():
-            if other_id == identity:
-                continue
             other = host_runtime.inspect_object(
                 other_id, hostctl.DOCKER_EXECUTABLE, missing="No such container"
             )
             if other is None:
+                continue
+            if other.get("Id") == identity:
                 continue
             other_config = cast(dict[str, Any], other.get("Config") or {})
             if host_runtime.RUN_LABEL in (other_config.get("Labels") or {}):

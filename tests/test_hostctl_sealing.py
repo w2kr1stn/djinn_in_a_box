@@ -330,7 +330,8 @@ def test_alias_and_relocated_socket(ground, monkeypatch):
 
 
 def test_leftover_proxy_and_environment(ground, monkeypatch):
-    proxy = dev()
+    # A peer is a different container: it needs its own ID (#193 skips the assessed one by ID).
+    proxy = dev(identity="proxy-id")
     proxy["Name"] = "/leftover-proxy"
     proxy["Config"]["Image"] = "tecnativa/docker-socket-proxy:latest"
     ground.objects["proxy-id"] = proxy
@@ -2552,3 +2553,22 @@ def test_run_authority_adds_no_filesystem_or_socket_probes(ground, run_peer, mon
     result = sealing.assess(dev())
     assert result.causes == ("Docker authority in a running djinn run /djinn-run-a",)
     assert not result.errors
+
+
+def test_peer_loop_skips_assessed_dev_by_full_id(ground, monkeypatch):
+    full = "a" * 64
+    short = full[:12]
+    me = dev([bind(ground.socket)], identity=full)
+    me["Config"]["ExposedPorts"] = {"4096/tcp": {}}
+    me["Name"] = "/djinn"
+    ground.objects[full] = me
+    ground.objects[short] = me
+    monkeypatch.setattr(
+        hostctl,
+        "command",
+        lambda *a, **kw: short
+        if a[0] == "ps"
+        else json.dumps({"DockerRootDir": str(ground.paths["data"])}),
+    )
+    result = sealing.assess(me)
+    assert not any("reachable Docker proxy /djinn" in c for c in result.causes), result.causes
