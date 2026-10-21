@@ -809,9 +809,12 @@ class TestRunCommand:
     def test_allow_help(self):
         result = CliRunner().invoke(app, ["run", "--help"])
         assert result.exit_code == 0
-        assert "--allow" in result.output
-        assert "Allow outbound HOST[/PREFIX][:PORT]" in result.output
-        assert "replaces the default firewall list" in re.sub(r"[│\s]+", " ", result.output)
+        # CI forces a colored terminal for Typer; compare the plain panel text.
+        uncolored = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        plain = " ".join(re.sub(r"[│╭╮╰╯─]", " ", uncolored).split())
+        assert "--allow" in plain
+        assert "Allow outbound HOST[/PREFIX][:PORT]" in plain
+        assert "replaces the default firewall list" in plain
 
     def test_allow_status_does_not_wrap_at_80_columns(self, run_mocks, monkeypatch):
         from djinn_in_a_box.commands import agent as agent_command
