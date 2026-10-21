@@ -427,7 +427,7 @@ class TestRunCommand:
             run(agent="claude", prompt="test prompt", mount=["/missing"])
 
         assert exc_info.value.exit_code == 1
-        error.assert_called_once_with("Mount path does not exist: /missing")
+        error.assert_called_once_with("Mount path does not exist: /missing", soft_wrap=False)
 
     def test_run_does_not_translate_runner_file_not_found(
         self, run_mocks: dict[str, Any]
@@ -452,7 +452,7 @@ class TestRunCommand:
             run(agent="claude", prompt="test prompt")
 
         assert exc_info.value.exit_code == 1
-        error.assert_called_once_with("mount collision detail")
+        error.assert_called_once_with("mount collision detail", soft_wrap=False)
 
     def test_run_cli_refuses_managed_mount_before_creation(
         self, mock_app_config: AppConfig, claude_config: AgentConfig, tmp_path: Path
@@ -511,7 +511,7 @@ class TestRunCommand:
             run(agent="claude", prompt="test prompt")
 
         assert exc_info.value.exit_code == 1
-        error.assert_called_once_with("bad volume arguments")
+        error.assert_called_once_with("bad volume arguments", soft_wrap=False)
 
     def test_run_keeps_checked_config_when_loader_changes_after_bootstrap(
         self, run_mocks: dict[str, Any]
@@ -655,6 +655,352 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
         mock_run.assert_not_called()
+
+    @pytest.mark.parametrize("docker_flag", ["--docker", "--docker-direct"])
+    def test_allow_refuses_docker_before_workflow(self, run_mocks, docker_flag):
+        result = CliRunner().invoke(
+            app,
+            ["run", "claude", "test", "--allow", "8.8.8.8", docker_flag],
+        )
+        assert result.exit_code == 1
+        assert "--allow cannot be combined with --docker or --docker-direct" in result.stderr
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("entry", ["*", "", "éxample.com", "10.0.0.1/8"])
+    def test_allow_validation_precedes_workflow(self, run_mocks, entry):
+        result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", entry])
+        assert result.exit_code == 1
+        assert "--allow" in result.stderr
+        assert result.stdout == ""
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("firewall", [False, True])
+    def test_allow_status_streams_and_exit_code(self, run_mocks, firewall):
+        from djinn_in_a_box.core.egress import plan_egress
+
+        plan = plan_egress(
+            ["API.Example:443", "api.example:443", "10.0.0.0/8"],
+            resolve=lambda _: ["8.8.8.8", "1.1.1.1"],
+        )
+
+        def run_agent(*args, **kwargs):
+            assert kwargs["egress"] == plan
+            kwargs["on_ready"](kwargs["resolved_mounts"])
+            return RunResult(
+                7,
+                '{"agent":"stdout"}\n',
+                "djinn-egress: allow 10.0.0.0/8 any\ndjinn-egress: locked 3\ncontainer stderr\n",
+            )
+
+        run_mocks["run"].side_effect = run_agent
+        with patch("djinn_in_a_box.commands.agent.plan_egress", return_value=plan) as planner:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "run",
+                    "claude",
+                    "test",
+                    "--json",
+                    "--allow",
+                    "API.Example:443",
+                    "--allow",
+                    "10.0.0.0/8",
+                ]
+                + (["--firewall"] if firewall else []),
+            )
+        planner.assert_called_once_with(["API.Example:443", "10.0.0.0/8"])
+        assert result.exit_code == 7, result.output
+        assert result.stdout == '{"agent":"stdout"}\n'
+        assert "Firewall" in result.stderr and "Allowlist (3 destinations)" in result.stderr
+        assert "api.example:443 -> 1.1.1.1/32 tcp/443, 8.8.8.8/32 tcp/443" in result.stderr
+        assert "10.0.0.0/8 -> 10.0.0.0/8 any" in result.stderr
+        assert "djinn-egress: locked 3" in result.stderr
+        assert "container stderr" in result.stderr
+
+    def test_allow_status_values_cannot_forge_the_egress_block(self, run_mocks):
+        forged = "m\ndjinn-egress: allow 9.9.9.9/32 any\ndjinn-egress: locked 666"
+
+        def run_agent(*args, **kwargs):
+            kwargs["on_ready"]((
+                ContainerMount(
+                    Path("/in\ndjinn-egress: locked 7"), Path("/home/dev/workspace"), True
+                ),
+            ))
+            return RunResult(
+                0, "out\n", "djinn-egress: allow 8.8.8.8/32 tcp/443\ndjinn-egress: locked 1\n"
+            )
+
+        run_mocks["run"].side_effect = run_agent
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test", "--allow", "8.8.8.8:443", "--model", forged]
+        )
+        assert result.exit_code == 0, result.output
+        prefixed = [
+            line for line in result.stderr.splitlines() if line.startswith("djinn-egress:")
+        ]
+        assert prefixed == ["djinn-egress: allow 8.8.8.8/32 tcp/443", "djinn-egress: locked 1"]
+        assert "m\\ndjinn-egress: allow 9.9.9.9/32 any" in result.stderr
+
+    @pytest.mark.parametrize("container_ok", [True, False])
+    def test_allow_wrapping_cannot_forge_the_egress_block(
+        self, run_mocks, monkeypatch, container_ok
+    ):
+        from djinn_in_a_box.core.console import err_console
+
+        monkeypatch.setattr(err_console, "width", 34)
+        model = (
+            "x" * 65 + " djinn-egress: allow 9.9.9.9/32 any " + "x" * 80
+            + " djinn-egress: locked 666"
+        )
+        container = (
+            RunResult(0, "", "djinn-egress: allow 8.8.8.8/32 tcp/443\ndjinn-egress: locked 1\n")
+            if container_ok
+            else RunResult(1, "", "djinn-egress-init: firewall setup failed; not starting\n")
+        )
+
+        def run_agent(*args, **kwargs):
+            kwargs["on_ready"](kwargs["resolved_mounts"])
+            return container
+
+        run_mocks["run"].side_effect = run_agent
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test", "--allow", "8.8.8.8:443", "--model", model]
+        )
+        prefixed = [
+            line for line in result.stderr.splitlines() if line.startswith("djinn-egress:")
+        ]
+        genuine = ["djinn-egress: allow 8.8.8.8/32 tcp/443", "djinn-egress: locked 1"]
+        assert prefixed == (genuine if container_ok else [])
+        assert err_console.soft_wrap is False
+
+    def test_allow_unknown_agent_is_one_escaped_line(self, run_mocks):
+        run_mocks["run"].side_effect = UnknownAgentError("bad\nname", ("claude", "codex"))
+        result = CliRunner().invoke(app, ["run", "bad\nname", "test", "--allow", "8.8.8.8"])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert len(result.stderr.splitlines()) == 1
+        assert "Unknown agent: bad\\nname; available agents: claude, codex" in result.stderr
+
+    def test_allow_compose_refusal_is_one_escaped_error(self, run_mocks):
+        from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+        run_mocks["run"].side_effect = EgressSpecificationError("environment.BASH_ENV: [red]hook")
+        result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", "8.8.8.8"])
+        assert result.exit_code == 1
+        assert "environment.BASH_ENV: [red]hook" in result.stderr
+        assert result.stdout == ""
+        assert len(result.stderr.splitlines()) == 1
+
+    def test_allow_planner_error_is_escaped(self, run_mocks):
+        from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+        with patch(
+            "djinn_in_a_box.commands.agent.plan_egress",
+            side_effect=EgressSpecificationError("--allow '[red]': invalid name"),
+        ):
+            result = CliRunner().invoke(app, ["run", "claude", "test", "--allow", "[red]"])
+        assert result.exit_code == 1
+        assert "--allow '[red]': invalid name" in result.stderr
+        assert len(result.stderr.splitlines()) == 1
+        run_mocks["workflow"].assert_not_called()
+
+    def test_allow_help(self):
+        result = CliRunner().invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        # CI forces a colored terminal for Typer; compare the plain panel text.
+        uncolored = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        plain = " ".join(re.sub(r"[│╭╮╰╯─]", " ", uncolored).split())
+        assert "--allow" in plain
+        assert "Allow outbound HOST[/PREFIX][:PORT]" in plain
+        assert "replaces the default firewall list" in plain
+
+    def test_allow_status_does_not_wrap_at_80_columns(self, run_mocks, monkeypatch):
+        from djinn_in_a_box.commands import agent as agent_command
+        from djinn_in_a_box.core.console import err_console
+        from djinn_in_a_box.core.egress import plan_egress
+
+        monkeypatch.setattr(err_console, "width", 80)
+        plan = plan_egress(
+            ["api.openai.com:443"], resolve=lambda _: ["162.159.140.245", "172.66.0.243"],
+        )
+
+        def run_agent(*args, **kwargs):
+            kwargs["on_ready"](kwargs["resolved_mounts"])
+            return RunResult(0)
+
+        run_mocks["run"].side_effect = run_agent
+        with (
+            patch("djinn_in_a_box.commands.agent.plan_egress", return_value=plan),
+            patch.object(agent_command, "status_line", wraps=agent_command.status_line) as status,
+        ):
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test", "--allow", "api.openai.com:443"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "   Firewall:   Allowlist (2 destinations)" in result.stderr.splitlines()
+        assert (
+            "   Egress:     api.openai.com:443 -> 162.159.140.245/32 tcp/443, "
+            "172.66.0.243/32 tcp/443"
+        ) in result.stderr.splitlines()
+        for call in status.call_args_list:
+            if call.args[0] in {"Firewall", "Egress"}:
+                assert call.kwargs["soft_wrap"] is True
+
+    def test_allow_invalid_port_is_one_line_at_80_columns(self, run_mocks, monkeypatch):
+        from djinn_in_a_box.core.console import err_console
+
+        monkeypatch.setattr(err_console, "width", 80)
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test", "--allow", "api.anthropic.com:0443"],
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert len(result.stderr.splitlines()) == 1
+        assert "port must be 1–65535 without leading zeros" in result.stderr
+        run_mocks["run"].assert_not_called()
+
+    @pytest.mark.parametrize("path", [
+        "docker-conflict", "docker-mode", "workflow", "unknown-agent", "network",
+        "runtime-mount", "runner-refusal",
+    ])
+    def test_allow_error_paths_disable_hard_wrap(self, run_mocks, monkeypatch, path):
+        from djinn_in_a_box.commands import agent as agent_command
+        from djinn_in_a_box.core.agent_runner import AgentNetworkError
+        from djinn_in_a_box.core.console import err_console
+        from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+        monkeypatch.setattr(err_console, "width", 80)
+        message = "refused destination " * 10 + "end"
+        arguments = ["run", "claude", "test", "--allow", "8.8.8.8"]
+        if path == "docker-conflict":
+            arguments += ["--docker", "--docker-direct"]
+            expected = "--docker and --docker-direct are mutually exclusive"
+        elif path == "docker-mode":
+            arguments += ["--docker"]
+            expected = "--allow cannot be combined with --docker or --docker-direct"
+        elif path == "workflow":
+            run_mocks["workflow"].return_value = WorkflowPreparationResult(
+                False, (WorkflowPreparationProblem("blocked", message, "Resolve drift."),),
+            )
+            expected = message
+        else:
+            exceptions = {
+                "unknown-agent": UnknownAgentError(message, ("claude",)),
+                "network": AgentNetworkError(message),
+                "runtime-mount": RuntimeMountSpecificationError(message),
+                "runner-refusal": EgressSpecificationError(message),
+            }
+            run_mocks["run"].side_effect = exceptions[path]
+            expected = str(exceptions[path])
+            if path == "runtime-mount":
+                expected = f"Internal runtime mount construction failed: {expected}"
+            if path == "unknown-agent":
+                expected = f"{expected}; available agents: claude"
+        with patch.object(agent_command, "error", wraps=agent_command.error) as print_error:
+            result = CliRunner().invoke(app, arguments)
+        assert result.exit_code == 1, result.output
+        print_error.assert_called_once_with(expected, soft_wrap=True)
+        assert any(line.endswith(expected) for line in result.stderr.splitlines())
+
+    @pytest.mark.parametrize("allow", [False, True])
+    @pytest.mark.parametrize("setting", ["source", "target", "managed"])
+    def test_early_mount_refusals_escape_controls_only_with_allow(
+        self, run_mocks, tmp_path, monkeypatch, setting, allow,
+    ):
+        from djinn_in_a_box.commands import agent as agent_command
+        from djinn_in_a_box.core import docker
+        from djinn_in_a_box.core.console import err_console
+
+        monkeypatch.setattr(err_console, "width", 80)
+        poisoned = "input\n\x1b[2J" + "x" * 90
+        if setting == "managed":
+            source = tmp_path / (poisoned + ":bad")
+            source.mkdir()
+            config = AppConfig(code_dir=source, config_root=tmp_path / "config")
+            run_mocks["load_config"].return_value = config
+            mount = str(tmp_path)
+        elif setting == "source":
+            mount = str(tmp_path / poisoned)
+        else:
+            mount = f"{tmp_path}:/proc/{poisoned}"
+        # run_mocks patches this name; a context-scoped patch restores before its teardown,
+        # where a monkeypatch would put the mock back after run_mocks restored the original.
+        validator = (
+            docker.validate_managed_bind_sources
+            if setting == "managed" else agent_command.validate_managed_bind_sources
+        )
+        with patch.object(agent_command, "validate_managed_bind_sources", validator):
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test", "--mount", mount]
+                + (["--allow", "8.8.8.8"] if allow else []),
+            )
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        run_mocks["run"].assert_not_called()
+        if allow:
+            assert "input\\n\\x1b[2J" in result.stderr
+            assert "\x1b" not in result.stderr
+            assert len(result.stderr.splitlines()) == 1
+        else:
+            assert "input\n" in result.stderr
+
+    @pytest.mark.parametrize("case", ["hook", "zdotdir", "mount", "declared-mount"])
+    def test_real_allow_refusal_precedes_status_network_and_runtime(self, tmp_path, case):
+        from djinn_in_a_box.core import agent_runner, docker
+
+        config = AppConfig(
+            code_dir=tmp_path, config_root=tmp_path / "config",
+            environment={"LD_PRELOAD": ""} if case == "hook" else
+                        {"ZDOTDIR": ""} if case == "zdotdir" else {},
+            mounts={"input": {"volume": True, "target": "/usr/input", "backup": "none"}}
+            if case == "declared-mount" else {},
+        )
+        mount = f"{tmp_path}:/usr/input:ro" if case == "mount" else str(tmp_path)
+        with (
+            patch("djinn_in_a_box.commands.agent.load_config", return_value=config),
+            patch("djinn_in_a_box.commands.agent.prepare_config_workflow",
+                  return_value=WorkflowPreparationResult(True)),
+            patch("djinn_in_a_box.commands.agent.workflow_image_compatible",
+                  return_value=WorkflowImageCompatibility.COMPATIBLE),
+            patch.object(agent_runner, "load_agents",
+                         return_value={"claude": AgentConfig(binary="claude")}),
+            patch.object(agent_runner, "ensure_network", return_value=True) as network,
+            patch.object(docker, "git_runtime",
+                         side_effect=AssertionError("runtime allocated")) as runtime,
+            patch.object(docker.subprocess, "run",
+                         side_effect=AssertionError("Docker called")) as process,
+        ):
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test", "--allow", "8.8.8.8", "--mount", mount],
+            )
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert len(result.stderr.splitlines()) == 1
+        assert "Running" not in result.stderr and "Firewall" not in result.stderr
+        assert {"hook": "environment.LD_PRELOAD", "zdotdir": "environment.ZDOTDIR",
+                "mount": "--mount", "declared-mount": "mounts.input"}[case] in result.stderr
+        network.assert_not_called()
+        runtime.assert_not_called()
+        process.assert_not_called()
+
+    @pytest.mark.parametrize("allow", [False, True])
+    def test_allow_inherited_mount_error_stays_one_line(self, run_mocks, allow):
+        run_mocks["run"].side_effect = MountCollisionError(
+            "Mount /in\nput -> / conflicts with reserved mount at /home/dev/.claude "
+            "(conflict path: /home/dev/.claude)"
+        )
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test"] + (["--allow", "8.8.8.8"] if allow else []),
+        )
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        if allow:
+            assert "Mount /in\\nput -> / conflicts" in result.stderr
+            assert len(result.stderr.splitlines()) == 1
+        else:
+            assert "Mount /in\nput -> / conflicts" in result.stderr
 
 
 class TestAgentsJson:

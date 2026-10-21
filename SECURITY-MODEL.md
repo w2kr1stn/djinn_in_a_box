@@ -780,6 +780,23 @@ a custom helper network outside RFC1918 refuses readiness. This firewall cannot
 replace the host no-forwarding prerequisite. See [the rules](scripts/init-firewall.sh)
 and [firewall usage](README.md#what---firewall-allows).
 
+`djinn run --allow` is a stricter mode for one headless run. A root step applies
+an IPv4 and IPv6 rule set that allows only loopback, replies and the listed
+destinations, refuses Docker's embedded DNS resolver, reads both chains back and
+then removes `NET_ADMIN` and `NET_RAW` from the bounding set of the whole process
+tree before the entrypoint runs. `sudo` keeps working but yields root without
+these capabilities, so the run cannot change the rules or send raw packets.
+Until that point the root step runs only image content: fixed absolute paths, a
+privileged-mode shell, a clean environment for the firewall child, and no
+library. The host refuses start-up hooks in the environment, mounts over image
+system paths or exactly at `/home` or `/home/dev`, and Docker access modes for
+these runs, and it does not deliver desktop relays. Names are resolved once on
+the host and pinned in the hosts file; the run has no DNS. The rules govern IPv4
+and IPv6 traffic only. Other socket families are not governed by them (in the
+measured setup Docker's default seccomp profile refuses `AF_VSOCK`), and inbound
+traffic is out of scope. A host firewall can restrict the listed private or
+tailnet destinations further.
+
 Codex's managed app-server daemon defaults to remote control off upstream.
 Enabling it requires `codex app-server daemon enable-remote-control` and a
 ChatGPT login; Djinn does not change `remoteControlEnabled`. The log line

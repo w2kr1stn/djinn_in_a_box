@@ -252,3 +252,48 @@ def test_headless_config_carries_declarations(tmp_path, monkeypatch):
     assert {m["type"] for m in fragment["services"]["dev"]["volumes"]} == {"bind", "volume"}
     assert fragment["services"]["dev"]["environment"]["CDP_HOST"] == "$$HOST"
     assert fragment["volumes"] == {"djinn-worker": {"name": "djinn-worker"}}
+
+
+@pytest.mark.parametrize("firewall", [False, True])
+def test_allowlist_implies_firewall_and_preserves_plan(runner_mocks, firewall):
+    from djinn_in_a_box.core.egress import plan_egress
+
+    plan = plan_egress(["10.0.0.0/8:443"])
+    run_headless_agent("codex", "inspect", resolved_mounts=(), egress=plan, firewall=firewall)
+    options = runner_mocks["compose"].call_args.args[1]
+    assert options.egress is plan
+    assert options.firewall_enabled is True
+
+
+def test_default_runner_has_no_allowlist(runner_mocks):
+    run_headless_agent("codex", "inspect", resolved_mounts=())
+    options = runner_mocks["compose"].call_args.args[1]
+    assert options.egress is None
+    assert options.firewall_enabled is False
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_runner_checks_allowlist_inputs_before_network_and_ready(runner_mocks, allow):
+    from unittest.mock import Mock
+
+    from djinn_in_a_box.core.egress import plan_egress
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    config = runner_mocks["app_config"].model_copy(update={"environment": {"ZDOTDIR": ""}})
+    ready = Mock()
+    if allow:
+        with pytest.raises(EgressSpecificationError, match="ZDOTDIR"):
+            run_headless_agent(
+                "codex", "inspect", egress=plan_egress(["8.8.8.8"]),
+                resolved_mounts=(), app_config=config, on_ready=ready,
+            )
+        runner_mocks["network"].assert_not_called()
+        ready.assert_not_called()
+        runner_mocks["compose"].assert_not_called()
+    else:
+        run_headless_agent(
+            "codex", "inspect", resolved_mounts=(), app_config=config, on_ready=ready,
+        )
+        runner_mocks["network"].assert_called_once()
+        ready.assert_called_once_with(())
+        runner_mocks["compose"].assert_called_once()

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, ParamSpec, TypeVar, cast
 
 import typer
 from rich.markup import escape
@@ -28,6 +30,7 @@ from djinn_in_a_box.core.console import (
     console,
     err_console,
     error,
+    escape_nonprintable,
     info,
     print_captured,
     rule,
@@ -45,7 +48,9 @@ from djinn_in_a_box.core.docker import (
     validate_managed_bind_sources,
     workflow_image_compatible,
 )
+from djinn_in_a_box.core.egress import EgressPlan, plan_egress
 from djinn_in_a_box.core.exceptions import (
+    EgressSpecificationError,
     MountSpecificationError,
     RuntimeMountSpecificationError,
 )
@@ -71,18 +76,25 @@ def _show_run_status(
     docker_mode: DockerMode,
     firewall: bool,
     timeout: int | None,
+    egress: EgressPlan | None = None,
 ) -> None:
     """Render CLI-only execution status after runner prerequisites pass."""
+
+    # Allowlist callers read Djinn's leading `djinn-egress:` block from stderr, so no
+    # caller-derived value may start a line of its own there.
+    def shown(value: object) -> str:
+        return escape_nonprintable(str(value)) if egress is not None else str(value)
+
     err_console.print()
-    info(f"Running {agent} (headless)...")
+    info(f"Running {escape(shown(agent)) if egress is not None else agent} (headless)...")
     err_console.print()
 
-    status_line("Agent", agent)
+    status_line("Agent", shown(agent))
     for mount in mounts:
         mode = "ro" if mount.read_only else "rw"
         status_line(
             "Mount",
-            f"{mount.source} -> {mount.target} ({mode})",
+            shown(f"{mount.source} -> {mount.target} ({mode})"),
             value_style="path",
         )
 
@@ -91,10 +103,10 @@ def _show_run_status(
         None,
     )
     if workspace is not None:
-        status_line("Workspace", str(workspace), value_style="path")
+        status_line("Workspace", shown(workspace), value_style="path")
 
     if model:
-        status_line("Model", model)
+        status_line("Model", shown(model))
 
     if write:
         status_line("Mode", "Read/Write (--write)", "status.disabled")
@@ -105,7 +117,14 @@ def _show_run_status(
         status_line("Docker", "Enabled (agent daemon)")
     elif docker_mode is DockerMode.DIRECT:
         status_line("Docker", "Enabled (DIRECT)", "warning")
-    if firewall:
+    if egress is not None:
+        status_line("Firewall", f"Allowlist ({len(egress.rules)} destinations)", soft_wrap=True)
+        for entry, rules in egress.entries:
+            status_line(
+                "Egress", f"{entry} -> {', '.join(rule.describe() for rule in rules)}",
+                soft_wrap=True,
+            )
+    elif firewall:
         status_line("Firewall", "Enabled")
     if json_output:
         status_line("Output", "JSON")
@@ -115,7 +134,34 @@ def _show_run_status(
     err_console.print()
 
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _unwrapped_stderr_with_allow(func: Callable[P, R]) -> Callable[P, R]:
+    """Print stderr without hard wrapping while --allow is in effect.
+
+    Allowlist callers read Djinn's leading `djinn-egress:` block from stderr. A wrapped
+    host line could start with that prefix through a long caller value; without hard
+    wrapping only a line break can, and caller values are printed with those escaped.
+    """
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        if kwargs.get("allow") is None:
+            return func(*args, **kwargs)
+        previous = err_console.soft_wrap
+        err_console.soft_wrap = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            err_console.soft_wrap = previous
+
+    return wrapper
+
+
 @handle_config_errors
+@_unwrapped_stderr_with_allow
 def run(
     agent: Annotated[
         str,
@@ -149,6 +195,14 @@ def run(
         bool,
         typer.Option("--firewall", "-f", help="Enable network firewall"),
     ] = False,
+    allow: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow",
+            help=escape("Allow outbound HOST[/PREFIX][:PORT]; repeatable, "
+                        "replaces the default firewall list"),
+        ),
+    ] = None,
     here: Annotated[
         bool,
         typer.Option("--here", help="Mount current directory as ~/workspace"),
@@ -189,6 +243,9 @@ def run(
         # With Docker access and timeout
         djinn run claude "Build the Docker image" --docker --timeout 300
 
+        # Restrict outbound traffic to a pinned provider endpoint
+        djinn run claude "Explain this code" --allow api.anthropic.com:443
+
         # Mount the current directory and two additional directories
         djinn run claude "Compare these projects" --here \\
             --mount ~/other-project --mount ~/reference:/home/dev/reference:ro
@@ -196,8 +253,19 @@ def run(
     try:
         docker_mode = resolve_docker_mode(docker, docker_direct)
     except ValueError as e:
-        error(str(e))
+        error(str(e), soft_wrap=allow is not None)
         raise typer.Exit(1) from None
+
+    egress = None
+    if allow is not None:
+        if docker_mode is not DockerMode.NONE:
+            error("--allow cannot be combined with --docker or --docker-direct", soft_wrap=True)
+            raise typer.Exit(1)
+        try:
+            egress = plan_egress(allow)
+        except EgressSpecificationError as e:
+            error(escape(str(e)), soft_wrap=True)
+            raise typer.Exit(1) from None
 
     checked_config = None
     delivery_targets: tuple[WorkflowDeliveryTarget, ...] = ()
@@ -205,7 +273,8 @@ def run(
     try:
         validate_managed_bind_sources(config)
     except MountSpecificationError as e:
-        error(escape(str(e)))
+        message = escape_nonprintable(str(e)) if egress is not None else str(e)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     checked_config = config
     if agent in {"claude", "codex"}:
@@ -223,7 +292,7 @@ def run(
     print_workflow_notices(workflow)
     if not workflow.success:
         problem = workflow.problems[0]
-        error(escape(problem.message))
+        error(escape(problem.message), soft_wrap=egress is not None)
         warning(escape(problem.remedy))
         raise typer.Exit(1)
 
@@ -232,7 +301,8 @@ def run(
             tuple(mount or ()), here=here or not mount
         )
     except (MountSpecificationError, FileNotFoundError, NotADirectoryError) as e:
-        error(escape(str(e)))
+        message = escape_nonprintable(str(e)) if egress is not None else str(e)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
 
     try:
@@ -244,6 +314,7 @@ def run(
             model=model,
             docker_mode=docker_mode,
             firewall=firewall,
+            egress=egress,
             resolved_mounts=resolved_mounts,
             timeout=timeout,
             app_config=checked_config,
@@ -255,21 +326,29 @@ def run(
                 model=model,
                 docker_mode=docker_mode,
                 firewall=firewall,
+                egress=egress,
                 timeout=timeout,
             ),
         )
     except UnknownAgentError as e:
-        error(str(e))
-        console.print(f"Available agents: {', '.join(e.available)}")
+        if egress is not None:
+            message = f"{e}; available agents: {', '.join(e.available)}"
+            error(escape(escape_nonprintable(message)), soft_wrap=True)
+        else:
+            error(str(e))
+            console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
     except AgentNetworkError as e:
-        error(str(e))
+        error(str(e), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
     except RuntimeMountSpecificationError as e:
-        error(f"Internal runtime mount construction failed: {e}")
+        error(f"Internal runtime mount construction failed: {e}", soft_wrap=egress is not None)
         raise typer.Exit(1) from None
-    except (MountCollisionError, MountSpecificationError) as e:
-        error(escape(str(e)))
+    except (MountCollisionError, MountSpecificationError, EgressSpecificationError) as e:
+        message = str(e)
+        if egress is not None:
+            message = escape_nonprintable(message)
+        error(escape(message), soft_wrap=egress is not None)
         raise typer.Exit(1) from None
 
     if result.stdout:

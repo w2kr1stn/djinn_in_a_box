@@ -89,6 +89,8 @@ RUN groupadd --gid $USER_GID $USERNAME \
 
 COPY scripts/init-firewall.sh /usr/local/bin/init-firewall.sh
 RUN chmod +x /usr/local/bin/init-firewall.sh
+COPY scripts/egress-init.sh /usr/local/bin/djinn-egress-init
+RUN chmod 0755 /usr/local/bin/djinn-egress-init
 
 USER $USERNAME
 WORKDIR /home/$USERNAME

@@ -1,6 +1,7 @@
 import re
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from djinn_in_a_box.core import console as console_mod
@@ -67,3 +68,22 @@ def test_print_captured_routes_to_stdout_when_asked(monkeypatch) -> None:
 
     assert "payload" in out_buf.getvalue()
     assert "payload" not in err_buf.getvalue()
+
+
+@pytest.mark.parametrize("helper", ["status_line", "error"])
+@pytest.mark.parametrize("soft_wrap", [False, True])
+def test_line_helpers_opt_in_to_soft_wrap(monkeypatch, helper, soft_wrap) -> None:
+    output = StringIO()
+    test_console = Console(file=output, width=80, theme=DJINN_THEME)
+    monkeypatch.setattr(console_mod, "err_console", test_console)
+    message = "a long destination " * 10
+    kwargs = {"soft_wrap": True} if soft_wrap else {}
+    if helper == "status_line":
+        console_mod.status_line("Egress", message, **kwargs)
+    else:
+        console_mod.error(message, **kwargs)
+    if soft_wrap:
+        assert len(output.getvalue().splitlines()) == 1
+        assert message in output.getvalue()
+    else:
+        assert len(output.getvalue().splitlines()) > 1

@@ -9,6 +9,12 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- `djinn run --allow HOST[/PREFIX][:PORT]` (repeatable) gives one headless run
+  exactly the listed outbound destinations and refuses everything else at once.
+  Names are resolved once on the host and pinned; the run has no DNS. A root step
+  applies and reads back the rules, then removes `NET_ADMIN` and `NET_RAW` from
+  the run's process tree; `djinn-egress:` lines on stderr show the applied rules
+  (#170).
 - `djinn serve <claude|opencode ...>`, `--status`, `--stop [NAME ...]` and
   `--pair opencode` run the agent harnesses' server modes inside the running
   detached container. OpenCode serves its web UI and API on host
@@ -23,6 +29,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `--firewall` now allows Claude's current sign-in token host
+  `platform.claude.com` instead of the unused `console.anthropic.com`, so a
+  subscription token can be refreshed under the firewall (#178).
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).

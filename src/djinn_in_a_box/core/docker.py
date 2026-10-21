@@ -43,7 +43,7 @@ from djinn_in_a_box.config.defaults import (
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
 from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing, post_mortem
-from djinn_in_a_box.core.console import warning
+from djinn_in_a_box.core.console import escape_nonprintable, warning
 from djinn_in_a_box.core.contained_paths import (
     PathContainmentError,
     clear_directory,
@@ -52,8 +52,10 @@ from djinn_in_a_box.core.contained_paths import (
     secure_root,
 )
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+from djinn_in_a_box.core.egress import EgressPlan
 from djinn_in_a_box.core.exceptions import (
     DeclarationSpecificationError,
+    EgressSpecificationError,
     MountSpecificationError,
     RuntimeMountSpecificationError,
     SopsAgeKeyFileError,
@@ -343,6 +345,9 @@ class ContainerOptions:
 
     mounts: tuple[ContainerMount, ...] = ()
     """Additional host-directory mounts for this container execution."""
+
+    egress: EgressPlan | None = None
+    """Resolved destinations for a locked headless allowlist run."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1276,6 +1281,7 @@ class ComposeService(TypedDict, total=False):
     container_name: str
     cap_add: list[str]
     depends_on: dict[str, object]
+    extra_hosts: list[str]
 
 
 class ComposeFragment(TypedDict, total=False):
@@ -1367,7 +1373,7 @@ def resolve_declared_entries(
         config.mounts if config else {}, config.environment if config else {}
     )
     for key in (*GIT_ENVIRONMENT, *agent_docker.SELECTORS, "DOCKER_ENABLED",
-                "DOCKER_DIRECT", "DJINN_FIREWALL_GATE"):
+                "DOCKER_DIRECT", "DJINN_FIREWALL_GATE", "DJINN_EGRESS_ALLOW"):
         if caller_env and key in caller_env:
             raise DeclarationSpecificationError(f"caller environment.{key} is reserved by Djinn")
     errors = {d.identity: d.error for d in entries.diagnostics}
@@ -2293,6 +2299,8 @@ def _prepare_companions(
         except (OSError, ValueError, RuntimeError, KeyError, TypeError,
                 subprocess.SubprocessError) as exc:
             raise RuntimeMountSpecificationError(f"Agent Docker preparation failed: {exc}") from exc
+    if options.egress is not None:
+        return
     endpoints = desktop.discover_desktop_endpoints()
     for endpoint in endpoints:
         if endpoint.available is False:
@@ -2448,6 +2456,49 @@ def inspect_running_desktop(
     )
 
 
+def validate_egress_inputs(
+    config: AppConfig,
+    mounts: tuple[ContainerMount, ...],
+    env: dict[str, str] | None,
+) -> None:
+    """Check run-controlled hooks and targets without provisioning runtime resources."""
+    declarations = inspect_declarations(config.mounts, config.environment)
+    hook_names = {
+        "GLIBC_TUNABLES", "GCONV_PATH", "LOCPATH", "NLSPATH", "BASH_ENV", "ENV",
+        "BASHOPTS", "SHELLOPTS", "ZDOTDIR",
+    }
+    for key in (*config.environment, *(env or {})):
+        if key in hook_names or key.startswith(("LD_", "BASH_FUNC_")):
+            raise EgressSpecificationError(
+                escape_nonprintable(
+                    f"environment.{key}: loader and shell start-up hooks are forbidden with --allow"
+                )
+            )
+    targets = [(f"--mount {mount.source}", mount.target) for mount in mounts]
+    targets.extend(
+        (f"mounts.{name}", Path(mount.target)) for name, mount in declarations.mounts.items()
+    )
+    for setting, path in targets:
+        target = _resolve_image_aliases(_normalize_mount_target(path))
+        if target in (Path("/"), Path("/home"), Path("/home/dev")) or any(
+            target == root or target.is_relative_to(root) or root.is_relative_to(target)
+            for root in map(Path, ("/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/run"))
+        ):
+            raise EgressSpecificationError(
+                escape_nonprintable(
+                    f"{setting}: target {target} shadows image system paths required by --allow"
+                )
+            )
+
+
+def _apply_egress(fragment: ComposeFragment, egress: EgressPlan) -> None:
+    dev = fragment["services"]["dev"]
+    dev["user"] = "0:0"
+    dev["entrypoint"] = ["/usr/local/bin/djinn-egress-init"]
+    dev.setdefault("extra_hosts", []).extend(f"{name}:{ip}" for name, ip in egress.pins)
+    dev.setdefault("environment", {})["DJINN_EGRESS_ALLOW"] = egress.environment_value()
+
+
 def compose_run(
     config: AppConfig,
     options: ContainerOptions,
@@ -2470,6 +2521,10 @@ def compose_run(
         service: Compose service name (default: dev).
         timeout: Timeout in seconds (headless only). Returns exit code 124 on timeout.
     """
+    if options.egress is not None and (
+        service != "dev" or options.docker_mode is not DockerMode.NONE
+    ):
+        raise ValueError("Egress allowlists require the dev service without Docker access")
     validate_managed_bind_sources(config)
     # Fail before allocating a TTY: a background start would otherwise degenerate
     # into a SIGTTOU storm that kills the container. Headless runs pass -T and are
@@ -2532,6 +2587,9 @@ def compose_run(
         zone_overlay_targets=zone_overlay_targets,
     )
 
+    if options.egress is not None:
+        validate_egress_inputs(config, mounts, env)
+
     if options.docker_mode is not DockerMode.AGENT or service != "dev":
         for mount in mounts:
             target = _resolve_image_aliases(mount.target)
@@ -2562,6 +2620,8 @@ def compose_run(
     fragment: ComposeFragment = (
         declarations.compose_fragment() if service == "dev" else {"services": {service: {}}}
     )
+    if options.egress is not None:
+        _apply_egress(fragment, options.egress)
     if service == "dev":
         fragment["services"]["dev"].setdefault("environment", {}).update(
             dict.fromkeys(desktop.MANAGED_ENV)
@@ -2694,6 +2754,8 @@ def compose_up_detached(
     file, so the interactive zsh ending the entrypoint stays alive with nothing
     attached. Attach afterwards with ``djinn enter``.
     """
+    if options.egress is not None:
+        raise ValueError("Egress allowlists are only supported by compose_run")
     validate_managed_bind_sources(config)
     _validate_desktop_env(env)
     project_root = get_project_root()

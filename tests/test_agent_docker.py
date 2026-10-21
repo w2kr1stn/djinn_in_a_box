@@ -264,6 +264,16 @@ def test_selector_override_refused_before_generation(tmp_path, monkeypatch, key)
         )
 
 
+@pytest.mark.parametrize("value", ["", "8.8.8.8/32:443"])
+def test_caller_egress_override_refused_before_generation(tmp_path, monkeypatch, value):
+    monkeypatch.setattr(docker, "git_runtime", lambda *args: pytest.fail("allocated generation"))
+    with pytest.raises(DeclarationSpecificationError, match="DJINN_EGRESS_ALLOW.*reserved"):
+        docker.compose_run(
+            AppConfig(code_dir=tmp_path), docker.ContainerOptions(),
+            env={"DJINN_EGRESS_ALLOW": value}, interactive=False,
+        )
+
+
 @pytest.mark.parametrize("health", ["unhealthy", "starting", "late-healthy", "observer-dead"])
 def test_readiness_refuses_failed_or_late_evidence(evidence, monkeypatch, health):
     actual, _ = evidence

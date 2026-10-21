@@ -5,6 +5,37 @@ set -euo pipefail
 # Djinn in a Box - Entrypoint Script
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Egress allowlist guard (djinn run --allow)
+# -----------------------------------------------------------------------------
+# Runs before anything else, with plain output: the rules are applied by the
+# root wrapper, which drops NET_ADMIN and NET_RAW from the bounding set. Start
+# only when this process tree really lacks both.
+if [[ -n "${DJINN_EGRESS_ALLOW:-}" ]]; then
+    egress_status_path='/proc/self/status'
+    egress_capbnd=""
+    if [[ -r "$egress_status_path" ]]; then
+        while IFS= read -r egress_line; do
+            if [[ "$egress_line" == CapBnd:* ]]; then
+                egress_capbnd="${egress_line#CapBnd:}"
+                egress_capbnd="${egress_capbnd//[[:space:]]/}"
+                break
+            fi
+        done < "$egress_status_path"
+    fi
+    if [[ ! "$egress_capbnd" =~ '^[0-9a-fA-F]{16}$' ]]; then
+        print -r -- "[err] egress allowlist: CapBnd is missing or malformed; refusing to start." >&2
+        exit 1
+    fi
+    # NET_ADMIN is bit 12, NET_RAW bit 13: both live in the last four hex digits.
+    if (( 16#${egress_capbnd[-4,-1]} & 0x3000 )); then
+        print -r -- "[err] egress allowlist: NET_ADMIN or NET_RAW is still in the bounding set; refusing to start." >&2
+        exit 1
+    fi
+    egress_tokens=( ${=DJINN_EGRESS_ALLOW} )
+    print -r -- "djinn-egress: locked ${#egress_tokens}" >&2
+fi
+
 OUTPUT_LIB="${OUTPUT_LIB:-/home/dev/output-lib.sh}"
 _djinn_define_plain_ui_fallbacks() {
     ui_section() { echo "[info] $1" >&2; }
@@ -44,7 +75,7 @@ fi
 # -----------------------------------------------------------------------------
 # Firewall & Permissions
 # -----------------------------------------------------------------------------
-if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
+if [[ -z "${DJINN_EGRESS_ALLOW:-}" && "${ENABLE_FIREWALL:-false}" == "true" ]]; then
     ui_info "Initializing firewall..."
     sudo /usr/local/bin/init-firewall.sh
 fi
@@ -207,7 +238,9 @@ fi
 # Security Summary
 # =============================================================================
 ui_section "Security"
-if [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
+if [[ -n "${DJINN_EGRESS_ALLOW:-}" ]]; then
+    ui_ok "Firewall:     Allowlist (locked)"
+elif [[ "${ENABLE_FIREWALL:-false}" == "true" ]]; then
     ui_ok "Firewall:     Enabled"
 else
     ui_warn "Firewall:     Disabled"
