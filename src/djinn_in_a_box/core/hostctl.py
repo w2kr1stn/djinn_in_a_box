@@ -121,10 +121,13 @@ def command(*args: str, timeout: float = 5) -> str:
     return result.stdout
 
 
-def inspect_helper() -> dict[str, Any] | None:
+def inspect_helper(*, strict: bool = False) -> dict[str, Any] | None:
     from djinn_in_a_box.core.host_runtime import inspect_object
 
-    value = inspect_object(HELPER_NAME, DOCKER_EXECUTABLE)
+    value = (
+        inspect_object(HELPER_NAME, DOCKER_EXECUTABLE, missing="No such container")
+        if strict else inspect_object(HELPER_NAME, DOCKER_EXECUTABLE)
+    )
     if value is not None:
         labels: dict[str, Any] = value.get("Config", {}).get("Labels") or {}
         if not labels.get(GENERATION_LABEL):

@@ -1360,10 +1360,13 @@ construction-error problems are unchanged.
 `validate_managed_bind_sources(config)` raises `MountSpecificationError` with the
 first problem.
 
-`compose_run()` and `compose_up_detached()` call this wrapper in every Docker
-mode, before shell/SOPS/zone mount builders, declared/invocation validators,
-workspace preparation, companions, helpers or temporary overrides. Guests first
-apply the protected-source check described under [Guest runs](#guest-runs).
+For dev starts, `compose_run()` and `compose_up_detached()` call this wrapper in
+every Docker mode, before shell/SOPS/zone mount builders, declared/invocation
+validators, workspace preparation, companions, helpers or temporary overrides.
+Guests first check phase-1 user and declared sources, then build shell/SOPS/zone
+mounts and check their sources. Next come `validate_managed_bind_sources()`,
+the declared/invocation validators and the DIRECT helper check, then preflight
+and the phase-2 source check described under [Guest runs](#guest-runs).
 These source-validation gates also cover direct callers.
 
 When a mount exists, `compose_run()` uses the first mount target as

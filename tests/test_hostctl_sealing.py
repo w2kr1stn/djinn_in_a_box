@@ -1786,6 +1786,39 @@ def test_undeterminable_execution_inputs_refuse_only_without_authority(
             result.require(allow_unsealed=True)
 
 
+@pytest.mark.parametrize("authority", [False, True])
+@pytest.mark.parametrize("control", [
+    host_runtime.STATE_TMP, host_runtime.READY, host_runtime.ATTACHED,
+    host_runtime.LOADED, host_runtime.OBSERVER_LOG,
+])
+def test_private_map_errors_deferred_until_authority(ground, monkeypatch, authority, control):
+    empty_desktop(monkeypatch)
+    root = ground.paths["runtime"]
+    (root / control).symlink_to(root / "missing")
+    intact = (
+        host_runtime.STATE_FILE if control == host_runtime.OBSERVER_LOG
+        else host_runtime.OBSERVER_LOG
+    )
+    source = root / intact
+    source.touch()
+    mounts = [bind(source)]
+    if authority:
+        mounts.append(bind(ground.socket))
+    result = sealing.assess(dev(mounts))
+    # Resolved entries on either side of the failure still protect control files.
+    assert any(f"{source} ->" in cause for cause in result.cause_details), result
+    if authority:
+        assert not result.errors, result
+        result.require(allow_unsealed=True)
+    else:
+        assert any(
+            "inspection uncertain: dangling host alias" in error and control in error
+            for error in result.errors
+        ), result
+        with pytest.raises(hostctl.HostctlError):
+            result.require(allow_unsealed=True)
+
+
 def test_inventory_skip_preserves_unverified_endpoint_error(
     ground, monkeypatch, inventory_source, inventory_calls
 ):
@@ -2404,7 +2437,8 @@ def test_protected_host_roots_cover_private_state_and_run_inputs(ground, monkeyp
     monkeypatch.setattr(post_mortem, "records_root", records_root)
     storage_calls = []
 
-    def storage(*, timeout):
+    def storage(*, timeout, strict):
+        assert strict
         storage_calls.append(timeout)
         return ground.paths["data"], ground.backing
 

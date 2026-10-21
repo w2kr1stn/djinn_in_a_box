@@ -390,7 +390,9 @@ def test_cleanup_rejects_foreign_identity(guest, capsys, field):
     assert docker._remove_run(identifier, 10)
     assert not any(c[0] in {"stop", "rm"} for c in calls(log))
     assert json.loads(objects.read_text())
-    assert "Skipping" in capsys.readouterr().err
+    message = capsys.readouterr().err
+    assert "Skipping" in message
+    assert "check it, then remove it or run `djinn clean`" in message
 
 
 def test_warning_failure_cannot_interrupt_cleanup(guest, monkeypatch):
@@ -428,12 +430,28 @@ def test_cleanup_warning_preserves_run_result(guest, capsys, rc):
     assert "djinn clean" in capsys.readouterr().err
 
 
-def test_sigterm_real_cli_removes_its_own_run(guest, tmp_path):
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP], ids=["term", "hup"])
+@pytest.mark.parametrize("phase", ["preflight", "run"])
+def test_signal_real_cli_cleans_up(guest, tmp_path, number, phase):
     _, binary, objects, log = guest
     home, state, config = (tmp_path / name for name in ("cli-home", "cli-state", "cli-config"))
     for path in (home, state, config):
         path.mkdir()
     behavior(guest, run_hang=True)
+    if phase == "preflight":
+        script = binary.read_text()
+        marker = "    elif args[0] == 'compose' and 'config' in args:\n"
+        assert marker in script
+        binary.write_text(script.replace(marker, marker + '''\
+        (store.parent / 'preflight-ready').write_text(args[-4])
+        with log.open('a') as stream:
+            stream.write(json.dumps(args) + '\\n')
+        import time
+        parent = os.getppid()
+        while os.getppid() == parent:
+            time.sleep(0.02)
+        sys.exit(0)
+'''))
     # The real CLI runs in-process in this child; only external preparation is stubbed.
     wrapper = '''
 import os, pwd, sys
@@ -456,6 +474,8 @@ app()
         **os.environ, "PATH": str(binary.parent) + os.pathsep + "/usr/bin:/bin",
         "HOME": str(home), "XDG_STATE_HOME": str(state), "DJINN_CONFIG_ROOT": str(config),
         "DJINN_TEST_PASSWD_HOME": str(home),
+        "TMPDIR": str(tmp_path),
+        "PYTHONPATH": str(Path(docker.__file__).resolve().parents[2]),
     }
     workspace = tmp_path / "cli-workspace"
     workspace.mkdir()
@@ -465,17 +485,29 @@ app()
     )
     try:
         deadline = time.monotonic() + 10
-        ready = binary.parent / "ready"
+        ready = binary.parent / ("preflight-ready" if phase == "preflight" else "ready")
         while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
             time.sleep(0.02)
         assert ready.exists(), child.communicate(timeout=2)
-        child.send_signal(signal.SIGTERM)
+        overrides = list(tmp_path.glob("djinn-run-*.yml"))
+        assert len(overrides) == 1
+        if phase == "preflight":
+            assert Path(ready.read_text()) == overrides[0]
+        child.send_signal(number)
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 130, (stdout, stderr)
-        name = ready.read_text()
-        identity = "guest-" + name.removeprefix("djinn-run-")
-        assert ["stop", "-t", "10", identity] in calls(log)
-        assert ["rm", "-f", identity] in calls(log)
+        assert not overrides[0].exists()
+        if phase == "run":
+            name = ready.read_text()
+            identity = "guest-" + name.removeprefix("djinn-run-")
+            assert ["stop", "-t", "10", identity] in calls(log)
+            assert ["rm", "-f", identity] in calls(log)
+        else:
+            assert not any(c[0] in {"stop", "rm"} or "run" in c for c in calls(log))
+            assert not any(
+                c[:2] == ["container", "inspect"] and c[2].startswith("djinn-run-")
+                for c in calls(log)
+            )
         assert json.loads(objects.read_text()) == {}
     finally:
         if child.poll() is None:

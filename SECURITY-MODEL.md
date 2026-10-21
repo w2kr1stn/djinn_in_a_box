@@ -134,6 +134,16 @@ base/config-root/workspace/declaration binds, plus every command-line `-v` mount
 refuses the run. See [mount usage](README.md#storage-and-mounts) for the private-state
 ancestor refusal and remedies.
 
+A run accepts only checked binds, named volumes whose definitions contain only
+`name` (no driver options), and `tmpfs` mounts. Every other host carrier in the
+resolved Compose configuration refuses the run, including `volumes_from`,
+secrets, configs, devices, volumes with driver options, other mount types or
+service keys outside the allowlist.
+A file source with more than one hard link also refuses the run.
+Guest helper and storage checks treat only the daemon's exact resource wording
+`No such container` or `no such volume`, respectively, as absence; other
+inspection failures refuse the run.
+
 `djinn run --docker-direct` is refused while the hostctl helper is running.
 Close the window or omit the flag. With host Docker authority, network separation
 is no boundary; a running run with a Docker socket or non-empty `DOCKER_HOST`
@@ -143,9 +153,10 @@ checks sealing after enrollment, but there is no periodic reassessment of runs
 in an open window; a run that starts after that check remains a residual.
 
 The source check is a snapshot: a writable workspace can swap a directory for a
-symlink before container start. Sockets inside mounted directories are not
-scanned. Base binds are checked but not rewritten; their owner-controlled roots
-are mount points in dev. A run started during `djinn clean` can escape that clean.
+symlink before container start. The contents of mounted directories (sockets,
+hard links) are not scanned. Base binds are checked but not rewritten; their
+owner-controlled roots are mount points in dev. A run started during `djinn clean`
+can escape that clean.
 A Docker API reachable over TCP is outside this model; sealing sees `DOCKER_HOST`
 only in the container environment, not an agent's later shell environment or
 client configuration. The host's [forwarding policy](#direct-routes-and-target-authority)

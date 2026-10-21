@@ -2567,6 +2567,10 @@ def _guest_source_check(
                     break
             if cause is None and stat.S_ISSOCK(host_sealing.host_file(path).stat().st_mode):
                 cause = "resolved source is a socket"
+            if cause is None:
+                info = host_sealing.host_file(path).stat()
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                    cause = "hard-link provenance unknown"
         except _RUN_CHECK_ERRORS as exc:
             raise RunRefusedError(f"cannot verify {source}: {exc}; refusing") from exc
         if cause is not None:
@@ -2590,10 +2594,30 @@ def _guest_source_check(
                     source = mount.source
                     check(source, Path(mount.target))
         else:
-            for mount in resolved["services"]["dev"]["volumes"]:
-                if mount["type"] == "bind":
+            service = resolved["services"]["dev"]
+            allowed = {
+                "build", "cap_add", "command", "container_name", "deploy", "entrypoint",
+                "environment", "extra_hosts", "hostname", "image", "networks", "stdin_open",
+                "tty", "user", "volumes", "working_dir",
+            }
+            for key in service:
+                if key not in allowed:
+                    raise RunRefusedError(f"unsupported run service key {key}; refusing")
+            for mount in service["volumes"]:
+                kind = mount["type"]
+                if kind == "bind":
                     source = mount["source"]
                     check(source, Path(mount["target"]))
+                elif kind == "volume":
+                    source = mount["source"]
+                    definition = resolved["volumes"][source]
+                    for key in definition:
+                        if key != "name":
+                            raise RunRefusedError(
+                                f"unsupported run volume {source} definition key {key}; refusing"
+                            )
+                elif kind != "tmpfs":
+                    raise RunRefusedError(f"unsupported run volume type {kind}; refusing")
             for spec in _volume_specs_from_mount_args(mount_args or []):
                 source, _, _ = _normalize_runtime_mount_specification(spec)
                 # Keep the literal target for the exact approved DIRECT socket exception.
@@ -2633,7 +2657,7 @@ def _guest_direct_check() -> None:
     """Check the window under the same transition guard used by hostctl."""
     try:
         with hostctl.control_guard():
-            helper = hostctl.inspect_helper()
+            helper = hostctl.inspect_helper(strict=True)
             if helper is not None and helper["State"]["Running"]:
                 raise RunRefusedError(
                     "close the hostctl window (`djinn hostctl off`) or run without --docker-direct"
@@ -2727,7 +2751,9 @@ def _remove_run(identifier: str, grace: int) -> bool:
                 if not verified:
                     raise ValueError("run identity does not match")
             except Exception as exc:
-                warnings.append(f"Skipping {target}: {exc}")
+                warnings.append(
+                    f"Skipping {target}: {exc}; check it, then remove it or run `djinn clean`"
+                )
                 return True
             try:
                 host_runtime.run_runtime_command(
@@ -2925,29 +2951,31 @@ def compose_run(
     if service == "dev" and options.docker_mode is DockerMode.AGENT:
         _prepare_workspace(config, options, declarations, mounts, fragment)
     if guest:
-        with _compose_override(fragment, prefix="djinn-run-") as override_path:
+        with (
+            signals_as_interrupt(),
+            _compose_override(fragment, prefix="djinn-run-") as override_path,
+        ):
             args = [*compose_files, "-f", str(override_path)]
             cmd[2 : 2 + len(compose_files)] = args
             resolved = _run_preflight(args, config, project_root, host_env)
             _guest_source_check(config, options, resolved=resolved, mount_args=cmd)
-            with signals_as_interrupt():
-                try:
-                    result = subprocess.run(
-                        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                        cwd=project_root, env=host_env, timeout=timeout, check=False,
-                    )
-                    return RunResult(result.returncode, stdout=result.stdout, stderr=result.stderr)
-                except subprocess.TimeoutExpired as exc:
-                    assert timeout is not None
-                    stdout, stderr = _decode_timeout_output(exc, timeout)
-                    return RunResult(124, stdout=stdout, stderr=stderr)
-                except FileNotFoundError as exc:
-                    return RunResult(127, stderr=f"Docker command not found: {exc}")
-                except PermissionError as exc:
-                    return RunResult(126, stderr=f"Permission denied: {exc}")
-                finally:
-                    assert run_id is not None
-                    _remove_run(run_id, 10)
+            try:
+                result = subprocess.run(
+                    cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    cwd=project_root, env=host_env, timeout=timeout, check=False,
+                )
+                return RunResult(result.returncode, stdout=result.stdout, stderr=result.stderr)
+            except subprocess.TimeoutExpired as exc:
+                assert timeout is not None
+                stdout, stderr = _decode_timeout_output(exc, timeout)
+                return RunResult(124, stdout=stdout, stderr=stderr)
+            except FileNotFoundError as exc:
+                return RunResult(127, stderr=f"Docker command not found: {exc}")
+            except PermissionError as exc:
+                return RunResult(126, stderr=f"Permission denied: {exc}")
+            finally:
+                assert run_id is not None
+                _remove_run(run_id, 10)
     owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
     with owner_context as git_delivery:
         if git_delivery is not None:

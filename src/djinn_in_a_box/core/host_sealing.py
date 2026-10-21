@@ -410,12 +410,13 @@ def private_state_paths() -> dict[str, Path]:
     }
 
 
-def docker_storage_roots(*, timeout: float = 5) -> tuple[Path, Path]:
+def docker_storage_roots(*, timeout: float = 5, strict: bool = False) -> tuple[Path, Path]:
     """Return Docker's data root and the helper volume's backing storage."""
     info = json.loads(hostctl.command("info", "--format", "{{json .}}", timeout=timeout))
     data_root = canonical(info["DockerRootDir"])
     volume = host_runtime.inspect_object(
-        hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume", timeout=timeout
+        hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume", timeout=timeout,
+        **({"missing": "no such volume"} if strict else {}),
     )
     backing = canonical(volume["Mountpoint"]) if volume is not None else data_root
     return data_root, backing
@@ -425,7 +426,7 @@ def protected_host_roots(
     identities: Iterable[Path] = (), *, timeout: float = 30
 ) -> dict[str, Path]:
     """Broad host-path protection for runs, including all runtime deliveries."""
-    data_root, backing = docker_storage_roots(timeout=timeout)
+    data_root, backing = docker_storage_roots(timeout=timeout, strict=True)
     return {
         "host runtime": host_runtime.runtime_root(),
         **_private_state_roots(),
@@ -464,9 +465,13 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         environment = agent_docker.inspected_environment(env)
         home = canonical(pwd.getpwuid(os.getuid()).pw_dir)
         data_root, backing = docker_storage_roots()
-        private = {
-            name: canonical(path) for name, path in private_state_paths().items()
-        }
+        private: dict[str, Path] = {}
+        private_errors: list[Exception] = []
+        for name, path in private_state_paths().items():
+            try:
+                private[name] = canonical(path)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                private_errors.append(exc)
         execution: dict[str, tuple[Path, str, str]] = {}
         execution_error: Exception | None = None
         try:
@@ -622,6 +627,8 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         if unverified_endpoint:
             causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
         authority = any(f.kind in DOCKER_AUTHORITY_KINDS for f in causes) or unverified_endpoint
+        if not authority:
+            errors.extend(Finding(f"inspection uncertain: {exc}") for exc in private_errors)
         if execution_error is not None and not authority:
             errors.append(Finding(f"inspection uncertain: {execution_error}"))
         if not inspection.raw_sources and not authority:

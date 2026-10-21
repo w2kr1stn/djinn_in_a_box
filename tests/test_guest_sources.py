@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from test_desktop_runtime import calls
+from test_desktop_runtime import behavior, calls, write_json
 from typer.testing import CliRunner
 
 from djinn_in_a_box.config.ssh import GitIdentity
@@ -223,6 +223,64 @@ def test_absent_helper_volume_uses_data_root(fake_owner):
     assert ["volume", "inspect", hostctl.HOSTCTL_STATE_VOLUME] in calls(log)
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        None,
+        "Error response from daemon: open /x: no such file or directory",
+        "Error response from daemon: no such container: djinn-hostctl",
+        "Error response from daemon: No such volume: djinn-hostctl",
+        "Error response from daemon: get djinn-hostctl: no such volume",
+    ],
+)
+def test_guest_helper_inspection_requires_exact_container_absence(fake_owner, message):
+    _, _, objects, log = fake_owner
+    if message is not None:
+        write_json(objects, {
+            hostctl.HELPER_NAME: {
+                "State": {"Running": True},
+                "Config": {"Labels": {hostctl.GENERATION_LABEL: "window"}},
+            },
+        })
+        behavior(fake_owner, errors={f"container inspect {hostctl.HELPER_NAME}": message})
+        # Other callers retain the legacy broad, case-insensitive absence classifier.
+        assert hostctl.inspect_helper() is None
+        with pytest.raises(docker.RunRefusedError, match="cannot verify hostctl helper.*refusing"):
+            docker._guest_direct_check()
+        assert json.loads(objects.read_text())[hostctl.HELPER_NAME]["State"]["Running"]
+    else:
+        docker._guest_direct_check()
+    assert ["container", "inspect", hostctl.HELPER_NAME] in calls(log)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        None,
+        "Error response from daemon: open /x: no such file or directory",
+        "Error response from daemon: get helper: No such volume",
+        "Error response from daemon: No such container: helper",
+    ],
+)
+def test_guest_storage_inspection_requires_exact_volume_absence(fake_owner, tmp_path, message):
+    config, binary, objects, log = fake_owner
+    data = binary.parent / "docker-data"
+    if message is not None:
+        backing = tmp_path / "unverified-backing"
+        backing.mkdir()
+        write_json(objects, {hostctl.HOSTCTL_STATE_VOLUME: {"Mountpoint": str(backing)}})
+        behavior(fake_owner, errors={f"volume inspect {hostctl.HOSTCTL_STATE_VOLUME}": message})
+        assert host_sealing.docker_storage_roots() == (data, data)
+        with pytest.raises(docker.RunRefusedError, match="cannot verify .*; refusing"):
+            docker._guest_source_check(config, docker.ContainerOptions())(backing, Path("/review"))
+    else:
+        assert host_sealing.docker_storage_roots(strict=True) == (data, data)
+        assert docker._guest_source_check(config, docker.ContainerOptions())(
+            config.code_dir, Path("/review")
+        ) == config.code_dir
+    assert ["volume", "inspect", hostctl.HOSTCTL_STATE_VOLUME] in calls(log)
+
+
 @pytest.fixture
 def compose_guest(boundary, monkeypatch):
     resolved = copy.deepcopy(VALID)
@@ -251,6 +309,107 @@ def compose_guest(boundary, monkeypatch):
         fragments=fragments,
         launches=launches,
     )
+
+
+@pytest.mark.parametrize("phase", ["user", "resolved"])
+def test_runtime_state_hardlink_is_refused(compose_guest, tmp_path, phase):
+    state = compose_guest.runtime / host_runtime.STATE_FILE
+    state.touch()
+    alias = tmp_path / "control-alias"
+    alias.hardlink_to(state)
+    options = docker.ContainerOptions()
+    if phase == "user":
+        options = docker.ContainerOptions(mounts=(docker.ContainerMount(alias, Path("/review")),))
+    else:
+        compose_guest.resolved["services"]["dev"]["volumes"] = [
+            {"type": "bind", "source": str(alias), "target": "/review"},
+        ]
+    with pytest.raises(docker.RunRefusedError, match="hard-link provenance unknown"):
+        docker.compose_run(compose_guest.config, options, interactive=False)
+    assert not compose_guest.launches
+
+
+def test_real_resolved_carrier_shape_passes(compose_guest):
+    g = compose_guest
+    g.resolved.update({
+        "name": docker.COMPOSE_PROJECT,
+        "volumes": {"cache": {"name": "djinn-in-a-box_cache"}},
+        "x-extension": {"description": "Compose extension"},
+    })
+    g.resolved["networks"]["default"]["ipam"] = {}
+    g.resolved["services"]["dev"].update({
+        "build": {"context": str(g.config.code_dir), "dockerfile": "Dockerfile"},
+        "cap_add": ["NET_ADMIN"],
+        "command": ["zsh"],
+        "container_name": "djinn",
+        "deploy": {"resources": {"limits": {"memory": "1073741824"}}},
+        "entrypoint": ["/entrypoint.sh"],
+        "environment": {"TZ": "UTC"},
+        "extra_hosts": ["host.docker.internal=host-gateway"],
+        "hostname": "djinn",
+        "image": "djinn-in-a-box:latest",
+        "stdin_open": True,
+        "tty": True,
+        "user": "0:0",
+        "working_dir": "/home/dev/projects",
+        "volumes": [
+            {"type": "bind", "source": str(g.config.code_dir), "target": "/workspace",
+             "bind": {"create_host_path": True}},
+            {"type": "volume", "source": "cache", "target": "/cache", "volume": {}},
+            {"type": "tmpfs", "target": "/scratch", "tmpfs": {"size": 1024}},
+        ],
+    })
+    assert docker.compose_run(g.config, docker.ContainerOptions(), interactive=False).success
+    assert len(g.launches) == 1
+
+
+@pytest.mark.parametrize("key", ["volumes_from", "secrets", "configs", "devices", "future_carrier"])
+def test_resolved_service_carriers_are_refused(compose_guest, key):
+    compose_guest.resolved["services"]["dev"][key] = ["host-carrier"]
+    with pytest.raises(docker.RunRefusedError, match=key):
+        docker.compose_run(compose_guest.config, docker.ContainerOptions(), interactive=False)
+    assert not compose_guest.launches
+
+
+@pytest.mark.parametrize("kind", ["image", "future_mount"])
+def test_unknown_resolved_volume_type_is_refused(compose_guest, kind):
+    compose_guest.resolved["services"]["dev"]["volumes"] = [{"type": kind, "target": "/review"}]
+    with pytest.raises(docker.RunRefusedError, match=kind):
+        docker.compose_run(compose_guest.config, docker.ContainerOptions(), interactive=False)
+    assert not compose_guest.launches
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("driver", "local"),
+    ("driver_opts", {"device": "/host", "o": "bind", "type": "none"}),
+    ("external", True),
+    ("labels", {"example": "value"}),
+    ("future_option", True),
+])
+def test_resolved_volume_definition_options_are_refused(compose_guest, key, value):
+    compose_guest.resolved["services"]["dev"]["volumes"] = [
+        {"type": "volume", "source": "cache", "target": "/review"},
+    ]
+    compose_guest.resolved["volumes"] = {
+        "cache": {"name": "cache", key: value},
+    }
+    with pytest.raises(docker.RunRefusedError, match=key):
+        docker.compose_run(compose_guest.config, docker.ContainerOptions(), interactive=False)
+    assert not compose_guest.launches
+
+
+def test_anonymous_resolved_volume_is_refused(compose_guest):
+    compose_guest.resolved["services"]["dev"]["volumes"] = [{"type": "volume", "target": "/review"}]
+    with pytest.raises(docker.RunRefusedError, match="cannot verify .*source.*; refusing"):
+        docker.compose_run(compose_guest.config, docker.ContainerOptions(), interactive=False)
+    assert not compose_guest.launches
+
+
+def test_missing_resolved_volumes_key_is_refused(compose_guest):
+    del compose_guest.resolved["services"]["dev"]["volumes"]
+    with pytest.raises(docker.RunRefusedError, match="cannot verify .*volumes.*; refusing"):
+        docker.compose_run(compose_guest.config, docker.ContainerOptions(), interactive=False)
+    assert not compose_guest.launches
 
 
 @pytest.mark.parametrize("family", ["shell", "sops", "zone", "declared"])
@@ -313,6 +472,7 @@ def test_structural_base_binds(compose_guest, monkeypatch, family):
         {"type": "volume", "source": "named", "target": "/named"},
         {"type": "bind", "source": str(source), "target": target, "read_only": True},
     ]
+    g.resolved["volumes"] = {"named": {"name": "djinn-in-a-box_named"}}
     with pytest.raises(docker.RunRefusedError, match="protected host path") as error:
         docker.compose_run(g.config, docker.ContainerOptions(), interactive=False)
     assert f"{source} → {target}" in str(error.value)
@@ -613,7 +773,8 @@ def test_direct_helper_state_and_guard(compose_guest, monkeypatch, running):
         finally:
             held = False
 
-    def inspect():
+    def inspect(*, strict):
+        assert strict
         assert held, "helper inspection must hold control_guard"
         return None if running is None else {"State": {"Running": running}}
 
