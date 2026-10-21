@@ -19,10 +19,13 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Required, TypedDict, cast
+from uuid import uuid4
+
+from rich.markup import escape
 
 if TYPE_CHECKING:
     from djinn_in_a_box.config.models import AppConfig
@@ -42,7 +45,14 @@ from djinn_in_a_box.config.defaults import (
     volume_categories,
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing, post_mortem
+from djinn_in_a_box.core import (
+    agent_docker,
+    desktop,
+    host_runtime,
+    host_sealing,
+    hostctl,
+    post_mortem,
+)
 from djinn_in_a_box.core.console import escape_nonprintable, warning
 from djinn_in_a_box.core.contained_paths import (
     PathContainmentError,
@@ -64,7 +74,8 @@ from djinn_in_a_box.core.exceptions import (
 )
 from djinn_in_a_box.core.opencode_credentials import EXPORT_LIMIT
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
-from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
+from djinn_in_a_box.core.signals import signals_as_interrupt, signals_ignored
+from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS, GitSSHError
 
 git_runtime = host_runtime.git_runtime
 
@@ -700,8 +711,10 @@ def ensure_network(name: str = DJINN_NETWORK) -> bool:
     return result.success
 
 
-def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
-    """Get project and compose file arguments based on Docker mode."""
+def get_compose_files(
+    docker_mode: DockerMode = DockerMode.NONE, *, guest: bool = False,
+) -> list[str]:
+    """Get Compose inputs in merge order, with the isolated network overlay for guests."""
     project_root = get_project_root()
     files = ["-p", COMPOSE_PROJECT, "-f", str(project_root / "docker-compose.yml")]
 
@@ -711,6 +724,9 @@ def get_compose_files(docker_mode: DockerMode = DockerMode.NONE) -> list[str]:
         files.extend(["-f", str(project_root / "docker-compose.agent-docker.yml")])
     elif docker_mode is DockerMode.DIRECT:
         files.extend(["-f", str(project_root / "docker-compose.docker-direct.yml")])
+
+    if guest:
+        files.extend(["-f", str(project_root / "docker-compose.run.yml")])
 
     return files
 
@@ -773,6 +789,7 @@ def _run_compose(
     cwd: Path,
     extra_env: dict[str, str] | None = None,
     timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> RunResult:
     """Single choke-point for non-interactive ``docker compose`` calls.
 
@@ -782,11 +799,11 @@ def _run_compose(
 
     ``extra_env`` carries values a subcommand cannot pass as a flag — ``up`` has
     no per-invocation ``-e`` — and is layered on top of the host bridge, never
-    replacing it.
+    replacing it. ``env`` supplies a previously captured host environment unchanged.
     """
-    env = _compose_host_env(config)
+    env = _compose_host_env(config) if env is None else env
     if extra_env:
-        env.update(extra_env)
+        env = {**env, **extra_env}
     return _run_captured([DOCKER_EXECUTABLE, "compose", *args], cwd=cwd, env=env, timeout=timeout)
 
 
@@ -1030,7 +1047,12 @@ def _reserved_mount_targets(
     return [*targets, *accepted_runtime_targets]
 
 
-def _execution_input_check() -> Callable[[str | Path], str | None]:
+def _execution_input_check(
+    *,
+    inventory_factory: Callable[[], dict[str, tuple[Path, str, str]]] | None = None,
+    noun: str = "host execution input",
+    raise_errors: bool = False,
+) -> Callable[[str | Path], str | None]:
     """Share a lazy inventory and contain inventory/source comparison failures."""
     inputs: dict[str, tuple[Path, str, str]] | None = None
     inventory_error: str | None = None
@@ -1041,12 +1063,14 @@ def _execution_input_check() -> Callable[[str | Path], str | None]:
             return inventory_error
         try:
             if inputs is None:
-                inputs = host_sealing.execution_paths()
+                inputs = (inventory_factory or host_sealing.execution_paths)()
             match = host_sealing.execution_overlap(source, inputs)
             if match is not None:
                 name, path = match
-                return f"overlaps host execution input {name} ({path})"
+                return f"overlaps {noun} {name} ({path})"
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            if raise_errors:
+                raise
             cause = f"cannot be checked against host execution inputs ({exc})"
             if inputs is None:
                 inventory_error = cause
@@ -2499,6 +2523,305 @@ def _apply_egress(fragment: ComposeFragment, egress: EgressPlan) -> None:
     dev.setdefault("environment", {})["DJINN_EGRESS_ALLOW"] = egress.environment_value()
 
 
+class RunRefusedError(RuntimeError):
+    """A guest run could not establish its required isolation."""
+
+
+_RUN_CHECK_ERRORS = (
+    OSError, ValueError, KeyError, TypeError, RuntimeError, GitSSHError,
+    subprocess.SubprocessError,
+)
+
+
+def _guest_source_check(
+    config: AppConfig, options: ContainerOptions, *,
+    resolved: dict[str, Any] | None = None, mount_args: list[str] | None = None,
+) -> Callable[[str | Path, Path], Path]:
+    """Check unescaped bind sources, sharing a lazy inventory within each phase."""
+    storage: dict[str, Path] = {}
+
+    def inventory() -> dict[str, tuple[Path, str, str]]:
+        roots = host_sealing.protected_host_roots(
+            (identity.key_file for identity in config.git.identities.values()), timeout=30,
+        )
+        for name in ("Docker data root", "helper backing storage"):
+            storage[name] = host_sealing.canonical(roots.pop(name))
+        return {
+            name: (host_sealing.canonical(path, strict=True), "protected", name)
+            for name, path in roots.items()
+        }
+
+    protected = _execution_input_check(
+        inventory_factory=inventory, noun="protected host path", raise_errors=True,
+    )
+
+    def check(source: str | Path, target: Path) -> Path:
+        # Only the approved overlay bind may carry host Docker authority.
+        if (options.docker_mode is DockerMode.DIRECT
+                and str(source) == str(target) == "/var/run/docker.sock"):
+            return Path(source)
+        try:
+            path = host_sealing.canonical(source, strict=True)
+            cause = "resolved source contains ':'" if ":" in str(path) else protected(path)
+            for name, root in storage.items():
+                if host_sealing.overlap(path, root):
+                    cause = f"overlaps protected host path {name} ({root})"
+                    break
+            if cause is None and stat.S_ISSOCK(host_sealing.host_file(path).stat().st_mode):
+                cause = "resolved source is a socket"
+            if cause is None:
+                info = host_sealing.host_file(path).stat()
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                    cause = "hard-link provenance unknown"
+        except _RUN_CHECK_ERRORS as exc:
+            raise RunRefusedError(f"cannot verify {source}: {exc}; refusing") from exc
+        if cause is not None:
+            remedy = (
+                "start from a subdirectory, or use `--mount <dir>:ro` for a directory "
+                "outside the private state"
+                if target == _WORKSPACE_PATH else "change --mount, the declaration or code_dir"
+            )
+            raise RunRefusedError(f"Bind {source} → {target}: {cause}; {remedy}; refusing")
+        return path
+
+    source: str | Path = "guest bind inventory"
+    try:
+        if resolved is None:
+            for mount in options.mounts:
+                source = mount.source
+                check(source, mount.target)
+            entries = inspect_declarations(config.mounts, config.environment)
+            for mount in entries.mounts.values():
+                if isinstance(mount, BindDeclaration):
+                    source = mount.source
+                    check(source, Path(mount.target))
+        else:
+            service = resolved["services"]["dev"]
+            allowed = {
+                "build", "cap_add", "command", "container_name", "deploy", "entrypoint",
+                "environment", "extra_hosts", "hostname", "image", "networks", "stdin_open",
+                "tty", "user", "volumes", "working_dir",
+            }
+            for key in service:
+                if key not in allowed:
+                    raise RunRefusedError(f"unsupported run service key {key}; refusing")
+            categories = volume_categories(config)
+            allowed_volumes = {
+                name for category in ("data", "cache") for name in categories[category]
+            }
+            allowed_volumes.update(
+                f"{DECLARED_VOLUME_PREFIX}{name}"
+                for name, declaration in config.mounts.items()
+                if isinstance(declaration, VolumeDeclaration)
+            )
+            allowed_volumes.discard(agent_docker.CACHE)
+            for mount in service["volumes"]:
+                kind = mount["type"]
+                if kind == "bind":
+                    source = mount["source"]
+                    check(source, Path(mount["target"]))
+                elif kind == "volume":
+                    source = mount["source"]
+                    definition = resolved["volumes"][source]
+                    for key in definition:
+                        if key != "name":
+                            raise RunRefusedError(
+                                f"unsupported run volume {source} definition key {key}; refusing"
+                            )
+                    name: str = definition["name"]
+                    source = name
+                    if name not in allowed_volumes:
+                        raise RunRefusedError(f"unsupported run volume {name}; refusing")
+                    volume = host_runtime.inspect_object(
+                        name, DOCKER_EXECUTABLE, "volume", missing="no such volume",
+                    )
+                    if volume is not None:
+                        device = host_sealing.volume_bind_source({
+                            "Name": name, "PlannedVolume": volume,
+                        })
+                        if device is not None:
+                            check(device, Path(mount["target"]))
+                elif kind != "tmpfs":
+                    raise RunRefusedError(f"unsupported run volume type {kind}; refusing")
+            for spec in _volume_specs_from_mount_args(mount_args or []):
+                source, _, _ = _normalize_runtime_mount_specification(spec)
+                # Keep the literal target for the exact approved DIRECT socket exception.
+                check(source, Path(spec.rsplit(":", 2)[1]))
+    except RunRefusedError:
+        raise
+    except _RUN_CHECK_ERRORS as exc:
+        raise RunRefusedError(f"cannot verify {source}: {exc}; refusing") from exc
+    return check
+
+
+def _guest_mount_args(
+    args: list[str], check: Callable[[str | Path, Path], Path],
+) -> list[str]:
+    """Resolve managed sources while retaining their already assigned targets."""
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        if flag in {"-v", "--volume"} or flag.startswith("--volume="):
+            spec = flag.split("=", 1)[1] if flag.startswith("--volume=") else args[index + 1]
+            source, target, mode = _normalize_runtime_mount_specification(spec)
+            source = str(check(source, target))
+            spec = f"{source}:{target}" + (f":{mode}" if mode else "")
+            if flag.startswith("--volume="):
+                result.append(f"--volume={spec}")
+            else:
+                result.extend([flag, spec])
+                index += 1
+        else:
+            result.append(flag)
+        index += 1
+    return result
+
+
+def _guest_direct_check() -> None:
+    """Check the window under the same transition guard used by hostctl."""
+    try:
+        with hostctl.control_guard():
+            helper = hostctl.inspect_helper(strict=True)
+            if helper is not None and helper["State"]["Running"]:
+                raise RunRefusedError(
+                    "close the hostctl window (`djinn hostctl off`) or run without --docker-direct"
+                )
+    except RunRefusedError:
+        raise
+    except _RUN_CHECK_ERRORS as exc:
+        raise RunRefusedError(f"cannot verify hostctl helper: {exc}; refusing") from exc
+
+
+def _run_preflight(
+    args: list[str], config: AppConfig, project_root: Path, host_env: dict[str, str],
+) -> dict[str, Any]:
+    """Resolve exactly the guest invocation and require its isolated default network."""
+    try:
+        result = _run_compose(
+            [*args, "config", "--format", "json"], config=config, cwd=project_root,
+            timeout=30, env=host_env,
+        )
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        raise RunRefusedError(
+            f"Compose could not resolve the run configuration: {exc}; refusing"
+        ) from exc
+    if not result.success:
+        line = next(
+            (line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()),
+            "Compose resolution failed",
+        )
+        raise RunRefusedError(
+            f"Compose could not resolve the run configuration (rc={result.returncode}): "
+            f"{line}; refusing"
+        )
+    try:
+        resolved = json.loads(result.stdout)
+        service = resolved["services"]["dev"]
+        networks = service["networks"]
+        default = resolved["networks"]["default"]
+        if not isinstance(networks, dict | list) or not isinstance(default, dict):
+            raise TypeError("invalid run network configuration")
+        networks = cast(dict[str, Any] | list[str], networks)
+        default = cast(dict[str, Any], default)
+        if (
+            set(networks) != {"default"}
+            or "network_mode" in service
+            or set(default) - {"name", "ipam"}
+            or default.get("name") != f"{COMPOSE_PROJECT}_default"
+            or default.get("ipam", {}) != {}
+        ):
+            raise ValueError("unexpected run network configuration")
+        return resolved
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        first_line = result.stderr.splitlines()[0] if result.stderr else str(exc)
+        raise RunRefusedError(
+            "Compose did not keep the run on its own network. Causes: Docker Compose older "
+            "than 2.24.4, or a Compose file or fragment that sets networks or network_mode. "
+            f"Compose rc={result.returncode}; {first_line}"
+        ) from exc
+
+
+def _remove_run(identifier: str, grace: int) -> bool:
+    """Verify a run by name and labels, then stop and remove only its pinned Docker ID."""
+    run_id = identifier if re.fullmatch(r"[0-9a-f]{12}", identifier) else None
+    target = f"djinn-run-{run_id}" if run_id else identifier
+    warnings: list[str] = []
+
+    def gone(exc: Exception) -> bool:
+        message = str(exc)
+        return "No such container" in message or bool(
+            re.search(r"removal of container .* is already in progress", message)
+        )
+
+    with signals_ignored():
+        try:
+            actual: dict[str, Any] | None = None
+            for timeout in (5, 15):
+                try:
+                    actual = host_runtime.inspect_object(
+                        target, DOCKER_EXECUTABLE, timeout=timeout, missing="No such container",
+                    )
+                    break
+                except Exception as exc:
+                    if timeout == 15:
+                        warnings.append(
+                            f"{target} may still exist; `djinn clean` removes it: {exc}"
+                        )
+                        return False
+            if actual is None:
+                return True
+            try:
+                name = actual.get("Name", "")
+                match = re.fullmatch(r"/djinn-run-([0-9a-f]{12})", name)
+                labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
+                docker_id = actual["Id"]
+                verified = (
+                    match is not None
+                    and labels.get(host_runtime.RUN_LABEL) == match[1]
+                    and labels.get("com.docker.compose.project") == COMPOSE_PROJECT
+                    and labels.get("com.docker.compose.service") == "dev"
+                    and isinstance(docker_id, str) and bool(docker_id)
+                    and (name == "/" + target if run_id else docker_id == identifier)
+                )
+                if not verified:
+                    raise ValueError("run identity does not match")
+            except Exception as exc:
+                warnings.append(
+                    f"Skipping {target}: {exc}; check it, then remove it or run `djinn clean`"
+                )
+                return True
+            try:
+                host_runtime.run_runtime_command(
+                    DOCKER_EXECUTABLE, "stop", "-t", str(grace), docker_id, timeout=15,
+                )
+            except Exception as exc:
+                if gone(exc):
+                    return True
+                warnings.append(f"Could not stop {target}: {exc}")
+            try:
+                if host_runtime.inspect_object(
+                    docker_id, DOCKER_EXECUTABLE, missing="No such container",
+                ) is None:
+                    return True
+            except Exception as exc:
+                warnings.append(f"Could not re-inspect {target}: {exc}")
+            try:
+                host_runtime.run_runtime_command(
+                    DOCKER_EXECUTABLE, "rm", "-f", docker_id, timeout=15,
+                )
+                return True
+            except Exception as exc:
+                if gone(exc):
+                    return True
+                warnings.append(f"{target} may still exist; `djinn clean` removes it: {exc}")
+                return False
+        finally:
+            for message in warnings:
+                with suppress(Exception):
+                    warning(escape(message))
+
+
 def compose_run(
     config: AppConfig,
     options: ContainerOptions,
@@ -2525,22 +2848,34 @@ def compose_run(
         service != "dev" or options.docker_mode is not DockerMode.NONE
     ):
         raise ValueError("Egress allowlists require the dev service without Docker access")
-    validate_managed_bind_sources(config)
+    guest = not interactive and service == "dev"
+    if guest and options.docker_mode is DockerMode.AGENT:
+        raise RuntimeMountSpecificationError("djinn run cannot use the dev's agent Docker daemon")
+    source_check = _guest_source_check(config, options) if guest else None
+    if not guest:
+        validate_managed_bind_sources(config)
     # Fail before allocating a TTY: a background start would otherwise degenerate
     # into a SIGTTOU storm that kills the container. Headless runs pass -T and are
     # unaffected.
     if interactive and is_background_process_group():
         return RunResult(returncode=1, stderr=BACKGROUND_START_ERROR)
 
-    _validate_desktop_env(env)
+    if not guest:
+        _validate_desktop_env(env)
     project_root = get_project_root()
 
     # Build compose command
-    compose_files = get_compose_files(options.docker_mode)
+    compose_files = get_compose_files(options.docker_mode, guest=guest)
     # Map service to fixed container name (matches container_name in compose YAML)
-    container_name = _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
+    run_id = uuid4().hex[:12] if guest else None
+    container_name = (
+        f"djinn-run-{run_id}"
+        if guest else _SERVICE_CONTAINER_NAMES.get(service, f"djinn-{service}")
+    )
 
     cmd = [DOCKER_EXECUTABLE, "compose", *compose_files, "run", "--rm", "--name", container_name]
+    if guest:
+        cmd.extend(["-l", f"{host_runtime.RUN_LABEL}={run_id}"])
 
     # TTY handling
     if not interactive:
@@ -2557,14 +2892,29 @@ def compose_run(
         cmd.extend(["-e", f"{key}={value}"])
 
     mounts = tuple(
-        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        ContainerMount(
+            source_check(mount.source, mount.target) if source_check else mount.source,
+            _normalize_mount_target(mount.target), mount.read_only,
+        )
         for mount in options.mounts
     )
-    shell_args = _canonicalize_runtime_mount_args(
-        get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
-    )
-    sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
-    zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+    try:
+        shell_args = _canonicalize_runtime_mount_args(
+            get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
+        )
+        sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
+        zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+        if source_check:
+            shell_args = _guest_mount_args(shell_args, source_check)
+            sops_args = _guest_mount_args(sops_args, source_check)
+            zone_overlay_args = _guest_mount_args(zone_overlay_args, source_check)
+    except _RUN_CHECK_ERRORS as exc:
+        if not guest or isinstance(exc, RunRefusedError):
+            raise
+        raise RunRefusedError(f"cannot verify managed bind sources: {exc}; refusing") from exc
+    if guest:
+        _validate_desktop_env(env)
+        validate_managed_bind_sources(config)
     declarations = resolve_declared_entries(
         config,
         options,
@@ -2578,6 +2928,12 @@ def compose_run(
         caller_env=env,
     )
     declarations.require_valid()
+    if source_check:
+        declarations.mounts = [
+            replace(mount, source=str(source_check(mount.source, mount.target)))
+            if mount.kind == "bind" else mount
+            for mount in declarations.mounts
+        ]
     validate_container_mounts(
         mounts,
         config,
@@ -2586,6 +2942,8 @@ def compose_run(
         sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
+    if guest and options.docker_mode is DockerMode.DIRECT:
+        _guest_direct_check()
 
     if options.egress is not None:
         validate_egress_inputs(config, mounts, env)
@@ -2628,6 +2986,32 @@ def compose_run(
         )
     if service == "dev" and options.docker_mode is DockerMode.AGENT:
         _prepare_workspace(config, options, declarations, mounts, fragment)
+    if guest:
+        with (
+            signals_as_interrupt(),
+            _compose_override(fragment, prefix="djinn-run-") as override_path,
+        ):
+            args = [*compose_files, "-f", str(override_path)]
+            cmd[2 : 2 + len(compose_files)] = args
+            resolved = _run_preflight(args, config, project_root, host_env)
+            _guest_source_check(config, options, resolved=resolved, mount_args=cmd)
+            try:
+                result = subprocess.run(
+                    cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    cwd=project_root, env=host_env, timeout=timeout, check=False,
+                )
+                return RunResult(result.returncode, stdout=result.stdout, stderr=result.stderr)
+            except subprocess.TimeoutExpired as exc:
+                assert timeout is not None
+                stdout, stderr = _decode_timeout_output(exc, timeout)
+                return RunResult(124, stdout=stdout, stderr=stderr)
+            except FileNotFoundError as exc:
+                return RunResult(127, stderr=f"Docker command not found: {exc}")
+            except PermissionError as exc:
+                return RunResult(126, stderr=f"Permission denied: {exc}")
+            finally:
+                assert run_id is not None
+                _remove_run(run_id, 10)
     owner_context = git_runtime(config, container_name) if service == "dev" else nullcontext(None)
     with owner_context as git_delivery:
         if git_delivery is not None:
@@ -2702,8 +3086,10 @@ def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
         if expecting_spec:
             specs.append(arg)
             expecting_spec = False
-        elif arg == "-v":
+        elif arg in {"-v", "--volume"}:
             expecting_spec = True
+        elif arg.startswith("--volume="):
+            specs.append(arg.split("=", 1)[1])
     return specs
 
 
@@ -3034,25 +3420,6 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         return RunResult(
                             1, stderr="runtime volume ownership changed; preserving resources"
                         )
-                if "agent_docker" in state:
-                    listed = _run_captured(
-                        [
-                            DOCKER_EXECUTABLE,
-                            "ps",
-                            "-aq",
-                            "--no-trunc",
-                            "--filter",
-                            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
-                        ],
-                        timeout=5,
-                    )
-                    owned = {r["id"] for r in state["resources"].values()}
-                    if state.get("dev_id"):
-                        owned.add(state["dev_id"])
-                    if not listed.success or set(listed.stdout.split()) - owned:
-                        return RunResult(
-                            1, stderr="unknown project resources; preserving resources"
-                        )
             # Diagnostic discovery must never change clean's outcome.
             candidates: list[post_mortem.Candidate] = []
             compose_targets: set[str] = set()
@@ -3099,6 +3466,38 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                     "clean", docker_path=DOCKER_EXECUTABLE, candidates=candidates,
                     runtime_generation=state["generation"] if state else None,
                 )
+            runs = _run_captured(
+                [
+                    DOCKER_EXECUTABLE, "ps", "-aq", "--no-trunc", "--filter",
+                    f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                    "--filter", f"label={host_runtime.RUN_LABEL}",
+                ],
+                timeout=5,
+            )
+            if not runs.success:
+                return RunResult(1, stderr="Cannot list djinn runs; preserving resources")
+            for identifier in runs.stdout.split():
+                if not _remove_run(identifier, 3):
+                    return RunResult(1, stderr=f"Could not remove djinn run {identifier}")
+            if state and "agent_docker" in state:
+                listed = _run_captured(
+                    [
+                        DOCKER_EXECUTABLE,
+                        "ps",
+                        "-aq",
+                        "--no-trunc",
+                        "--filter",
+                        f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                    ],
+                    timeout=5,
+                )
+                owned = {r["id"] for r in state["resources"].values()}
+                if state.get("dev_id"):
+                    owned.add(state["dev_id"])
+                if not listed.success or set(listed.stdout.split()) - owned:
+                    return RunResult(
+                        1, stderr="unknown project resources; preserving resources"
+                    )
             hostctl.stop_helper_locked(remove=True)
             actual = host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
             if actual is not None:
@@ -3164,6 +3563,21 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                             )
             if not result.success:
                 return result
+            network_name = f"{COMPOSE_PROJECT}_default"
+            network = host_runtime.inspect_object(
+                network_name, DOCKER_EXECUTABLE, "network",
+                missing=f"network {network_name} not found",
+            )
+            if network is not None:
+                network_labels: dict[str, Any] = network.get("Labels") or {}
+                if (
+                    network_labels.get("com.docker.compose.project") == COMPOSE_PROJECT
+                    and network_labels.get("com.docker.compose.network") == "default"
+                ):
+                    if not delete_network(str(network["Id"])):
+                        return RunResult(1, stderr="Could not remove the run network")
+                else:
+                    warning(f"Skipping {network_name}: network ownership does not match")
             if state is not None:
                 if not host_runtime.cleanup_owned(root, state["generation"], DOCKER_EXECUTABLE):
                     return RunResult(1, stderr="runtime ownership changed during clean")

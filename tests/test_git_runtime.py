@@ -12,15 +12,62 @@ from pathlib import Path
 
 import pytest
 
-from djinn_in_a_box.core import host_runtime, post_mortem
+from djinn_in_a_box.core import host_runtime, host_sealing, post_mortem
 from djinn_in_a_box.core.git_agent import agent_keys
 from djinn_in_a_box.core.host_runtime import (
     GENERATION_LABEL,
     git_runtime,
+    inspect_object,
     runtime_root,
     stop_owned_process,
 )
 from djinn_in_a_box.core.ssh_delivery import GitSSHError, read_public_delivery
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error response from daemon: get X: no such volume",
+        "Error response from daemon: No such container: X",
+        "NO SUCH image: X",
+    ],
+)
+def test_inspect_object_default_missing_match_is_unchanged(monkeypatch, stderr):
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", stderr)
+    )
+    assert inspect_object("X", "/fake/docker", "volume") is None
+
+
+@pytest.mark.parametrize(
+    "stderr, missing, absent",
+    [
+        ("Error response from daemon: No such container: X", "No such container", True),
+        ("Error: No such container: X", "No such container", True),
+        ("open /x: no such file or directory", "No such container", False),
+        ("Error response from daemon: get X: no such volume", "No such container", False),
+        ("permission denied", "No such container", False),
+        ("Error response from daemon: no such container: X", "No such container", False),
+        ("Error response from daemon: No such container: X", "no such", False),
+        ("Error response from daemon: get X: no such volume", "no such", True),
+        ("Error response from daemon: network X not found", "network X not found", True),
+    ],
+)
+def test_inspect_object_explicit_missing_is_case_sensitive(monkeypatch, stderr, missing, absent):
+    calls = []
+
+    def inspect(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 1, "", stderr)
+
+    monkeypatch.setattr(subprocess, "run", inspect)
+    if absent:
+        assert inspect_object("X", "/fake/docker", missing=missing, timeout=1.25) is None
+    else:
+        with pytest.raises(GitSSHError, match="Docker inspection failed"):
+            inspect_object("X", "/fake/docker", missing=missing, timeout=1.25)
+    assert calls[0][0] == ["/fake/docker", "container", "inspect", "X"]
+    assert calls[0][1]["timeout"] == 1.25
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +88,8 @@ def fake_docker(git_inputs, monkeypatch):
         "if state.exists():\n"
         "    print(state.read_text())\n"
         "else:\n"
-        "    print('Error: No such container', file=sys.stderr)\n"
+        "    print('Error response from daemon: No such container: ' + sys.argv[-1],\n"
+        "          file=sys.stderr)\n"
         "    sys.exit(1)\n"
     )
     binary.chmod(0o700)
@@ -430,3 +478,39 @@ def test_shared_state_parent_stays_private_under_a_permissive_umask(git_inputs, 
     assert stat.S_IMODE(parent.stat().st_mode) & 0o022 == 0
     monkeypatch.setenv("XDG_STATE_HOME", str(parent.parent))
     assert hostctl.state_root().parent == parent
+
+
+def test_live_runtime_control_files_are_private(git_inputs, fake_docker, monkeypatch):
+    root = runtime_root()
+    assert root.is_relative_to(Path(os.environ["DJINN_TEST_PASSWD_HOME"]))
+    writes = set()
+    original_open = Path.open
+
+    def record_open(path, mode="r", *args, **kwargs):
+        if path.is_relative_to(root) and any(flag in mode for flag in "wax+"):
+            writes.add(path)
+        return original_open(path, mode, *args, **kwargs)
+
+    # Include state.tmp, which is renamed away before a directory snapshot can see it.
+    monkeypatch.setattr(Path, "open", record_open)
+    with git_runtime(git_inputs, "djinn") as runtime:
+        observed_dev(fake_docker, runtime)
+        runtime.retain()
+        runtime.detached = False
+        private = set(host_sealing.private_state_paths().values())
+        files = {path for path in root.rglob("*") if not path.is_dir()} | writes
+        files = {
+            path for path in files
+            if path.relative_to(root).parts[0] not in {"public", "export"}
+        }
+        assert root / "private/agent.sock" in files
+        assert root / host_runtime.STATE_TMP in files
+        assert root / host_runtime.ATTACHED in files
+        assert all(
+            any(path == entry or entry in path.parents for entry in private) for path in files
+        )
+        controls = {
+            path for path in private
+            if path.is_relative_to(root) and path.relative_to(root).parts[0] != "private"
+        }
+        assert controls == {path for path in files if path.parent == root}

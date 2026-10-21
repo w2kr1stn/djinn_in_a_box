@@ -11,7 +11,6 @@ import pwd
 import re
 import secrets
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -31,6 +30,7 @@ from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
 from djinn_in_a_box.core import post_mortem
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
 from djinn_in_a_box.core.lock_holders import describe_holders
+from djinn_in_a_box.core.signals import signals_as_interrupt as _signals_as_interrupt
 
 if TYPE_CHECKING:
     from djinn_in_a_box.core.docker import RunResult
@@ -121,10 +121,13 @@ def command(*args: str, timeout: float = 5) -> str:
     return result.stdout
 
 
-def inspect_helper() -> dict[str, Any] | None:
+def inspect_helper(*, strict: bool = False) -> dict[str, Any] | None:
     from djinn_in_a_box.core.host_runtime import inspect_object
 
-    value = inspect_object(HELPER_NAME, DOCKER_EXECUTABLE)
+    value = (
+        inspect_object(HELPER_NAME, DOCKER_EXECUTABLE, missing="No such container")
+        if strict else inspect_object(HELPER_NAME, DOCKER_EXECUTABLE)
+    )
     if value is not None:
         labels: dict[str, Any] = value.get("Config", {}).get("Labels") or {}
         if not labels.get(GENERATION_LABEL):
@@ -846,26 +849,6 @@ CHECK_INCOMPLETE = "hostctl check state is incomplete; run djinn doctor"
 def _stdio_is_terminal() -> bool:
     """Both streams the owner needs for the approval prompt; stdout may be redirected."""
     return sys.stdin.isatty() and sys.stderr.isatty()
-
-
-@contextlib.contextmanager
-def _signals_as_interrupt() -> Iterator[None]:
-    """Treat SIGTERM/SIGHUP like Ctrl-C so cleanup runs; handlers are restored afterwards."""
-
-    def interrupt(signum: int, frame: Any) -> None:
-        raise KeyboardInterrupt
-
-    previous: dict[int, Any] = {}
-    try:
-        for number in (signal.SIGTERM, signal.SIGHUP):
-            previous[number] = signal.signal(number, interrupt)
-    except ValueError:  # not the main thread: nothing to convert
-        pass
-    try:
-        yield
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler if handler is not None else signal.SIG_DFL)
 
 
 def _live_helper() -> tuple[str, str]:

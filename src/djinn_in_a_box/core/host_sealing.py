@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple, cast
@@ -380,6 +381,62 @@ def volume_bind_source(mount: dict[str, Any]) -> str | None:
     raise ValueError(f"volume storage provenance unknown: {mount['Name']}")
 
 
+def _private_state_roots() -> dict[str, Path]:
+    controller = hostctl.state_root(create=False)
+    return {
+        "host controller/journal": controller,
+        "serve state": controller.parent / "serve",
+        "post-mortem records": post_mortem.records_root(create=False),
+    }
+
+
+def private_state_paths() -> dict[str, Path]:
+    """Private host state, excluding the public runtime deliveries."""
+    roots = _private_state_roots()
+    return {
+        "host controller/journal": roots["host controller/journal"],
+        "journal": roots["host controller/journal"] / "journal.jsonl",
+        "serve state": roots["serve state"],
+        "post-mortem records": roots["post-mortem records"],
+        "private agent": host_runtime.runtime_root() / "private",
+        "private agent socket": host_runtime.runtime_root() / "private/agent.sock",
+        "host runtime control": host_runtime.runtime_root() / host_runtime.STATE_FILE,
+        "host runtime temporary state": host_runtime.runtime_root() / host_runtime.STATE_TMP,
+        "host runtime creator lock": host_runtime.runtime_root() / host_runtime.CREATOR_LOCK,
+        "host runtime ready": host_runtime.runtime_root() / host_runtime.READY,
+        "host runtime attached": host_runtime.runtime_root() / host_runtime.ATTACHED,
+        "host runtime loaded": host_runtime.runtime_root() / host_runtime.LOADED,
+        "host runtime observer log": host_runtime.runtime_root() / host_runtime.OBSERVER_LOG,
+    }
+
+
+def docker_storage_roots(*, timeout: float = 5, strict: bool = False) -> tuple[Path, Path]:
+    """Return Docker's data root and the helper volume's backing storage."""
+    info = json.loads(hostctl.command("info", "--format", "{{json .}}", timeout=timeout))
+    data_root = canonical(info["DockerRootDir"])
+    volume = host_runtime.inspect_object(
+        hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume", timeout=timeout,
+        **({"missing": "no such volume"} if strict else {}),
+    )
+    backing = canonical(volume["Mountpoint"]) if volume is not None else data_root
+    return data_root, backing
+
+
+def protected_host_roots(
+    identities: Iterable[Path] = (), *, timeout: float = 30
+) -> dict[str, Path]:
+    """Broad host-path protection for runs, including all runtime deliveries."""
+    data_root, backing = docker_storage_roots(timeout=timeout, strict=True)
+    return {
+        "host runtime": host_runtime.runtime_root(),
+        **_private_state_roots(),
+        "Docker data root": data_root,
+        "helper backing storage": backing,
+        **{f"key file {index}": path for index, path in enumerate(identities)},
+        **{f"Docker socket {index}": path for index, path in enumerate(docker_sockets())},
+    }
+
+
 def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = None) -> Assessment:
     from djinn_in_a_box.core import docker
 
@@ -407,21 +464,14 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         networks = cast(dict[str, Any], networks)
         environment = agent_docker.inspected_environment(env)
         home = canonical(pwd.getpwuid(os.getuid()).pw_dir)
-        info = json.loads(hostctl.command("info", "--format", "{{json .}}"))
-        data_root = canonical(info["DockerRootDir"])
-        volume = host_runtime.inspect_object(
-            hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume"
-        )
-        backing = canonical(volume["Mountpoint"]) if volume is not None else data_root
-        private = {
-            "host controller/journal": canonical(hostctl.state_root(create=False)),
-            "journal": canonical(hostctl.state_root(create=False) / "journal.jsonl"),
-            "serve state": canonical(hostctl.state_root(create=False).parent / "serve"),
-            "post-mortem records": canonical(post_mortem.records_root(create=False)),
-            "private agent": canonical(host_runtime.runtime_root() / "private"),
-            "private agent socket": canonical(host_runtime.runtime_root() / "private/agent.sock"),
-            "host runtime control": canonical(host_runtime.runtime_root() / "runtime.json"),
-        }
+        data_root, backing = docker_storage_roots()
+        private: dict[str, Path] = {}
+        private_errors: list[Exception] = []
+        for name, path in private_state_paths().items():
+            try:
+                private[name] = canonical(path)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                private_errors.append(exc)
         execution: dict[str, tuple[Path, str, str]] = {}
         execution_error: Exception | None = None
         try:
@@ -577,6 +627,8 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         if unverified_endpoint:
             causes.append(Finding("Unverified Docker endpoint exposed in dev environment"))
         authority = any(f.kind in DOCKER_AUTHORITY_KINDS for f in causes) or unverified_endpoint
+        if not authority:
+            errors.extend(Finding(f"inspection uncertain: {exc}") for exc in private_errors)
         if execution_error is not None and not authority:
             errors.append(Finding(f"inspection uncertain: {execution_error}"))
         if not inspection.raw_sources and not authority:
@@ -635,14 +687,33 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
                     _require_root(host_file(source))
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     errors.append(Finding(f"bind inspection uncertain: {exc}"))
-        # A socket-bearing/proxy container on an attached network grants Docker
-        # authority regardless of how this dev was originally started.
+        # A run with Docker authority affects sealing even on a separate network.
+        socket_paths = {str(path) for path in sockets} | {"/var/run/docker.sock"}
         for other_id in hostctl.command("ps", "-q").split():
-            if other_id == identity:
-                continue
-            other = host_runtime.inspect_object(other_id, hostctl.DOCKER_EXECUTABLE)
+            other = host_runtime.inspect_object(
+                other_id, hostctl.DOCKER_EXECUTABLE, missing="No such container"
+            )
             if other is None:
-                raise ValueError("network peer disappeared during Docker inspection")
+                continue
+            if other.get("Id") == identity:
+                continue
+            other_config = cast(dict[str, Any], other.get("Config") or {})
+            if host_runtime.RUN_LABEL in (other_config.get("Labels") or {}):
+                socket_mount = any(
+                    str(mount.get(field)) in socket_paths
+                    for mount in cast(list[dict[str, Any]], other.get("Mounts") or [])
+                    for field in ("Source", "Destination")
+                )
+                docker_host = any(
+                    entry.startswith("DOCKER_HOST=") and entry != "DOCKER_HOST="
+                    for entry in cast(list[str], other_config.get("Env") or [])
+                )
+                if socket_mount or docker_host:
+                    causes.append(
+                        Finding(
+                            f"Docker authority in a running djinn run {other.get('Name', other_id)}"
+                        )
+                    )
             if verified.kind == "agent" and other["Id"] == verified.companion_id:
                 continue
             shared = set(networks).intersection(other["NetworkSettings"]["Networks"])

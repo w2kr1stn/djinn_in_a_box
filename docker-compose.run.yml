@@ -1,0 +1,5 @@
+# Runs are guests on the Compose default network.
+# Requires Docker Compose 2.24.4 for !override.
+services:
+  dev:
+    networks: !override [default]

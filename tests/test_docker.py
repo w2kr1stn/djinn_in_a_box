@@ -63,6 +63,8 @@ from djinn_in_a_box.core.docker import (
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 
+pytestmark = pytest.mark.usefixtures("legacy_guest_inputs")
+
 
 def _empty_mount_args(_config: AppConfig | None = None) -> list[str]:
     return []
@@ -3249,7 +3251,7 @@ def test_override_for_helper_service_has_no_ports(
 
 @pytest.mark.parametrize("interactive", [True, False], ids=["interactive", "headless"])
 def test_compose_run_has_no_published_ports(
-    monkeypatch, declared_creator, generated_overrides, interactive,
+    monkeypatch, declared_creator, generated_overrides, interactive, compose_yaml_loader,
 ):
     commands, payloads = [], []
 
@@ -3271,7 +3273,7 @@ def test_compose_run_has_no_published_ports(
     assert not {"-p", "--publish", "--service-ports"}.intersection(run_args)
     root = Path(__file__).resolve().parents[1]
     for path in root.glob("docker-compose*.yml"):
-        services = yaml.safe_load(path.read_text())["services"]
+        services = yaml.load(path.read_text(), Loader=compose_yaml_loader)["services"]
         assert all("ports" not in service for service in services.values())
 
 
@@ -3492,7 +3494,7 @@ def test_generated_overrides_match_real_creation(
         assert generated_overrides(["-f", str(path)], prefix) == [path]
 
 
-def test_compose_reservations_match(tmp_path, monkeypatch):
+def test_compose_reservations_match(tmp_path, monkeypatch, compose_yaml_loader):
     import socket
 
     import yaml
@@ -3504,7 +3506,10 @@ def test_compose_reservations_match(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
     keys, names = set(), set()
     for path in root.glob("docker-compose*.yml"):
-        data = yaml.safe_load(path.read_text())
+        data = yaml.load(path.read_text(), Loader=compose_yaml_loader)
+        if path.name == "docker-compose.run.yml":
+            assert set(data) == {"services"}
+            assert data["services"] == {"dev": {"networks": ["default"]}}
         for service in data["services"].values():
             environment = service.get("environment", {})
             keys.update(
@@ -3872,7 +3877,14 @@ def test_egress_real_override_and_default_compose_contract(egress_compose):
     assert not {"user", "entrypoint", "extra_hosts"}.intersection(default["services"]["dev"])
     assert "DJINN_EGRESS_ALLOW" not in default["services"]["dev"]["environment"]
     assert "ENABLE_FIREWALL=false" in observed[-1][0]
-    discover.assert_called_once_with()
+    discover.assert_not_called()
+    helper.assert_not_called()
+    assert not any(name.startswith("desktop-") for name in default.get("volumes", {}))
+    assert not any(name.startswith("desktop-") for name in default["services"])
+    assert all(
+        default["services"]["dev"]["environment"][name] is None
+        for name in docker_mod.desktop.MANAGED_ENV
+    )
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ stores, and local command choices remain outside the published source.
 ├── docker-compose.yml
 ├── docker-compose.agent-docker.yml
 ├── docker-compose.docker-direct.yml
+├── docker-compose.run.yml
 ├── docs/
 │   ├── design/
 │   │   └── CLI_DESIGN_SYSTEM.md
@@ -674,8 +675,9 @@ through `_run_compose()`. `compose_build()` is no compose call — it runs
 `--set dev.args.<ARG>=<version>` pairs before its targets only for recorded
 versions strictly above their upstream defaults. No overrides keep the existing
 argv. These are build args rather than runtime environment variables.
-`compose_run()` is the sanctioned interactive/headless run site; it also builds
-`host_env = _compose_host_env(config)` before calling `subprocess.run()`.
+`compose_run()` is the subprocess site for foreground starts and guest runs.
+It builds `host_env = _compose_host_env(config)` once; guests pass that same
+mapping to network preflight and `subprocess.run()`.
 When stdout or stderr is a TTY, `build_compose_env()` also renders
 `DJINN_TERM_WIDTH` from `shutil.get_terminal_size().columns`; otherwise that
 variable is left to inherited host environment or Compose defaults.
@@ -1042,7 +1044,8 @@ hook references, widened mounts and tools with host authority.
 
 `docker-compose.yml` defines a stable project name and one service:
 
-- `dev`: normal development container on `djinn-network`
+- `dev`: development container on `djinn-network`, or a guest run on the project
+  default network through `docker-compose.run.yml`
 
 There is no separate authentication service. Every bundled CLI signs in from
 inside a normal `dev` session: the tool prints a URL, the user opens it in the
@@ -1106,8 +1109,8 @@ Common mounts include:
 - named volumes for caches, OpenCode data, VS Code server state, and workspace
   metadata
 - read-only host `~/.gitconfig`
-- generated public SSH files at `/home/dev/.ssh` and the filtered Git agent export
-  directory at `/run/djinn-git-agent`, both read-only
+- for dev starts only, generated public SSH files at `/home/dev/.ssh` and the
+  filtered Git agent export at `/run/djinn-git-agent`, both read-only
 - the writable `config/claude` seed mount plus nested direct mounts for its
   workflow files, including `AGENTS.md`
 - the read-only `templates/claude/CLAUDE.md` bridge at `/home/dev/.claude/CLAUDE.md`
@@ -1184,9 +1187,9 @@ are validated; conflicting original basenames and reserved filenames refuse.
 survive. No keyscan or implicit host SSH config is used. Exact alias blocks select
 `IdentityAgent`, an original-name public `IdentityFile` and `IdentitiesOnly yes`.
 
-Both Compose creators acquire the same runtime before launch and append its one
-internal mount/environment fragment to declared delivery. Only `public/` and
-`export/` are bound, never `private/` or the runtime parent. The generated directory
+Foreground and detached dev starts acquire the same runtime before launch and
+append its one internal mount/environment fragment to declared delivery. Only
+`public/` and `export/` are bound, never `private/` or the runtime parent. The generated directory
 inode stays stable; files are replaced atomically. Generated targets and children,
 including `/var/run` aliases, and the emitted `SSH_AUTH_SOCK`/`DJINN_GIT_MANIFEST`
 variables are reserved against caller/declaration overrides.
@@ -1204,7 +1207,7 @@ or init service.
 
 A detached observer starts before loading, detects creator death during startup,
 then observes Docker's actual dev ID with a per-creation label. An inherited flock
-serializes pending creators and is released after ID handoff. The observer bounds
+serializes pending dev starts and is released after ID handoff. The observer bounds
 key loading at 120 seconds and container discovery at 60 seconds; the single
 `ssh-add` call itself is bounded at 120 seconds on a terminal and 10 seconds
 otherwise. CLI exit after detached handoff keeps the agent; foreground
@@ -1247,9 +1250,9 @@ failure at once. Djinn never execs into the companion itself: doctor and sealing
 still check its profile by host inspection against the trusted manifest, but take
 its liveness from the Docker status, which lags accordingly.
 
-`core/host_runtime.py` always takes the canonical creation guard, including without
-Git identities. Generation labels, actual container IDs and persisted ownership
-coordinate creation, clean, and the detached observer's helper stop/start/remove
+For dev starts, `core/host_runtime.py` always takes the canonical creation guard,
+including without Git identities. Generation labels, actual container IDs and
+persisted ownership coordinate creation, clean, and the detached observer's helper stop/start/remove
 transitions. Docker's absolute executable is resolved once and passed to the
 isolated observer. Empty Git identities still create no agent, keys or SSH mounts.
 Unknown Docker state and replacement generations authorize no resource cleanup.
@@ -1357,10 +1360,14 @@ construction-error problems are unchanged.
 `validate_managed_bind_sources(config)` raises `MountSpecificationError` with the
 first problem.
 
-Both `compose_run()` and `compose_up_detached()` call this wrapper first, in every
-Docker mode, before shell/SOPS/zone mount builders, declared/invocation validators,
-workspace preparation, companions, helpers or temporary overrides. These creator
-gates also cover direct callers and headless runs.
+For dev starts, `compose_run()` and `compose_up_detached()` call this wrapper in
+every Docker mode, before shell/SOPS/zone mount builders, declared/invocation
+validators, workspace preparation, companions, helpers or temporary overrides.
+Guests first check phase-1 user and declared sources, then build shell/SOPS/zone
+mounts and check their sources. Next come `validate_managed_bind_sources()`,
+the declared/invocation validators and the DIRECT helper check, then preflight
+and the phase-2 source check described under [Guest runs](#guest-runs).
+These source-validation gates also cover direct callers.
 
 When a mount exists, `compose_run()` uses the first mount target as
 `--workdir`. With no mount it omits `--workdir`, so the Compose service's
@@ -1396,8 +1403,8 @@ Declared mounts follow the three-layer configuration boundary: fixed built-ins
 (workspace, config root, SOPS key file, OMP theme), then additive declarations.
 Declarations never replace, redirect, disable or remove built-ins.
 
-`resolve_declared_entries()` is shared by `compose_run()` (interactive and
-headless) and `compose_up_detached()`, before any creation subprocess or temporary
+`resolve_declared_entries()` is shared by foreground starts, guest runs and
+`compose_up_detached()`, before any creation subprocess or temporary
 override. It resolves bind symlinks, checks that the absolute colon-free source
 exists as a directory, and inspects an optional marker directly under it with
 `lstat`: a regular file passes; a missing marker, directory or symlink refuses
@@ -1408,7 +1415,7 @@ and retains its behavior even on a path overlapping a declared source. Validatio
 can race a disappearing drive; there is no mount-liveness protocol.
 
 Targets use the existing canonicalizer and `_reserved_mount_targets`, with the
-union of all Docker modes for declarations in start/run/doctor. Equality and
+union of all Docker modes for declarations in start, run and doctor. Equality and
 declared ancestors of built-in/reserved/zone/active-workspace/invocation targets
 are refused; declared pairs cannot nest. Children otherwise remain allowed,
 except at or below `MANAGED_TARGET_ROOTS`, the same set used by invocation mounts.
@@ -1436,15 +1443,17 @@ boundary. Environment values are literal strings with no host override or
 interpolation. Literal endpoints, including a CDP gateway, need manual edits
 when the host gateway changes.
 
-Both creators serialize the same temporary Compose fragment: long-form binds
-with `bind.create_host_path: false` and `read_only: true` only for read-only binds,
+Foreground starts, guest runs and detached starts serialize the same declaration
+fragment: long-form binds with `bind.create_host_path: false` and
+`read_only: true` only for read-only binds,
 volumes with actual sources and top-level
 `volumes: {djinn-<name>: {name: djinn-<name>}}`, and a dev environment mapping.
 Each `$` is escaped as `$$` in Compose-bound strings without mutating config.
 The override is removed in `finally` on success, failure and timeout. Existing
 invocation flags and working-directory selection remain independent of declarations.
-Declared environment applies only to dev creation; workspace declarations also feed
-the companion. Neither applies to builds or raw archive helpers.
+Declared environment applies to the dev service, including guest runs; workspace
+declarations also feed the companion on dev starts. Neither applies to builds
+or raw archive helpers.
 `_prepare_workspace` forwards the resolved access mode into `WorkspaceMount` for
 identical dev and companion delivery.
 `session` and `enter` inherit the running container; edits affect the next
@@ -1464,6 +1473,62 @@ Doctor reports exactly one PASS/FAIL per declared mount/environment key using
 the same diagnostics; valid read-only binds say `valid declaration (read-only)`,
 including retained valid binds next to invalid declarations. It never repairs
 declared sources, markers or volumes.
+
+### Guest runs
+
+For `service="dev"`, `compose_run(..., interactive=False)` takes the guest branch
+and returns a `RunResult` with `owner=None`. `DockerMode.AGENT` raises
+`RuntimeMountSpecificationError` before side effects. Each run uses
+`djinn-run-<12 hex>` and `djinn.run=<same id>`, retains the Compose project
+`djinn-in-a-box`, service `dev` and `--rm -T`, and adds no Git generation label.
+It never acquires the creator lock or enters `git_runtime()`, prepares companions
+or desktop helpers, or calls the hostctl start guard. A dev and other runs can
+coexist; a run does not block dev creation. The shared mount/declaration builders,
+workflow delivery and firewall remain available. See [the run contract](README.md#quickstart)
+for delivery limits and [exit/cleanup behavior](README.md#container-entry-points).
+
+`get_compose_files(docker_mode, guest=True)` places `docker-compose.run.yml`
+after the base, desktop and Docker-direct files, before the generated override.
+Its `services.dev.networks: !override [default]` requires Compose 2.24.4. The
+same argument prefix, captured host environment and project cwd feed
+`_run_preflight()` and the run. Preflight resolves `config --format json` with a
+30 s timeout. It requires exactly the `default` service network, no
+`network_mode`, and a top-level default network named `djinn-in-a-box_default`
+with only `name` and empty `ipam`. Resolution errors or any other network
+configuration raise `RunRefusedError`. Resolution failures report the actual
+return code and last non-empty stderr line, or the exception if Compose could
+not run. Network/JSON failures retain the Compose version/fragment diagnostic.
+
+`_guest_source_check()` checks protected sources before execution-input
+validation, then checks every bind in the resolved Compose configuration plus
+the run's `-v` mounts. It substitutes resolved sources in invocation and declared
+mounts, preserving targets, and checks base binds without rewriting them.
+Phase 2 allows only data/cache volume names (excluding `agent_docker.CACHE`) and
+declared volumes in any backup category. It strictly inspects existing volumes
+and uses `host_sealing.volume_bind_source()` to check bind devices as bind sources
+and refuse unknown storage provenance; absent volumes may be created by Compose.
+Resolved sources containing `:` are refused.
+The broad `host_sealing.protected_host_roots()` inventory includes the runtime
+root; `private_state_paths()` keeps the narrower sealing map, derived from the
+runtime constants, including `state.json` and all control files but excluding
+`public/` and `export/`. `docker_storage_roots()` supplies the shared data-root
+and helper-volume inventory; absent helper storage defaults to the data root.
+Strictly resolved run sources are compared lexically with these storage roots,
+without an identity probe into inaccessible Docker directories. Protected-source
+or inspection failures raise `RunRefusedError`. DIRECT mode also checks the
+helper under `hostctl.control_guard()` and refuses while it is running. The
+[security model](SECURITY-MODEL.md#guest-runs) owns the source policy and residuals.
+
+A `finally` block calls `_remove_run(id, 10)` after every launched run.
+It checks the exact name, run ID label, project and service labels before
+pinning the Docker ID for stop and force-removal. The initial inspect retries
+once; failed identity checks authorize no removal. Stop errors do not prevent
+a force-remove attempt on the verified ID. Warnings are collected until cleanup
+finishes, and output errors cannot interrupt it. `core/signals.py` supplies
+`signals_as_interrupt()` around temporary override creation, preflight, launch
+and cleanup, and `signals_ignored()` during removal; previous handlers are
+restored and non-main threads are unchanged.
+Non-dev services retain their existing headless path.
 
 ## Hostctl helper
 
@@ -1496,9 +1561,9 @@ commits admission over private IPC. PID 1 refuses replacement routes within
 that generation and checks both persisted state and deadline on admission.
 Status reports open only after PID 1 acknowledges admission.
 
-The public SSH renderer composes a tailnet Include before Git aliases, including
-when no Git identities exist. Opening atomically refreshes only the tailnet
-files in the mounted directory. The dev image's `djinn-hostctl-connect` uses
+For dev starts only, the public SSH renderer composes a tailnet Include before
+Git aliases, including when no Git identities exist. Opening atomically refreshes
+only the tailnet files in the mounted directory. The dev image's `djinn-hostctl-connect` uses
 SOCKS5 without a direct connection fallback. Each relay stream has structured
 start/end records in the rotated Docker log.
 
@@ -1580,9 +1645,9 @@ documented exact cache key across source node, SSH user and destination. With
 connection. Each check runs `true` as the target user and appears in the relay
 log and the target's auth log.
 
-`core/host_sealing.py` supplies the shared assessment for on, doctor and both
-creators. It reads actual ID, mounts, environment and network peers, canonicalizes
-host sources/aliases, and consumes the desktop provenance inspector. Assessment
+`core/host_sealing.py` supplies the shared assessment for on, doctor, foreground
+and detached dev starts. It reads actual ID, mounts, environment and network
+peers, canonicalizes host sources/aliases, and consumes the desktop provenance inspector. Assessment
 stores the ordered sealing findings with their bind, class and item, derives the
 per-item `cause_details` and `error_details` from them, and derives grouped
 `causes` and `errors` for status, refusals, warnings, journal records and
@@ -1608,15 +1673,17 @@ uses the same probe with current/cached peers without starting a helper.
 See [direct routes and target authority](SECURITY-MODEL.md#direct-routes-and-target-authority)
 for the host prerequisite and diagnostic limits.
 
-Both creators inspect resolved Compose delivery before launch. Unsealed delivery
-closes and verifies the helper; sealed delivery pauses admission via private IPC.
+Foreground and detached dev starts inspect resolved Compose delivery before
+launch. Unsealed delivery closes and verifies the helper; sealed delivery pauses
+admission via private IPC.
 The existing asynchronous observer inspects the actual created dev and probes
 outside the control lock, then re-inspects dev and companion IDs/profile under the lock before
 admitting/resuming. Planned and actual assessments carry companion generation,
 network ID and profile fingerprint; opening and commit bind the same evidence.
 The observer revalidates the companion throughout an open window and closes on
 replacement, profile/storage/network drift or inspection uncertainty. Pause preserves immutable routes and helper-owned deadlines;
-creator starts never inherit an override. External replacement/removal closes.
+dev starts never inherit an override. Guest runs bypass this close/pause path;
+see [their boundary](SECURITY-MODEL.md#guest-runs). External replacement/removal closes.
 
 On external dev stop/removal/replacement, the observer stops the helper and
 journals closure first, then releases the control guard before recording
@@ -1811,8 +1878,15 @@ that prepend the tools library directory only for their real binaries in
   from any copy of the repo — a test sandbox, an agent's scratch checkout — would
   otherwise destroy the live session, and the socket is mounted so anything in the
   container can trigger it. Teardown from the host is unaffected. Agent generations are removed by exact owned IDs after ownership checks; their
-  clean path preserves foreign resources. Other modes retain Compose teardown for
-  the base services, with explicit removal of the one-off dev container.
+  clean path refuses unknown project resources. Before that check, explicit run
+  removal calls `_remove_run(id, 3)` for project-labelled runs, verifying the
+  name/run/project/service labels and using the same stop/remove sequence as run
+  cleanup. Failure to list or remove runs fails clean. Mismatches warn and skip
+  explicit removal; normal `down --remove-orphans` can still remove containers
+  carrying project labels. Other modes retain that Compose teardown for the base
+  services, with explicit removal of the one-off dev container. Both branches
+  remove `djinn-in-a-box_default` after verifying project/default-network labels.
+  A run started during clean remains a [residual](SECURITY-MODEL.md#guest-runs).
   Before the first mutation, recording (`clean`) covers every container labelled
   with the Compose project plus recorded runtime resources, even without runtime
   state. A stale recorded dev ID does not hide a project-owned stopped dev.
@@ -1864,8 +1938,9 @@ removal. Other operations retain their deadlines, including the 5 s runtime
 command default, desktop fallback and hostctl removals, and 15 s Compose down.
 A removal timeout says `Docker is still removing <container|volume> <id or name>
 after 60 s; the daemon may finish it in the background. Retrying is safe.`
-Start/run propagate `GitSSHError` to the CLI's `Internal runtime mount
-construction failed: <message>` route. Clean's direct dev timeout returns
+Dev starts propagate `GitSSHError` to the CLI's `Internal runtime mount
+construction failed: <message>` route. Guest refusals use `RunRefusedError`,
+which the run CLI prints with exit 1. Clean's direct dev timeout returns
 `RunResult(124, <message>)`; cleanup through `cleanup_owned` returns
 `RunResult(1, "Cleanup preserved resources: <message>")`. Recording precedes
 removal, so a removal timeout does not lose an already published record.
@@ -2339,14 +2414,17 @@ command string from `AgentConfig`. It appends the prompt template, which expands
 `$AGENT_PROMPT` inside the container. An explicit `model` takes precedence;
 otherwise the command uses `AgentConfig.default_model` when configured.
 
-`run()` loads app config and calls `validate_managed_bind_sources()` immediately
+`run()` refuses `--docker` with exit 1 before loading config or preparing workflow;
+[the diagnostic](README.md#docker-access-modes) names the supported alternatives.
+It then loads app config and calls `validate_managed_bind_sources()` immediately
 after `load_config()`, before `get_config_root()` or `prepare_config_workflow()`.
 It prints a `MountSpecificationError` through `error()` and exits 1; mount errors
 from this gate, source resolution and the creator are escaped with
 `rich.markup.escape()` before printing. It then
 runs the shared workflow preparation for Claude/Codex/OpenCode and accepts
 repeatable `--mount SRC[:DST[:ro|rw]]` values; `run_headless_agent()` loads the
-agent definitions, validates the requested agent and ensures the Docker network. Without an
+agent definitions and validates the requested agent without calling
+`ensure_network()`. Compose creates the guest network on demand. Without an
 explicit mount it keeps the implicit current-directory mount at
 `/home/dev/workspace`; with explicit mounts it uses their resolved targets and
 the first target as the workdir. It then calls

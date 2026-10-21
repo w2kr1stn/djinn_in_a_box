@@ -13,7 +13,7 @@ from djinn_in_a_box.core.host_runtime import GitRuntime
 from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
 
 
-@pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("kind", ["interactive", "detached"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "exception", "interrupt", "timeout"])
 def test_every_creator_public_fragment_and_lifetime(git_inputs, monkeypatch, kind, outcome):
     events, fragments = [], []

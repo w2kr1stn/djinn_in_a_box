@@ -77,6 +77,9 @@ def ground(tmp_path, monkeypatch, real_execution_paths):
     return AppConfig(code_dir=code, config_root=tmp_path / "config"), inputs, inventory
 
 
+pytestmark = pytest.mark.usefixtures("legacy_guest_inputs")
+
+
 def protect(inputs, path):
     inputs.clear()
     inputs["protected"] = (path, "execution input", "protected")
@@ -492,8 +495,12 @@ def create(kind, config, mode):
     return docker.compose_run(config, options, interactive=kind == "attached")
 
 
-@pytest.mark.parametrize("kind", ["attached", "headless", "detached"])
-@pytest.mark.parametrize("mode", list(docker.DockerMode))
+@pytest.mark.parametrize(("kind", "mode"), [
+    (kind, mode)
+    for kind in ("attached", "headless", "detached")
+    for mode in docker.DockerMode
+    if kind != "headless" or mode is not docker.DockerMode.AGENT
+])
 @pytest.mark.parametrize(
     "failure",
     ["overlap", "zones", "sessions", "default-root", "sessions-dotdot", "workspace-dotdot"],
@@ -531,10 +538,20 @@ def test_managed_refusal_precedes_all_creation(
         (docker, "resolve_declared_entries"),
         (docker, "validate_container_mounts"),
     ):
+        if kind == "headless" and name in {
+            "_validate_desktop_env", "get_project_root", "get_compose_files",
+            "get_shell_mount_args", "get_sops_age_key_mount_args",
+            "_zone_overlay_mount_args_and_targets",
+        }:
+            # Guest S3 checks collect these sources before execution-input validation.
+            continue
         spy = Mock(side_effect=AssertionError(f"unexpected {name}"))
         monkeypatch.setattr(obj, name, spy)
         spies.append(spy)
-    with pytest.raises(MountSpecificationError) as exc:
+    error_type = docker.RunRefusedError if kind == "headless" and failure == "zones" else (
+        MountSpecificationError
+    )
+    with pytest.raises(error_type) as exc:
         create(kind, config, mode)
     if failure == "overlap":
         assert str(exc.value) == expected("workspace", config.code_dir, config.code_dir)
@@ -542,16 +559,23 @@ def test_managed_refusal_precedes_all_creation(
         assert str(exc.value) == message
         assert not missing.exists()
     else:
-        assert str(exc.value).startswith(f"{LABELS['zones']} ")
-        assert "cannot be checked against host execution inputs (Invalid TOML" in str(exc.value)
-    if failure in {"overlap", "zones"}:
+        if kind == "headless":
+            assert "cannot verify managed bind sources" in str(exc.value)
+        else:
+            assert str(exc.value).startswith(f"{LABELS['zones']} ")
+            assert "cannot be checked against host execution inputs (Invalid TOML" in str(exc.value)
+    if failure == "overlap" or (failure == "zones" and kind != "headless"):
         inventory.assert_called_once_with()
     for spy in spies:
         spy.assert_not_called()
 
 
-@pytest.mark.parametrize("kind", ["attached", "headless", "detached"])
-@pytest.mark.parametrize("mode", list(docker.DockerMode))
+@pytest.mark.parametrize(("kind", "mode"), [
+    (kind, mode)
+    for kind in ("attached", "headless", "detached")
+    for mode in docker.DockerMode
+    if kind != "headless" or mode is not docker.DockerMode.AGENT
+])
 def test_literal_delivery_and_seed_exclusion(
     creators,
     monkeypatch,
@@ -600,7 +624,7 @@ def test_literal_delivery_and_seed_exclusion(
         assert all(spec.replace("$", "$$") in service["volumes"] for spec in raw)
     else:
         assert docker._volume_specs_from_mount_args(cmd) == raw
-        assert guard_specs == [raw]
+        assert guard_specs == ([] if kind == "headless" else [raw])
     if mode is docker.DockerMode.AGENT:
         companion = fragments[-1]["services"]["agent-docker"]
         for path in (config.code_dir, Path.home() / ".djinn/sessions"):
@@ -803,8 +827,12 @@ def test_doctor_contains_unexpandable_root(ground, quiet_doctor, monkeypatch):
     assert "Config root" in result.output
 
 
-@pytest.mark.parametrize("mode_args", [[], ["--docker"], ["--docker-direct"]])
-@pytest.mark.parametrize("argv", [["start"], ["start", "--detach"], ["run", "claude", "test"]])
+@pytest.mark.parametrize(("argv", "mode_args"), [
+    (argv, mode_args)
+    for argv in (["start"], ["start", "--detach"], ["run", "claude", "test"])
+    for mode_args in ([], ["--docker"], ["--docker-direct"])
+    if argv[0] != "run" or mode_args != ["--docker"]
+])
 @pytest.mark.parametrize(
     "failure",
     [

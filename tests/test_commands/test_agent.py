@@ -7,7 +7,7 @@ import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
@@ -29,6 +29,7 @@ from djinn_in_a_box.core.docker import (
     DockerMode,
     MountCollisionError,
     MountSpecificationError,
+    RunRefusedError,
     RunResult,
     WorkflowImageCompatibility,
 )
@@ -469,7 +470,6 @@ class TestRunCommand:
                 "djinn_in_a_box.commands.agent.workflow_image_compatible",
                 return_value=WorkflowImageCompatibility.COMPATIBLE,
             ),
-            patch("djinn_in_a_box.core.agent_runner.ensure_network", return_value=True),
             patch(
                 "djinn_in_a_box.core.agent_runner.load_agents",
                 return_value={"claude": claude_config},
@@ -623,14 +623,54 @@ class TestRunCommand:
 
         assert run_mocks["run"].call_args.kwargs["timeout"] == 300
 
-    def test_run_with_docker_flag(self, run_mocks: dict[str, Any]) -> None:
-        """Test run --docker enables docker option."""
+    def test_run_with_docker_flag(self, run_mocks: dict[str, Any], capsys) -> None:
+        """Refusal happens before config, workflow or runner work."""
         from djinn_in_a_box.commands.agent import run
 
-        with pytest.raises(typer.Exit):
+        with pytest.raises(typer.Exit) as caught:
             run(agent="claude", prompt="test", docker=True)
+        assert caught.value.exit_code == 1
+        run_mocks["run"].assert_not_called()
+        output = capsys.readouterr().err
+        assert "djinn run cannot use --docker:" in output
+        assert "--docker-direct (host Docker authority)" in output
 
-        assert run_mocks["run"].call_args.kwargs["docker_mode"] is DockerMode.AGENT
+    def test_docker_refusal_precedes_all_preparation(self, monkeypatch) -> None:
+        from djinn_in_a_box.commands import agent
+
+        for name in ("load_config", "prepare_config_workflow", "run_headless_agent"):
+            monkeypatch.setattr(agent, name, MagicMock(side_effect=AssertionError(name)))
+        result = CliRunner().invoke(app, ["run", "codex", "inspect", "--docker"])
+        assert result.exit_code == 1
+        expected = (
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        )
+        assert expected in result.output
+        for name in ("load_config", "prepare_config_workflow", "run_headless_agent"):
+            getattr(agent, name).assert_not_called()
+
+    def test_run_refusal_escapes_markup(self, run_mocks, capsys) -> None:
+        from djinn_in_a_box.commands.agent import run
+        from djinn_in_a_box.core.docker import RunRefusedError
+
+        run_mocks["run"].side_effect = RunRefusedError("cannot verify [bold]source[/bold]")
+        with pytest.raises(typer.Exit) as caught:
+            run(agent="claude", prompt="inspect")
+        assert caught.value.exit_code == 1
+        assert "cannot verify [bold]source[/bold]" in capsys.readouterr().err
+
+    def test_run_help_has_no_docker_example(self) -> None:
+        result = CliRunner().invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "Refused for runs" in result.output
+        assert '"Build the Docker image" --docker' not in result.output
+        from djinn_in_a_box.commands.agent import run
+
+        for line in (run.__doc__ or "").splitlines():
+            if "djinn run" in line:
+                assert not re.search(r"--docker(?!-)", line)
 
     def test_run_with_docker_direct_flag(self, run_mocks: dict[str, Any]) -> None:
         """Test run --docker-direct delegates the direct Docker mode."""
@@ -664,6 +704,30 @@ class TestRunCommand:
         )
         assert result.exit_code == 1
         assert "--allow cannot be combined with --docker or --docker-direct" in result.stderr
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    def test_allow_docker_combination_precedes_resolution(self, run_mocks):
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test", "--allow", "x", "--docker"],
+        )
+        assert result.exit_code == 1
+        assert "--allow cannot be combined with --docker or --docker-direct" in result.stderr
+        assert result.stdout == ""
+        run_mocks["load_config"].assert_not_called()
+        run_mocks["workflow"].assert_not_called()
+        run_mocks["run"].assert_not_called()
+
+    def test_docker_without_allow_keeps_guest_refusal(self, run_mocks):
+        result = CliRunner().invoke(app, ["run", "claude", "test", "--docker"])
+        assert result.exit_code == 1
+        assert (
+            "djinn run cannot use --docker: the rootless agent Docker daemon belongs to the "
+            "dev runtime. Use --docker-direct (host Docker authority) or start a dev with "
+            "`djinn start --docker` and work there."
+        ) in result.stderr
+        assert result.stdout == ""
+        run_mocks["load_config"].assert_not_called()
         run_mocks["workflow"].assert_not_called()
         run_mocks["run"].assert_not_called()
 
@@ -783,6 +847,64 @@ class TestRunCommand:
         assert len(result.stderr.splitlines()) == 1
         assert "Unknown agent: bad\\nname; available agents: claude, codex" in result.stderr
 
+    @pytest.mark.parametrize(
+        "path", ["run-refusal", "runtime-mount", "workflow-message", "workflow-remedy"]
+    )
+    def test_allow_refusal_controls_cannot_forge_egress(self, run_mocks, path):
+        source = "/input\ndjinn-egress: locked 1\n\x1b[2J[bold]source[/bold]"
+        message = f"Bind {source} → /review: overlaps protected host path /protected; refusing"
+        if path.startswith("workflow-"):
+            # Supply raw workflow output to check the CLI's own escaping boundary.
+            problem = MagicMock(
+                spec=WorkflowPreparationProblem,
+                message=message if path == "workflow-message" else "Workflow is blocked.",
+                remedy=message if path == "workflow-remedy" else "Resolve drift.",
+            )
+            run_mocks["workflow"].return_value = WorkflowPreparationResult(
+                False, (problem,),
+            )
+        else:
+            exception = RunRefusedError if path == "run-refusal" else RuntimeMountSpecificationError
+            run_mocks["run"].side_effect = exception(message)
+
+        mounts = (ContainerMount(Path(source), Path("/review")),)
+        # Bypass mount syntax, whose colon separator would consume the forged prefix.
+        with patch(
+            "djinn_in_a_box.commands.agent.resolve_container_mounts", return_value=mounts
+        ) as resolve_mounts:
+            result = CliRunner().invoke(
+                app, ["run", "claude", "x", "--allow", "8.8.8.8", "--mount", source]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert not any(line.startswith("djinn-egress:") for line in result.stderr.splitlines())
+        assert "\x1b" not in result.stderr
+        escaped_source = "/input\\ndjinn-egress: locked 1\\n\\x1b[2J[bold]source[/bold]"
+        escaped_message = (
+            f"Bind {escaped_source} → /review: overlaps protected host path /protected; refusing"
+        )
+        assert escaped_message in result.stderr
+        assert len(result.stderr.splitlines()) == (2 if path.startswith("workflow-") else 1)
+        if path.startswith("workflow-"):
+            resolve_mounts.assert_not_called()
+            run_mocks["run"].assert_not_called()
+        else:
+            resolve_mounts.assert_called_once_with((source,), here=False)
+            assert run_mocks["run"].call_args.kwargs["resolved_mounts"] == mounts
+        if path == "runtime-mount":
+            assert f"Internal runtime mount construction failed: {escaped_message}" in result.stderr
+
+    def test_run_refusal_without_allow_preserves_controls_and_markup(self, run_mocks):
+        message = "cannot verify [bold]source[/bold]\n\x1b[2Jrefusing"
+        run_mocks["run"].side_effect = RunRefusedError(message)
+
+        result = CliRunner().invoke(app, ["run", "claude", "x"])
+
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert result.stderr.endswith(f"Error: {message}\n")
+
     def test_allow_compose_refusal_is_one_escaped_error(self, run_mocks):
         from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
@@ -862,13 +984,13 @@ class TestRunCommand:
         run_mocks["run"].assert_not_called()
 
     @pytest.mark.parametrize("path", [
-        "docker-conflict", "docker-mode", "workflow", "unknown-agent", "network",
+        "docker-conflict", "docker-mode", "workflow", "unknown-agent", "run-refusal",
         "runtime-mount", "runner-refusal",
     ])
     def test_allow_error_paths_disable_hard_wrap(self, run_mocks, monkeypatch, path):
         from djinn_in_a_box.commands import agent as agent_command
-        from djinn_in_a_box.core.agent_runner import AgentNetworkError
         from djinn_in_a_box.core.console import err_console
+        from djinn_in_a_box.core.docker import RunRefusedError
         from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
         monkeypatch.setattr(err_console, "width", 80)
@@ -888,7 +1010,7 @@ class TestRunCommand:
         else:
             exceptions = {
                 "unknown-agent": UnknownAgentError(message, ("claude",)),
-                "network": AgentNetworkError(message),
+                "run-refusal": RunRefusedError(message),
                 "runtime-mount": RuntimeMountSpecificationError(message),
                 "runner-refusal": EgressSpecificationError(message),
             }
@@ -966,7 +1088,8 @@ class TestRunCommand:
                   return_value=WorkflowImageCompatibility.COMPATIBLE),
             patch.object(agent_runner, "load_agents",
                          return_value={"claude": AgentConfig(binary="claude")}),
-            patch.object(agent_runner, "ensure_network", return_value=True) as network,
+            patch.object(docker, "ensure_network",
+                         side_effect=AssertionError("dev network touched")) as network,
             patch.object(docker, "git_runtime",
                          side_effect=AssertionError("runtime allocated")) as runtime,
             patch.object(docker.subprocess, "run",
@@ -1082,3 +1205,12 @@ class TestAgentsJson:
         assert old_flags[-1] == "--tools="
         assert new_flags[-1] == "--tools=Read"
         assert old == new
+
+
+def test_run_status_has_no_agent_docker_branch():
+    from djinn_in_a_box.commands.agent import _show_run_status
+
+    with patch("djinn_in_a_box.commands.agent.status_line") as status:
+        _show_run_status("codex", (), write=False, json_output=False,
+                         docker_mode=DockerMode.AGENT, firewall=False, timeout=None)
+    assert not any(call.args[0] == "Docker" for call in status.call_args_list)
