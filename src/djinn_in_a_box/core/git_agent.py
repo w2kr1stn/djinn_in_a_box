@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import struct
@@ -17,6 +18,8 @@ from djinn_in_a_box.core.ssh_delivery import GitSSHError, take_string
 
 MAX_MESSAGE = 262144
 FAILURE = b"\x05"
+SERVE_FAILURES = 50
+SERVE_BACKOFF = 0.1
 
 
 def ssh_string(data: bytes) -> bytes:
@@ -87,32 +90,83 @@ def filter_request(private_socket: Path, allowed: frozenset[bytes], payload: byt
 class AgentFilter:
     """Clients can list/sign declared keys; every mutating or extension request fails."""
 
-    def __init__(self, exported: Path, private: Path, allowed: frozenset[bytes]) -> None:
+    def __init__(
+        self,
+        exported: Path,
+        private: Path,
+        allowed: frozenset[bytes],
+        clients: threading.BoundedSemaphore | None = None,
+    ) -> None:
         self.exported = exported
         self.private = private
         self.allowed = allowed
         self.stop = threading.Event()
-        self.clients = threading.BoundedSemaphore(16)
+        self.clients = clients or threading.BoundedSemaphore(16)
+        self.identity: tuple[int, int] | None = None
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.listener.bind(str(exported))
-        exported.chmod(0o600)
-        self.listener.listen(16)
-        self.listener.settimeout(0.2)
+        bound = False
+        try:
+            self.listener.bind(str(exported))
+            bound = True
+            info = exported.lstat()
+            self.identity = (info.st_dev, info.st_ino)
+            exported.chmod(0o600)
+            self.listener.listen(16)
+            self.listener.settimeout(0.2)
+        except BaseException:
+            # A failed attempt never strands a socket. The caller holds the owner guard and this
+            # instance bound the path moments ago, so even before the inode was read it is ours.
+            self.listener.close()
+            with contextlib.suppress(OSError):
+                if self.identity is not None:
+                    self.retire_path()
+                elif bound:
+                    exported.unlink(missing_ok=True)
+            raise
+
+    def retire_path(self) -> None:
+        """Remove the exported path only while it still names the socket this instance bound."""
+        if self.identity is None:
+            return
+        try:
+            info = self.exported.lstat()
+        except FileNotFoundError:
+            return
+        if (info.st_dev, info.st_ino) == self.identity:
+            self.exported.unlink(missing_ok=True)
 
     def serve(self) -> None:
+        # The pathname is left to a guarded owner (retire_path/clear_state), so a retiring
+        # instance never removes the socket of its successor.
+        failures = 0
         try:
             while not self.stop.is_set():
                 try:
                     stream, _ = self.listener.accept()
                 except TimeoutError:
                     continue
+                except OSError:
+                    failures += 1
+                    if failures >= SERVE_FAILURES:
+                        raise
+                    self.stop.wait(SERVE_BACKOFF)
+                    continue
                 if not self.clients.acquire(blocking=False):
                     stream.close()
                     continue
-                threading.Thread(target=self._client, args=(stream,), daemon=True).start()
+                try:
+                    threading.Thread(target=self._client, args=(stream,), daemon=True).start()
+                except RuntimeError:
+                    stream.close()
+                    self.clients.release()
+                    failures += 1
+                    if failures >= SERVE_FAILURES:
+                        raise
+                    self.stop.wait(SERVE_BACKOFF)
+                    continue
+                failures = 0
         finally:
             self.listener.close()
-            self.exported.unlink(missing_ok=True)
 
     def _client(self, stream: socket.socket) -> None:
         try:

@@ -1210,10 +1210,56 @@ then observes Docker's actual dev ID with a per-creation label. An inherited flo
 serializes pending dev starts and is released after ID handoff. The observer bounds
 key loading at 120 seconds and container discovery at 60 seconds; the single
 `ssh-add` call itself is bounded at 120 seconds on a terminal and 10 seconds
-otherwise. CLI exit after detached handoff keeps the agent; foreground
-completion, timeout, interruption, failure, external stop/removal/replacement or
-inspection failure releases it. Observation failures
-are recorded in the host-only `observer.log`; `doctor` reports unavailable state.
+otherwise. CLI exit after detached handoff keeps the agent; foreground completion,
+timeout, interruption or failure releases it. Unknown Docker,
+state-file or agent reads retry on the next tick. Stable ticks take no lock;
+transitions recheck ownership under a non-blocking guard. Busy locks retry.
+Each companion or helper transition retries independently after an uncertain result.
+Retry reasons carry UTC timestamps in the host-only `observer.log`; repeated
+identical reasons are logged on change and at most once per 60 seconds.
+
+The observer ends only on a runtime-close signal, a changed or removed runtime
+generation, confirmed dev removal or replacement, a stopped Git-only dev without
+resources, a changed dedicated-agent key set, a confirmed dead dedicated agent,
+an exhausted filter rebind allowance, an agent Docker companion resume failure,
+an unexpected loop error, or failed startup before attachment. Replacement leaves
+foreign resources intact. A companion resume failure attempts a dev stop (verified when it can be) before ending.
+The agent is never restarted without host-terminal key loading.
+
+The protocol filter retries transient accept and client-thread startup errors.
+A dead filter thread is rebound at the same exported socket path under the guard,
+after checking the generation. At most five rebinds are allowed in a rolling
+300 seconds; failed attempts count and are spaced (the next attempt waits 5 seconds,
+doubling per consecutive failure up to 60 seconds; a successful rebind resets it). Every rebind attempt, successful or failed,
+logs its UTC time and outcome in `observer.log` and publishes the last five times
+in `state.json` as `filter_rebinds`. A failed state publication
+retries without creating another filter or consuming another rebind allowance.
+
+Terminal causes are `dev-replaced`, `key-set-changed`, `agent-exited`,
+`filter-failed`, `companion-resume-failed` and `observer-error`, corresponding to
+the replacement, changed keys, dead agent, exhausted rebinds, failed companion
+resume and unexpected loop error above. They populate `state.json`'s optional
+`observer_exit` object with `code`, host-only `detail` (the fixed cause text plus a
+truncated error, at most 512 characters), UTC `time` and `rebinds` (the last five
+rebind attempt times). The same cause is also written first as a flushed UTC line in
+`observer.log`, before the post-mortem record, the guard and cleanup, so it survives
+a busy guard or a failing recorder.
+Except for dev replacement, the observer also writes `export/observer-exit`,
+visible read-only in dev at `/run/djinn-git-agent/observer-exit`. That file contains
+the UTC time, generic cause and host recovery hint, without paths, keys or
+exception text. State and export writes require the same runtime generation.
+Each cause channel is best effort. Cleanup and the next start remove the file.
+
+Doctor's Git agent row checks observer liveness before probing the socket.
+Unknown liveness warns. A dead observer with the same running dev ID and
+generation fails with its recorded cause and time, or names the missing cause;
+the remedy points to `observer.log` and host-side `djinn clean`, then `djinn start`.
+A dead observer with a stopped or absent dev warns that the next start reclaims
+stale state. A replacement dev warns and includes any recorded cause. A live
+observer attached to the running dev fails when its exported filter socket does
+not serve. Confirmed delivery with `filter_rebinds` warns with the count and last
+UTC time; otherwise confirmed delivery passes. Stopped devs and other unconfirmed
+key sets or lifecycle states warn.
 
 The image packages `scripts/git-config.py`; the entrypoint reads the public-only
 manifest through `DJINN_GIT_MANIFEST`. Git's config writer generates
@@ -1286,8 +1332,13 @@ notification failures never abort recovery. Start/clean print
 escaped, never raw Docker errors or record contents. Detached observers send
 these lines to their host-only `observer.log`. The Git observer closes Git
 delivery before final `observer-cleanup` recording; that hook can capture the
-stopped dev even when it leaves the dev for a later clean. Records survive runtime
-state cleanup and are never included in backup or sync sets.
+stopped dev even when it leaves the dev for a later clean. Terminal observer
+causes also produce an independent `observer-exit` post-mortem trigger with the
+cause code, runtime generation, expected and last observed dev IDs, and rebind
+UTC times in `detail.rebinds`. It requires neither cleanup ownership nor the
+runtime guard. Its dedup key includes the generation and cause code; repeated
+identical incidents deduplicate. Rebinds alone create no post-mortem record.
+Records survive runtime state cleanup and are never included in backup or sync sets.
 
 `core/docker.py` also auto-detects optional shell mounts:
 

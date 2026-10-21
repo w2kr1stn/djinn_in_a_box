@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, cast
@@ -50,6 +51,18 @@ LOADED = "loaded"
 OBSERVER_LOG = "observer.log"
 STARTUP_SECONDS = 60
 REMOVE_TIMEOUT_SECONDS = 60
+OBSERVER_EXIT_CAUSES = {
+    "dev-replaced": "dev was replaced or relabelled outside this runtime; its Git delivery ended",
+    "key-set-changed": (
+        "the dedicated Git agent's key set changed; Git delivery stopped (fail closed)"
+    ),
+    "agent-exited": "the dedicated Git ssh-agent exited; Git delivery ended",
+    "filter-failed": "the Git agent filter could not be kept serving; Git delivery ended",
+    "companion-resume-failed": (
+        "the agent Docker companion could not be resumed; a dev stop was attempted (fail closed)"
+    ),
+    "observer-error": "the host observer ended on an unexpected error",
+}
 CONTAINER_USER_UID = 1000
 """Must match the ``USER_UID`` build argument used by the dev image."""
 _creation_held = threading.local()
@@ -82,6 +95,21 @@ def process_token(pid: int) -> str | None:
         fields = text.rsplit(")", 1)[1].split()
         return None if fields[0] == "Z" else fields[19]
     except (OSError, IndexError):
+        return None
+
+
+def process_alive(pid: int, token: str) -> bool | None:
+    """True for the same live process, False when confirmed gone, None when unknown."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        fields = text.rsplit(")", 1)[1].split()
+        return fields[0] != "Z" and fields[19] == token
+    except IndexError:
         return None
 
 
@@ -164,11 +192,11 @@ def acquire_creation_lock(root: Path) -> int:
 
 
 @contextlib.contextmanager
-def creation_guard(root: Path | None = None) -> Iterator[Path]:
+def creation_guard(root: Path | None = None, *, timeout: float = 15) -> Iterator[Path]:
     """One nonblocking guard for creators, observers and config-independent clean."""
     from djinn_in_a_box.core.hostctl import control_guard
 
-    with control_guard():
+    with control_guard(timeout=timeout):
         root = root or runtime_root(create=True)
         fd = acquire_creation_lock(root)
         try:
@@ -405,6 +433,8 @@ def clear_state(root: Path, generation: str) -> None:
         STATE_FILE,
     ):
         (root / name).unlink(missing_ok=True)
+    for path in observer_exit_paths(root):
+        path.unlink(missing_ok=True)
 
 
 @dataclass
@@ -681,6 +711,8 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
         runtime.owns_generation = True
         for name in (READY, ATTACHED, LOADED):
             (root / name).unlink(missing_ok=True)
+        for path in observer_exit_paths(root):
+            path.unlink(missing_ok=True)
         blobs: frozenset[bytes] = frozenset()
         if git_enabled:
             private_directory(root / "private")
@@ -779,7 +811,114 @@ def git_runtime(config: AppConfig, container_name: str) -> Iterator[GitRuntime]:
             runtime.close()
 
 
+class _ObserverExitError(Exception):
+    """A deliberate terminal exit of the Git observer (SPEC exit table), carrying its cause."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+_OBSERVER_RETRY = (GitSSHError, OSError, ValueError, subprocess.SubprocessError)
+FILTER_REBINDS = 5
+FILTER_REBIND_WINDOW_SECONDS = 300
+OBSERVER_NOTE_SECONDS = 60
+OBSERVER_DETAIL_CHARS = 512
+FILTER_REBIND_BACKOFF_SECONDS = 5
+FILTER_REBIND_BACKOFF_CAP_SECONDS = 60
+OBSERVER_CLOSE_SECONDS = 30
+OBSERVER_SIGNALLED_CLOSE_SECONDS = 2
+
+
+def _utc() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def observer_exit_paths(root: Path) -> tuple[Path, Path]:
+    """The dev-visible cause file and its atomic-write temporary, derived from the target."""
+    target = root / "export/observer-exit"
+    return target, target.with_name(target.name + ".tmp")
+
+
+def _serve_filter(
+    root: Path, allowed: frozenset[bytes], clients: threading.BoundedSemaphore | None = None
+) -> tuple[AgentFilter, threading.Thread]:
+    server = AgentFilter(root / "export/auth.sock", root / "private/agent.sock", allowed, clients)
+    worker = threading.Thread(target=server.serve, daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        server.listener.close()
+        server.retire_path()
+        raise
+    return server, worker
+
+
+def _say(message: str) -> None:
+    """Diagnostics are best effort: a full disk under observer.log must not end the observer."""
+    with contextlib.suppress(Exception):
+        print(message, file=sys.stderr, flush=True)
+
+
+def _warn(message: str) -> None:
+    with contextlib.suppress(Exception):
+        warning(message)
+
+
+def _terminal_line(code: str, error: str | None, rebinds: list[str]) -> None:
+    """The cause survives in observer.log whatever the other channels do (flushed, bounded)."""
+    line = f"{_utc()} observer-exit: {code}: {OBSERVER_EXIT_CAUSES[code]}"
+    if error:
+        line += f"; error: {' '.join(error.split())[:200]}"
+    if rebinds:
+        line += "; filter rebinds: " + ", ".join(rebinds[-FILTER_REBINDS:])
+    _say(line)
+
+
+def _publish_observer_exit(root: Path, generation: str, code: str, error: str | None,
+                           rebinds: list[str]) -> bool:
+    """Under the guard: the cause into state.json, then the dev-visible file; best effort.
+
+    Returns whether the state still belongs to this generation.
+    """
+    fresh = read_state(root)
+    if fresh is None or fresh["generation"] != generation:
+        return False
+    when = _utc()
+    fixed = OBSERVER_EXIT_CAUSES[code]
+    detail = fixed
+    if error:
+        detail = f"{fixed}: {error}"[:OBSERVER_DETAIL_CHARS]  # the fixed text always fits whole
+    fresh["observer_exit"] = {
+        "code": code, "detail": detail, "time": when, "rebinds": rebinds[-FILTER_REBINDS:],
+    }
+    try:
+        save_state(root, fresh)
+    except _OBSERVER_RETRY as exc:
+        _say(f"{_utc()} observer-exit: state cause not written: {exc}")
+    if code == "dev-replaced" or not (root / "export").is_dir():
+        return True  # no dev-visible file: replaced dev, or a runtime without Git export
+    target, temporary = observer_exit_paths(root)
+    try:
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+        )
+        with os.fdopen(descriptor, "w") as stream:
+            os.fchmod(descriptor, 0o600)
+            stream.write(
+                f"{when}\n{OBSERVER_EXIT_CAUSES[code]}\n"
+                "Recover from the host: djinn clean, then djinn start.\n"
+            )
+        temporary.replace(target)
+    except OSError as exc:
+        _say(f"{_utc()} observer-exit: cause file not written: {exc}")
+    return True
+
+
 def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> None:
+    from djinn_in_a_box.core.hostctl import HostctlError, control_guard
+
+    retry = (*_OBSERVER_RETRY, HostctlError)
     if not Path(docker_path).is_absolute():
         raise GitSSHError("observer requires a pinned absolute Docker executable")
     state = read_state(root)
@@ -791,12 +930,15 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
     server = None
     worker = None
     if state["git_enabled"]:
-        server = AgentFilter(root / "export/auth.sock", root / "private/agent.sock", allowed)
-        worker = threading.Thread(target=server.serve, daemon=True)
-        worker.start()
+        server, worker = _serve_filter(root, allowed)
     stop = threading.Event()
 
+    signalled_at: float | None = None  # a stop signal: the caller cleans up and kills us soon
+
     def stopping(_signum: int, _frame: FrameType | None) -> None:
+        nonlocal signalled_at
+        if signalled_at is None:
+            signalled_at = time.monotonic()
         stop.set()
 
     signal.signal(signal.SIGTERM, stopping)
@@ -806,6 +948,25 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
     loading = True
     dev_id = None
     running = True
+    # service -> the dev state last applied; None while a step's outcome is unclear.
+    settled: dict[str, bool | None] = {}
+    pending: list[str] = []  # rebind times not yet published to state.json
+    rebind_times: list[str] = []
+    rebind_marks: list[float] = []
+    rebind_failures = 0  # consecutive failed attempts; spaces the next one (backoff)
+    rebind_after = 0.0
+    exit_code: str | None = None
+    failure: str | None = None
+    seen_id: str | None = None
+    noted = ("", 0.0)
+
+    def note(reason: str) -> None:
+        nonlocal noted
+        now = time.monotonic()
+        if reason != noted[0] or now - noted[1] >= OBSERVER_NOTE_SECONDS:
+            noted = (reason, now)
+            _say(f"{_utc()} observer: {reason}; retrying")
+
     try:
         while not stop.wait(0.25):
             if loading:
@@ -818,104 +979,232 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                     continue
                 loading = False
                 deadline = time.monotonic() + STARTUP_SECONDS
-            try:
-                actual = inspect_dev(state["container_name"], docker_path)
-            except (GitSSHError, OSError, subprocess.SubprocessError):
-                continue  # Unknown state never authorizes cleanup.
             if dev_id is None:
-                if actual and actual[2] == generation and actual[1]:
-                    dev_id = actual[0]
-                    fresh = read_state(root)
-                    if fresh is None or fresh["generation"] != generation:
-                        break
-                    fresh["dev_id"] = dev_id
-                    save_state(root, fresh)
-                    (root / ATTACHED).touch(mode=0o600)
-                    os.close(lock_fd)
-                    lock_fd = -1
-                elif (
+                # Startup bounds run before any inspection, so unknown ones cannot extend them.
+                if (
                     time.monotonic() >= deadline
                     or process_token(state["creator_pid"]) != state["creator_token"]
                 ):
                     break
-            else:
-                with creation_guard(root):
-                    fresh = read_state(root)
+                try:
                     actual = inspect_dev(state["container_name"], docker_path)
-                    if fresh is None or fresh["generation"] != generation:
-                        break
-                    if actual is None or actual[0] != dev_id or actual[2] != generation:
-                        break
-                    if actual[1] != running:
-                        for service, record in fresh["resources"].items():
-                            if service == "agent-docker":
-                                from djinn_in_a_box.core.docker import resume_agent_docker
+                    if actual and actual[2] == generation and actual[1]:
+                        # One step, retried as a whole; the creator's lock copy is released last.
+                        with control_guard(timeout=0):
+                            fresh = read_state(root)
+                            if fresh is None or fresh["generation"] != generation:
+                                break
+                            fresh["dev_id"] = actual[0]
+                            save_state(root, fresh)
+                            (root / ATTACHED).touch(mode=0o600)
+                            os.close(lock_fd)
+                            lock_fd = -1
+                            dev_id = seen_id = actual[0]
+                except retry as exc:
+                    note(f"{type(exc).__name__}: {exc}")
+            else:
+                if server is not None and worker is not None:
+                    try:
+                        keys = agent_keys(root / "private/agent.sock")
+                    except (GitSSHError, OSError, EOFError) as exc:
+                        # Only a confirmed gone agent ends the observer; a failed read is unknown.
+                        if process_alive(state["agent_pid"], state["agent_token"]) is False:
+                            exit_code = "agent-exited"
+                            break
+                        note(f"agent read failed: {type(exc).__name__}: {exc}")
+                    else:
+                        if keys != allowed:
+                            exit_code = "key-set-changed"
+                            break
+                try:
+                    # Lock-free check: a stable dev takes no lock; changes are confirmed below.
+                    actual = inspect_dev(state["container_name"], docker_path)
+                    if actual is not None:
+                        seen_id = actual[0]  # kept even when the state read below fails
+                    fresh = read_state(root)
+                except _OBSERVER_RETRY as exc:
+                    note(f"{type(exc).__name__}: {exc}")
+                    continue  # Unknown state never authorizes cleanup.
+                if (
+                    fresh is not None
+                    and fresh["generation"] == generation
+                    and actual is not None
+                    and actual[0] == dev_id
+                    and actual[2] == generation
+                    and actual[1] == running
+                    and all(settled.get(s, running) == running for s in fresh["resources"])
+                    and not (
+                        server is not None
+                        and worker is not None
+                        and not worker.is_alive()
+                        and time.monotonic() >= rebind_after
+                    )
+                    and not pending
+                ):
+                    continue
+                try:
+                    with creation_guard(root, timeout=0):
+                        fresh = read_state(root)
+                        actual = inspect_dev(state["container_name"], docker_path)
+                        if fresh is None or fresh["generation"] != generation:
+                            break
+                        if actual is None:
+                            break
+                        seen_id = actual[0]
+                        if actual[0] != dev_id or actual[2] != generation:
+                            exit_code = "dev-replaced"
+                            break
+                        target = actual[1]
+                        if target != running or any(
+                            settled.get(s, running) != target for s in fresh["resources"]
+                        ):
+                            for service, record in fresh["resources"].items():
+                                if settled.get(service, running) == target:
+                                    continue
+                                settled[service] = None
+                                if service == "agent-docker":
+                                    from djinn_in_a_box.core.docker import resume_agent_docker
 
-                                if actual[1]:
-                                    try:
-                                        resume_agent_docker(root, fresh, docker_path)
-                                    except (
-                                        OSError,
-                                        ValueError,
-                                        RuntimeError,
-                                        subprocess.SubprocessError
-                                    ):
-                                        dev = None
-                                        with contextlib.suppress(Exception):
-                                            inspected = inspect_object(dev_id, docker_path)
-                                            if (
-                                                inspected is not None
-                                                and inspected.get("Id") == dev_id
-                                            ):
-                                                dev = inspected
+                                    if target:
+                                        try:
+                                            resume_agent_docker(root, fresh, docker_path)
+                                        except (
+                                            OSError,
+                                            ValueError,
+                                            RuntimeError,
+                                            subprocess.SubprocessError
+                                        ) as exc:
+                                            try:
+                                                dev = None
+                                                with contextlib.suppress(Exception):
+                                                    inspected = inspect_object(dev_id, docker_path)
+                                                    if (
+                                                        inspected is not None
+                                                        and inspected.get("Id") == dev_id
+                                                    ):
+                                                        dev = inspected
+                                                if (
+                                                    dev is None
+                                                    or dev.get("State", {}).get("Running")
+                                                    is not False
+                                                ):
+                                                    _teardown_container(
+                                                        docker_path, dev, "stop", "-t", "3",
+                                                        dev_id, root=records_root,
+                                                    )
+                                            finally:
+                                                # Fail closed also when the defensive stop fails.
+                                                raise _ObserverExitError(
+                                                    "companion-resume-failed"
+                                                ) from exc
+                                    else:
+                                        resource = inspect_owned_resource(
+                                            record, generation, docker_path
+                                        )
                                         if (
-                                            dev is None
-                                            or dev.get("State", {}).get("Running") is not False
+                                            resource
+                                            and resource.get("State", {}).get("Running") is True
                                         ):
                                             _teardown_container(
-                                                docker_path, dev, "stop", "-t", "3", dev_id,
+                                                docker_path,
+                                                resource,
+                                                "stop",
+                                                "-t",
+                                                str(agent_docker.STOP_GRACE_SECONDS),
+                                                record["id"],
+                                                timeout=agent_docker.STOP_TIMEOUT_SECONDS,
                                                 root=records_root,
                                             )
-                                        raise
-                                else:
+                                    settled[service] = target
+                                    continue
+                                if service.endswith("-helper"):
                                     resource = inspect_owned_resource(
                                         record, generation, docker_path
                                     )
-                                    if (
-                                        resource
-                                        and resource.get("State", {}).get("Running") is True
-                                    ):
-                                        _teardown_container(
-                                            docker_path,
-                                            resource,
-                                            "stop",
-                                            "-t",
-                                            str(agent_docker.STOP_GRACE_SECONDS),
-                                            record["id"],
-                                            timeout=agent_docker.STOP_TIMEOUT_SECONDS,
-                                            root=records_root,
-                                        )
-                                continue
-                            if service.endswith("-helper"):
-                                resource = inspect_owned_resource(record, generation, docker_path)
-                                if resource is not None:
-                                    if actual[1]:
-                                        run_runtime_command(docker_path, "start", record["id"])
-                                    elif resource.get("State", {}).get("Running") is True:
-                                        _teardown_container(
-                                            docker_path, resource, "stop", record["id"],
-                                            root=records_root,
-                                        )
-                        running = actual[1]
-                        if not running and server is not None:
-                            server.stop.set()
-                            stop_owned_process(state["agent_pid"], state["agent_token"])
-                            server = None
-                        if not running and not fresh["resources"]:
-                            break  # Preserve Git-only release-on-stop semantics.
-            if server is not None and agent_keys(root / "private/agent.sock") != allowed:
-                raise GitSSHError("dedicated Git agent key set changed")
+                                    if resource is not None:
+                                        if target:
+                                            run_runtime_command(docker_path, "start", record["id"])
+                                        elif resource.get("State", {}).get("Running") is True:
+                                            _teardown_container(
+                                                docker_path, resource, "stop", record["id"],
+                                                root=records_root,
+                                            )
+                                settled[service] = target
+                            if not target and server is not None:
+                                # Git shutdown completes before the stop is committed; a failure
+                                # keeps target != running, so the next tick repeats it.
+                                server.stop.set()
+                                server.retire_path()
+                                stop_owned_process(state["agent_pid"], state["agent_token"])
+                                server = None
+                            running = target
+                            if not running and not fresh["resources"]:
+                                break  # Preserve Git-only release-on-stop semantics.
+                        now = time.monotonic()
+                        if (
+                            server is not None
+                            and worker is not None
+                            and not worker.is_alive()
+                            and now >= rebind_after
+                        ):
+                            rebind_marks[:] = [
+                                mark for mark in rebind_marks
+                                if now - mark < FILTER_REBIND_WINDOW_SECONDS
+                            ]
+                            if len(rebind_marks) >= FILTER_REBINDS:
+                                exit_code = "filter-failed"
+                                break
+                            # One attempt block: the time is taken when the allowance is
+                            # consumed, before any fallible step, and every outcome has a
+                            # line, a place in the history and a place in the pending merge.
+                            rebind_marks.append(now)
+                            when = _utc()
+                            pending.append(when)
+                            rebind_times = [*rebind_times, when][-FILTER_REBINDS:]
+                            try:
+                                server.stop.set()
+                                # The generation was re-checked under the guard: the path is
+                                # this runtime's, whoever bound it last (a failed attempt may
+                                # have left its own socket behind).
+                                (root / "export/auth.sock").unlink(missing_ok=True)
+                                server, worker = _serve_filter(root, allowed, server.clients)
+                            except (OSError, RuntimeError) as exc:
+                                _say(
+                                    f"{when} observer: Git agent filter rebind failed: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                                rebind_failures += 1
+                                rebind_after = now + min(
+                                    FILTER_REBIND_BACKOFF_SECONDS * 2 ** (rebind_failures - 1),
+                                    FILTER_REBIND_BACKOFF_CAP_SECONDS,
+                                )
+                            else:
+                                rebind_failures, rebind_after = 0, 0.0
+                                _say(f"{when} observer: Git agent filter rebound")
+                        if pending:  # also after Git shutdown, while the observer lives on
+                            latest = read_state(root)
+                            if latest is None or latest["generation"] != generation:
+                                break
+                            latest["filter_rebinds"] = [
+                                *latest.get("filter_rebinds", []), *pending
+                            ][-FILTER_REBINDS:]
+                            save_state(root, latest)
+                            pending.clear()
+                except _ObserverExitError as exc:
+                    exit_code = exc.code
+                    if exc.__cause__ is not None:  # the chained reason, e.g. the resume failure
+                        failure = f"{type(exc.__cause__).__name__}: {exc.__cause__}"
+                    break
+                except retry as exc:
+                    note(f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        exit_code = "observer-error"
+        failure = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
+        if exit_code is not None:
+            with contextlib.suppress(Exception):
+                _terminal_line(exit_code, failure, rebind_times)
         if server is not None:
             server.stop.set()
         if worker is not None:
@@ -924,21 +1213,68 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
             stop_owned_process(state["agent_pid"], state["agent_token"])
         if lock_fd != -1:
             os.close(lock_fd)
-        try:
-            with creation_guard(root):
-                if cleanup_owned(
-                    root, generation, docker_path,
-                    incident="observer-cleanup", records_root=records_root,
-                ):
-                    clear_state(root, generation)
-                else:
-                    # A stopped Git-only dev keeps no runtime resources.
-                    fresh = read_state(root)
-                    inspect_dev(state["container_name"], docker_path)
-                    if fresh and fresh["generation"] == generation and not fresh["resources"]:
+        if exit_code is not None:
+            with contextlib.suppress(Exception):
+                post_mortem.record(
+                    "observer-exit",
+                    docker_path=docker_path,
+                    candidates=[],
+                    observed={"state": exit_code, "expected_id": dev_id, "actual_id": seen_id},
+                    runtime_generation=generation,
+                    root=records_root,
+                    detail={"rebinds": rebind_times, **({"error": failure} if failure else {})},
+                )
+        closing = time.monotonic()
+        guard = contextlib.ExitStack()
+        guarded = False
+        while not guarded:
+            # A signal at any time caps the wait at its time plus two seconds.
+            limit = closing + OBSERVER_CLOSE_SECONDS
+            if signalled_at is not None:
+                limit = min(limit, signalled_at + OBSERVER_SIGNALLED_CLOSE_SECONDS)
+            try:
+                guard.enter_context(creation_guard(root, timeout=0))
+                guarded = True
+            except retry as exc:
+                if time.monotonic() >= limit:
+                    _warn(f"Observer cleanup preserved resources: {exc}")
+                    break
+                time.sleep(0.25)
+        if guarded:
+            with guard:
+                try:
+                    try:
+                        if (
+                            exit_code is not None
+                            and _publish_observer_exit(
+                                root, generation, exit_code, failure, rebind_times
+                            )
+                            and server is not None
+                        ):
+                            server.retire_path()
+                    except Exception as exc:  # a diagnostic must never skip the cleanup
+                        _say(f"{_utc()} observer-exit: not published: {exc}")
+                    if cleanup_owned(
+                        root, generation, docker_path,
+                        incident="observer-cleanup", records_root=records_root,
+                    ):
                         clear_state(root, generation)
-        except (GitSSHError, OSError, subprocess.SubprocessError) as exc:
-            warning(f"Observer cleanup preserved resources: {exc}")
+                    else:
+                        # A stopped Git-only dev keeps no runtime resources.
+                        fresh = read_state(root)
+                        final = inspect_dev(state["container_name"], docker_path)
+                        if (
+                            fresh
+                            and fresh["generation"] == generation
+                            and not fresh["resources"]
+                            and (
+                                final is None
+                                or (final[0] == dev_id and final[2] == generation and not final[1])
+                            )
+                        ):
+                            clear_state(root, generation)
+                except retry as exc:
+                    _warn(f"Observer cleanup preserved resources: {exc}")
 
 
 def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) -> None:

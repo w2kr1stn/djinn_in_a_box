@@ -14,7 +14,7 @@ from pathlib import Path
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import host_runtime
 from djinn_in_a_box.core.git_agent import agent_keys
-from djinn_in_a_box.core.host_runtime import inspect_dev, process_token, runtime_root
+from djinn_in_a_box.core.host_runtime import inspect_dev, runtime_root
 from djinn_in_a_box.core.ssh_delivery import (
     AGENT_SOCKET,
     SSH_TARGET,
@@ -37,6 +37,10 @@ class RepositoryScan:
     directories_not_scanned: int
     unreadable_root: bool
     limit_reached: bool = False
+
+OBSERVER_REMEDY = (
+    "See observer.log on the host; recreate dev from the host: djinn clean, then djinn start."
+)
 
 
 def public_selector(value: str, names: set[str]) -> bool:
@@ -324,29 +328,67 @@ def git_diagnostics(config: AppConfig) -> list[GitDiagnostic]:
             )
         else:
             state = json.loads(state_path.read_text())
-            live = process_token(state["observer_pid"]) == state["observer_token"]
-            loaded = agent_keys(root / "export" / "auth.sock")
-            private_loaded = agent_keys(root / "private" / "agent.sock")
-            actual = inspect_dev(state["container_name"])
-            ok = (
-                live
-                and expected is not None
-                and loaded == expected
-                and private_loaded == expected
-                and actual is not None
-                and actual[1]
-                and actual[0] == state.get("dev_id")
-                and actual[2] == state["generation"]
-            )
-            rows.append(
-                GitDiagnostic(
-                    "Git agent",
-                    "pass" if ok else "warn",
-                    "declared key set; observer attached to dev " + state["dev_id"]
-                    if ok
-                    else "key set/lifecycle not confirmed against current declarations",
+            live = host_runtime.process_alive(state["observer_pid"], state["observer_token"])
+            status = "warn"
+            detail = "key set/lifecycle not confirmed against current declarations"
+            remedy = ""
+            if live is None:
+                detail = "observer liveness unknown: process identity could not be read"
+            else:
+                actual = inspect_dev(state["container_name"])
+                attached = (
+                    actual is not None
+                    and actual[1]
+                    and actual[0] == state.get("dev_id")
+                    and actual[2] == state["generation"]
                 )
-            )
+                if not live:
+                    # Only an absent dev, or a stopped dev of this ID and generation, is ours to
+                    # reclaim; any other dev (running or stopped) is a replacement.
+                    reclaimable = actual is None or (
+                        not actual[1]
+                        and actual[0] == state.get("dev_id", actual[0])
+                        and actual[2] == state["generation"]
+                    )
+                    if reclaimable:
+                        detail = (
+                            "stale runtime state (observer not running, dev not running); "
+                            "the next start reclaims it"
+                        )
+                    else:
+                        cause = state.get("observer_exit")
+                        if cause:
+                            text = host_runtime.OBSERVER_EXIT_CAUSES.get(
+                                cause["code"], cause["code"]
+                            )
+                            ended = f"host observer ended: {text} ({cause['time']})"
+                        else:
+                            ended = "host observer ended without a recorded cause"
+                        if attached:
+                            status = "fail"
+                            detail = ended
+                            remedy = OBSERVER_REMEDY
+                        elif cause:
+                            detail += "; " + ended
+                elif attached:
+                    try:
+                        loaded = agent_keys(root / "export" / "auth.sock")
+                    except Exception as exc:
+                        status = "fail"
+                        reason = str(exc) or type(exc).__name__
+                        detail = f"Git agent filter not serving: {reason}"
+                        remedy = OBSERVER_REMEDY
+                    else:
+                        private_loaded = agent_keys(root / "private" / "agent.sock")
+                        if loaded == expected and private_loaded == expected:
+                            if rebinds := state.get("filter_rebinds"):
+                                detail = f"filter rebound {len(rebinds)}× (last {rebinds[-1]})"
+                            else:
+                                status = "pass"
+                                detail = (
+                                    "declared key set; observer attached to dev " + state["dev_id"]
+                                )
+            rows.append(GitDiagnostic("Git agent", status, detail, remedy))
     except (OSError, ValueError, KeyError, GitSSHError, EOFError) as exc:
         rows.append(GitDiagnostic("Git agent", "warn", f"unknown/uninspected: {exc}"))
     rows.extend(git_references(None, names, config.git.allowed_signers_file is not None))
