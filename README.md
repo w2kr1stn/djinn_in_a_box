@@ -1047,7 +1047,8 @@ djinn-egress: locked 1
 
 Djinn's block comes first. A run is locked only when the block ends with
 `djinn-egress: locked N`; later lines with the same prefix come from the run
-itself.
+itself. Read the block from stderr on its own: if you merge the streams
+(`2>&1`), the agent's stdout comes first and can contain any text.
 
 Hosts the bundled CLIs contact (Claude Code 2.1.304, Codex 0.163.0,
 OpenCode 2.1.1):
