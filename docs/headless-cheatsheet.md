@@ -5,12 +5,13 @@ the session-oriented `djinn session --prompt` path.
 
 Host control runs on the host: `djinn hostctl on --for 10m`, `status`,
 `limit 5` and `off`. Enrollment is asynchronous and login time counts against
-the window. Once `status` reports open, headless agents use `ssh host-a`.
+the window. Once `status` reports open, session agents in the running dev can
+use `ssh host-a`. For runs, see [the guest boundary](../SECURITY-MODEL.md#guest-runs).
 Hostctl status groups sealing findings by bind; `djinn doctor` lists every cause
 and unknown item, plus address results. See
 [host control usage](../README.md#host-control-windows) and the
 [security model](../SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
-for creator close/pause behavior, `--allow-unsealed` and deployment requirements.
+for dev-start close/pause behavior, `--allow-unsealed` and deployment requirements.
 
 ---
 
@@ -111,9 +112,6 @@ djinn run claude "Analyze this project" --model sonnet \
 # Mount the current working directory implicitly
 djinn run claude "Summarize this repository"
 
-# Enable the rootless agent Docker daemon
-djinn run claude "Build and test the project" --docker
-
 # Enable direct Docker socket access only when the task requires it
 djinn run claude "Debug this Dockerfile" --docker-direct
 
@@ -127,9 +125,12 @@ djinn run claude "Summarize the notes" --mount ~/notes:/home/dev/notes:ro --allo
 djinn agents
 ```
 
-`djinn run` starts an ephemeral Docker Compose container, sends the prompt through
-the `AGENT_PROMPT` environment variable, prints agent output to stdout, and exits
-with the agent's return code.
+`djinn run` starts an ephemeral guest container on its own Compose network,
+alongside a running dev or other runs. It sends the prompt through `AGENT_PROMPT`,
+prints agent output to stdout, and exits with the agent's return code. See
+[exit codes and cleanup](../README.md#container-entry-points) for timeout, signal
+and refusal handling, and [Git delivery limits](../README.md#git-identities-and-ssh-signing)
+for SSH and signing restrictions.
 
 ---
 
@@ -144,13 +145,15 @@ with the agent's return code.
 | `--json`, `-j` | Request JSON output from the agent. |
 | `--here` | Mount the current directory at `/home/dev/workspace`; repeatable with `--mount`. |
 | `--mount SRC[:DST[:ro\|rw]]` | Repeatable host-directory mount. Without `DST`, Djinn derives `/home/dev/mount/<basename>`; append `:ro` for read-only. |
-| `--docker`, `-d` | Enable the rootless companion daemon. |
-| `--docker-direct` | Enable direct host Docker socket access. |
+| `--docker`, `-d` | Refused; the rootless companion belongs to the dev runtime. |
+| `--docker-direct` | Enable direct host Docker socket access; refused while the hostctl helper is running. |
 | `--firewall`, `-f` | Enable the outbound firewall inside the container. |
 | `--allow <entry>` | Repeatable. Allow outbound traffic only to this name, address or network (`:PORT` = TCP port only); replaces the `--firewall` list for this run. |
 | `--timeout <sec>`, `-t <sec>` | Timeout for the headless container run. |
 
-`--docker` and `--docker-direct` are mutually exclusive.
+`--docker` is refused for runs. For rootless Docker, work in a dev started with
+`djinn start --docker`; see [Docker access modes](../README.md#docker-access-modes)
+for the refusal and host-authority implications of direct access.
 
 `djinn run` without `--mount` and without `--here` keeps its implicit `--here`
 behavior: the current directory is mounted at `/home/dev/workspace` and is the
@@ -165,6 +168,8 @@ the run's workdir. A user target cannot equal or contain the active workspace
 target; children and explicit mounts at the unused root remain valid.
 Targets at or below Djinn-managed roots are refused for both `:rw` and `:ro`,
 following the [same rule as declared mounts](../README.md#storage-and-mounts).
+That guidance also covers protected-source refusals for runs, including read-only
+mounts and `--here` from `$HOME`.
 
 ---
 
@@ -222,7 +227,7 @@ must start with a letter or number.
 | Scripted batch work | `djinn run ... --json` | Keeps stdout suitable for pipelines. |
 | File edits in the current project | `djinn run ... --write` | Enables the agent's write mode for the mounted workspace. |
 | Long-running project context | `djinn session --project <name>` | Reuses a stable workspace under `~/.djinn/sessions/`. |
-| Container build or test tasks | `djinn run ... --docker` | Uses the rootless agent daemon; published ports use `agent-docker:<port>`. |
+| Rootless container build or test tasks | `djinn start --docker` | Work in dev with the rootless agent daemon. |
 | Dockerfile or daemon debugging | `djinn run ... --docker-direct` | Uses unfiltered Docker access. |
 
 Docker authority and write-mode implications are documented in the

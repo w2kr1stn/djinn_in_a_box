@@ -35,6 +35,17 @@ Versioning before and after the first stable release.
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).
+- `djinn run` works alongside a running dev and other runs without taking the
+  dev runtime or blocking `djinn start` (#179).
+- Run cleanup verifies and removes exactly its own container on completion,
+  failure, timeout, Ctrl-C, SIGTERM and SIGHUP; signals exit 130 (#179).
+- `djinn clean` ends in-flight runs and removes their project-default network
+  in both normal and agent-Docker teardown (#179).
+- Sealing skips peers that the daemon reports as “No such container” during
+  inspection instead of becoming uncertain (#179).
+- The private sealing map uses the real `state.json` and covers all runtime
+  control files without treating public/export delivery as private (#179).
+- The sealing peer loop skips the assessed dev by its full Docker ID (#193).
 - Raise the default OpenCode version to 2.1.1; a fresh build with the previous
   default 2.0.26 failed in OpenCode's npm postinstall. Maintainers now build
   once with the defaults alone after any default bump (#176).
@@ -123,7 +134,8 @@ Versioning before and after the first stable release.
   affected `[mounts.*]` entries. Sealing treats an execution input that cannot be
   inspected as uncertain unless a Docker-authority cause already prevents
   sealing, and both checks cover the location of every symlink on an execution
-  input's path.
+  input's path. The separate guest-run protected-source check (#179) also
+  covers read-only binds.
 - Protect host-mode `djinn session` from automatic loading of container-writable
   agent and Git configuration. Claude starts with user-only settings; OpenCode
   disables project config and refuses its remaining entry points; Codex
@@ -161,6 +173,20 @@ Versioning before and after the first stable release.
   `claude-isolated` agent was measured with (#171).
 - `djinn agents --json` writes raw JSON with every field, including
   `prompt_template`, and sorted keys, independent of the terminal width (#171).
+- `djinn run` is a guest on `djinn-in-a-box_default`, separate from dev and its
+  companions. Runs receive no Git/SSH, hostctl alias or desktop delivery (#179).
+- Require Docker Compose 2.24.4 or later for the run overlay's `!override`;
+  preflight refuses a run if Compose does not keep its separate network (#179).
+- Refuse `djinn run --docker` before preparation; use `--docker-direct` for host
+  Docker authority, or work in a dev started with `djinn start --docker` (#179).
+- Refuse `--docker-direct` for runs while the hostctl helper is running (#179).
+- Refuse every run bind source, even read-only and through symlinks, that
+  overlaps protected host state, Docker storage, configured Git keys or Docker
+  sockets; refuse other socket sources too. Checks cover resolved Compose binds
+  and command-line mounts, with only the approved DIRECT socket excepted (#179).
+- Refuse `djinn run` from `$HOME` without `--mount` when its implicit workspace
+  contains private state. Start from a subdirectory or mount a directory outside
+  private state read-only; `general.code_dir` must also avoid protected state (#179).
 - Keep Codex SQLite stores per host with
   `CODEX_SQLITE_HOME=/home/dev/.codex/sqlite` and a new `sqlite` local-zone default.
   Session-ID resume works across machines; picker/`--last` discovery and
@@ -184,7 +210,8 @@ Versioning before and after the first stable release.
   (`start_interval`). After startup, Docker reports a failed helper as
   `unhealthy` after about 60–90 s instead of about 6 s. A desktop helper that
   never passes its probe now fails creation at the 15 s deadline with
-  `helper health starting (readiness timeout)`.
+  `helper health starting (readiness timeout)`. This `start_interval`
+  requirement predates guest runs; the current Compose minimum is 2.24.4 above.
 
 ### Removed
 
@@ -405,7 +432,8 @@ Versioning before and after the first stable release.
 - Git keys that share a passphrase now ask for it once at `djinn start` and
   `djinn run`, instead of once per key. One `ssh-add` call loads all declared
   keys; a different passphrase prompts again, so declare keys that share one
-  next to each other.
+  next to each other. With guest runs (#179), this key-loading behavior applies
+  only to dev starts.
 - Host provisioning creates every nested bind-mount target inside the config
   root, so Docker no longer creates root-owned directories or files there.
 - Claude Code loads the global `AGENTS.md` again: Djinn provides
@@ -476,7 +504,8 @@ Versioning before and after the first stable release.
   `down`, which is how `djinn start` and `djinn run` create the dev container —
   so cleanup printed success while a live session survived and `djinn backup`
   kept refusing with its stop-all-containers guard. Teardown also reaps a Docker
-  proxy left behind by `--docker`.
+  proxy left behind by `--docker`. Guest runs (#179) now have distinct
+  identities and their own cleanup.
 - A host path that cannot be provisioned (for example an unwritable or
   root-owned config root) now reports the failing path and a writability remedy
   instead of being classified as workflow drift, which advised making a workflow
@@ -491,7 +520,8 @@ Versioning before and after the first stable release.
 
 - A passphrase piped to `djinn start` or `djinn run` no longer unlocks encrypted
   Git keys; without a terminal on stdin, encrypted keys refuse startup. Unlock
-  them at a host terminal.
+  them at a host terminal. With guest runs (#179), only dev starts load keys;
+  runs receive no Git/SSH delivery.
 - Host provisioning secures config and credential roots with mode `0700` and
   creates every assigned zone overlay directory before Compose starts.
 - Documented credential storage and access: credentials remain unencrypted at

@@ -30,7 +30,7 @@ Djinn gives you one repeatable container image and several ways to use it:
   container with SIGTTOU — loading the host and overflowing Docker's event ring
   buffer, so nothing that goes wrong in that container stays diagnosable.
   `djinn start` refuses that shape.
-- Run a one-shot agent prompt with `djinn run`.
+- Run a one-shot agent prompt with `djinn run`, alongside a running dev.
 - Attach another shell to a running container with `djinn enter`.
 - Keep reusable session workspaces under `~/.djinn/sessions/` with
   `djinn session`.
@@ -65,7 +65,10 @@ read a mounted key, so also deny it in their permission settings, for example
 Install these on the host:
 
 - Docker Engine 25 or later, or Docker Desktop with such an engine
-- Docker Compose v2.20.2 or later, available as `docker compose`
+- Docker Compose v2.24.4 or later, available as `docker compose`; the run overlay
+  uses [`!override`](https://docs.docker.com/reference/compose-file/merge/#replace-value)
+  to replace the network list. Older Compose silently ignores the tag; Djinn's
+  network preflight then refuses the run.
 - Docker Buildx, available as `docker buildx`, used by `djinn build`
 - `uv`, used to install and run the Python CLI
 
@@ -125,6 +128,13 @@ read-only mode. Add `--write` when you want the selected agent to modify files:
 ```sh
 djinn run claude "Fix the failing test." --write
 ```
+
+A run is a guest alongside dev and other runs; it never takes the dev runtime
+or blocks `djinn start`. It keeps workspace mounts, config-root credentials,
+workflow delivery, shell/SOPS/zone mounts, declarations and `--firewall`.
+It gets no desktop endpoints or hostctl aliases. Its network is separate from
+dev and the companions; see the [run boundary](SECURITY-MODEL.md#guest-runs).
+For Git/SSH limits, see [Git identities and SSH signing](#git-identities-and-ssh-signing).
 
 ## First Authentication
 
@@ -672,12 +682,12 @@ invalid config file, or build the image.
 
 Desktop notifications, playback and microphone capture use two isolated helpers,
 built with `djinn build`. Only their read-only output directories reach dev.
-Creation through foreground start, detached start or `djinn run` prepares each
-available host endpoint independently. A failed helper produces a warning and
+Creation through foreground or detached `djinn start` prepares each available
+host endpoint independently. A failed helper produces a warning and
 starts dev without that endpoint. `djinn clean` removes their runtime volumes;
 backup and restore exclude them.
 
-After rebuilding, recreate dev through the normal start/run path. Recreate after
+After rebuilding, recreate dev through `djinn start`. Recreate after
 a host desktop session or audio server restart too; plain container restart keeps
 the existing mounts and cannot restore an endpoint omitted during creation.
 See [desktop boundaries](SECURITY-MODEL.md#desktop-boundaries)
@@ -933,8 +943,25 @@ value overrides `default_model` for that invocation.
 | `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn serve` | Starts Claude Remote Control or the OpenCode web UI/API inside the running detached container | Uses the container's working directory, mounts and sign-ins | [Remote agent access](#remote-agent-servers), status, stop and OpenCode pairing |
-| `djinn run AGENT PROMPT` | Runs the `dev` service headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
+| `djinn run AGENT PROMPT` | Runs a [guest](#quickstart) headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback checks the selected agent binary on `PATH` and applies workspace checks before launch. Claude, Codex, and OpenCode host fallback receives that agent's confirmed canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
+
+`djinn run` exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| Agent's code | Normal agent completion, including failure. |
+| `1` | Any run refusal. |
+| `124` | Timeout. |
+| `126` / `127` | Command cannot be executed / command not found. |
+| `130` | Ctrl-C, SIGTERM or SIGHUP. |
+
+Every exit path after launch cleans up exactly that run's container. Cleanup
+verifies its name and labels, stops it with a 10 s grace period, then
+force-removes it if needed. Further interrupt, termination and hangup signals
+are ignored during cleanup, which can take about 55 s. If identity cannot be
+verified or removal fails, a warning names the container and points to
+`djinn clean`.
 
 The [Codex daemon policy](#codex) runs on foreground and detached dev-container
 starts, not on one-shot `djinn run` or `compose run … <cmd>` invocations.
@@ -967,7 +994,7 @@ Common `start` options:
 
 | Option | Effect |
 | --- | --- |
-| `--docker`, `-d` | Starts the rootless `agent-docker` companion and sets a managed Unix `DOCKER_HOST` in dev |
+| `--docker`, `-d` | Starts the rootless `agent-docker` companion and sets a managed Unix `DOCKER_HOST` in dev; refused by `djinn run` |
 | `--docker-direct` | Adds `docker-compose.docker-direct.yml` and mounts `/var/run/docker.sock` directly into the dev container |
 | `--firewall`, `-f` | Applies the existing outbound rules in dev and, with `--docker`, before the companion daemon starts |
 | `--here` | Mounts the current directory as `/home/dev/workspace` and uses it as the working directory; writable overlaps with host execution inputs are refused |
@@ -1259,7 +1286,12 @@ clean removes it. Inner containers stop with dev and follow Docker restart polic
 when the daemon starts again.
 
 `djinn start --docker-direct` mounts `/var/run/docker.sock` directly into dev and
-grants host-daemon authority. Both Docker flags also work with `djinn run`.
+grants host-daemon authority. Runs support only `--docker-direct`, and refuse it
+while the hostctl helper is running; close the window with `djinn hostctl off`
+or run without that flag. `djinn run --docker` exits 1 before preparation:
+
+> djinn run cannot use --docker: the rootless agent Docker daemon belongs to the dev runtime. Use --docker-direct (host Docker authority) or start a dev with `djinn start --docker` and work there.
+
 A verified companion of dev's own generation contributes no Docker sealing
 cause. Direct mode remains unsealed; unknown or mismatched agent evidence refuses
 admission, including with `--allow-unsealed`. Other sealing causes still apply.
@@ -1288,8 +1320,8 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `${DJINN_CONFIG_ROOT}/age` | `/home/dev/.config/age` | age encryption identities (`keys.txt`) |
 | `${CODE_DIR}` | `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) | One configured workspace root; AIOS's `projects/` appears at `/home/dev/aios/projects` |
 | `${HOME}/.djinn/sessions` | `/home/dev/sessions` | Session workspaces |
-| Djinn-generated public SSH directory | `/home/dev/.ssh:ro` | Declared Git aliases, public keys and host/signing trust |
-| Djinn Git agent export directory | `/run/djinn-git-agent:ro` | Filtered SSH agent socket (`auth.sock`) |
+| Djinn-generated public SSH directory (starts only) | `/home/dev/.ssh:ro` | Declared Git aliases, public keys and host/signing trust |
+| Djinn Git agent export directory (starts only) | `/run/djinn-git-agent:ro` | Filtered SSH agent socket (`auth.sock`) |
 | `~/.gitconfig` | `/home/dev/.gitconfig:ro` | Read-only Git config |
 | `./config/claude` | `/home/dev/.claude_seed` | Local Claude seed and settings sync source |
 | `./config/claude/AGENTS.md` | `/home/dev/.claude/AGENTS.md` | Direct Compose-Claude instruction mount |
@@ -1328,6 +1360,11 @@ while generated text in `memories/` stays shared. See
 Local-zone SQLite is outside the config-root backup.
 
 ### Git identities and SSH signing
+
+This delivery is for foreground and detached `djinn start` only. Runs have no
+Git over SSH: no `SSH_AUTH_SOCK`, generated `~/.ssh` or SSH signing. Commits
+requiring SSH signing fail. Git over HTTPS through the config-root `gh`
+credentials still works.
 
 Declare each existing Git SSH alias and both host key paths with `djinn config edit`:
 
@@ -1368,10 +1405,11 @@ Djinn never takes a passphrase from piped or redirected input: without a termina
 on stdin, any encrypted key refuses startup, while unencrypted keys still load.
 Linux host numeric UID 1000 must match the dev image. Host runtime state lives in the
 owner-only `.local/state/djinn/runtime/git-agent` directory under the home recorded for
-the host UID; `HOME` and `XDG_RUNTIME_DIR` do not affect its location. Both `start` and
-`run` deliver `SSH_AUTH_SOCK=/run/djinn-git-agent/auth.sock`. A detached start keeps
-the agent until the actual dev container stops or is removed. Concurrent creation is
-refused; use `djinn clean` on the host before replacing a live container.
+the host UID; `HOME` and `XDG_RUNTIME_DIR` do not affect its location. Foreground
+and detached starts deliver `SSH_AUTH_SOCK=/run/djinn-git-agent/auth.sock`. A
+detached start keeps the agent until the actual dev container stops or is removed.
+Concurrent dev creation is refused; use `djinn clean` on the host before replacing
+a live dev container.
 
 For SSH signing, Djinn writes `gpg.format=ssh`, an explicitly selected public signing
 key and optional `gpg.ssh.allowedSignersFile` to `~/.gitconfig_local`. Add this manually
@@ -1416,6 +1454,15 @@ the selected workspace bind. Targets at or below a Djinn-managed root are refuse
 for both `:rw` and `:ro`, following the shared rule for declared mounts below.
 `djinn run` without `--mount` and without `--here` keeps its implicit `--here`
 behavior.
+
+Runs also refuse protected host sources and socket sources, including read-only
+binds, across the resolved Compose configuration and command-line mounts; see
+[the protected-source check](SECURITY-MODEL.md#guest-runs).
+For runs, `--here` from a directory containing Djinn's private state, such as `$HOME`, is
+refused. Start from a subdirectory, or use `--mount <dir>:ro` for a directory
+outside the private state. The configured `general.code_dir` is always bound,
+so move it too if it contains protected state; an explicit mount does not
+replace it.
 
 Named volumes are Docker-managed and host-local:
 
@@ -1527,8 +1574,8 @@ Approving the banner of a host check approves the helper's source identity for
 that target user: within the target policy's `checkPeriod` it can also cover the
 agents' later connections as that user; that is the intended effect.
 
-Generated aliases remain present while the window is closed. Git and signing
-work independently.
+Generated aliases in dev remain present while the window is closed. Git and
+signing in dev work independently. For runs, see [the guest limits](#quickstart).
 Generated SSH delivery requires host numeric UID 1000, matching the dev image,
 so the dev user can read the owner-only public files.
 
@@ -1671,11 +1718,17 @@ For encryption and credential implications, see the
 
 ## Cleanup and Uninstall
 
-Remove running Djinn containers while keeping volumes, config, and the network:
+Remove the whole Compose project's containers, including in-flight runs, while
+keeping persistent volumes, config and `djinn-network`. This also removes the
+run network `djinn-in-a-box_default`:
 
 ```sh
 djinn clean
 ```
+
+Explicit run removal verifies the run name and labels, stops it with a 3 s grace
+period, then force-removes it by ID. Normal project teardown follows; `djinn clean`
+does not promise to preserve foreign containers carrying the project labels.
 
 Before `djinn clean` or `djinn start` removes a dev, companion or helper
 container that stopped without Djinn, it writes a post-mortem record to

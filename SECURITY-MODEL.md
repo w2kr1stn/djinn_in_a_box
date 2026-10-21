@@ -101,7 +101,8 @@ The policy keeps its existing private-network/DNS allowances and fixed allowlist
 `--docker-direct` delivers the host socket read-write. The entrypoint adjusts socket
 group access for dev; a non-root client still has host-root-equivalent authority.
 Host workloads are independent of dev's firewall and resource limits. Direct mode
-is unsealed. Agent mode contributes no Docker cause only after the same-generation
+is unsealed. Runs have an additional [window restriction](#guest-runs).
+Agent mode contributes no Docker cause only after the same-generation
 verification described below. Prefer no Docker access when unnecessary.
 
 The temporary audit assistant holds host Docker authority and shares `djinn-network`.
@@ -111,6 +112,44 @@ The audit agent is trusted at the level of the Docker socket and the read-write 
 steps, including access to loopback-only host services. It applies to the whole
 build, so use it only with trusted Dockerfiles and build inputs. It affects
 build-time networking, not the resulting container's runtime network.
+
+## Guest runs
+
+`djinn run` uses only the Compose project network `djinn-in-a-box_default`, never
+`djinn-network`. It cannot reach dev, the agent-Docker companion or the hostctl
+relay `djinn-hostctl:1080`, by alias or IP. Runs neither close nor pause windows;
+network separation keeps them outside the relay. Runs share this one network
+with each other. This is a network boundary, not storage isolation: config-root
+credentials, sessions and caches remain shared with dev.
+
+A run refuses every bind source, read-only included, that overlaps a protected
+host path in either direction after resolving symlinks. Protected paths are the
+whole runtime root; hostctl state, serve state and post-mortem records; the Docker
+data root and helper volume's backing storage; configured Git key files; and
+all Docker sockets. Every socket source is also refused. The check covers exactly
+what Docker binds: every bind in the resolved Compose configuration, including
+base/config-root/workspace/declaration binds, plus every command-line `-v` mount
+(including shell, SOPS and zone mounts). The only exception is the approved
+`/var/run/docker.sock` source and target in DIRECT mode. An incomplete check
+refuses the run. See [mount usage](README.md#storage-and-mounts) for the private-state
+ancestor refusal and remedies.
+
+`djinn run --docker-direct` is refused while the hostctl helper is running.
+Close the window or omit the flag. With host Docker authority, network separation
+is no boundary; a running run with a Docker socket or non-empty `DOCKER_HOST`
+contributes a [sealing cause](#sealed-deployments-and-trusted-controller).
+A window can open between the direct-mode check and container start. Admission
+checks sealing after enrollment, but there is no periodic reassessment of runs
+in an open window; a run that starts after that check remains a residual.
+
+The source check is a snapshot: a writable workspace can swap a directory for a
+symlink before container start. Sockets inside mounted directories are not
+scanned. Base binds are checked but not rewritten; their owner-controlled roots
+are mount points in dev. A run started during `djinn clean` can escape that clean.
+A Docker API reachable over TCP is outside this model; sealing sees `DOCKER_HOST`
+only in the container environment, not an agent's later shell environment or
+client configuration. The host's [forwarding policy](#direct-routes-and-target-authority)
+must cover the run bridge too.
 
 ## Remote agent server access
 
@@ -328,6 +367,9 @@ For a running dev container it requires complete inspection and no named causes:
   managed volumes and endpoint consumers. Companion workspace mounts must equal
   the trusted delivery and be a subset of dev's own mounts, at the same paths and
   modes. Names, labels and daemon-reported identity alone never qualify.
+- No Docker authority in a running `djinn run`: a run with a Docker socket bind
+  or non-empty `DOCKER_HOST` reports “Docker authority in a running djinn run”,
+  even on a separate network. Opening then requires `--allow-unsealed`.
 - No other reachable Docker proxy through shared networks, host networking or
   non-loopback published ports. Only the verified companion's inherited EXPOSE
   2375/2376 metadata is exempt; all other peers are still inspected. A leftover
@@ -335,7 +377,8 @@ For a running dev container it requires complete inspection and no named causes:
 - No bind of host `/`, the controller user's home or its ancestors; no exposure
   of `djinn-hostctl-state`, its backing storage or the Docker data root.
 - No bind exposing private controller/journal, post-mortem records, agent or
-  runtime control state.
+  runtime control state. The private map includes the real `state.json` and all
+  runtime control files; public/export delivery stays outside that narrow map.
 - No writable bind overlapping host execution inputs: Djinn's installation and
   build context, configuration/agent/zone files, Python environments/executable,
   effective import directories and loaded modules, Docker CLI/configuration/
@@ -378,6 +421,12 @@ malformed, unsupported or incomplete provenance is **unknown**, not sealed.
 The exception removes only a Docker cause. A sensitive workspace, such as host
 `/`, remains a dev cause even when delivered identically to the companion.
 
+The peer scan skips the assessed dev by its full Docker ID. If the daemon reports
+“No such container” for a vanished peer, sealing skips it; other inspection
+failures remain uncertain. The run-authority check examines socket source/target
+paths lexically and reads `DOCKER_HOST` directly from container env before
+skipping non-shared peers, adding no inspection error source.
+
 The nested inventory is skipped when a cause is treated as Docker authority:
 a Docker socket or relocated socket bind, a host-root bind, or an unverified
 `DOCKER_HOST`. These are conservative classifications, not verified access.
@@ -409,14 +458,14 @@ individual findings. With host authority, the window is only an operating aid.
 The flag cannot override uncertain inspection, direct-route results, deadline,
 trust or journal failures. The one exception is the nested inventory above: a
 Docker-authority cause skips it instead of overriding its uncertainty, because
-it cannot make such a dev sealed. The flag applies to that opening only. Before any new
-interactive, headless or detached dev starts, unsealed/unknown planned delivery
+it cannot make such a dev sealed. The flag applies to that opening only. Before
+any new interactive or detached dev starts, unsealed/unknown planned delivery
 closes and verifies the helper; sealed delivery pauses admission until actual
 delivery and the probes in both dev and companion namespaces pass. Companion
 ID, profile, network and storage are revalidated at admission commit and during
 the open window; replacement, drift or uncertain inspection closes the window.
 A creator never inherits the override. External dev removal or replacement closes
-the window.
+the window. [Guest runs](#guest-runs) bypass this close/pause path.
 
 ## Window state, expiry and logs
 
@@ -498,9 +547,10 @@ bound. A hung host state filesystem can still block the command.
 
 ## Direct routes and target authority
 
-The host must prevent forwarding from the Docker network into the tailnet for
-all declared IPv4/IPv6 addresses. Hostctl changes no firewall. Its throwaway,
-digest-pinned probe shares only dev's network namespace and runs trusted isolated
+The host must prevent forwarding from every Docker bridge into the tailnet for
+all declared IPv4/IPv6 addresses, including `djinn-in-a-box_default`. A policy
+scoped only to `djinn-network` does not protect runs. Hostctl changes no firewall.
+Its throwaway, digest-pinned probe shares only dev's network namespace and runs trusted isolated
 Python, without dev files/environment, to attempt raw TCP connections on port
 22. Reached or unknown results refuse admission; doctor uses the same probe and
 reports deferred results without dev or authenticated peers.
