@@ -59,6 +59,51 @@ def _forbid_real_docker(request, monkeypatch):
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded)
 
 
+@pytest.fixture
+def quiet_doctor(monkeypatch):
+    """Doctor rows run without the Docker CLI: probes are stubbed and any CLI call fails (#194)."""
+    from djinn_in_a_box.commands import doctor
+    from djinn_in_a_box.core import docker, git_diagnostics
+    from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+
+    for name in (
+        "_docker_installed",
+        "docker_daemon_ok",
+        "_docker_socket_ok",
+        "compose_v2_ok",
+        "buildx_ok",
+        "_image_built",
+        "network_exists",
+    ):
+        monkeypatch.setattr(doctor, name, lambda *a: True)
+    monkeypatch.setattr(doctor, "agent_docker_checks", lambda **kw: [])
+    monkeypatch.setattr(doctor, "hostctl_checks", lambda *a, **kw: [])
+    monkeypatch.setattr(git_diagnostics, "git_diagnostics", lambda c: [])
+    monkeypatch.setattr(
+        docker,
+        "inspect_running_desktop",
+        lambda: MagicMock(channels=(), raw_sources=(), raw_verified=True),
+    )
+    # The OpenCode runtime row inspects and execs into a running `djinn` container; its own tests
+    # fake Docker. Here the result must not depend on whether such a container exists.
+    monkeypatch.setattr(
+        doctor,
+        "_opencode_runtime_check",
+        lambda config, *, daemon: doctor.Check(
+            "OpenCode runtime", doctor.Status.WARN, "check unavailable"
+        ),
+    )
+    original = subprocess.Popen.__init__
+
+    def refuse_docker(self, args, *rest, **kwargs):
+        argv = [str(arg) for arg in args] if isinstance(args, list | tuple) else [str(args)]
+        if argv[0] in {DOCKER_EXECUTABLE, "docker"}:
+            raise AssertionError(f"doctor test reached the real Docker CLI: {argv!r}")
+        original(self, args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", refuse_docker)
+
+
 def _proc_stat(pid: int) -> list[str] | None:
     """Fields after the command name in /proc/<pid>/stat: state, ppid, pgrp, ..."""
     try:

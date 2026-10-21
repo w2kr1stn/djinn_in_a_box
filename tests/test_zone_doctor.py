@@ -10,6 +10,10 @@ from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.zones import load_zone_assignments
 from djinn_in_a_box.core.docker import ensure_zone_roots, resolve_zone_roots
 
+# Every test here runs the doctor; none may depend on a running `djinn` container (#194).
+pytestmark = pytest.mark.usefixtures("quiet_doctor")
+_REAL_OPENCODE_RUNTIME_CHECK = doctor_mod._opencode_runtime_check
+
 
 @pytest.fixture
 def zone_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppConfig:
@@ -21,6 +25,18 @@ def zone_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppConfig:
 
 def _check_named(checks: list[doctor_mod.Check], name: str) -> doctor_mod.Check:
     return next(check for check in checks if check.name == name)
+
+
+def test_doctor_tests_cannot_reach_the_real_docker_cli(
+    zone_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_mod, "_opencode_runtime_check", _REAL_OPENCODE_RUNTIME_CHECK)
+    # The first call of the real row is a read-only `docker container inspect`; it must be refused
+    # too, not only the later `docker exec`.
+    with pytest.raises(AssertionError, match="doctor test reached the real Docker CLI") as refused:
+        doctor_mod.run_checks(zone_config)
+    assert "'container', 'inspect'" in str(refused.value)
+    assert "'exec'" not in str(refused.value)
 
 
 def test_drift_accounts_for_intermediate_assignment_segments(zone_config: AppConfig) -> None:

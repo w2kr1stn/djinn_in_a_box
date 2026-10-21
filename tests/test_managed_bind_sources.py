@@ -15,7 +15,7 @@ from djinn_in_a_box.commands import agent, container, doctor
 from djinn_in_a_box.config import loader, zones
 from djinn_in_a_box.config.defaults import DEFAULT_ZONES, SYNC_PATHS
 from djinn_in_a_box.config.models import AppConfig
-from djinn_in_a_box.core import docker, git_diagnostics, host_sealing
+from djinn_in_a_box.core import docker, host_sealing
 from djinn_in_a_box.core.config_workflow import WorkflowPreparationResult
 from djinn_in_a_box.core.exceptions import ConfigValidationError, MountSpecificationError
 
@@ -641,28 +641,6 @@ def test_home_unset_is_pinned_to_checked_sessions(ground, monkeypatch):
             volume["source"] == str(checked[-1])
             for volume in fragment["services"][service]["volumes"]
         )
-
-
-@pytest.fixture
-def quiet_doctor(monkeypatch):
-    for name in (
-        "_docker_installed",
-        "docker_daemon_ok",
-        "_docker_socket_ok",
-        "compose_v2_ok",
-        "buildx_ok",
-        "_image_built",
-        "network_exists",
-    ):
-        monkeypatch.setattr(doctor, name, lambda *a: True)
-    monkeypatch.setattr(doctor, "agent_docker_checks", lambda **kw: [])
-    monkeypatch.setattr(doctor, "hostctl_checks", lambda *a, **kw: [])
-    monkeypatch.setattr(git_diagnostics, "git_diagnostics", lambda c: [])
-    monkeypatch.setattr(
-        docker,
-        "inspect_running_desktop",
-        lambda: Mock(channels=(), raw_sources=(), raw_verified=True),
-    )
 
 
 @pytest.mark.parametrize("overlap", [False, True])
