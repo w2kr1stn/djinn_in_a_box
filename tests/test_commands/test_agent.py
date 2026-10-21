@@ -917,19 +917,22 @@ class TestRunCommand:
             source.mkdir()
             config = AppConfig(code_dir=source, config_root=tmp_path / "config")
             run_mocks["load_config"].return_value = config
-            monkeypatch.setattr(
-                agent_command, "validate_managed_bind_sources",
-                docker.validate_managed_bind_sources,
-            )
             mount = str(tmp_path)
         elif setting == "source":
             mount = str(tmp_path / poisoned)
         else:
             mount = f"{tmp_path}:/proc/{poisoned}"
-        result = CliRunner().invoke(
-            app, ["run", "claude", "test", "--mount", mount]
-            + (["--allow", "8.8.8.8"] if allow else []),
+        # run_mocks patches this name; a context-scoped patch restores before its teardown,
+        # where a monkeypatch would put the mock back after run_mocks restored the original.
+        validator = (
+            docker.validate_managed_bind_sources
+            if setting == "managed" else agent_command.validate_managed_bind_sources
         )
+        with patch.object(agent_command, "validate_managed_bind_sources", validator):
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test", "--mount", mount]
+                + (["--allow", "8.8.8.8"] if allow else []),
+            )
         assert result.exit_code == 1, result.output
         assert result.stdout == ""
         run_mocks["run"].assert_not_called()
@@ -995,6 +998,7 @@ class TestRunCommand:
             assert len(result.stderr.splitlines()) == 1
         else:
             assert "Mount /in\nput -> / conflicts" in result.stderr
+
 
 class TestAgentsJson:
     @pytest.fixture
