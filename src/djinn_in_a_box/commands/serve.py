@@ -139,43 +139,35 @@ def _status_table(snapshot: core.Snapshot) -> None:
         if state == "degraded":
             state = f"degraded ({row['reason']})"
         if name == core.OPENCODE:
-            endpoint = (
+            lines = [
                 f"http://127.0.0.1:{snapshot.port}"
                 if snapshot.published
-                else "port not published (recreate once)"
-            )
-            endpoint += (
-                f"\ntailnet: {snapshot.url}"
+                else "port not published (recreate once)",
+                f"tailnet: {snapshot.url}"
                 if snapshot.url
-                else f"\ntailnet: unknown ({snapshot.reason})"
-            )
+                else f"tailnet: unknown ({snapshot.reason})",
+            ]
             if row["state"] in ("running", "degraded"):
-                endpoint += (
-                    f"\nrelay refused since start: {row['relay_refused']}"
+                lines.append(
+                    f"relay refused since start: {row['relay_refused']}"
                     if row["relay_refused"] is not None
-                    else f"\nrelay refused: unknown ({row['relay_note']})"
+                    else f"relay refused: unknown ({row['relay_note']})"
                 )
             if row["foreign_listener"]:
-                endpoint += (
-                    "\nnote: port 4096 is used by another process; possibly "
+                lines.append(
+                    "note: port 4096 is used by another process; possibly "
                     "a djinn serve from before the update — recreate the container"
                 )
             if snapshot.funnel:
-                endpoint += "\n" + core.FUNNEL_WARNING
+                lines.append(core.FUNNEL_WARNING)
         else:
-            endpoint = "Remote Control: see the Claude apps"
+            lines = ["Remote Control: see the Claude apps"]
         # Each cell is data; escaped controls cannot become terminal instructions or markup.
+        # Only the endpoint's own line breaks survive; a newline inside a value stays escaped.
         table.add_row(
-            *(
-                Text(escape_nonprintable(str(value)))
-                for value in (
-                    name,
-                    state,
-                    row["since"] or "",
-                    endpoint,
-                    row["last_line"] or "" if row["state"] == "exited" else "",
-                )
-            )
+            *(Text(escape_nonprintable(str(value))) for value in (name, state, row["since"] or "")),
+            Text("\n".join(escape_nonprintable(line) for line in lines)),
+            Text(escape_nonprintable(row["last_line"] or "" if row["state"] == "exited" else "")),
         )
     console.print(table)
 

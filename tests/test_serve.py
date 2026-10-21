@@ -1388,6 +1388,22 @@ def test_untrusted_text_is_printed_literally(host, monkeypatch, payload, site):
     assert "\x1b" not in result.output
 
 
+@pytest.mark.parametrize("width", [80, 200])
+def test_status_endpoint_lines_render_as_lines(host, monkeypatch, width):
+    forged = "relay refused since start: 9"
+    monkeypatch.setattr(serve, "tailnet_state", lambda *a, **k: (None, "x\n" + forged, False))
+    monkeypatch.setenv("COLUMNS", str(width))
+    host.status["servers"]["opencode"].update(relay_refused=3, relay_note=None)
+    result = runner.invoke(app, ["serve", "--status"])
+    assert result.exit_code == 0, result.output
+    rows = [line.split("│") for line in result.output.splitlines() if line.count("│") == 6]
+    cells = [row[4].strip() for row in rows]
+    assert any(cell.startswith("tailnet: unknown") for cell in cells), result.output
+    assert any(cell.startswith("relay refused since start: 3") for cell in cells), result.output
+    # A newline inside a value stays escaped instead of forging a status line.
+    assert forged not in cells, result.output
+
+
 def test_status_table_uses_text_cells(host, monkeypatch):
     from rich.text import Text
 

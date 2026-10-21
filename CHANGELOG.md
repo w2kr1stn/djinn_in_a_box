@@ -32,6 +32,9 @@ Versioning before and after the first stable release.
 - `--firewall` now allows Claude's current sign-in token host
   `platform.claude.com` instead of the unused `console.anthropic.com`, so a
   subscription token can be refreshed under the firewall (#178).
+- `djinn serve --status` shows the OpenCode endpoint, tailnet and relay details on
+  separate lines instead of one line with literal `\n`, which narrow terminals
+  truncated (#167).
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).
