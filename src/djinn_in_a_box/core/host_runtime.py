@@ -824,6 +824,8 @@ FILTER_REBINDS = 5
 FILTER_REBIND_WINDOW_SECONDS = 300
 OBSERVER_NOTE_SECONDS = 60
 OBSERVER_DETAIL_CHARS = 512
+FILTER_REBIND_BACKOFF_SECONDS = 5
+FILTER_REBIND_BACKOFF_CAP_SECONDS = 60
 OBSERVER_CLOSE_SECONDS = 30
 OBSERVER_SIGNALLED_CLOSE_SECONDS = 2
 
@@ -894,8 +896,8 @@ def _publish_observer_exit(root: Path, generation: str, code: str, error: str | 
         save_state(root, fresh)
     except _OBSERVER_RETRY as exc:
         _say(f"{_utc()} observer-exit: state cause not written: {exc}")
-    if code == "dev-replaced":
-        return True
+    if code == "dev-replaced" or not (root / "export").is_dir():
+        return True  # no dev-visible file: replaced dev, or a runtime without Git export
     target, temporary = observer_exit_paths(root)
     try:
         descriptor = os.open(
@@ -951,6 +953,8 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
     pending: list[str] = []  # rebind times not yet published to state.json
     rebind_times: list[str] = []
     rebind_marks: list[float] = []
+    rebind_failures = 0  # consecutive failed attempts; spaces the next one (backoff)
+    rebind_after = 0.0
     exit_code: str | None = None
     failure: str | None = None
     seen_id: str | None = None
@@ -1029,7 +1033,12 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                     and actual[2] == generation
                     and actual[1] == running
                     and all(settled.get(s, running) == running for s in fresh["resources"])
-                    and not (server is not None and worker is not None and not worker.is_alive())
+                    and not (
+                        server is not None
+                        and worker is not None
+                        and not worker.is_alive()
+                        and time.monotonic() >= rebind_after
+                    )
                     and not pending
                 ):
                     continue
@@ -1131,8 +1140,13 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                             running = target
                             if not running and not fresh["resources"]:
                                 break  # Preserve Git-only release-on-stop semantics.
-                        if server is not None and worker is not None and not worker.is_alive():
-                            now = time.monotonic()
+                        now = time.monotonic()
+                        if (
+                            server is not None
+                            and worker is not None
+                            and not worker.is_alive()
+                            and now >= rebind_after
+                        ):
                             rebind_marks[:] = [
                                 mark for mark in rebind_marks
                                 if now - mark < FILTER_REBIND_WINDOW_SECONDS
@@ -1159,7 +1173,13 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                                     f"{when} observer: Git agent filter rebind failed: "
                                     f"{type(exc).__name__}: {exc}"
                                 )
+                                rebind_failures += 1
+                                rebind_after = now + min(
+                                    FILTER_REBIND_BACKOFF_SECONDS * 2 ** (rebind_failures - 1),
+                                    FILTER_REBIND_BACKOFF_CAP_SECONDS,
+                                )
                             else:
+                                rebind_failures, rebind_after = 0, 0.0
                                 _say(f"{when} observer: Git agent filter rebound")
                         if pending:  # also after Git shutdown, while the observer lives on
                             latest = read_state(root)
@@ -1172,6 +1192,8 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                             pending.clear()
                 except _ObserverExitError as exc:
                     exit_code = exc.code
+                    if exc.__cause__ is not None:  # the chained reason, e.g. the resume failure
+                        failure = f"{type(exc.__cause__).__name__}: {exc.__cause__}"
                     break
                 except retry as exc:
                     note(f"{type(exc).__name__}: {exc}")
@@ -1200,7 +1222,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                     observed={"state": exit_code, "expected_id": dev_id, "actual_id": seen_id},
                     runtime_generation=generation,
                     root=records_root,
-                    detail={"rebinds": rebind_times},
+                    detail={"rebinds": rebind_times, **({"error": failure} if failure else {})},
                 )
         closing = time.monotonic()
         guard = contextlib.ExitStack()
@@ -1230,7 +1252,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                             and server is not None
                         ):
                             server.retire_path()
-                    except retry as exc:
+                    except Exception as exc:  # a diagnostic must never skip the cleanup
                         _say(f"{_utc()} observer-exit: not published: {exc}")
                     if cleanup_owned(
                         root, generation, docker_path,

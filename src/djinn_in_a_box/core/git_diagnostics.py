@@ -38,6 +38,10 @@ class RepositoryScan:
     unreadable_root: bool
     limit_reached: bool = False
 
+OBSERVER_REMEDY = (
+    "See observer.log on the host; recreate dev from the host: djinn clean, then djinn start."
+)
+
 
 def public_selector(value: str, names: set[str]) -> bool:
     path = value.replace("${HOME}", "/home/dev").replace("$HOME", "/home/dev")
@@ -363,10 +367,7 @@ def git_diagnostics(config: AppConfig) -> list[GitDiagnostic]:
                         if attached:
                             status = "fail"
                             detail = ended
-                            remedy = (
-                                "See observer.log on the host; recreate dev from the host: "
-                                "djinn clean, then djinn start."
-                            )
+                            remedy = OBSERVER_REMEDY
                         elif cause:
                             detail += "; " + ended
                 elif attached:
@@ -376,6 +377,7 @@ def git_diagnostics(config: AppConfig) -> list[GitDiagnostic]:
                         status = "fail"
                         reason = str(exc) or type(exc).__name__
                         detail = f"Git agent filter not serving: {reason}"
+                        remedy = OBSERVER_REMEDY
                     else:
                         private_loaded = agent_keys(root / "private" / "agent.sock")
                         if loaded == expected and private_loaded == expected:

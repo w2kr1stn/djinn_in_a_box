@@ -163,6 +163,7 @@ def test_live_attached_observer_with_failed_filter_fails_before_rebind_warning(
     assert row.status == "fail"
     reason = str(error) or type(error).__name__
     assert row.detail == f"Git agent filter not serving: {reason}"
+    assert row.remedy == REMEDY
     assert probes == ["liveness", "dev", "export"]
 
 
@@ -181,6 +182,7 @@ def test_filter_failure_precedes_private_agent_error(observer_doctor):
     )
     assert row.status == "fail"
     assert row.detail == "Git agent filter not serving: socket refused"
+    assert row.remedy == REMEDY
     assert probes == ["liveness", "dev", "export"]
 
 

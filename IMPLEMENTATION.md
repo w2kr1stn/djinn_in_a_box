@@ -1210,7 +1210,8 @@ then observes Docker's actual dev ID with a per-creation label. An inherited flo
 serializes pending dev starts and is released after ID handoff. The observer bounds
 key loading at 120 seconds and container discovery at 60 seconds; the single
 `ssh-add` call itself is bounded at 120 seconds on a terminal and 10 seconds
-otherwise. CLI exit after detached handoff keeps the agent. Unknown Docker,
+otherwise. CLI exit after detached handoff keeps the agent; foreground completion,
+timeout, interruption or failure releases it. Unknown Docker,
 state-file or agent reads retry on the next tick. Stable ticks take no lock;
 transitions recheck ownership under a non-blocking guard. Busy locks retry.
 Each companion or helper transition retries independently after an uncertain result.
@@ -1228,7 +1229,8 @@ The agent is never restarted without host-terminal key loading.
 The protocol filter retries transient accept and client-thread startup errors.
 A dead filter thread is rebound at the same exported socket path under the guard,
 after checking the generation. At most five rebinds are allowed in a rolling
-300 seconds; failed attempts count. Every rebind attempt, successful or failed,
+300 seconds; failed attempts count and are spaced (the next attempt waits 5 seconds,
+doubling per consecutive failure up to 60 seconds; a successful rebind resets it). Every rebind attempt, successful or failed,
 logs its UTC time and outcome in `observer.log` and publishes the last five times
 in `state.json` as `filter_rebinds`. A failed state publication
 retries without creating another filter or consuming another rebind allowance.

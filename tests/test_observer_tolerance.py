@@ -497,6 +497,7 @@ class Harness:
         self.servers: list[git_agent.AgentFilter] = []
         self.workers: list[threading.Thread] = []
         self.record_calls: list[str] = []
+        self.guard_marks: list[int] = []
         self.thread_failures = 0
         self.busy_after: int | None = None
         self.agent: subprocess.Popen[bytes] | None = None
@@ -1095,10 +1096,10 @@ def test_failed_rebinds_count_toward_the_bound(gitted, quick_filter, monkeypatch
 
     monkeypatch.setattr(host_runtime, "_serve_filter", failing)
     kill_filters(gitted, after=3, limit=1)
-    gitted.stop_at = 100
+    gitted.stop_at = 1000
     gitted.run()
     assert len(attempts) == 6  # the initial filter and five failed rebinds
-    assert gitted.clock.ticks < 100
+    assert gitted.clock.ticks < 1000
     assert_channels(gitted, "filter-failed")
 
 
@@ -1115,11 +1116,11 @@ def test_failed_thread_start_during_rebind_strands_no_socket(gitted, quick_filte
             h.workers[-1].join(timeout=5)
         elif h.clock.ticks == 4:
             seen.append((h.root / "export/auth.sock").exists())  # failed attempt left nothing
-        elif h.clock.ticks == 9:
+        elif h.clock.ticks == 30:
             seen.append(agent_keys(h.root / "export/auth.sock") == frozenset())
 
     gitted.hook = hook
-    gitted.stop_at = 12
+    gitted.stop_at = 40
     gitted.run()
     assert seen == [False, True]
     assert len(gitted.servers) == 2  # the failed attempt never returned a filter
@@ -1193,6 +1194,7 @@ def test_replacement_keeps_state_cause_and_resources(inproc, steps, other, runni
     inproc.hook = lambda h, inside: (
         setattr(h, "dev", replacement) if h.clock.ticks >= 4 else None
     )
+    inproc.stop_at = 40  # a regression fails the assertions below instead of hanging
     inproc.run()
     state = inproc.state()
     assert state is not None and set(state["resources"]) == set(COMPANIONS)
@@ -1209,6 +1211,7 @@ def test_git_only_replacement_keeps_state_and_cause(inproc, other, running):
     inproc.hook = lambda h, inside: (
         setattr(h, "dev", replacement) if h.clock.ticks >= 4 else None
     )
+    inproc.stop_at = 40
     inproc.run()
     state = inproc.state()
     assert state is not None and state["resources"] == {}
@@ -1521,6 +1524,7 @@ def test_filter_survives_a_failed_client_thread_start(filters):
     server, thread, errors = filters(script=["stream-fail"])
     thread.start()
     wait_for(lambda: server.listener.peers, 5)
+    server.listener.peers[0].settimeout(5)  # a regression fails here instead of hanging
     assert server.listener.peers[0].recv(1) == b""  # closed (after the slot was taken)
     wait_for(lambda: server.clients._value == 16, 5, "the client slot was not released")
     assert agent_keys(server.exported) == frozenset()
@@ -1634,11 +1638,12 @@ def test_dev_stop_with_companions_retires_the_exported_socket(gitted, steps):
             h.dev = ("dev-1", False, "g1")
         if h.clock.ticks == 8:  # the observer lives on: the path must already be retired
             seen.append((h.root / "export/auth.sock").exists())
+            seen.append(h.agent.poll() is not None)  # and the key-holding agent already gone
 
     gitted.hook = hook
     gitted.stop_at = 10
     gitted.run()
-    assert seen == [False]
+    assert seen == [False, True]
     assert gitted.agent.poll() is not None
 
 
@@ -1961,7 +1966,7 @@ def test_every_rebind_attempt_has_time_log_line_and_history(gitted, quick_filter
     mp.setattr(host_runtime, host_runtime_attr, flaky)
     try:
         kill_filters(gitted, after=3, limit=1)
-        gitted.stop_at = 20
+        gitted.stop_at = 100
         gitted.run()
     finally:
         mp.undo()
@@ -2066,11 +2071,11 @@ def test_post_bind_inode_read_failure_strands_no_socket(gitted, quick_filter, mo
         if h.clock.ticks >= 2:
             state["armed"] = True
         hook(h, inside)
-        if h.clock.ticks == 10:
+        if h.clock.ticks == 30:
             seen.append(agent_keys(h.root / "export/auth.sock") == frozenset())
 
     gitted.hook = armed
-    gitted.stop_at = 12
+    gitted.stop_at = 40
     gitted.run()
     assert state["failed"] == 1 and seen == [True]
     assert gitted.exit_records() == [] and len(gitted.servers) == 2
@@ -2092,7 +2097,7 @@ def test_retirement_failure_is_a_logged_rebind_attempt(
 
     monkeypatch.setattr(Path, "unlink", unlink)
     kill_filters(gitted, after=3, limit=1)
-    gitted.stop_at = 12
+    gitted.stop_at = 40
     gitted.run()
     log = capsys.readouterr().err.splitlines()
     outcomes = [
@@ -2121,7 +2126,7 @@ def test_exhaustion_through_retirement_failures_keeps_every_attempt(
 
     kill_filters(gitted, after=3, limit=1)
     monkeypatch.setattr(Path, "unlink", unlink)
-    gitted.stop_at = 60
+    gitted.stop_at = 1000
     try:
         gitted.run()
     finally:
@@ -2203,11 +2208,11 @@ def test_failed_setup_with_failed_cleanup_is_recovered_by_the_next_attempt(
     def hook(h, inside):
         state["armed"] = h.clock.ticks >= 2
         kill(h, inside)
-        if h.clock.ticks == 12:
+        if h.clock.ticks == 30:
             seen.append(agent_keys(sock) == frozenset())
 
     gitted.hook = hook
-    gitted.stop_at = 14
+    gitted.stop_at = 40
     gitted.run()
     assert state["lstat"] == 1 and state["unlink"] == 1 and seen == [True]
     assert gitted.exit_records() == []  # no E7: the next attempt unlinked and bound again
@@ -2235,11 +2240,11 @@ def test_thread_start_failure_with_failed_cleanup_is_recovered(gitted, quick_fil
             h.thread_failures = 1
             state["armed"] = True
         kill(h, inside)
-        if h.clock.ticks == 12:
+        if h.clock.ticks == 30:
             seen.append(agent_keys(h.root / "export/auth.sock") == frozenset())
 
     gitted.hook = hook
-    gitted.stop_at = 14
+    gitted.stop_at = 40
     gitted.run()
     assert state["raised"] == 1 and seen == [True]
     assert gitted.exit_records() == []
@@ -2309,3 +2314,168 @@ def test_replacement_id_seen_before_a_failed_state_read_is_recorded(gitted, monk
     gitted.run()
     observed = gitted.exit_records()[0]["observed"]
     assert observed["expected_id"] == "dev-1" and observed["actual_id"] == "dev-2"
+
+
+# ---------------------------------------------------------------------------------------------
+# Fix round 4 (Code-Loop A Phase 2).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_companion_resume_error_text_reaches_every_channel(inproc, steps, capsys):
+    """P1: the chained resume exception is the exit cause's error text."""
+    inproc.prepare(resources=COMPANIONS)
+    steps.resume = [RuntimeError("Agent Docker restart readiness timeout")]
+    flip(inproc, 4, 8)
+    inproc.stop_at = 60
+    inproc.run()
+    cause = assert_channels(inproc, "companion-resume-failed", export=False)
+    assert "RuntimeError: Agent Docker restart readiness timeout" in cause["detail"]
+    assert "readiness timeout" in capsys.readouterr().err
+    assert inproc.exit_records()[0]["detail"]["error"].endswith("readiness timeout")
+
+
+def test_accept_failure_threshold_is_fifty(filters):
+    """P4: 49 consecutive accept failures keep serving, 50 end the thread."""
+    server, thread, errors = filters(script=["oserror"] * 49 + ["wait"])
+    thread.start()
+    assert server.listener.reached.wait(10) and thread.is_alive() and errors == []
+    server.listener.gate.set()
+    ended, ended_thread, ended_errors = filters(script=["oserror"] * 50)
+    ended_thread.start()
+    ended_thread.join(timeout=10)
+    assert not ended_thread.is_alive() and len(ended_errors) == 1
+
+
+def test_symlink_planted_at_the_temporary_is_not_followed(gitted, capsys):
+    """P4: O_NOFOLLOW; the write fails as a diagnostic and the outside target is untouched."""
+    outside = gitted.root / "outside-target"
+    outside.write_text("untouched")
+    target, temporary = host_runtime.observer_exit_paths(gitted.root)
+    temporary.symlink_to(outside)
+    gitted.keys.results = [frozenset({b"unexpected"})]
+    gitted.stop_at = 40
+    gitted.run()
+    assert outside.read_text() == "untouched"
+    assert not target.exists()
+    assert "cause file not written" in capsys.readouterr().err
+    assert gitted.state()["observer_exit"]["code"] == "key-set-changed"
+
+
+def test_no_export_file_and_no_diagnostic_without_an_export_directory(inproc, steps, capsys):
+    """P6: a runtime without Git export has no dev-visible cause file to (fail to) write."""
+    inproc.prepare(resources=COMPANIONS)
+    steps.resume = [RuntimeError("resume refused")]
+    flip(inproc, 4, 8)
+    inproc.stop_at = 60
+    inproc.run()
+    assert not (inproc.root / "export").exists()
+    assert "cause file not written" not in capsys.readouterr().err
+
+
+def test_malformed_state_never_skips_the_cleanup(gitted, monkeypatch):
+    """P9: any exception while publishing the cause is a diagnostic; cleanup still runs."""
+    cleaned = []
+    real = host_runtime.cleanup_owned
+
+    def cleanup(*args, **kwargs):
+        cleaned.append(True)
+        return real(*args, **kwargs)
+
+    def broken(root, generation, code, error, rebinds):
+        raise KeyError("generation")
+
+    monkeypatch.setattr(host_runtime, "cleanup_owned", cleanup)
+    monkeypatch.setattr(host_runtime, "_publish_observer_exit", broken)
+    gitted.keys.results = [frozenset({b"unexpected"})]
+    gitted.stop_at = 40
+    gitted.run()
+    assert cleaned == [True]
+
+
+def failing_rebinds(gitted, monkeypatch, script):
+    """``_serve_filter`` follows ``script`` (True = fail) after the initial build."""
+    recording = host_runtime._serve_filter
+    times = []
+
+    def serve(root, allowed, clients=None):
+        if not recording_started:
+            recording_started.append(True)
+            return recording(root, allowed, clients)
+        times.append(gitted.clock.now)
+        gitted.guard_marks.append(len(gitted.guards))
+        if script and script.pop(0):
+            raise OSError(24, "Too many open files")
+        return recording(root, allowed, clients)
+
+    recording_started: list[bool] = []
+    monkeypatch.setattr(host_runtime, "_serve_filter", serve)
+    return times
+
+
+def test_failed_rebinds_back_off_and_a_success_resets_the_spacing(
+    gitted, quick_filter, monkeypatch
+):
+    """P5/D8: 5 s, doubling; a successful rebind starts the spacing over."""
+    times = failing_rebinds(gitted, monkeypatch, [True, True, False, True, False])
+    kill_filters(gitted, after=3, limit=2)
+    gitted.stop_at = 400
+    gitted.run()
+    assert len(times) == 5 and gitted.exit_records() == []
+    gaps = [b - a for a, b in zip(times, times[1:], strict=False)]
+    assert 5 <= gaps[0] < 5.5 and 10 <= gaps[1] < 10.5  # fail, fail -> 5 s, 10 s
+    assert gaps[2] < 0.6  # right after the success: no spacing is carried over
+    assert 5 <= gaps[3] < 5.5  # the next failure waits 5 s again, not 20 s
+
+
+def test_persistent_rebind_failure_is_spaced_capped_and_ends_in_e7(
+    gitted, quick_filter, monkeypatch
+):
+    times = failing_rebinds(gitted, monkeypatch, [True] * 50)
+    kill_filters(gitted, after=3, limit=1)
+    gitted.stop_at = 2000
+    gitted.run()
+    assert len(times) == 5
+    gaps = [b - a for a, b in zip(times, times[1:], strict=False)]
+    for gap, expected in zip(gaps, (5, 10, 20, 40), strict=True):
+        assert expected <= gap < expected + 0.6
+    assert_channels(gitted, "filter-failed", export=True)
+    # Waiting is lock-free: between two attempts the observer enters its guard only for them.
+    spent = [b - a for a, b in zip(gitted.guard_marks, gitted.guard_marks[1:], strict=False)]
+    assert max(spent) <= 4, spent
+    # E7 comes when the capped 60 s wait (not 80 s) after the fifth attempt has passed.
+    assert 60 <= gitted.clock.now - times[-1] < 61
+
+
+def test_two_second_descriptor_shortage_after_a_filter_death_is_survived(
+    gitted, quick_filter, monkeypatch
+):
+    """P5: a short fault does not spend the allowance; the filter serves afterwards."""
+    recording = host_runtime._serve_filter
+    state = {"dead_at": None, "attempts": 0, "started": False}
+
+    def serve(root, allowed, clients=None):
+        if not state["started"]:
+            state["started"] = True
+            return recording(root, allowed, clients)
+        state["attempts"] += 1
+        if gitted.clock.now - state["dead_at"] < 2:
+            raise OSError(24, "Too many open files")
+        return recording(root, allowed, clients)
+
+    monkeypatch.setattr(host_runtime, "_serve_filter", serve)
+    kills = kill_filters(gitted, after=3, limit=1)
+    hook = gitted.hook
+    seen = []
+
+    def wrapped(h, inside):
+        hook(h, inside)
+        if kills and state["dead_at"] is None:
+            state["dead_at"] = h.clock.now - 0.25
+        if h.clock.ticks == 80:
+            seen.append(agent_keys(h.root / "export/auth.sock") == frozenset())
+
+    gitted.hook = wrapped
+    gitted.stop_at = 90
+    gitted.run()
+    assert gitted.exit_records() == [] and seen == [True]
+    assert state["attempts"] == 2  # one inside the shortage, one 5 s later
