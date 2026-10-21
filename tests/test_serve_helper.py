@@ -571,6 +571,25 @@ def test_status_exited_record_with_fifo_log_returns(ctx: Ctx, name: str) -> None
         assert entry["state"] == "exited" and entry["last_line"] is None
 
 
+@pytest.mark.parametrize(
+    ("relay_line", "expected"),
+    [
+        ("relay failed: [Errno 28] No space left on device", "relay failed: [Errno 28]"),
+        ("refused 10.0.0.9 (not gateway)", "backend said goodbye"),
+    ],
+)
+def test_status_exited_opencode_names_relay_failure(
+    ctx: Ctx, relay_line: str, expected: str
+) -> None:
+    ctx.env["FAKE_OC_MODE"] = "exit-early"
+    rc, out = ctx.opencode()
+    assert rc == 0 and out["result"] == "exited", out
+    (ctx.state / "opencode.log").write_text("backend said goodbye\n")
+    (ctx.state / "opencode-relay.log").write_text(relay_line + "\n")
+    entry = ctx.status()["servers"]["opencode"]
+    assert entry["state"] == "exited" and entry["last_line"].startswith(expected), entry
+
+
 @pytest.mark.parametrize("name", ["claude", "opencode"])
 def test_start_exit_tail_with_fifo_log_returns(ctx: Ctx, name: str) -> None:
     # The exiting process replaces its log after spawn has created the regular file.

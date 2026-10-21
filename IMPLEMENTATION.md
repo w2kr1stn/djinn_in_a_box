@@ -1932,7 +1932,7 @@ exactly one JSON object plus a newline: exit 0 with `ok: true`, or exit 1 with
 
 | Subcommand | Successful reply |
 | --- | --- |
-| `status` | `pid1_start`, `busy`, and `servers` keyed by `claude` and `opencode`; each row has `state`, `reason`, `pid`, `since`, `last_line`. OpenCode adds `listening`, `discovery_pid_ok`, `foreign_listener`, `relay_refused` (int or null), `relay_note` (string or null). |
+| `status` | `pid1_start`, `busy`, and `servers` keyed by `claude` and `opencode`; each row has `state`, `reason`, `pid`, `since`, `last_line`. OpenCode adds `listening`, `discovery_pid_ok`, `foreign_listener`, `relay_refused` (int or null), `relay_note` (string or null); for an exited OpenCode, `last_line` is the relay's `relay failed:` line when that ends the relay log. |
 | `claude-start --prefix <slug>` | `name`, `result`, `pid`, `since`, `log_tail` |
 | `opencode-preflight` | `ok` only; reads environment, settings paths, service allowlist and route_localnet without changing files or processes |
 | `opencode-start --port 4096 [--cors <url>]` | The start fields plus `stopped_previous` |

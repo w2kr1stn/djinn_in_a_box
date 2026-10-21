@@ -1465,6 +1465,11 @@ def _status_entry(name: str, record: Record | None, ev: Eval, dirfd: int) -> dic
     }
     if ev.state == "exited":
         tail = sanitize_tail(f"{name}.log", 1, dir_fd=dirfd)
+        if name == "opencode":
+            # A relay failure is the cause; ordinary refusal lines are not.
+            relay_tail = sanitize_tail("opencode-relay.log", 1, dir_fd=dirfd)
+            if relay_tail and relay_tail[-1].startswith("relay failed: "):
+                tail = relay_tail
         entry["last_line"] = tail[-1] if tail else None
     if name == "opencode":
         count, note = relay_count(dirfd, record)
