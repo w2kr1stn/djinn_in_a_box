@@ -1598,6 +1598,57 @@ creator flock, which protects lengthy preparation. Enrollment runs in the
 host_runtime detached observer, outside the control lock; each publication
 rechecks helper identity and window generation.
 
+A busy control lock skips observation publication for that round while dev and
+companion checks continue. Three consecutive skipped rounds queue one
+`observation-skipped` note; publication catches up when the lock is free. Every
+closure path ends with the pinned helper stopped, including errors before
+admission and cancellation. Closure tries the control lock without waiting for
+at most two seconds, then uses an unlocked fallback. Both paths inspect with
+positive `No such container` absence semantics, confirm the launch ID and
+generation immediately before stopping that ID, and share `stop_and_verify`.
+A different helper is preserved. Failed or unknown outcomes retry with a
+0.5-second backoff doubling to five seconds, with one retry log line per minute.
+The SIGTERM, SIGINT and SIGHUP handler ignores all three signals and sets a cancel
+flag without raising. The observer checks that flag at each round and after sleeps,
+then enters closure through its normal finalizer; a step already in progress (for
+example an admission waiting for the control lock) finishes or times out first.
+Closure subprocesses have timeouts because they inherit ignored signals.
+The PID-1 timer stays the outer bound.
+
+Verified closure journals `relay-closed` under the guard or when the helper is
+already absent, stopped or replaced; `relay-closed-unlocked` records a verified
+fallback stop. Under the control guard, verified closure also reconciles the pinned
+stopped helper's expiry logs using `reconcile(wait=0.5)`. A busy journal leaves
+expiry unmarked for a later reconciliation. The verified event and timestamp are
+retained before provenance recording, reconciliation and control guard release.
+Errors in these steps preserve the verified outcome and its original publication
+budget without retrying the stop. All observer diagnostic
+output is best effort, including retry, reconciliation and publication warnings.
+Failed attempts journal
+`relay-close-failed` with generation, helper ID, running attempt count, `first`
+(UTC of the first failure) and fixed reason `inspection-unknown` or
+`stop-unverified` (the latest), coalesced whatever the reasons to one row on the
+first failure and per `HOSTCTL_CLOSE_NOTE_SECONDS` (300), plus the final count at
+verified closure; an unwritten row is refreshed in place. Doctor shows the count,
+`first` and the last noted time. Observer writes for skipped publications
+and closure outcomes use `journal(wait=0.5)`;
+busy or failed writes retain events in memory while stop attempts continue.
+The 60-second publication budget starts at verified closure, before reconciliation;
+when it expires a best-effort warning ends publication retries. Other journal
+callers, including `reconcile()` without a wait argument, keep blocking acquisition.
+Journal appends insert a missing newline after a partial earlier write, keeping
+retries parseable. Failed closure counts use the highest attempt number so a
+disk flush (`fsync`) error after a complete append cannot inflate them. Outcome
+publication precedes teardown diagnostics. Doctor reads a bounded 64 KiB journal
+tail independently of whether Docker or a status snapshot is available and reports
+an unmatched failed closure as FAIL (unverifiable without Docker). A later
+verified outcome, newer generation, or positive live evidence of closure clears
+it; pre-stop intents do not. Closure state is retained per generation, with the
+last `on` opening event in the tail selecting the current generation; without an
+opening event, first-seen generation order applies. Delayed older-generation rows
+do not promote that generation or clear the current failure. An unreadable journal
+keeps its WARN even when the observer is current.
+
 PID 1 persists generation, boot ID, UTC deadline and CLOCK_BOOTTIME deadline in
 the state volume and polls every 250 ms.
 The exec updater communicates over a helper-private Unix socket, atomically

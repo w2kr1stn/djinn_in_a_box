@@ -546,12 +546,51 @@ cannot reopen a generation. Host observer loss does not remove this timer.
 `limit` resets the remaining duration through private, generation-checked IPC;
 it cannot resurrect an expired or closed window.
 
+The hostctl observer rechecks dev and companion evidence each round. A busy
+host control lock skips only that round's observation publication; checks keep
+running, and publication catches up after release. Several consecutive skips
+produce an `observation-skipped` journal note. Every closure path ends with the
+pinned helper stopped, also without the control lock: after at most two seconds
+of non-waiting lock attempts, the observer confirms the launch ID and generation
+again and stops exactly that ID. An inspection error remains unknown unless the
+engine positively reports `No such container`. Failed stops retry with backoff
+until closure is verified; SIGTERM, SIGINT and SIGHUP request this closure and
+are ignored afterwards. Other signals, a signal before the observer installs its
+handlers, SIGKILL or host loss end the observer without closure; the PID-1 timer
+stays the outer bound.
+
 The owner-only host journal is
 `$XDG_STATE_HOME/djinn/hostctl/journal.jsonl`, using `~/.local/state` when
 `XDG_STATE_HOME` is unset; an empty value refuses. It stays outside public SSH
 delivery and records on/off/limit attempts and outcomes, overrides, readiness
 and observed helper expiry, with rotation. Admission requires successful journal
-writes; a later host journal failure requests closure. New journal entries group
+writes; a later journal failure in admission or control operations requests
+helper closure. The observer's journal writes for skipped publications and closure
+outcomes wait at most half a second for the separate journal lock, retaining
+unwritten events for retry without delaying helper stop attempts. Guarded closure
+reconciles the stopped helper's expiry logs with the same half-second lock wait.
+A busy journal leaves expiry unmarked so a later reconciliation can retain it.
+The 60-second publication budget starts at verified closure, before reconciliation.
+Errors in reconciliation, provenance recording or control guard release preserve
+the verified outcome and its original budget without retrying the stop.
+After the budget expires, the observer attempts a warning; diagnostic output is
+best effort and cannot interrupt closure. `relay-closed` records verified
+closure under the control lock, or an already absent, stopped or replaced helper;
+`relay-closed-unlocked` records a verified fallback stop. `relay-close-failed`
+records failed attempts with generation, helper ID, running attempt count, the
+UTC time of the first failure and a fixed reason (`inspection-unknown` or
+`stop-unverified`, the latest). Repeated failures are coalesced whatever their
+reasons: a row on the first failure and at most every five minutes, plus the
+final count on closure; an unwritten row is updated in place, so a lasting outage neither floods
+the rotated journal nor grows the observer's queue. Doctor reads a bounded
+journal tail even without the daemon or a status snapshot. Partial appends are
+separated from subsequent JSON rows; repeated writes count by the highest attempt
+number. The last opening event identifies the current generation in that tail;
+without an opening, first-seen generation order applies. Delayed older-generation
+rows do not supersede it. An unreadable journal remains WARN. An unmatched failure
+is a closure-pending FAIL until a verified outcome, a newer generation, or a
+live inspection proving that generation closed; unavailable Docker makes it
+unverifiable. New journal entries group
 bind-related causes and unknowns, including reasons built from them; standalone
 findings and existing entries are unchanged. Helper Docker logs
 (`docker logs djinn-hostctl`, rotated at 10 MB with three files) record connection

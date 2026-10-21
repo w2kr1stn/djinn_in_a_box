@@ -143,11 +143,23 @@ def generation(helper: dict[str, Any]) -> str:
     return str(helper["Config"]["Labels"][GENERATION_LABEL])
 
 
-def journal(event: str, **fields: Any) -> None:
+def journal(event: str, *, wait: float | None = None, **fields: Any) -> bool:
     root = state_root()
     fd = os.open(root / "journal.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if wait is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    time.sleep(min(0.05, remaining))
         path = root / "journal.jsonl"
         if path.exists() and path.stat().st_size >= JOURNAL_BYTES:
             for index in (2, 1):
@@ -155,23 +167,26 @@ def journal(event: str, **fields: Any) -> None:
                 if source.exists():
                     source.replace(root / f"journal.jsonl.{index + 1}")
             path.replace(root / "journal.jsonl.1")
-        out = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        out = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             info = os.fstat(out)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise HostctlError("journal must be an owner-only regular file")
             data = json.dumps({"time": datetime.now(UTC).isoformat(), "event": event, **fields})
+            # Isolate a partial earlier append so retries remain complete JSON rows.
+            separator = "\n" if info.st_size and os.pread(out, 1, info.st_size - 1) != b"\n" else ""
             with os.fdopen(out, "a", closefd=False) as stream:
-                stream.write(data + "\n")
+                stream.write(separator + data + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            return True
         finally:
             os.close(out)
     finally:
         os.close(fd)
 
 
-def reconcile(helper: dict[str, Any]) -> None:
+def reconcile(helper: dict[str, Any], *, wait: float | None = None) -> None:
     """Retain exact helper expiry events, deduplicated under the control lock."""
     root = state_root()
     gen = generation(helper)
@@ -192,17 +207,26 @@ def reconcile(helper: dict[str, Any]) -> None:
             # Marker written only after durable append. Journal scanning closes the
             # append/marker crash gap; never infer an expiry timestamp from exit.
             rows = (root / "journal.jsonl").read_text() if (root / "journal.jsonl").exists() else ""
-            if not any(
-                row.get("event") == "expiry" and row.get("generation") == gen
-                for row in (json.loads(line) for line in rows.splitlines())
-            ):
-                journal(
-                    "expiry",
-                    generation=gen,
-                    deadline=event.get("deadline"),
-                    helper_time=event.get("time"),
-                    state_error=event.get("state_error"),
-                )
+            recorded = False
+            for row_line in rows.splitlines():
+                try:
+                    raw_row: Any = json.loads(row_line)
+                except ValueError:
+                    continue
+                if not isinstance(raw_row, dict):
+                    continue
+                row = cast(dict[str, Any], raw_row)
+                if row.get("event") == "expiry" and row.get("generation") == gen:
+                    recorded = True
+                    break
+            if not recorded and journal(
+                "expiry", wait=wait,
+                generation=gen,
+                deadline=event.get("deadline"),
+                helper_time=event.get("time"),
+                state_error=event.get("state_error"),
+            ) is False:
+                return
             temporary = root / "observed-expiry.tmp"
             temporary.write_text(json.dumps([*seen[-99:], gen]))
             temporary.chmod(0o600)
@@ -684,6 +708,32 @@ def _record_stopped_helper(helper: dict[str, Any]) -> None:
             )
 
 
+def stop_and_verify(
+    identity: str, gen: str, *, strict: bool,
+) -> dict[str, Any] | None:
+    """Stop an inspected ID; None means it disappeared or was replaced after the stop."""
+    try:
+        command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        if not strict:
+            raise
+        # A timed-out stop may have taken effect. Only a verified outcome closes it.
+        current = inspect_helper(strict=True) if strict else inspect_helper()
+        if (
+            current is None or current["Id"] != identity or generation(current) != gen
+        ):
+            return None
+        if current["State"]["Running"]:
+            raise
+        return current
+    current = inspect_helper(strict=True) if strict else inspect_helper()
+    if current is None or current["Id"] != identity or generation(current) != gen:
+        return None
+    if current["State"]["Running"]:
+        raise HostctlError("Helper termination could not be verified")
+    return current
+
+
 def stop_helper_locked(*, remove: bool = False) -> None:
     helper = inspect_helper()
     if helper is None:
@@ -694,11 +744,12 @@ def stop_helper_locked(*, remove: bool = False) -> None:
     if was_running:
         started_at = str(helper["State"].get("StartedAt", ""))
         try:
-            command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+            current = stop_and_verify(identity, gen, strict=False)
         finally:
             if started_at:
                 _helper_marker(identity, started_at)
-    current = inspect_helper()
+    else:
+        current = inspect_helper()
     if current is None or current["Id"] != identity or generation(current) != gen:
         raise HostctlError("Helper changed during teardown; preserving resources")
     if current["State"]["Running"]:

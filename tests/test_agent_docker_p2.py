@@ -595,13 +595,22 @@ def test_open_window_observer_closes_on_companion_drift(managed, monkeypatch, dr
     hostctl.save_private(
         "opening.json", {"generation": "gen-a", "dev_id": m.dev["Id"], "agent": agent}
     )
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda: helper)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: helper)
     monkeypatch.setattr(hostctl, "node_status", lambda h: {"BackendState": "Running"})
     monkeypatch.setattr(hostctl, "prepare_trust", lambda *a: trust())
     monkeypatch.setattr(hostctl, "admit_locked", lambda *a, **k: None)
+    monkeypatch.setattr(hostctl, "reconcile", lambda *a, **k: None)
     monkeypatch.setattr(host_sealing, "run_probe", lambda *a: [])
     closed = []
-    monkeypatch.setattr(hostctl, "stop_helper_locked", lambda: closed.append("closed"))
+
+    def stop(identity, generation, *, strict):
+        # The observer's closure stops exactly its pinned helper (issue #199).
+        assert (identity, generation, strict) == ("helper-id", "gen-a", True)
+        closed.append("closed")
+        helper["State"]["Running"] = False
+        return helper
+
+    monkeypatch.setattr(hostctl, "stop_and_verify", stop)
 
     class Enrollment:
         returncode = 0
@@ -612,9 +621,14 @@ def test_open_window_observer_closes_on_companion_drift(managed, monkeypatch, dr
     monkeypatch.setattr(host_runtime.subprocess, "Popen", lambda *a, **k: Enrollment())
     turns = 0
 
+    class Endless(BaseException):
+        """Not an Exception: the closure re-raises it, so a regression fails instead of hanging."""
+
     def advance(_):
         nonlocal turns
         turns += 1
+        if turns > 100:
+            raise Endless("observer never ended")
         if turns == 1:
             if drift == "replacement":
                 m.objects.pop(m.companion["Id"])
