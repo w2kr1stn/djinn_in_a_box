@@ -179,3 +179,74 @@ def test_postmortem_doctor_path_is_literal(tmp_path, monkeypatch):
     assert "\n" not in row.detail and "\t" not in row.detail
     assert "[red]literal[/red]\\n\\t.json" in result.output
     assert "secret" not in result.output
+
+
+@pytest.mark.parametrize("read_error", [False, True])
+def test_doctor_journal_readability_with_current_observation(tmp_path, monkeypatch, read_error):
+    from djinn_in_a_box.core import host_runtime
+
+    journal = hostctl.state_root() / "journal.jsonl"
+    journal.write_text("{}\n")
+    original = type(journal).open
+
+    def opened(path, *args, **kwargs):
+        if read_error and path == journal and args == ("rb",):
+            raise PermissionError("journal is unreadable")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(journal), "open", opened)
+    monkeypatch.setattr(host_runtime, "process_token", lambda pid: "token")
+    monkeypatch.setattr(hostctl, "snapshot", lambda: {
+        "helper": "helper-a", "state": "open", "observation": {
+            "time": host_runtime.time.time(), "observer_pid": 1, "observer_token": "token",
+        },
+    })
+    row = next(r for r in hostctl_checks(None, daemon=True) if r.name == "Hostctl journal")
+    assert row.status is (Status.WARN if read_error else Status.PASS)
+    assert "journal is unreadable" in row.detail if read_error else "observer current" in row.detail
+
+
+@pytest.mark.parametrize("failure_first", [False, True])
+def test_doctor_tail_opening_anchors_current_generation(tmp_path, monkeypatch, failure_first):
+    root = hostctl.state_root()
+    hostctl.journal("on", generation="old-A")
+    hostctl.journal("diagnostic", detail="x" * 80000)
+    hostctl.journal("on", generation="current-B")
+    if failure_first:
+        hostctl.journal("relay-close-failed", generation="current-B", attempt=3, time="current")
+    hostctl.journal("relay-close-failed", generation="old-A", attempt=9, time="old")
+    hostctl.journal("relay-closed", generation="old-A")
+    if not failure_first:
+        hostctl.journal("relay-close-failed", generation="current-B", attempt=3, time="current")
+    tail = (root / "journal.jsonl").read_bytes()[-65536:]
+    assert b'"event": "on", "generation": "old-A"' not in tail
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is Status.FAIL and "failed 3×, last current" in row.detail
+    assert "unverifiable" in row.detail
+
+
+def test_doctor_last_opening_selects_existing_generation_state(tmp_path):
+    hostctl.journal("diagnostic", generation="current-B")
+    hostctl.journal("on", generation="old-A")
+    hostctl.journal("relay-close-failed", generation="current-B", attempt=2, time="current")
+    hostctl.journal("on", generation="current-B")
+    hostctl.journal("relay-close-failed", generation="old-A", attempt=9)
+    hostctl.journal("off", generation="old-A")
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is Status.FAIL and "failed 2×, last current" in row.detail
+
+
+def test_doctor_without_opening_uses_first_seen_generation_order(tmp_path):
+    hostctl.journal("relay-close-failed", generation="old-A", attempt=9)
+    hostctl.journal("relay-close-failed", generation="current-B", attempt=2, time="current")
+    hostctl.journal("relay-close-failed", generation="old-A", attempt=10)
+    hostctl.journal("relay-closed", generation="old-A")
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is Status.FAIL and "failed 2×, last current" in row.detail
+
+
+@pytest.mark.parametrize("fields", [{}, {"attempt": "invalid"}])
+def test_doctor_invalid_attempt_metadata_warns(tmp_path, fields):
+    hostctl.journal("relay-close-failed", generation="generation-a", **fields)
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is Status.WARN and row.detail.startswith("unknown:")

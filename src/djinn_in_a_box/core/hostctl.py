@@ -167,14 +167,16 @@ def journal(event: str, *, wait: float | None = None, **fields: Any) -> bool:
                 if source.exists():
                     source.replace(root / f"journal.jsonl.{index + 1}")
             path.replace(root / "journal.jsonl.1")
-        out = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        out = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             info = os.fstat(out)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise HostctlError("journal must be an owner-only regular file")
             data = json.dumps({"time": datetime.now(UTC).isoformat(), "event": event, **fields})
+            # Isolate a partial earlier append so retries remain complete JSON rows.
+            separator = "\n" if info.st_size and os.pread(out, 1, info.st_size - 1) != b"\n" else ""
             with os.fdopen(out, "a", closefd=False) as stream:
-                stream.write(data + "\n")
+                stream.write(separator + data + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
             return True
@@ -184,7 +186,7 @@ def journal(event: str, *, wait: float | None = None, **fields: Any) -> bool:
         os.close(fd)
 
 
-def reconcile(helper: dict[str, Any]) -> None:
+def reconcile(helper: dict[str, Any], *, wait: float | None = None) -> None:
     """Retain exact helper expiry events, deduplicated under the control lock."""
     root = state_root()
     gen = generation(helper)
@@ -208,14 +210,14 @@ def reconcile(helper: dict[str, Any]) -> None:
             if not any(
                 row.get("event") == "expiry" and row.get("generation") == gen
                 for row in (json.loads(line) for line in rows.splitlines())
-            ):
-                journal(
-                    "expiry",
-                    generation=gen,
-                    deadline=event.get("deadline"),
-                    helper_time=event.get("time"),
-                    state_error=event.get("state_error"),
-                )
+            ) and journal(
+                "expiry", wait=wait,
+                generation=gen,
+                deadline=event.get("deadline"),
+                helper_time=event.get("time"),
+                state_error=event.get("state_error"),
+            ) is False:
+                return
             temporary = root / "observed-expiry.tmp"
             temporary.write_text(json.dumps([*seen[-99:], gen]))
             temporary.chmod(0o600)

@@ -843,10 +843,9 @@ def _zone_diagnostic_checks(config: AppConfig, assignments: ZoneAssignments) -> 
 def _hostctl_journal_check(*, daemon: bool) -> Check:
     from djinn_in_a_box.core import host_runtime, hostctl
 
-    pending: dict[str, Any] | None = None
-    count = 0
+    states: dict[str, tuple[dict[str, Any] | None, int]] = {}
     latest = None
-    seen: set[str] = set()
+    opening = None
     try:
         path = hostctl.state_root(create=False) / "journal.jsonl"
         with path.open("rb") as stream:
@@ -864,20 +863,24 @@ def _hostctl_journal_check(*, daemon: bool) -> Check:
             gen = row.get("generation")
             if not isinstance(gen, str):
                 continue
-            if gen not in seen:
-                seen.add(gen)
-                latest, pending, count = gen, None, 0
-            if gen != latest:
-                continue
+            if gen not in states:
+                states[gen] = (None, 0)
+                latest = gen
+            if row.get("event") == "on":
+                opening = gen
+            pending, count = states[gen]
             if row.get("event") in ("relay-closed", "relay-closed-unlocked", "off", "expiry"):
                 pending, count = None, 0
             elif row.get("event") == "relay-close-failed":
                 pending = row
-                count += 1
+                count = max(count, row["attempt"])
+            states[gen] = (pending, count)
     except FileNotFoundError:
         pass
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         return Check("Hostctl journal", Status.WARN, f"unknown: {exc}")
+    latest = opening or latest
+    pending, count = states.get(latest, (None, 0)) if latest is not None else (None, 0)
     if pending is not None:
         if daemon:
             try:
@@ -901,7 +904,7 @@ def _hostctl_journal_check(*, daemon: bool) -> Check:
             if not daemon:
                 detail += "; unverifiable: Docker unavailable"
             return Check("Hostctl journal", Status.FAIL, detail)
-    return Check("Hostctl journal", Status.WARN, "unknown: observation/log gaps")
+    return Check("Hostctl journal", Status.PASS, "no pending closure in journal tail")
 
 
 def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
@@ -917,7 +920,11 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
         )
     ]
     journal_check = _hostctl_journal_check(daemon=daemon)
-    checks.append(journal_check)
+    journal_readable = journal_check.status is Status.PASS
+    checks.append(
+        Check("Hostctl journal", Status.WARN, "unknown: observation/log gaps")
+        if journal_readable else journal_check
+    )
     if not daemon:
         return checks + [
             Check(f"Hostctl {name}", Status.WARN, "unknown: Docker unavailable")
@@ -997,7 +1004,7 @@ def hostctl_checks(config: AppConfig | None, *, daemon: bool) -> list[Check]:
         and time.time() - observation.get("time", 0) < 10
         and process_token(observation.get("observer_pid", -1)) == observation.get("observer_token")
     )
-    if journal_check.status is not Status.FAIL:
+    if journal_readable:
         checks[1] = Check(
             "Hostctl journal",
             Status.PASS if (root / "journal.jsonl").exists() and observer_live else Status.WARN,

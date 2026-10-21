@@ -1615,20 +1615,30 @@ The PID-1 timer stays the outer bound.
 Verified closure journals `relay-closed` under the guard or when the helper is
 already absent, stopped or replaced; `relay-closed-unlocked` records a verified
 fallback stop. Under the control guard, verified closure also reconciles the pinned
-stopped helper's expiry logs; reconciliation may wait on its journal after the
-stop. Reconciliation errors log once and preserve the verified outcome without
-retrying the stop. Each failed attempt journals
+stopped helper's expiry logs using `reconcile(wait=0.5)`. A busy journal leaves
+expiry unmarked for a later reconciliation. Reconciliation errors log once and
+preserve the verified outcome without retrying the stop. All observer diagnostic
+output is best effort, including retry, reconciliation and publication warnings.
+Each failed attempt journals
 `relay-close-failed` with generation, helper ID, attempt number and fixed reason
 `inspection-unknown` or `stop-unverified`. Observer writes for skipped publications
 and closure outcomes use `journal(wait=0.5)`;
 busy or failed writes retain events in memory while stop attempts continue.
-After verified closure the retained events retry for at most 60 seconds, then
-a warning ends publication retries. Other journal callers keep blocking
-acquisition. Outcome publication precedes teardown diagnostics. Doctor reads a
+The 60-second publication budget starts at verified closure, before reconciliation;
+when it expires a best-effort warning ends publication retries. Other journal
+callers, including `reconcile()` without a wait argument, keep blocking acquisition.
+Journal appends insert a missing newline after a partial earlier write, keeping
+retries parseable. Failed closure counts use the highest attempt number so a
+disk flush (`fsync`) error after a complete append cannot inflate them. Outcome
+publication precedes teardown diagnostics. Doctor reads a
 bounded 64 KiB journal tail before checking the daemon or snapshot and reports
 an unmatched failed closure as FAIL (unverifiable without Docker). A later
 verified outcome, newer generation, or positive live evidence of closure clears
-it; pre-stop intents do not.
+it; pre-stop intents do not. Closure state is retained per generation, with the
+last `on` opening event in the tail selecting the current generation; without an
+opening event, first-seen generation order applies. Delayed older-generation rows
+do not promote that generation or clear the current failure. An unreadable journal
+keeps its WARN even when the observer is current.
 
 PID 1 persists generation, boot ID, UTC deadline and CLOCK_BOOTTIME deadline in
 the state volume and polls every 250 ms.

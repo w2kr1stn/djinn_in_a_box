@@ -433,7 +433,7 @@ def test_shared_stop_verification_contract(window, monkeypatch, strict, after):
 
     monkeypatch.setattr(hostctl, "inspect_helper", inspect)
     monkeypatch.setattr(hostctl, "command", command)
-    monkeypatch.setattr(hostctl, "reconcile", lambda *a: (_ for _ in ()).throw(
+    monkeypatch.setattr(hostctl, "reconcile", lambda *a, **kw: (_ for _ in ()).throw(
         hostctl.HostctlError("Docker logs failed (exit 1)"),
     ))
     if strict:
@@ -454,7 +454,7 @@ def test_shared_stop_verification_contract(window, monkeypatch, strict, after):
 
 
 def test_guarded_closure_ignores_post_stop_diagnostic_failure(window, monkeypatch):
-    monkeypatch.setattr(hostctl, "reconcile", lambda *a: (_ for _ in ()).throw(
+    monkeypatch.setattr(hostctl, "reconcile", lambda *a, **kw: (_ for _ in ()).throw(
         hostctl.HostctlError("Docker logs failed (exit 1)"),
     ))
     window.run()
@@ -602,7 +602,8 @@ def test_doctor_clear_precedence(window, monkeypatch, outcome, daemon):
         journal(outcome, generation="generation-a")
     elif outcome == "new-generation":
         journal("on-attempt", generation="generation-b")
-        journal("relay-close-failed", generation="generation-a")  # Old retry is superseded.
+        # Old retry is superseded.
+        journal("relay-close-failed", generation="generation-a", attempt=1)
 
     def inspect(*args, **kwargs):
         assert kwargs["missing"] == "No such container"
@@ -721,10 +722,10 @@ def test_strict_absence_uses_exact_engine_wording(monkeypatch):
 def test_doctor_tail_is_bounded(window, monkeypatch):
     journal = window.root / "journal.jsonl"
     # An old failure outside the tail cannot determine the current closure state.
-    hostctl.journal("relay-close-failed", generation="generation-a")
+    hostctl.journal("relay-close-failed", generation="generation-a", attempt=1)
     with journal.open("a") as stream:
         stream.write("x" * 100000 + "\n")
-    hostctl.journal("relay-close-failed", generation="generation-b")
+    hostctl.journal("relay-close-failed", generation="generation-b", attempt=1)
     monkeypatch.setattr(hostctl, "snapshot", lambda: (_ for _ in ()).throw(
         hostctl.HostctlError("snapshot failed"),
     ))
@@ -1111,7 +1112,7 @@ host_runtime.observe_hostctl('helper-a', 'generation-a', '/isolated/docker')
 
 
 def test_doctor_malformed_live_inspection_is_unknown(window, monkeypatch):
-    hostctl.journal("relay-close-failed", generation="generation-a")
+    hostctl.journal("relay-close-failed", generation="generation-a", attempt=1)
     monkeypatch.setattr(host_runtime, "inspect_object", lambda *a, **kw: {"Config": None})
     monkeypatch.setattr(hostctl, "snapshot", lambda: (_ for _ in ()).throw(
         hostctl.HostctlError("snapshot failed"),
@@ -1154,7 +1155,7 @@ def test_unlocked_probe_already_closed_uses_closed_event(window, monkeypatch, fo
 def test_reconcile_error_after_guarded_stop_does_not_report_failed_stop(window, monkeypatch):
     reconciled = []
 
-    def reconcile(helper):
+    def reconcile(helper, **kwargs):
         assert not helper["State"]["Running"]
         reconciled.append(helper["Id"])
         raise hostctl.HostctlError("Docker logs failed (exit 1)")
@@ -1229,11 +1230,12 @@ def test_guarded_closure_reconciles_real_expiry_after_stop(window, monkeypatch, 
     reconciled = []
     real_reconcile = hostctl.reconcile
 
-    def reconcile(helper):
+    def reconcile(helper, **kwargs):
         assert getattr(hostctl._held, "active", False)
         assert not helper["State"]["Running"]
         reconciled.append(helper)
-        real_reconcile(helper)
+        assert kwargs == {"wait": 0.5}
+        real_reconcile(helper, **kwargs)
     expiry = {
         "event": "expiry", "generation": "generation-a",
         "deadline": "2026-10-21T12:00:00Z", "time": "2026-10-21T12:00:00Z",
@@ -1274,7 +1276,7 @@ def test_unlocked_closure_does_not_reconcile(window, monkeypatch):
         with guard(timeout=timeout):
             yield
 
-    def reconcile(helper):
+    def reconcile(helper, **kwargs):
         reconciled.append(helper["Id"])
 
     monkeypatch.setattr(hostctl, "control_guard", busy)
@@ -1293,7 +1295,7 @@ def test_guarded_reconcile_failure_is_logged_once_without_retry(
 ):
     reconciled = []
 
-    def reconcile(helper):
+    def reconcile(helper, **kwargs):
         assert getattr(hostctl._held, "active", False)
         assert not helper["State"]["Running"]
         assert window.stops == ["helper-a"]
@@ -1334,7 +1336,7 @@ def test_guarded_reconcile_requires_pinned_stopped_helper(window, monkeypatch, f
 
     monkeypatch.setattr(hostctl, "inspect_helper", inspect)
     monkeypatch.setattr(hostctl, "command", command)
-    monkeypatch.setattr(hostctl, "reconcile", lambda helper: reconciled.append(helper))
+    monkeypatch.setattr(hostctl, "reconcile", lambda helper, **kw: reconciled.append(helper))
     window.run()
     assert not reconciled
     assert window.stops == (["helper-a"] if foreign == "removed-after-stop" else [])
@@ -1387,3 +1389,319 @@ def test_eof_holder_deadline_releases_lock_with_pipe_open(tmp_path):
             assert_control_lock_held(lock)
     finally:
         release_holder(holder)
+
+
+@pytest.mark.parametrize("path", ["retry", "reconcile", "publication-timeout"])
+def test_real_warning_sink_failure_never_interrupts_closure(window, monkeypatch, path):
+    import errno
+    import io
+
+    from rich.console import Console
+
+    from djinn_in_a_box.core import console
+
+    writes = []
+
+    class FullSink(io.StringIO):
+        def write(self, text):
+            writes.append(text)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(console, "err_console", Console(file=FullSink(), width=1000))
+    attempts = []
+
+    def command(*args, **kwargs):
+        if args[0] == "stop":
+            attempts.append(args)
+            if path == "retry" and len(attempts) == 1:
+                raise hostctl.HostctlError("first stop failed")
+        return window.command(*args, **kwargs)
+
+    if path == "reconcile":
+        def reconcile(helper, **kwargs):
+            assert not helper["State"]["Running"]
+            raise OSError("expiry log unavailable")
+        monkeypatch.setattr(hostctl, "reconcile", reconcile)
+    elif path == "publication-timeout":
+        monkeypatch.setattr(hostctl, "journal", lambda *a, **kw: False)
+    monkeypatch.setattr(hostctl, "command", command)
+    window.run()
+    assert not window.helper["State"]["Running"]
+    assert len(attempts) == (2 if path == "retry" else 1)
+    if path != "publication-timeout":
+        assert [row["event"] for row in window.rows()] == (
+            ["relay-close-failed", "relay-closed"] if path == "retry" else ["relay-closed"]
+        )
+    else:
+        assert window.clock == 60
+    assert any({
+        "retry": "closure pending;", "reconcile": "expiry reconciliation failed",
+        "publication-timeout": "publication timed out",
+    }[path] in text for text in writes)
+
+
+def test_diagnostic_timestamp_failure_cannot_abort_retry(window, monkeypatch):
+    def timestamp():
+        raise KeyboardInterrupt
+
+    attempts = []
+
+    def command(*args, **kwargs):
+        if args[0] == "stop":
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise hostctl.HostctlError("first stop failed")
+        return window.command(*args, **kwargs)
+
+    monkeypatch.setattr(host_runtime.time, "gmtime", timestamp)
+    monkeypatch.setattr(hostctl, "command", command)
+    try:
+        window.run()
+    except BaseException as exc:
+        pytest.fail(f"diagnostic escaped closure: {type(exc).__name__}")
+    assert len(attempts) == 2 and not window.helper["State"]["Running"]
+    assert window.rows()[-1]["event"] == "relay-closed"
+
+
+@pytest.mark.parametrize("wait", [None, 0.5])
+def test_journal_repairs_partial_first_append(window, monkeypatch, wait):
+    original = hostctl.os.fdopen
+    writes = []
+
+    class PartialWriter:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, data):
+            writes.append(data)
+            if len(writes) == 1:
+                self.stream.write(data[:len(data) // 2])
+                self.stream.flush()
+                raise OSError("partial first append")
+            return self.stream.write(data)
+
+    monkeypatch.setattr(hostctl.os, "fdopen", lambda *a, **kw: PartialWriter(original(*a, **kw)))
+    with pytest.raises(OSError, match="partial first append"):
+        hostctl.journal("diagnostic", wait=wait, generation="generation-a")
+    assert hostctl.journal("diagnostic", wait=wait, generation="generation-a") is True
+    assert hostctl.journal("next", wait=wait) is True
+    lines = (window.root / "journal.jsonl").read_text().splitlines()
+    assert len(lines) == 3
+    with pytest.raises(ValueError):
+        json.loads(lines[0])
+    assert [json.loads(line)["event"] for line in lines[1:]] == ["diagnostic", "next"]
+
+
+def test_partial_outcome_retry_remains_visible_to_doctor(window, monkeypatch):
+    original = hostctl.os.fdopen
+    injected = []
+    attempts = []
+
+    class PartialWriter:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, data):
+            if '"event": "relay-closed"' in data and not injected:
+                injected.append(True)
+                self.stream.write(data[:len(data) // 2])
+                self.stream.flush()
+                raise OSError("partial outcome append")
+            return self.stream.write(data)
+
+    def command(*args, **kwargs):
+        if args[0] == "stop":
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise hostctl.HostctlError("first stop failed")
+        return window.command(*args, **kwargs)
+
+    monkeypatch.setattr(hostctl.os, "fdopen", lambda *a, **kw: PartialWriter(original(*a, **kw)))
+    monkeypatch.setattr(hostctl, "command", command)
+    window.run()
+    lines = (window.root / "journal.jsonl").read_text().splitlines()
+    assert len(lines) == 3 and injected and len(attempts) == 2
+    assert json.loads(lines[-1])["event"] == "relay-closed"
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is not Status.FAIL
+
+
+def test_fsync_after_complete_append_does_not_inflate_failed_attempts(window, monkeypatch):
+    original = hostctl.os.fsync
+    fsyncs = []
+    attempts = []
+
+    def fsync(fd):
+        fsyncs.append(fd)
+        if len(fsyncs) == 1:
+            raise OSError("fsync failed after complete append")
+        return original(fd)
+
+    def command(*args, **kwargs):
+        attempts.append(args)
+        raise hostctl.HostctlError("stop failed")
+
+    def sleep(seconds):
+        if len(attempts) == 2:
+            raise SystemExit
+        window.sleep(seconds)
+
+    monkeypatch.setattr(hostctl.os, "fsync", fsync)
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(host_runtime.time, "sleep", sleep)
+    with pytest.raises(SystemExit):
+        window.run()
+    assert [row["attempt"] for row in window.rows()] == [1, 1, 2]
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is Status.FAIL and "failed 2×" in row.detail
+    # A delayed duplicate of a lower attempt must not reduce the count either.
+    hostctl.journal("relay-close-failed", generation="generation-a", attempt=1)
+    row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
+    assert row.status is Status.FAIL and "failed 2×" in row.detail
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["complete", "interrupted"])
+def test_observation_publication_reader_barrier_is_atomic(window, monkeypatch, interrupted):
+    import threading
+
+    public = window.root / "observation.json"
+    old = {"generation": "generation-a", "time": -1}
+    public.write_text(json.dumps(old))
+    original = type(public).write_text
+    halfway = threading.Event()
+    read_done = threading.Event()
+    seen = []
+
+    def reader():
+        if halfway.wait(timeout=2):
+            try:
+                seen.append(json.loads(public.read_text()))
+            except ValueError:
+                seen.append("truncated JSON")
+            finally:
+                read_done.set()
+
+    def write(path, data, *args, **kwargs):
+        if path.parent != window.root or not path.name.startswith("observation"):
+            return original(path, data, *args, **kwargs)
+        with path.open("w") as stream:
+            split = len(data) // 2
+            stream.write(data[:split])
+            stream.flush()
+            halfway.set()
+            assert read_done.wait(timeout=2), "reader did not reach publication barrier"
+            if interrupted:
+                raise OSError("publication interrupted after partial write")
+            stream.write(data[split:])
+        return len(data)
+
+    def finish(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(type(public), "write_text", write)
+    monkeypatch.setattr(host_runtime, "inspect_dev", lambda *a: None)
+    monkeypatch.setattr(host_runtime.time, "sleep", finish)
+    child = threading.Thread(target=reader)
+    child.start()
+    try:
+        window.run()
+    finally:
+        child.join(timeout=3)
+    assert not child.is_alive() and seen == [old]
+    published = json.loads(public.read_text())
+    assert published == old if interrupted else published["time"] != old["time"]
+    assert window.rows()[-1]["event"] == "relay-closed"
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["found-stopped", "stop-verified"])
+def test_expiry_reconciliation_shares_verified_closure_budget(window, monkeypatch, running):
+    window.helper["State"]["Running"] = running
+    lock = os.open(window.root / "journal.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    expiry = json.dumps({"event": "expiry", "generation": "generation-a"})
+    waits = []
+
+    def command(*args, **kwargs):
+        if args[0] == "logs":
+            assert not window.helper["State"]["Running"]
+            assert getattr(hostctl._held, "active", False)
+            # Include work after verification in the publication budget.
+            window.sleep(7)
+            return expiry
+        result = window.command(*args, **kwargs)
+        window.sleep(3)  # Stop time belongs before the post-stop budget starts.
+        return result
+
+    def journal(event, **kwargs):
+        assert 0 < kwargs["wait"] <= 0.5
+        waits.append((event, kwargs["wait"], window.clock))
+        return window.journal(event, **kwargs)
+
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(hostctl, "journal", journal)
+    try:
+        window.run()
+        assert_control_lock_held(window.root / "journal.lock")
+        assert not (window.root / "observed-expiry.json").exists()
+        assert not (window.root / "observed-expiry.tmp").exists()
+        assert window.clock == pytest.approx(60 + (3 if running else 0))
+        assert waits[0][:2] == ("expiry", 0.5)
+        assert waits[-1][0] == "relay-closed"
+        assert not window.helper["State"]["Running"]
+    finally:
+        os.close(lock)
+    monkeypatch.setattr(hostctl, "journal", window.journal)
+    with hostctl.control_guard():
+        hostctl.reconcile(window.helper)
+    assert window.rows()[-1]["event"] == "expiry"
+    assert json.loads((window.root / "observed-expiry.json").read_text()) == ["generation-a"]
+
+
+@pytest.mark.parametrize("wait", [None, 0.25], ids=["default-blocking", "bounded"])
+@pytest.mark.parametrize("result", [None, True, False])
+def test_reconcile_forwards_wait_and_marks_only_written_expiry(window, monkeypatch, wait, result):
+    window.helper["State"]["Running"] = False
+    expiry = {"event": "expiry", "generation": "generation-a"}
+    calls = []
+
+    def journal(event, **kwargs):
+        calls.append((event, kwargs))
+        return result
+
+    monkeypatch.setattr(hostctl, "journal", journal)
+    monkeypatch.setattr(hostctl, "command", lambda *a, **kw: json.dumps(expiry))
+    with hostctl.control_guard():
+        if wait is None:
+            hostctl.reconcile(window.helper)
+        else:
+            hostctl.reconcile(window.helper, wait=wait)
+    assert len(calls) == 1 and calls[0][0] == "expiry"
+    assert calls[0][1]["wait"] == wait
+    marker = window.root / "observed-expiry.json"
+    assert marker.exists() is (result is not False)
+    assert not (window.root / "observed-expiry.tmp").exists()
+
+
+def test_reconcile_wait_is_keyword_only(window):
+    with pytest.raises(TypeError):
+        hostctl.reconcile(window.helper, 0.5)

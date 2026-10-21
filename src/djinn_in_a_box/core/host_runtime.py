@@ -1323,8 +1323,9 @@ def observe_hostctl(
     teardown = None
 
     def log(message: str) -> None:
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        warning(f"{stamp} {message}")
+        with contextlib.suppress(BaseException):
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            warning(f"{stamp} {message}")
 
     def ignore_signals() -> None:
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -1371,6 +1372,7 @@ def observe_hostctl(
                                 time.sleep(min(0.1, remaining))
                                 continue
                         fresh = hostctl.inspect_helper(strict=True)
+                        verified_at = time.monotonic()
                         if (
                             fresh is not None
                             and fresh["Id"] == helper_id
@@ -1381,6 +1383,7 @@ def observe_hostctl(
                             started_at = str(fresh["State"].get("StartedAt", ""))
                             try:
                                 fresh = hostctl.stop_and_verify(helper_id, generation, strict=True)
+                                verified_at = time.monotonic()
                             finally:
                                 if guarded and started_at:
                                     with contextlib.suppress(Exception):
@@ -1388,14 +1391,15 @@ def observe_hostctl(
                                             helper_id, started_at,
                                         )
                             stopped = True
+                        until = verified_at + 60
                         if (
                             guarded and fresh is not None
                             and fresh["Id"] == helper_id
                             and hostctl.generation(fresh) == generation
                         ):
-                            # Reconciliation may wait on its journal only after verified closure.
+                            # Reconciliation shares the post-stop publication budget.
                             try:
-                                hostctl.reconcile(fresh)
+                                hostctl.reconcile(fresh, wait=0.5)
                             except BaseException:
                                 log("Hostctl expiry reconciliation failed after verified closure")
                     event = (
@@ -1415,7 +1419,6 @@ def observe_hostctl(
                     logged = time.monotonic()
                 time.sleep(delay)
                 delay = min(delay * 2, 5)
-            until = time.monotonic() + 60
             while pending:
                 publish_pending(until=until)
                 if not pending:

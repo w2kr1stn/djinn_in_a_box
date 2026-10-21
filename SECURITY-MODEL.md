@@ -566,15 +566,21 @@ writes; a later journal failure in admission or control operations requests
 helper closure. The observer's journal writes for skipped publications and closure
 outcomes wait at most half a second for the separate journal lock, retaining
 unwritten events for retry without delaying helper stop attempts. Guarded closure
-reconciles the stopped helper's expiry logs; this may wait on the journal after
-the stop is verified. Reconciliation errors are logged without retrying the stop.
-After verified closure, publication retries for at most 60 seconds,
-then records a warning in the observer log. `relay-closed` records verified
+reconciles the stopped helper's expiry logs with the same half-second lock wait.
+A busy journal leaves expiry unmarked so a later reconciliation can retain it.
+The 60-second publication budget starts at verified closure, before reconciliation.
+Reconciliation errors preserve the verified outcome without retrying the stop.
+After the budget expires, the observer attempts a warning; diagnostic output is
+best effort and cannot interrupt closure. `relay-closed` records verified
 closure under the control lock, or an already absent, stopped or replaced helper;
 `relay-closed-unlocked` records a verified fallback stop. `relay-close-failed`
 records each failed attempt with generation, helper ID, attempt number and a
 fixed reason (`inspection-unknown` or `stop-unverified`). Doctor reads a bounded
-journal tail even without the daemon or a status snapshot. An unmatched failure
+journal tail even without the daemon or a status snapshot. Partial appends are
+separated from subsequent JSON rows; repeated writes count by the highest attempt
+number. The last opening event identifies the current generation in that tail;
+without an opening, first-seen generation order applies. Delayed older-generation
+rows do not supersede it. An unreadable journal remains WARN. An unmatched failure
 is a closure-pending FAIL until a verified outcome, a newer generation, or a
 live inspection proving that generation closed; unavailable Docker makes it
 unverifiable. New journal entries group
