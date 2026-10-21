@@ -1025,6 +1025,10 @@ def run_relay(
                 return
             if reason == "not gateway":
                 local = client.getsockname()[0]
+                with contextlib.suppress(ValueError):
+                    mapped = ipaddress.ip_address(local)
+                    if isinstance(mapped, ipaddress.IPv6Address) and mapped.ipv4_mapped:
+                        local = str(mapped.ipv4_mapped)
                 reason = (
                     f"not the bridge gateway for {local}; check userland-proxy / direct routing"
                     " or a non-default network of a multi-network container"

@@ -1186,8 +1186,10 @@ cannot verify them:
   modes must be neither `routed` nor `nat-unprotected`.
 - Container and endpoint sysctls must leave every
   `net.ipv4.conf.*.route_localnet` disabled (`0`). The helper also checks the
-  actual container values before starting; disable loopback routing and recreate
-  the container if refused.
+  actual container values before starting. A new container inherits the host's
+  `all`/`default` values, so a host with loopback routing enabled is refused too;
+  disable it on the host or in the container and endpoint sysctls, then recreate
+  the container.
 - OpenCode's default settings roots under the container's `/home/dev`.
   Mounts covering, inside or above `~/.config/opencode` or
   `~/.local/state/opencode` refuse. `HOME` must retain `/home/dev`, and
@@ -1224,12 +1226,14 @@ the daemon that the Codex TUI starts itself; `djinn serve codex` follows in
 `djinn serve --status` shows the detailed table, including OpenCode's local
 endpoint and the tailnet URL or the reason it is unknown. `djinn status` shows
 a compact snapshot in Services, with the local URL for running OpenCode.
-The OpenCode row shows `relay refused since start: <count>` (reset on relay
-restart), or `relay refused: unknown (<reason>)` when the counter is missing,
-unreadable, belongs to another relay or is stale; unknown never means zero.
+While OpenCode is running or degraded, its row shows `relay refused since
+start: <count>` (reset on relay restart), or `relay refused: unknown (<reason>)`
+when the counter is missing, unreadable, belongs to another relay or is stale;
+unknown never means zero.
 
 If legitimate browser/host connections close and this count rises, inspect the
-relay refusal log under `/tmp/djinn-serve` inside the container and check `userland-proxy`, direct routing and the publishing network. With
+relay refusal log `/tmp/djinn-serve/opencode-relay.log` inside the container
+and check `userland-proxy`, direct routing and the publishing network. With
 `"userland-proxy": false`, Docker's loopback DNAT/masquerading is assumed to
 present the gateway source; this configuration has not been measured. A publish
 through a non-default network of a multi-network container is also refused.

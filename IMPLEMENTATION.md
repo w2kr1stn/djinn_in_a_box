@@ -2168,8 +2168,9 @@ code `gate` and a literal disable/recreate hint. The helper's preflight and star
 also read `/proc/sys/net/ipv4/conf/all/route_localnet` and every interface entry,
 including `default`; any nonzero integer, non-integer or unreadable value refuses
 with `route-localnet`. Effective interface routing is `all OR interface`, so
-either being nonzero suffices; nothing starts. The host maps the helper code to
-a literal refusal. There is no runtime watchdog (see the security boundary).
+either being nonzero suffices; nothing starts. This also catches values a new
+container inherits from the host's `all`/`default` entries. The host maps the
+helper code to a literal refusal that names the host as a possible source. There is no runtime watchdog (see the security boundary).
 The Engine gate compares the leading version triple against 28.3.3 and refuses
 unknown versions. The daemon-wide routing/iptables prerequisites cannot be
 checked through this API;

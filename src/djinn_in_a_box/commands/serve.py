@@ -86,6 +86,7 @@ def _helper_failure(name: str, failure: core.ServeError) -> None:
         _literal(
             "Error: OpenCode requires route_localnet=0 on all container interfaces; refusing. "
             "Disable loopback routing in the container and endpoint sysctls, "
+            "and on the host (new containers inherit its all/default values), "
             "then recreate the container."
         )
     elif failure.code == "service-config":
@@ -148,11 +149,12 @@ def _status_table(snapshot: core.Snapshot) -> None:
                 if snapshot.url
                 else f"\ntailnet: unknown ({snapshot.reason})"
             )
-            endpoint += (
-                f"\nrelay refused since start: {row['relay_refused']}"
-                if row["relay_refused"] is not None
-                else f"\nrelay refused: unknown ({row['relay_note']})"
-            )
+            if row["state"] in ("running", "degraded"):
+                endpoint += (
+                    f"\nrelay refused since start: {row['relay_refused']}"
+                    if row["relay_refused"] is not None
+                    else f"\nrelay refused: unknown ({row['relay_note']})"
+                )
             if row["foreign_listener"]:
                 endpoint += (
                     "\nnote: port 4096 is used by another process; possibly "

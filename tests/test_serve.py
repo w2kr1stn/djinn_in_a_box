@@ -1258,6 +1258,7 @@ def test_route_localnet_helper_failure_message(host, monkeypatch):
         "OpenCode requires route_localnet=0 on all container interfaces; refusing." in result.output
     )
     assert "Disable loopback routing in the container and endpoint sysctls" in result.output
+    assert "new containers inherit its all/default values" in result.output
     assert "then recreate the container" in result.output
     assert "unsafe" not in result.output
 
@@ -1428,6 +1429,21 @@ def test_status_relay_count_or_unknown_note(host, monkeypatch, count, note, expe
     assert "relay refused" not in endpoints[0]
     if count is None:
         assert "relay refused since start: 0" not in endpoints[1]
+
+
+@pytest.mark.parametrize(
+    "state,shown",
+    [("running", True), ("degraded", True), ("stopped", False), ("exited", False)],
+)
+def test_status_relay_line_only_while_a_relay_is_expected(host, monkeypatch, state, shown):
+    host.status["servers"]["opencode"].update(
+        state=state, reason="relay gone", relay_refused=None, relay_note="foreign identity"
+    )
+    printed = []
+    monkeypatch.setattr(command.console, "print", lambda table: printed.append(table))
+    assert runner.invoke(app, ["serve", "--status"]).exit_code == 0
+    endpoint = [cell.plain for cell in printed[0].columns[3]._cells][1]
+    assert ("relay refused" in endpoint) is shown, endpoint
 
 
 @pytest.mark.parametrize("reason", ["relay gone", "relay listener lost", "opencode gone"])

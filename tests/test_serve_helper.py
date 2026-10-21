@@ -2705,6 +2705,7 @@ def test_relay_gateway_route_refresh_and_refusal_logs(relay: RelayHarness) -> No
     assert wait_for(lambda: relay.count()["refused"] == 2)
     log = (relay.ctx.state / "opencode-relay.log").read_text()
     assert "refused 127.0.0.3 (not the bridge gateway for" in log
+    assert "gateway for ::ffff:" not in log
     assert "userland-proxy / direct routing" in log
     assert "non-default network of a multi-network container" in log
     assert "opaque" not in log and "response" not in log
