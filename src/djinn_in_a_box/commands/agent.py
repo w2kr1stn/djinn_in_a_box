@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, ParamSpec, TypeVar, cast
 
 import typer
 from rich.markup import escape
@@ -132,7 +134,34 @@ def _show_run_status(
     err_console.print()
 
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _unwrapped_stderr_with_allow(func: Callable[P, R]) -> Callable[P, R]:
+    """Print stderr without hard wrapping while --allow is in effect.
+
+    Allowlist callers read Djinn's leading `djinn-egress:` block from stderr. A wrapped
+    host line could start with that prefix through a long caller value; without hard
+    wrapping only a line break can, and caller values are printed with those escaped.
+    """
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        if kwargs.get("allow") is None:
+            return func(*args, **kwargs)
+        previous = err_console.soft_wrap
+        err_console.soft_wrap = True
+        try:
+            return func(*args, **kwargs)
+        finally:
+            err_console.soft_wrap = previous
+
+    return wrapper
+
+
 @handle_config_errors
+@_unwrapped_stderr_with_allow
 def run(
     agent: Annotated[
         str,

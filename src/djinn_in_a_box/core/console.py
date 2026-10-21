@@ -21,7 +21,7 @@ def status_line(
     style: str = "status.enabled",
     *,
     value_style: str | None = None,
-    soft_wrap: bool = False,
+    soft_wrap: bool | None = None,
 ) -> None:
     """Print a formatted status line to stderr (e.g., '   Projects:  /path')."""
     # Calculate padding to align values (longest label is ~10 chars)
@@ -33,7 +33,7 @@ def status_line(
     err_console.print(line, soft_wrap=soft_wrap)
 
 
-def error(message: str, *, soft_wrap: bool = False) -> None:
+def error(message: str, *, soft_wrap: bool | None = None) -> None:
     err_console.print(f"[error]{ICONS['error']} Error: {message}[/error]", soft_wrap=soft_wrap)
 
 
