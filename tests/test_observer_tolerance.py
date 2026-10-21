@@ -1254,7 +1254,9 @@ def test_companion_resume_failure_stops_dev_and_ends_loudly(inproc, steps):
     steps.stop = [None, None]  # the two companion stops during dev's own stop succeed
     steps.stop = []
     flip(inproc, 4, 8)
+    inproc.stop_at = 60  # a swallowed exit fails the assertions below instead of hanging
     inproc.run()
+    assert inproc.clock.ticks < 60, "the observer did not end on the resume failure"
     assert ("teardown", "stop", "-t", "3", "dev-1") in steps.calls
     defensive = ("teardown", "stop", "-t", "3", "dev-1")
     assert steps.calls.index(("resume",)) < steps.calls.index(defensive)
@@ -1275,7 +1277,9 @@ def test_companion_resume_failure_with_failing_defensive_stop_still_ends(
         return real(docker_path, actual, *args, **kwargs)
 
     monkeypatch.setattr(host_runtime, "_teardown_container", teardown)
+    inproc.stop_at = 60
     inproc.run()
+    assert inproc.clock.ticks < 60
     cause = assert_channels(inproc, "companion-resume-failed", export=False)
     # F11: a failed defensive stop is never reported as a successful one.
     assert "was stopped" not in cause["detail"] and "was stopped" not in capsys.readouterr().err
@@ -2479,3 +2483,19 @@ def test_two_second_descriptor_shortage_after_a_filter_death_is_survived(
     gitted.run()
     assert gitted.exit_records() == [] and seen == [True]
     assert state["attempts"] == 2  # one inside the shortage, one 5 s later
+
+
+def test_guarded_section_entered_during_backoff_makes_no_early_attempt(
+    gitted, quick_filter, monkeypatch
+):
+    """T4: a pending publication opens the guard while a failed rebind is backing off."""
+    times = failing_rebinds(gitted, monkeypatch, [True, False])
+    failing_save(monkeypatch, once_with="filter_rebinds")  # the history stays pending
+    kill_filters(gitted, after=3, limit=1)
+    gitted.stop_at = 80
+    gitted.run()
+    assert len(times) == 2, times
+    assert 5 <= times[1] - times[0] < 5.5, times  # not 0.25 s after the failed attempt
+    # Positive control: the guarded section really was entered while backing off.
+    assert gitted.guard_marks[1] - gitted.guard_marks[0] >= 2, gitted.guard_marks
+    assert len(gitted.state()["filter_rebinds"]) == 2
