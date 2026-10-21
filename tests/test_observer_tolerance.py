@@ -221,13 +221,14 @@ def fire(context, mode: str, scope: str = "free") -> None:
 def test_creator_lock_held_across_ticks(attached):
     """L2: creator.lock held across several ticks."""
     before = len(calls(attached))
-    holder = hold(attached.root / "creator.lock", 2)
+    holder = hold(attached.root / "creator.lock", 120)  # released only by this test
     try:
         # Handshake: at least four observer ticks (lock-free inspections) inside the hold.
-        wait_for(lambda: len(calls(attached)) >= before + 4, 10, "the observer did not tick")
-        assert holder.poll() is None, "the hold ended before four ticks were observed"
-        assert_survived(attached)
+        wait_for(lambda: len(calls(attached)) >= before + 4, 20, "the observer did not tick")
+        assert holder.poll() is None
+        assert_survived(attached)  # the signature works while the lock is still held
     finally:
+        holder.terminate()
         holder.wait(timeout=5)
     assert_survived(attached)
 
@@ -492,6 +493,7 @@ class Harness:
         self.guards: list[tuple[str, float, int]] = []
         self.servers: list[git_agent.AgentFilter] = []
         self.workers: list[threading.Thread] = []
+        self.record_calls: list[str] = []
         self.thread_failures = 0
         self.busy_after: int | None = None
         self.agent: subprocess.Popen[bytes] | None = None
@@ -573,9 +575,15 @@ def inproc(git_inputs, monkeypatch):
         "#!/bin/sh\necho 'Error response from daemon: No such container: x' >&2\nexit 1\n"
     )
     docker.chmod(0o700)
-    records = base / "records"
-    records.mkdir(mode=0o700)
+    records = post_mortem.records_root(create=True)  # the recorder's default root, one store
     harness = Harness(runtime_root(create=True), records, docker)
+    real_record = post_mortem.record
+
+    def spy(trigger, **kwargs):
+        harness.record_calls.append(trigger)
+        return real_record(trigger, **kwargs)
+
+    monkeypatch.setattr(post_mortem, "record", spy)
     clock = harness.clock
 
     class TickEvent(threading.Event):
@@ -887,6 +895,8 @@ def assert_channels(h, code, *, export=True):
     records = h.exit_records()
     assert [r["observed"]["state"] for r in records] == [code]
     assert records[0]["trigger"] == "observer-exit" and records[0]["runtime_generation"] == "g1"
+    assert records[0]["observed"]["expected_id"] == "dev-1"
+    assert records[0]["observed"]["actual_id"] in {"dev-1", "dev-2"}  # never null after attach
     target = h.export_file()
     if export:
         lines = target.read_text().splitlines()
@@ -1911,6 +1921,7 @@ def test_initial_state_publication_failure_is_e10(inproc, monkeypatch):
         inproc.run()
     monkeypatch.setattr(host_runtime, "save_state", real)
     assert not (inproc.root / "ready").exists()
+    assert inproc.record_calls == []  # no recorder attempt at all, whatever its root
     assert inproc.exit_records() == [] and not inproc.export_file().exists()
     assert "observer_exit" not in inproc.state()
     assert not (inproc.root / "export/auth.sock").exists()
@@ -1922,6 +1933,7 @@ def test_initial_filter_thread_start_failure_is_e10(inproc):
     with pytest.raises(RuntimeError):
         inproc.run()
     assert not (inproc.root / "ready").exists()
+    assert inproc.record_calls == []  # no recorder attempt at all, whatever its root
     assert inproc.exit_records() == [] and not inproc.export_file().exists()
     assert "observer_exit" not in inproc.state()
     assert not (inproc.root / "export/auth.sock").exists()  # listener and path were cleaned
@@ -2022,3 +2034,130 @@ def test_failing_cleanup_warning_does_not_escape(gitted, monkeypatch):
     gitted.stop_at = 200
     gitted.run()  # returns instead of raising the OSError out of the final section
     assert [r["observed"]["state"] for r in gitted.exit_records()] == ["key-set-changed"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Fix round 2 (Code-Loop A it2).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_post_bind_inode_read_failure_strands_no_socket(gitted, quick_filter, monkeypatch, capsys):
+    """G1: one failed lstat right after bind; the bound path is removed, the next rebind serves."""
+    state = {"armed": False, "seen": 0, "failed": 0}
+    real = Path.lstat
+
+    def lstat(self, *args, **kwargs):
+        if state["armed"] and self == gitted.root / "export/auth.sock":
+            state["seen"] += 1
+            if state["seen"] == 2 and not state["failed"]:  # 1: retire of the old, 2: new bind
+                state["failed"] += 1
+                raise OSError(5, "one-shot lstat after bind")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    kill_filters(gitted, after=3, limit=1)
+    hook = gitted.hook
+    seen = []
+
+    def armed(h, inside):
+        if h.clock.ticks >= 2:
+            state["armed"] = True
+        hook(h, inside)
+        if h.clock.ticks == 10:
+            seen.append(agent_keys(h.root / "export/auth.sock") == frozenset())
+
+    gitted.hook = armed
+    gitted.stop_at = 12
+    gitted.run()
+    assert state["failed"] == 1 and seen == [True]
+    assert gitted.exit_records() == [] and len(gitted.servers) == 2
+    assert len(rebind_stamps(capsys)) == 2  # the failed and the working attempt
+
+
+def test_retirement_failure_is_a_logged_rebind_attempt(
+    gitted, quick_filter, monkeypatch, capsys
+):
+    """G2: retire fails once; the consumed attempt has its line and its place in the history."""
+    real = git_agent.AgentFilter.retire_path
+    state = {"raised": 0}
+
+    def retire(self):
+        if self.stop.is_set() and not state["raised"]:
+            state["raised"] += 1
+            raise OSError(5, "retire failed before construction")
+        real(self)
+
+    monkeypatch.setattr(git_agent.AgentFilter, "retire_path", retire)
+    kill_filters(gitted, after=3, limit=1)
+    gitted.stop_at = 12
+    gitted.run()
+    log = capsys.readouterr().err.splitlines()
+    outcomes = [
+        (line.split(" ", 1)[0], "failed" if "rebind failed" in line else "ok")
+        for line in log if "observer: Git agent filter reb" in line
+    ]
+    assert [o for _, o in outcomes] == ["failed", "ok"]
+    failed_line = next(line for line in log if "rebind failed" in line)
+    assert "retire failed before construction" in failed_line
+    assert gitted.state()["filter_rebinds"] == [t for t, _ in outcomes]
+
+
+def test_exhaustion_through_retirement_failures_keeps_every_attempt(
+    gitted, quick_filter, monkeypatch
+):
+    real = git_agent.AgentFilter.retire_path
+    failing = {"on": True}
+
+    def retire(self):
+        if failing["on"] and gitted.workers and not gitted.workers[0].is_alive():
+            raise OSError(5, "retire failed")
+        real(self)
+
+    kill_filters(gitted, after=3, limit=1)
+    monkeypatch.setattr(git_agent.AgentFilter, "retire_path", retire)
+    gitted.stop_at = 60
+    try:
+        gitted.run()
+    finally:
+        failing["on"] = False
+    cause = assert_channels(gitted, "filter-failed", export=True)
+    assert len(cause["rebinds"]) == 5
+    assert gitted.exit_records()[0]["detail"]["rebinds"] == cause["rebinds"]
+
+
+def test_pending_publication_catches_up_after_dev_stop_with_companions(
+    gitted, steps, quick_filter, monkeypatch
+):
+    """G3: a failed history save, then a dev stop; the observer lives on and publishes."""
+    state = gitted.state()
+    state["resources"] = COMPANIONS
+    (gitted.root / "state.json").write_text(json.dumps(state))
+    failing_save(monkeypatch, once_with="filter_rebinds")
+    kill_filters(gitted, after=3, limit=1)
+    kill = gitted.hook
+    snapshots = []
+
+    def hook(h, inside):
+        kill(h, inside)
+        if h.clock.ticks >= 4:  # the tick after the rebind whose history save failed
+            h.dev = ("dev-1", False, "g1")
+        if h.clock.ticks == 14:
+            snapshots.append((h.state()["filter_rebinds"], len(h.guards)))
+        if h.clock.ticks == 18:
+            snapshots.append(len(h.guards))
+
+    gitted.hook = hook
+    gitted.stop_at = 20
+    gitted.run()
+    published, guards_at_14 = snapshots[0]
+    assert len(published) == 1
+    assert snapshots[1] == guards_at_14  # idle again: no guard per tick once caught up
+
+
+def test_first_tick_exit_records_both_ids(gitted):
+    """G4."""
+    gitted.keys.results = [frozenset({b"unexpected"})]
+    gitted.stop_at = 40
+    gitted.run()
+    observed = gitted.exit_records()[0]["observed"]
+    assert observed["expected_id"] == "dev-1" and observed["actual_id"] == "dev-1"

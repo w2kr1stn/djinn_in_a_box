@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import struct
@@ -103,17 +104,24 @@ class AgentFilter:
         self.clients = clients or threading.BoundedSemaphore(16)
         self.identity: tuple[int, int] | None = None
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bound = False
         try:
             self.listener.bind(str(exported))
+            bound = True
             info = exported.lstat()
             self.identity = (info.st_dev, info.st_ino)
             exported.chmod(0o600)
             self.listener.listen(16)
             self.listener.settimeout(0.2)
         except BaseException:
-            # A failed attempt never strands a socket; only the inode this instance bound goes.
+            # A failed attempt never strands a socket. The caller holds the owner guard and this
+            # instance bound the path moments ago, so even before the inode was read it is ours.
             self.listener.close()
-            self.retire_path()
+            with contextlib.suppress(OSError):
+                if self.identity is not None:
+                    self.retire_path()
+                elif bound:
+                    exported.unlink(missing_ok=True)
             raise
 
     def retire_path(self) -> None:

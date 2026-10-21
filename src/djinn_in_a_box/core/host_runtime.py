@@ -994,7 +994,7 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                             (root / ATTACHED).touch(mode=0o600)
                             os.close(lock_fd)
                             lock_fd = -1
-                            dev_id = actual[0]
+                            dev_id = seen_id = actual[0]
                 except retry as exc:
                     note(f"{type(exc).__name__}: {exc}")
             else:
@@ -1130,40 +1130,42 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                             running = target
                             if not running and not fresh["resources"]:
                                 break  # Preserve Git-only release-on-stop semantics.
-                        if server is not None and worker is not None:
-                            if not worker.is_alive():
-                                now = time.monotonic()
-                                rebind_marks[:] = [
-                                    mark for mark in rebind_marks
-                                    if now - mark < FILTER_REBIND_WINDOW_SECONDS
-                                ]
-                                if len(rebind_marks) >= FILTER_REBINDS:
-                                    exit_code = "filter-failed"
-                                    break
-                                rebind_marks.append(now)  # A failed rebind counts too.
+                        if server is not None and worker is not None and not worker.is_alive():
+                            now = time.monotonic()
+                            rebind_marks[:] = [
+                                mark for mark in rebind_marks
+                                if now - mark < FILTER_REBIND_WINDOW_SECONDS
+                            ]
+                            if len(rebind_marks) >= FILTER_REBINDS:
+                                exit_code = "filter-failed"
+                                break
+                            # One attempt block: the time is taken when the allowance is
+                            # consumed, before any fallible step, and every outcome has a
+                            # line, a place in the history and a place in the pending merge.
+                            rebind_marks.append(now)
+                            when = _utc()
+                            pending.append(when)
+                            rebind_times = [*rebind_times, when][-FILTER_REBINDS:]
+                            try:
                                 server.stop.set()
                                 server.retire_path()
-                                when = _utc()
-                                pending.append(when)  # every attempt has a time and a place
-                                rebind_times = [*rebind_times, when][-FILTER_REBINDS:]
-                                try:
-                                    server, worker = _serve_filter(root, allowed, server.clients)
-                                except (OSError, RuntimeError) as exc:
-                                    _say(
-                                        f"{when} observer: Git agent filter rebind failed: "
-                                        f"{type(exc).__name__}: {exc}"
-                                    )
-                                else:
-                                    _say(f"{when} observer: Git agent filter rebound")
-                            if pending:
-                                latest = read_state(root)
-                                if latest is None or latest["generation"] != generation:
-                                    break
-                                latest["filter_rebinds"] = [
-                                    *latest.get("filter_rebinds", []), *pending
-                                ][-FILTER_REBINDS:]
-                                save_state(root, latest)
-                                pending.clear()
+                                server, worker = _serve_filter(root, allowed, server.clients)
+                            except (OSError, RuntimeError) as exc:
+                                _say(
+                                    f"{when} observer: Git agent filter rebind failed: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                            else:
+                                _say(f"{when} observer: Git agent filter rebound")
+                        if pending:  # also after Git shutdown, while the observer lives on
+                            latest = read_state(root)
+                            if latest is None or latest["generation"] != generation:
+                                break
+                            latest["filter_rebinds"] = [
+                                *latest.get("filter_rebinds", []), *pending
+                            ][-FILTER_REBINDS:]
+                            save_state(root, latest)
+                            pending.clear()
                 except _ObserverExitError as exc:
                     exit_code = exc.code
                     break
