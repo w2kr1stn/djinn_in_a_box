@@ -1875,6 +1875,42 @@ def _try_lease(root_fd: int, name: str) -> int:
     return descriptor
 
 
+def sessions_in_use(
+    root: str | os.PathLike[str] | None = None, *, policy: RootPolicy | None = None
+) -> list[tuple[str, float]]:
+    """Read the IDs and directory modification times of sessions with a held lease.
+
+    Loose private directory modes are repaired, as by every recovery; nothing else changes.
+    """
+    effective = policy or RootPolicy()
+    root_text = os.fspath(root) if root is not None else default_audit_root()
+    root_fd = _open_root(root_text, effective, create=False)
+    if root_fd is None:
+        return []
+    running: list[tuple[str, float]] = []
+    try:
+        for name in sorted(os.listdir(root_fd)):
+            if _SESSION_ID.fullmatch(name) is None:
+                continue
+            try:
+                status = os.lstat(name, dir_fd=root_fd)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(status.st_mode):
+                continue
+            try:
+                descriptor = _try_lease(root_fd, name)
+            except BlockingIOError:
+                running.append((name, status.st_mtime))
+            except FileNotFoundError:
+                continue
+            else:
+                os.close(descriptor)
+    finally:
+        os.close(root_fd)
+    return running
+
+
 def _data_state(session_fd: int) -> str:
     """absent, empty, database or other, by lstat; the open refuses a symlink or a file."""
     try:

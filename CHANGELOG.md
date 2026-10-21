@@ -39,7 +39,8 @@ Versioning before and after the first stable release.
   naming the holding process.
 - Persist and sync OpenCode 2 logins, including MCP OAuth, through
   `credentials.json` in the config root; audits import them and merge refreshes
-  back, and deleting or restoring the OpenCode data volume exports them first
+  back, global logout refuses while an audit runs, and deleting or restoring
+  the OpenCode data volume exports them first
   (#162).
 - Require `DJINN_LIVE_DOCKER=1` before probing or running live Docker overlay
   tests; CI opts in on its test step.

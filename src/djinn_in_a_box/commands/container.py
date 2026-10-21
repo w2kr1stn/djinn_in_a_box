@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from typing import Annotated, ParamSpec, TypeVar
@@ -709,9 +710,26 @@ def _validate_opencode_carrier(config: AppConfig | None) -> None:
         return
 
 
+def _refuse_running_audit_sessions() -> None:
+    """Keep a global logout from being undone by a running audit's final merge."""
+    running = opencode_credentials.sessions_in_use()
+    if running:
+        sessions = "\n".join(
+            f"{identity} (running since {datetime.fromtimestamp(start):%Y-%m-%d %H:%M:%S}): "
+            "finish that audit, then run the command again."
+            for identity, start in running
+        )
+        raise opencode_credentials.CredentialsError(
+            f"Audit sessions are in use:\n{sessions}\n"
+            "For an urgent single logout, run "
+            "djinn clean volumes --credentials --opencode-id <credential-id>."
+        )
+
+
 def _logout_opencode(config: AppConfig | None) -> None:
     """Recover and export outside the single lease, then tombstone and clear under it."""
     recover_leftover_sessions(get_project_root(), config)
+    _refuse_running_audit_sessions()
     exported = b"[]"
     try:
         exported = export_opencode_data_credentials()
@@ -1006,6 +1024,7 @@ def clean_all(
         categories = volume_categories(config)
         try:
             _validate_opencode_carrier(config)
+            _refuse_running_audit_sessions()
         except (opencode_credentials.CredentialsError, OSError) as exc:
             error(f"OpenCode credentials refused: {credential_error_reason(exc)}")
             raise typer.Exit(1) from None

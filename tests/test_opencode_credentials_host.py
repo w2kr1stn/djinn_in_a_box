@@ -616,6 +616,80 @@ def test_loose_private_directories_are_tightened_to_0700(world: World) -> None:
 # ---------------------------------------------------------------------------------------------
 
 
+def test_sessions_in_use_reports_held_leases_and_directory_times(world: World) -> None:
+    with world.session() as first, world.session() as second:
+        os.utime(first.path, (1_700_000_000, 1_700_000_000))
+        os.utime(second.path, (1_710_000_000, 1_710_000_000))
+        assert oc.sessions_in_use(world.root, policy=world.policy) == sorted(
+            [(first.id, 1_700_000_000.0), (second.id, 1_710_000_000.0)]
+        )
+        assert first.held and second.held
+
+
+def test_sessions_in_use_ignores_free_sessions_and_releases_probe_leases(world: World) -> None:
+    identity = world.finished_session(final=[entry("cred_a")])
+    assert oc.sessions_in_use(world.root, policy=world.policy) == []
+    descriptor = os.open(world.root / identity, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("prefix", [".creating-", ".deleting-"])
+def test_sessions_in_use_ignores_temporary_names_even_with_held_leases(
+    world: World, prefix: str
+) -> None:
+    with world.session() as session:
+        Path(session.path).rename(world.root / (prefix + session.id))
+        assert oc.sessions_in_use(world.root, policy=world.policy) == []
+
+
+def test_sessions_in_use_does_not_create_a_missing_root(world: World) -> None:
+    assert oc.sessions_in_use(world.root, policy=world.policy) == []
+    assert not (world.home / ".local").exists()
+
+
+def test_sessions_in_use_changes_no_files(world: World) -> None:
+    world.put(FILE, [entry("cred_a")])
+    world.finished_session(final=[entry("cred_finished")])
+    with world.session() as session:
+        oc.write_seed(session, b"[]")
+
+        def snapshot():
+            return {
+                str(p.relative_to(world.base)): (
+                    p.lstat().st_mode,
+                    p.lstat().st_mtime_ns,
+                    p.lstat().st_ctime_ns,
+                    p.read_bytes() if p.is_file() else None,
+                )
+                for p in [world.base, *world.base.rglob("*")]
+            }
+
+        before = snapshot()
+        assert oc.sessions_in_use(world.root, policy=world.policy) == [
+            (session.id, Path(session.path).lstat().st_mtime)
+        ]
+        assert snapshot() == before
+
+
+def test_sessions_in_use_repairs_a_loose_root_like_every_recovery(world: World) -> None:
+    with world.session() as session:
+        world.root.chmod(0o750)
+        running = oc.sessions_in_use(world.root, policy=world.policy)
+        assert [identity for identity, _ in running] == [session.id]
+        assert stat.S_IMODE(world.root.lstat().st_mode) == 0o700
+
+
+def test_sessions_in_use_does_not_follow_session_symlinks(world: World) -> None:
+    with world.session() as session:
+        target = world.home / "held"
+        Path(session.path).rename(target)
+        Path(session.path).symlink_to(target, target_is_directory=True)
+        assert oc.sessions_in_use(world.root, policy=world.policy) == []
+
+
 def test_a_valid_final_export_is_adopted_and_the_session_deleted(world: World) -> None:
     world.put(FILE, [entry("cred_a")])
     identity = world.finished_session(final=[entry("cred_new", "prov_n")], database=True)

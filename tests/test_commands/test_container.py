@@ -2326,6 +2326,122 @@ def credential_cleanup(mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPat
     return config, carrier, exported, oc
 
 
+@pytest.mark.parametrize("command", ["volumes", "all"])
+def test_global_logout_refuses_running_audits_before_destructive_work(
+    credential_cleanup, monkeypatch, command
+):
+    config, carrier, _, oc = credential_cleanup
+    spies = {}
+    for module, name in (
+        (oc, "merge_back"),
+        (oc, "tombstone_all"),
+        (container, "clear_sync_path"),
+        (container, "export_opencode_data_credentials"),
+        (container, "compose_down"),
+        (container, "delete_volumes"),
+        (container, "delete_network"),
+        (container.hostctl, "delete_state_locked"),
+    ):
+        spy = (
+            MagicMock(return_value={})
+            if name == "delete_volumes"
+            else MagicMock(wraps=getattr(module, name))
+        )
+        monkeypatch.setattr(module, name, spy)
+        spies[name] = spy
+
+    def snapshot():
+        return {
+            str(p.relative_to(config.config_root)): (
+                p.lstat().st_mode,
+                p.read_bytes() if p.is_file() else None,
+            )
+            for p in config.config_root.rglob("*")
+        }
+
+    with oc.create_audit_session() as first, oc.create_audit_session() as second:
+        os.utime(first.path, (1_700_000_000, 1_700_000_000))
+        os.utime(second.path, (1_710_000_000, 1_710_000_000))
+        before = snapshot()
+        carrier_before = {p.name: p.read_bytes() for p in carrier.iterdir() if p.is_file()}
+        args = ["clean", command, "--force"]
+        if command == "volumes":
+            args.append("--credentials")
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1, result.output
+        assert "OpenCode credentials refused" in result.output
+        for session, epoch in ((first, 1_700_000_000), (second, 1_710_000_000)):
+            started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+            assert f"{session.id} (running since {started})" in result.output
+            assert Path(session.path).is_dir()
+        assert "finish that audit, then run the command again" in result.output
+        assert "djinn clean volumes --credentials --opencode-id <credential-id>" in result.output
+        for spy in spies.values():
+            spy.assert_not_called()
+        assert snapshot() == before
+        assert {p.name: p.read_bytes() for p in carrier.iterdir() if p.is_file()} == carrier_before
+
+
+def test_global_logout_rechecks_sessions_after_recovery(credential_cleanup, monkeypatch):
+    _, _, _, oc = credential_cleanup
+    sessions = []
+
+    def recover(*_):
+        sessions.append(oc.create_audit_session())
+
+    monkeypatch.setattr(container, "recover_leftover_sessions", recover)
+    export = MagicMock(side_effect=AssertionError("export must wait for the audit to finish"))
+    monkeypatch.setattr(container, "export_opencode_data_credentials", export)
+    try:
+        result = runner.invoke(app, ["clean", "all", "--force"])
+        assert result.exit_code == 1, result.output
+        assert len(sessions) == 1
+        assert sessions[0].id in result.output
+        assert "--opencode-id" in result.output
+        export.assert_not_called()
+    finally:
+        for session in sessions:
+            session.close()
+
+
+def test_selected_logout_during_audit_survives_its_final_merge(credential_cleanup):
+    _, carrier, exported, oc = credential_cleanup
+    with oc.create_audit_session() as session:
+        result = runner.invoke(
+            app, ["clean", "volumes", "--credentials", "--opencode-id", "X", "--force"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "X" in json.loads((carrier / "credentials.removed.json").read_bytes())
+        final = Path(session.io_path) / "final.json"
+        final.write_bytes(exported.replace(b'"database"', b'"X"'))
+        final.chmod(0o600)
+        report = oc.recover_audit_sessions(
+            None,
+            carrier,
+            lambda _: pytest.fail("the final export should be used"),
+            lambda _: False,
+            own_session=session,
+        )
+        assert report.recovered == [session.id]
+    assert "X" not in {
+        item["id"] for item in json.loads((carrier / "credentials.json").read_bytes())
+    }
+    assert "X" in json.loads((carrier / "credentials.removed.json").read_bytes())
+
+
+def test_global_logout_recovers_finished_audit_then_logs_out(credential_cleanup):
+    _, carrier, exported, oc = credential_cleanup
+    with oc.create_audit_session() as session:
+        final = Path(session.io_path) / "final.json"
+        final.write_bytes(exported.replace(b'"database"', b'"finished"'))
+        final.chmod(0o600)
+    result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
+    assert result.exit_code == 0, result.output
+    assert not Path(session.path).exists()
+    assert not (carrier / "credentials.json").exists()
+    assert "finished" in json.loads((carrier / "credentials.removed.json").read_bytes())
+
+
 @pytest.mark.parametrize("existing_tombstones", [False, True])
 def test_selected_logout_is_refused_while_restore_runs(
     credential_cleanup, monkeypatch, tmp_path, existing_tombstones
@@ -2826,15 +2942,16 @@ def test_clean_all_exports_before_delete_and_keeps_tombstones(
     assert ("logins only in the database are not covered" in result.output) == failed
 
 
-def test_credentials_cleanup_warns_for_each_kept_audit_session(credential_cleanup):
+def test_credentials_cleanup_warns_for_each_kept_audit_session_before_refusal(credential_cleanup):
     _, _, _, oc = credential_cleanup
     first = oc.create_audit_session()
     second = oc.create_audit_session()
     try:
         result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         for session in (first, second):
             assert f"session {session.id} was kept: in use" in result.output
+        assert "OpenCode credentials refused" in result.output
     finally:
         first.close()
         second.close()

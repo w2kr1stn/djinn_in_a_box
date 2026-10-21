@@ -1680,6 +1680,9 @@ everywhere, name its ID:
 djinn clean volumes --credentials --opencode-id <id>
 ```
 
+`--credentials` without `--opencode-id` and `clean all` refuse while an audit runs;
+finish the audit, or log out a single login immediately with `--opencode-id`.
+
 Clear the optional `repo-dotfiles` config-root directory:
 
 ```sh
