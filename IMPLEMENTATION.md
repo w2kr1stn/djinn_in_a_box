@@ -1610,7 +1610,8 @@ A different helper is preserved. Failed or unknown outcomes retry with a
 0.5-second backoff doubling to five seconds, with one retry log line per minute.
 The SIGTERM, SIGINT and SIGHUP handler ignores all three signals and sets a cancel
 flag without raising. The observer checks that flag at each round and after sleeps,
-then enters closure through its normal finalizer.
+then enters closure through its normal finalizer; a step already in progress (for
+example an admission waiting for the control lock) finishes or times out first.
 Closure subprocesses have timeouts because they inherit ignored signals.
 The PID-1 timer stays the outer bound.
 

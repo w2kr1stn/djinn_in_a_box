@@ -1368,7 +1368,7 @@ def observe_hostctl(
                         try:
                             stack.enter_context(hostctl.control_guard(timeout=0))
                             guarded = True
-                        except (hostctl.HostctlError, OSError):
+                        except Exception:  # any guard failure: fall back after the bound
                             remaining = deadline - time.monotonic()
                             if remaining > 0:
                                 time.sleep(min(0.1, remaining))

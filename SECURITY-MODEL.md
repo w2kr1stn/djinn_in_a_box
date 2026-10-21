@@ -554,8 +554,10 @@ pinned helper stopped, also without the control lock: after at most two seconds
 of non-waiting lock attempts, the observer confirms the launch ID and generation
 again and stops exactly that ID. An inspection error remains unknown unless the
 engine positively reports `No such container`. Failed stops retry with backoff
-until closure is verified; cancellation ignores further termination signals
-before closure begins. The PID-1 timer stays the outer bound.
+until closure is verified; SIGTERM, SIGINT and SIGHUP request this closure and
+are ignored afterwards. Other signals, a signal before the observer installs its
+handlers, SIGKILL or host loss end the observer without closure; the PID-1 timer
+stays the outer bound.
 
 The owner-only host journal is
 `$XDG_STATE_HOME/djinn/hostctl/journal.jsonl`, using `~/.local/state` when

@@ -1014,13 +1014,19 @@ def test_unknown_closure_inspection_retries(window, monkeypatch, failure):
     assert window.stops == ["helper-a"]
 
 
-def test_unavailable_guard_also_falls_back(window, monkeypatch):
+@pytest.mark.parametrize("error", [
+    hostctl.HostctlError("state ownership invalid"),
+    # private_directory() raises GitSSHError when the state directory mode is not 0700.
+    host_runtime.GitSSHError("Git runtime directory must be owned by you with mode 0700"),
+    ValueError("malformed state"),
+])
+def test_unavailable_guard_also_falls_back(window, monkeypatch, error):
     guard = hostctl.control_guard
 
     @contextlib.contextmanager
     def invalid_state(*, timeout=15):
         if window.admitted:
-            raise hostctl.HostctlError("state ownership invalid")
+            raise error
         with guard(timeout=timeout):
             yield
 
