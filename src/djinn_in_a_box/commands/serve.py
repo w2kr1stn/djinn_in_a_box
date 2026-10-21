@@ -82,6 +82,13 @@ def _helper_failure(name: str, failure: core.ServeError) -> None:
             "OpenCode remote access (OpenTunnel) is enabled in its service settings; refusing. "
             "Remove it in the container with: opencode service unset remote"
         )
+    elif failure.code == "route-localnet":
+        _literal(
+            "Error: OpenCode requires route_localnet=0 on all container interfaces; refusing. "
+            "Disable loopback routing in the container and endpoint sysctls, "
+            "and on the host (new containers inherit its all/default values), "
+            "then recreate the container."
+        )
     elif failure.code == "service-config":
         keys = re.findall(r"service.json contains '([^']+)'", str(failure))
         if keys:
@@ -132,34 +139,35 @@ def _status_table(snapshot: core.Snapshot) -> None:
         if state == "degraded":
             state = f"degraded ({row['reason']})"
         if name == core.OPENCODE:
-            endpoint = (
+            lines = [
                 f"http://127.0.0.1:{snapshot.port}"
                 if snapshot.published
-                else "port not published (recreate once)"
-            )
-            endpoint += (
-                f"\ntailnet: {snapshot.url}"
+                else "port not published (recreate once)",
+                f"tailnet: {snapshot.url}"
                 if snapshot.url
-                else f"\ntailnet: unknown ({snapshot.reason})"
-            )
-            if row["foreign_listener"]:
-                endpoint += "\nnote: port 4096 is used by another process"
-            if snapshot.funnel:
-                endpoint += "\n" + core.FUNNEL_WARNING
-        else:
-            endpoint = "Remote Control: see the Claude apps"
-        # Each cell is data; escaped controls cannot become terminal instructions or markup.
-        table.add_row(
-            *(
-                Text(escape_nonprintable(str(value)))
-                for value in (
-                    name,
-                    state,
-                    row["since"] or "",
-                    endpoint,
-                    row["last_line"] or "" if row["state"] == "exited" else "",
+                else f"tailnet: unknown ({snapshot.reason})",
+            ]
+            if row["state"] in ("running", "degraded"):
+                lines.append(
+                    f"relay refused since start: {row['relay_refused']}"
+                    if row["relay_refused"] is not None
+                    else f"relay refused: unknown ({row['relay_note']})"
                 )
-            )
+            if row["foreign_listener"]:
+                lines.append(
+                    "note: port 4096 is used by another process; possibly "
+                    "a djinn serve from before the update — recreate the container"
+                )
+            if snapshot.funnel:
+                lines.append(core.FUNNEL_WARNING)
+        else:
+            lines = ["Remote Control: see the Claude apps"]
+        # Each cell is data; escaped controls cannot become terminal instructions or markup.
+        # Only the endpoint's own line breaks survive; a newline inside a value stays escaped.
+        table.add_row(
+            *(Text(escape_nonprintable(str(value))) for value in (name, state, row["since"] or "")),
+            Text("\n".join(escape_nonprintable(line) for line in lines)),
+            Text(escape_nonprintable(row["last_line"] or "" if row["state"] == "exited" else "")),
         )
     console.print(table)
 

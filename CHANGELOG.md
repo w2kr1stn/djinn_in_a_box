@@ -32,6 +32,9 @@ Versioning before and after the first stable release.
 - `--firewall` now allows Claude's current sign-in token host
   `platform.claude.com` instead of the unused `console.anthropic.com`, so a
   subscription token can be refreshed under the firewall (#178).
+- `djinn serve --status` shows the OpenCode endpoint, tailnet and relay details on
+  separate lines instead of one line with literal `\n`, which narrow terminals
+  truncated (#167).
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).
@@ -99,6 +102,13 @@ Versioning before and after the first stable release.
   file owned by the invoking user and not writable by group or others, in a
   non-symlink directory with the same rules; any other state stops the command
   instead of falling back to the built-in agents (#171).
+- Bind managed OpenCode to container loopback behind a gateway-only relay;
+  ordinary bridge peers are refused before reaching the API. Check inspected
+  container/endpoint `route_localnet` settings and actual values before start.
+  Status reports relay refusals since start or why the count is unknown. Stop
+  OpenCode before updating; legacy servers require stopping or container
+  recreation. Document direct-routing, source-address and ARP-spoofing residuals;
+  the password remains a second barrier (#167).
 - Refuse managed writable binds selected by configuration that overlap host
   execution inputs or whose path contains `..` or `:`: the workspace root (also
   delivered to the agent-Docker companion), config-root tool directories (`claude`, `codex`,

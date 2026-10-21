@@ -16,7 +16,8 @@ Process state lives in ``/tmp/djinn-serve`` (outside volumes and binds, so it en
 container). Test-only environment overrides, never set in production:
 ``DJINN_SERVE_TEST_STATE_DIR`` (state directory), ``DJINN_SERVE_TEST_HOME`` (the home directory
 OpenCode must use instead of ``/home/dev``) and ``DJINN_SERVE_TEST_TIMING`` (comma separated
-``name=seconds`` pairs for the keys of ``_TIMING``).
+``name=seconds`` pairs for the keys of ``_TIMING``). Relay tests also replace the two ports,
+route-table files and sysctl directory through the ``TEST_*_ENV`` constants below.
 """
 
 from __future__ import annotations
@@ -25,12 +26,15 @@ import contextlib
 import errno
 import fcntl
 import hmac
+import ipaddress
 import json
 import os
 import pty
 import re
 import select
+import selectors
 import signal
+import socket
 import stat
 import struct
 import sys
@@ -38,7 +42,7 @@ import termios
 import time
 import unicodedata
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from types import FrameType
 from typing import IO, Final, NoReturn, cast
@@ -46,6 +50,15 @@ from typing import IO, Final, NoReturn, cast
 STATE_DIR: Final = "/tmp/djinn-serve"  # nosec B108 - fixed, 0700, dev-owned and fstat-checked
 HOME_DIR: Final = "/home/dev"
 OPENCODE_PORT: Final = 4096
+OPENCODE_INTERNAL_PORT: Final = 4097
+RELAY_LIMIT: Final = 64
+RELAY_BUFFER: Final = 64 * 1024
+RELAY_LOG_SOURCES: Final = 256
+TEST_BACKEND_ENV: Final = "DJINN_SERVE_TEST_BACKEND_PORT"
+TEST_RELAY_ENV: Final = "DJINN_SERVE_TEST_RELAY_PORT"
+TEST_ROUTE4_ENV: Final = "DJINN_SERVE_TEST_ROUTE4"
+TEST_ROUTE6_ENV: Final = "DJINN_SERVE_TEST_ROUTE6"
+TEST_SYSCTL_ENV: Final = "DJINN_SERVE_TEST_SYSCTL_DIR"
 TEST_STATE_ENV: Final = "DJINN_SERVE_TEST_STATE_DIR"
 TEST_HOME_ENV: Final = "DJINN_SERVE_TEST_HOME"
 TEST_TIMING_ENV: Final = "DJINN_SERVE_TEST_TIMING"
@@ -63,6 +76,7 @@ ERROR_CODES: Final = (
     "service-json",
     "service-config",
     "remote-config",
+    "route-localnet",
     "spawn",
     "not-registered",
     "busy",
@@ -86,6 +100,11 @@ _TIMING: Final = {
     "claude_grace": 5.0,
     "handoff_wait": 2.0,
     "launch_cleanup": 3.0,
+    "relay_connect": 5.0,
+    "relay_idle": 1800.0,
+    "relay_heartbeat": 10.0,
+    "relay_flush": 1.0,
+    "relay_log_interval": 60.0,
 }
 
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b")
@@ -229,8 +248,14 @@ def socket_inodes(pid: int) -> set[int]:
     return inodes
 
 
-def listener_inodes(port: int, *, wildcard_v4: bool) -> set[int]:
-    """Inodes of LISTEN sockets on ``port`` (``wildcard_v4``: only 0.0.0.0, no IPv6)."""
+def listener_inodes(
+    port: int, *, wildcard_v4: bool, address: str | None = None, non_loopback: bool = False
+) -> set[int]:
+    """LISTEN inodes on ``port``; optionally filter the proc-format local address.
+
+    ``wildcard_v4`` restricts the result to 0.0.0.0, excluding IPv6.
+    ``non_loopback`` excludes loopback, including IPv4-mapped loopback addresses.
+    """
     inodes: set[int] = set()
     for table in ("tcp",) if wildcard_v4 else ("tcp", "tcp6"):
         try:
@@ -242,17 +267,40 @@ def listener_inodes(port: int, *, wildcard_v4: bool) -> set[int]:
             fields = row.split()
             if len(fields) < 10 or fields[3] != "0A":
                 continue
-            address, _, hexport = fields[1].partition(":")
-            if wildcard_v4 and address != "00000000":
+            local, _, hexport = fields[1].partition(":")
+            if address is not None and local != address:
+                continue
+            if wildcard_v4 and local != "00000000":
                 continue
             if int(hexport, 16) == port and fields[9].isdigit():
+                if non_loopback:
+                    packed = bytes.fromhex(local)
+                    # proc IPv6 addresses contain four little-endian 32-bit words.
+                    packed = b"".join(packed[i : i + 4][::-1] for i in range(0, len(packed), 4))
+                    ip = ipaddress.ip_address(packed)
+                    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+                        ip = ip.ipv4_mapped
+                    if ip.is_loopback:
+                        continue
                 inodes.add(int(fields[9]))
     return inodes
 
 
 def listener_ours(pid: int, port: int) -> bool:
-    """A LISTEN socket on 0.0.0.0:<port> whose inode belongs to ``pid``."""
-    return bool(listener_inodes(port, wildcard_v4=True) & socket_inodes(pid))
+    """A LISTEN socket on 127.0.0.1:<port> whose inode belongs to ``pid``."""
+    return bool(listener_inodes(port, wildcard_v4=False, address="0100007F") & socket_inodes(pid))
+
+
+def relay_listener_ours(pid: int, port: int) -> bool:
+    return bool(listener_inodes(port, wildcard_v4=False) & socket_inodes(pid))
+
+
+def backend_port() -> int:
+    return int(os.environ.get(TEST_BACKEND_ENV, str(OPENCODE_INTERNAL_PORT)))
+
+
+def relay_port() -> int:
+    return int(os.environ.get(TEST_RELAY_ENV, str(OPENCODE_PORT)))
 
 
 def foreign_listener(pid: int | None, port: int) -> bool:
@@ -314,6 +362,8 @@ class Record:
     child_start: str | None = None
     port: int | None = None
     cors: str | None = None
+    relay_pid: int | None = None
+    relay_start: str | None = None
 
 
 def _as_dict(value: object) -> dict[str, object] | None:
@@ -364,7 +414,16 @@ def decode_record(raw: bytes) -> Record | None:
     cors = data.get("cors")
     if cors is not None and (not isinstance(cors, str) or not _CORS.fullmatch(cors)):
         return None
-    return Record(pid, start, p1, cwd, tag, at, child_pid, child_start, port, cors)
+    relay_pid, relay_start = _int(data.get("relay_pid")), _ticks(data.get("relay_start"))
+    if (port is not None or tag == "opencode-serve") and (
+        relay_pid is None or relay_pid <= 1 or relay_start is None
+    ):
+        return None
+    if (relay_pid is None) != (relay_start is None):
+        return None
+    return Record(
+        pid, start, p1, cwd, tag, at, child_pid, child_start, port, cors, relay_pid, relay_start
+    )
 
 
 def load_record(dirfd: int, name: str) -> Record | None:
@@ -652,12 +711,14 @@ def record_groups(record: Record) -> list[tuple[int, str]]:
     groups = [(record.pid, record.start)]
     if record.child_pid is not None and record.child_start is not None:
         groups.insert(0, (record.child_pid, record.child_start))
+    if record.relay_pid is not None and record.relay_start is not None:
+        groups.insert(0, (record.relay_pid, record.relay_start))
     return groups
 
 
 def evaluate(name: str, record: Record | None, home: str) -> Eval:
     """Total state function: no record, stale, exited, degraded or running."""
-    port = record.port if record and record.port else OPENCODE_PORT
+    port = record.port if record and record.port else relay_port()
     if record is None:
         return Eval("stopped", foreign=name == "opencode" and foreign_listener(None, port))
     if record.pid1_start != pid1_start():
@@ -678,28 +739,489 @@ def evaluate(name: str, record: Record | None, home: str) -> Eval:
         if child == "alive":
             return Eval("degraded", "supervisor gone")
         return Eval("exited")
-    if main == "stale":
+    relay = (
+        group_state(record.relay_pid, record.relay_start)
+        if record.relay_pid is not None and record.relay_start is not None
+        else "gone"
+    )
+    if "stale" in (main, relay):
         return Eval("stopped", "stale record", stale=True)
-    if main == "gone":
+    if main == relay == "gone":
         return Eval("exited", foreign=foreign_listener(None, port))
-    listening = listener_ours(record.pid, port)
+    listening = main == "alive" and listener_ours(record.pid, backend_port())
     found = discovery_pid(home)
     ours = found == record.pid
-    if listening and ours:
-        return Eval("running", listening=True, discovery_ok=True)
-    if not listening:
+    relay_listening = (
+        relay == "alive"
+        and record.relay_pid is not None
+        and relay_listener_ours(record.relay_pid, port)
+    )
+    if main != "alive":
+        reason = "opencode gone"
+    elif relay != "alive":
+        reason = "relay gone"
+    elif not relay_listening:
+        reason = "relay listener lost"
+    elif not listening:
         reason = "listener lost"
-    elif found is None:
-        reason = "not registered"
+    elif not ours:
+        reason = "not registered" if found is None else "registered to another process"
     else:
-        reason = "registered to another process"
+        return Eval("running", listening=True, discovery_ok=True)
     return Eval(
         "degraded",
         reason,
         listening=listening,
         discovery_ok=ours,
-        foreign=foreign_listener(record.pid, port),
+        foreign=foreign_listener(record.relay_pid, port),
     )
+
+
+# ------------------------------------------------------------------------- relay
+
+
+def check_route_localnet() -> None:
+    """Every all/default/interface value must be readable integer zero (all OR interface)."""
+    root = os.environ.get(TEST_SYSCTL_ENV, "/proc/sys/net/ipv4/conf")
+    try:
+        entries = os.listdir(root)
+        if "all" not in entries or "default" not in entries:
+            raise ValueError("missing all/default")
+        for entry in entries:
+            with open(os.path.join(root, entry, "route_localnet"), encoding="ascii") as handle:
+                if int(handle.read().strip()) != 0:
+                    raise ValueError("nonzero value")
+    except (OSError, ValueError) as exc:
+        raise HelperError(
+            "route-localnet", "route_localnet must be readable integer 0 for all interfaces"
+        ) from exc
+
+
+def current_gateway(version: int) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Read real Linux proc rows; ambiguity or any malformed row fails closed."""
+    path = os.environ.get(
+        TEST_ROUTE4_ENV if version == 4 else TEST_ROUTE6_ENV,
+        "/proc/net/route" if version == 4 else "/proc/net/ipv6_route",
+    )
+    gateways: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    with open(path, encoding="ascii") as handle:
+        rows = handle.read().splitlines()
+    if version == 4:
+        if not rows or rows[0].split() != [
+            "Iface",
+            "Destination",
+            "Gateway",
+            "Flags",
+            "RefCnt",
+            "Use",
+            "Metric",
+            "Mask",
+            "MTU",
+            "Window",
+            "IRTT",
+        ]:
+            raise ValueError("malformed IPv4 table header")
+        rows = rows[1:]
+    for row in rows:
+        fields = row.split()
+        if version == 4:
+            if len(fields) != 11:
+                raise ValueError("malformed IPv4 route")
+            for index in (1, 2, 7):
+                if len(fields[index]) != 8:
+                    raise ValueError("malformed IPv4 address")
+            dest, hop, mask = (int(fields[i], 16) for i in (1, 2, 7))
+            if any(not re.fullmatch(r"[0-9a-fA-F]+", fields[i]) for i in (1, 2, 3, 7)):
+                raise ValueError("malformed IPv4 hex")
+            flags = int(fields[3], 16)
+            for index in (4, 5, 6, 8, 9, 10):
+                int(fields[index])
+            gateway = ipaddress.IPv4Address(hop.to_bytes(4, "little"))
+            default = dest == mask == 0
+        else:
+            if len(fields) != 10 or any(len(fields[i]) != 32 for i in (0, 2, 4)):
+                raise ValueError("malformed IPv6 route")
+            if any(not re.fullmatch(r"[0-9a-fA-F]+", field) for field in fields[:9]):
+                raise ValueError("malformed IPv6 hex")
+            dest6 = ipaddress.IPv6Address(int(fields[0], 16))
+            ipaddress.IPv6Address(int(fields[2], 16))
+            prefix, source_prefix = int(fields[1], 16), int(fields[3], 16)
+            if not 0 <= prefix <= 128 or not 0 <= source_prefix <= 128:
+                raise ValueError("malformed IPv6 prefix")
+            gateway = ipaddress.IPv6Address(int(fields[4], 16))
+            for index in (5, 6, 7):
+                int(fields[index], 16)
+            flags = int(fields[8], 16)
+            default = int(dest6) == prefix == 0
+        if default and flags & 3 == 3 and not flags & 0x200 and not gateway.is_unspecified:
+            gateways.append(gateway)
+    if len(gateways) != 1:
+        raise ValueError(f"{len(gateways)} eligible default gateways")
+    gateway = gateways[0]
+    if version == 6 and (
+        gateway.is_link_local or gateway.is_multicast or getattr(gateway, "scope_id", None)
+    ):
+        raise ValueError("scoped default gateway")
+    return gateway
+
+
+def admission(peer: tuple[object, ...]) -> tuple[str, str | None]:
+    """Return normalized source and refusal reason, or None when admitted."""
+    source = str(peer[0])
+    try:
+        address = ipaddress.ip_address(source)
+        if "%" in source or (len(peer) > 3 and peer[3] != 0):
+            raise ValueError("scoped peer")
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        source = str(address)
+        gateway = current_gateway(address.version)
+        return source, None if address == gateway else "not gateway"
+    except (OSError, ValueError) as exc:
+        return source, f"gateway undetermined: {exc}"
+
+
+def relay_count(dirfd: int, record: Record | None) -> tuple[int | None, str | None]:
+    try:
+        raw = read_nofollow("opencode-relay.count", dirfd, "state-dir")
+        if raw is None:
+            return None, "missing"
+        data = _as_dict(json.loads(raw))
+        if data is None:
+            raise ValueError("invalid count")
+        if record is None or (data.get("relay_pid"), data.get("relay_start")) != (
+            record.relay_pid,
+            record.relay_start,
+        ):
+            return None, "foreign identity"
+        count = _int(data.get("refused"))
+        updated = data.get("updated_at")
+        if (
+            count is None
+            or count < 0
+            or isinstance(updated, bool)
+            or not isinstance(updated, (float, int))
+        ):
+            raise ValueError("invalid count")
+        if not 0 <= time.time() - updated <= 30:
+            return None, "stale"
+        return count, None
+    except (HelperError, OSError, ValueError):
+        return None, "unreadable"
+
+
+@dataclass(eq=False)
+class RelayConnection:
+    sockets: tuple[socket.socket, socket.socket]
+    buffers: tuple[bytearray, bytearray]
+    eof: list[bool]
+    shut: list[bool]
+    started: float
+    active: float
+    connecting: bool = True
+
+
+def relay_listener(port: int) -> socket.socket:
+    try:
+        listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            listener.close()
+            raise
+    except OSError as exc:
+        if exc.errno not in (
+            errno.EAFNOSUPPORT,
+            errno.EPROTONOSUPPORT,
+            errno.ENOPROTOOPT,
+            errno.EINVAL,
+        ):
+            raise
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("::" if listener.family == socket.AF_INET6 else _BIND_ALL, port))
+        listener.listen(128)
+        listener.setblocking(False)
+        return listener
+    except BaseException:
+        listener.close()
+        raise
+
+
+def run_relay(
+    dirfd: int, port: int, handoff: int, ack: int, *, listener: socket.socket | None = None
+) -> None:
+    """One selector owns all sockets, counters and refusal logging; no exec or threads."""
+    stopping = False
+
+    def on_signal(_signum: int, _frame: FrameType | None) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+    selector = selectors.DefaultSelector()
+    connections: set[RelayConnection] = set()
+    listener = listener if listener is not None else relay_listener(port)
+    count, persisted, size = 0, -1, 0
+    last_flush, last_attempt = float("-inf"), float("-inf")
+    write_failed = False
+    logged: dict[str, float] = {}
+    last_suppressed = float("-inf")
+    accept_retry_at: float | None = None
+
+    def persist(force: bool = False) -> None:
+        nonlocal persisted, last_flush, last_attempt, size, write_failed
+        now = time.monotonic()
+        if not force and (
+            now - last_attempt < timing("relay_flush")
+            or (count == persisted and now - last_flush < timing("relay_heartbeat"))
+        ):
+            return
+        last_attempt = now
+        try:
+            write_atomic(
+                dirfd,
+                "opencode-relay.count",
+                json.dumps(
+                    {
+                        "relay_pid": os.getpid(),
+                        "relay_start": raw_start(os.getpid()),
+                        "refused": count,
+                        "updated_at": time.time(),
+                    }
+                ).encode(),
+            )
+        except OSError:
+            if not write_failed:
+                size = _write_log(b"relay counter write failed; retrying\n", size)
+            write_failed = True
+        else:
+            persisted, last_flush, write_failed = count, now, False
+
+    def close_connection(conn: RelayConnection) -> None:
+        for sock in conn.sockets:
+            with contextlib.suppress(KeyError):
+                selector.unregister(sock)
+            sock.close()
+        connections.discard(conn)
+
+    def refuse(client: socket.socket, source: str, reason: str) -> None:
+        nonlocal count, size, last_suppressed
+        count += 1
+        now = time.monotonic()
+        # The source cap bounds both retained state and expiry work.
+        for key in list(logged):
+            if now - logged[key] >= timing("relay_log_interval"):
+                del logged[key]
+        if source not in logged:
+            if len(logged) >= RELAY_LOG_SOURCES:
+                if now - last_suppressed >= timing("relay_log_interval"):
+                    size = _write_log(b"refusal log suppressed: too many sources\n", size)
+                    last_suppressed = now
+                client.close()
+                return
+            if reason == "not gateway":
+                local = client.getsockname()[0]
+                with contextlib.suppress(ValueError):
+                    mapped = ipaddress.ip_address(local)
+                    if isinstance(mapped, ipaddress.IPv6Address) and mapped.ipv4_mapped:
+                        local = str(mapped.ipv4_mapped)
+                reason = (
+                    f"not the bridge gateway for {local}; check userland-proxy / direct routing"
+                    " or a non-default network of a multi-network container"
+                )
+            size = _write_log(f"refused {source} ({reason})\n".encode(), size)
+            logged[source] = now
+        client.close()
+
+    try:
+        os.write(handoff, f"{os.getpid()} {raw_start(os.getpid())}\n".encode())
+        os.close(handoff)
+        handoff = -1
+        ack_end = time.monotonic() + timing("deadline")
+        acknowledged = False
+        while not stopping and time.monotonic() < ack_end:
+            if select.select([ack], [], [], min(0.1, max(0, ack_end - time.monotonic())))[0]:
+                acknowledged = os.read(ack, len(_LAUNCH_ACK) + 1) == _LAUNCH_ACK
+                break
+        if not acknowledged:
+            return
+        os.close(ack)
+        ack = -1
+        persist()
+        selector.register(listener, selectors.EVENT_READ, None)
+        while not stopping:
+            if accept_retry_at is not None and time.monotonic() >= accept_retry_at:
+                selector.register(listener, selectors.EVENT_READ, None)
+                accept_retry_at = None
+            for key, events in selector.select(0.1):
+                if key.data is None:
+                    try:
+                        client, peer = listener.accept()
+                    except (BlockingIOError, InterruptedError):
+                        continue
+                    except OSError as exc:
+                        if exc.errno == errno.ECONNABORTED:
+                            continue
+                        selector.unregister(listener)
+                        accept_retry_at = time.monotonic() + 1.0
+                        error = errno.errorcode.get(exc.errno or 0, "unknown")
+                        size = _write_log(
+                            f"accept failed ({error}); pausing new connections\n".encode(), size
+                        )
+                        continue
+                    source, reason = admission(peer)
+                    if reason is not None:
+                        refuse(client, source, reason)
+                        continue
+                    if len(connections) >= RELAY_LIMIT:
+                        refuse(client, source, "connection limit reached")
+                        continue
+                    try:
+                        target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    except OSError:
+                        client.close()
+                        continue
+                    try:
+                        client.setblocking(False)
+                        target.setblocking(False)
+                        result = target.connect_ex(("127.0.0.1", backend_port()))
+                        if result not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK):
+                            raise OSError(result, "backend connect failed")
+                        now = time.monotonic()
+                        conn = RelayConnection(
+                            (client, target),
+                            (bytearray(), bytearray()),
+                            [False, False],
+                            [False, False],
+                            now,
+                            now,
+                            result != 0,
+                        )
+                        connections.add(conn)
+                    except OSError:
+                        client.close()
+                        target.close()
+                    continue
+                conn, index = key.data
+                if conn not in connections:
+                    continue
+                sock = conn.sockets[index]
+                try:
+                    if index == 1 and conn.connecting:
+                        error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                        if error:
+                            raise OSError(error, "backend connect failed")
+                        conn.connecting = False
+                    if events & selectors.EVENT_READ:
+                        data = sock.recv(RELAY_BUFFER - len(conn.buffers[index]))
+                        if data:
+                            conn.buffers[index].extend(data)
+                            conn.active = time.monotonic()
+                        else:
+                            conn.eof[index] = True
+                    outgoing = conn.buffers[1 - index]
+                    if events & selectors.EVENT_WRITE and outgoing and not conn.connecting:
+                        sent = sock.send(outgoing)
+                        del outgoing[:sent]
+                        conn.active = time.monotonic()
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    close_connection(conn)
+            now = time.monotonic()
+            for conn in list(connections):
+                if (conn.connecting and now - conn.started >= timing("relay_connect")) or (
+                    now - conn.active >= timing("relay_idle")
+                ):
+                    close_connection(conn)
+                    continue
+                try:
+                    for index, sock in enumerate(conn.sockets):
+                        other = 1 - index
+                        if (
+                            conn.eof[other]
+                            and not conn.buffers[other]
+                            and not conn.shut[index]
+                            and not conn.connecting
+                        ):
+                            sock.shutdown(socket.SHUT_WR)
+                            conn.shut[index] = True
+                        events = 0
+                        if (
+                            not conn.eof[index]
+                            and len(conn.buffers[index]) < RELAY_BUFFER
+                            and not conn.connecting
+                        ):
+                            events |= selectors.EVENT_READ
+                        if (index == 1 and conn.connecting) or (
+                            conn.buffers[other] and not conn.connecting
+                        ):
+                            events |= selectors.EVENT_WRITE
+                        with contextlib.suppress(KeyError):
+                            selector.unregister(sock)
+                        if events:
+                            selector.register(sock, events, (conn, index))
+                    if all(conn.eof) and not any(conn.buffers):
+                        close_connection(conn)
+                except OSError:
+                    close_connection(conn)
+            persist()
+    finally:
+        for conn in list(connections):
+            close_connection(conn)
+        listener.close()
+        selector.close()
+        persist(force=True)
+        for fd in (handoff, ack):
+            if fd >= 0:
+                os.close(fd)
+
+
+def spawn_relay(
+    dirfd: int, port: int, handoff: int, ack: int, *, listener: socket.socket | None = None
+) -> int:
+    """Fork the relay, taking ownership of any supplied listening socket."""
+    logfd = -1
+    try:
+        remove_file(dirfd, "opencode-relay.log")
+        logfd = os.open(
+            "opencode-relay.log",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_APPEND,
+            0o600,
+            dir_fd=dirfd,
+        )
+        pid = os.fork()
+    except BaseException:
+        if logfd >= 0:
+            os.close(logfd)
+        if listener is not None:
+            listener.close()
+        raise
+    if pid:
+        os.close(logfd)
+        if listener is not None:
+            listener.close()
+        return pid
+    try:
+        os.setsid()
+        null = os.open("/dev/null", os.O_RDONLY)
+        os.dup2(null, 0)
+        os.dup2(logfd, 1)
+        os.dup2(logfd, 2)
+        _close_other_fds(dirfd, handoff, ack, listener.fileno() if listener is not None else None)
+        if listener is None:
+            run_relay(dirfd, port, handoff, ack)
+        else:
+            run_relay(dirfd, port, handoff, ack, listener=listener)
+    except BaseException as exc:
+        with contextlib.suppress(OSError):
+            os.write(2, f"relay failed: {exc}\n".encode("utf-8", "replace"))
+        os._exit(127)
+    os._exit(0)
 
 
 # ------------------------------------------------------------------------- spawning
@@ -947,10 +1469,20 @@ def _status_entry(name: str, record: Record | None, ev: Eval, dirfd: int) -> dic
     }
     if ev.state == "exited":
         tail = sanitize_tail(f"{name}.log", 1, dir_fd=dirfd)
+        if name == "opencode":
+            # A relay failure is the cause; ordinary refusal lines are not.
+            relay_tail = sanitize_tail("opencode-relay.log", 1, dir_fd=dirfd)
+            if relay_tail and relay_tail[-1].startswith("relay failed: "):
+                tail = relay_tail
         entry["last_line"] = tail[-1] if tail else None
     if name == "opencode":
+        count, note = relay_count(dirfd, record)
         entry.update(
-            listening=ev.listening, discovery_pid_ok=ev.discovery_ok, foreign_listener=ev.foreign
+            relay_refused=count,
+            relay_note=note,
+            listening=ev.listening,
+            discovery_pid_ok=ev.discovery_ok,
+            foreign_listener=ev.foreign,
         )
     return entry
 
@@ -988,7 +1520,11 @@ def cmd_stop(args: list[str]) -> dict[str, object]:
         for name in dict.fromkeys(names):
             record = load_record(dirfd, name)
             ev = evaluate(name, record, home)
-            if record is None or ev.state in ("stopped", "exited"):
+            if (
+                record is None
+                or ev.stale
+                or all(group_state(*g) == "gone" for g in record_groups(record))
+            ):
                 remove_file(dirfd, f"{name}.json")
                 results[name] = {"result": "not-running", "pid": None}
             elif stop_groups(record_groups(record), deadline):
@@ -1023,7 +1559,11 @@ def _prepare(dirfd: int, name: str, home: str, deadline: Deadline) -> tuple[Reco
     ev = evaluate(name, record, home)
     if record is not None and ev.state == "running":
         return record, False
-    if record is not None and ev.state == "degraded":
+    if (
+        record is not None
+        and not ev.stale
+        and any(group_state(*g) == "alive" for g in record_groups(record))
+    ):
         if not stop_groups(record_groups(record), deadline):
             raise HelperError("spawn", f"the degraded {name} server could not be stopped")
         remove_file(dirfd, f"{name}.json")
@@ -1066,9 +1606,12 @@ def _publish_started_record(
     *,
     ack: int | None = None,
     cors: str | None = None,
+    relay: tuple[int, str] | None = None,
 ) -> Record:
     try:
         record = _fresh_record(pid, handoff, tag, port, cors)
+        if relay is not None:
+            record = replace(record, relay_pid=relay[0], relay_start=relay[1])
         save_record(dirfd, name, record)
         return record
     except Exception as exc:
@@ -1079,6 +1622,7 @@ def _publish_started_record(
             f"could not build or publish the {name} process record",
             exc,
             ack=ack,
+            relay=relay,
         )
 
 
@@ -1116,6 +1660,7 @@ def _fail_launch(
     cause: Exception,
     *,
     ack: int | None = None,
+    relay: tuple[int, str] | None = None,
 ) -> NoReturn:
     """One guard for all post-spawn failures before publication, independent of Deadline.
 
@@ -1129,6 +1674,10 @@ def _fail_launch(
     groups = [(pid, raw_start(pid) or "0")]
     if handoff is not None:
         groups.append(handoff)
+    if relay is not None:
+        groups.append(relay)
+        with contextlib.suppress(Exception):
+            _kill_failed_launch(relay[0], None, end)
     with contextlib.suppress(Exception):
         _kill_failed_launch(pid, handoff, end)
     while any(group_state(*group) == "alive" for group in groups):
@@ -1259,6 +1808,7 @@ def check_opencode_preconditions(home: str) -> None:
     check_env_root(home)
     check_settings_paths(home)
     check_service_config(read_service_config(home))
+    check_route_localnet()
 
 
 def cmd_opencode_preflight(args: list[str]) -> dict[str, object]:
@@ -1275,7 +1825,7 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
         raise HelperError("usage", "opencode-start needs --port <1-65535>")
     if cors is not None and not _CORS.fullmatch(cors):
         raise HelperError("usage", "--cors must be an http(s) origin")
-    port = int(port_text)
+    port = int(os.environ.get(TEST_RELAY_ENV, port_text))
     home = opencode_home()
     # Nothing is changed before these refusals.
     check_opencode_preconditions(home)
@@ -1294,44 +1844,119 @@ def cmd_opencode_start(args: list[str], stdin: IO[str]) -> dict[str, object]:
                 raise HelperError("spawn", "the running OpenCode server could not be stopped")
             remove_file(dirfd, "opencode.json")
             restarted = True
-        merge_password(home, password)
+        foreign_message = (
+            "foreign listener on relay port; stop it or recreate the container "
+            "(a djinn serve from before the update)"
+        )
+        if listener_inodes(port, wildcard_v4=False, non_loopback=True):
+            raise HelperError("spawn", foreign_message)
         stopped_default = stop_default_service(home, deadline)
-        argv = ["opencode", "serve", "--service", "--hostname", _BIND_ALL, "--port", str(port)]
+        if foreign_listener(None, port):
+            raise HelperError("spawn", foreign_message)
+        internal = backend_port()
+        if listener_inodes(internal, wildcard_v4=False):
+            raise HelperError(
+                "spawn", "foreign listener on OpenCode backend port 127.0.0.1:" + str(internal)
+            )
+        merge_password(home, password)
+        argv = [
+            "opencode",
+            "serve",
+            "--service",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            str(internal),
+        ]
         if cors is not None:
             argv += ["--cors", cors]
         pid = spawn(dirfd, "opencode", argv, pty_mode=False)
+        relay_pid = None
+        relay = None
+        readfd = writefd = ack_read = ack_write = -1
         try:
             if not _wait_leader(pid, 1.0):
                 raise HelperError("spawn", "the OpenCode process did not become a group leader")
+            readfd, writefd = os.pipe()
+            ack_read, ack_write = os.pipe()
+            relay_pid = spawn_relay(dirfd, port, writefd, ack_read)
+            os.close(writefd)
+            writefd = -1
+            os.close(ack_read)
+            ack_read = -1
+            relay = _read_handoff(readfd, min(timing("handoff_wait"), max(0, deadline.left())))
+            if relay is None or relay[0] != relay_pid or not _wait_leader(relay_pid, 1.0):
+                tail = sanitize_tail("opencode-relay.log", dir_fd=dirfd)
+                detail = ": " + "; ".join(tail) if tail else " (handoff missing or timed out)"
+                raise HelperError("spawn", "the relay did not report its listener" + detail)
         except Exception as exc:
+            ack, ack_write = ack_write, -1
             _fail_launch(
-                pid, None, "spawn", "the OpenCode process did not become a group leader", exc
+                pid,
+                None,
+                "spawn",
+                str(exc),
+                exc,
+                ack=ack if ack >= 0 else None,
+                relay=(relay_pid, raw_start(relay_pid) or "0") if relay_pid is not None else None,
             )
-        record = _publish_started_record(
-            dirfd, "opencode", pid, None, "opencode-serve", port, cors=cors
-        )
+        finally:
+            for fd in (readfd, writefd, ack_read):
+                if fd >= 0:
+                    os.close(fd)
+        try:
+            record = _publish_started_record(
+                dirfd,
+                "opencode",
+                pid,
+                None,
+                "opencode-serve",
+                port,
+                cors=cors,
+                ack=ack_write,
+                relay=relay,
+            )
+        except HelperError:
+            ack_write = -1
+            raise
+        try:
+            os.write(ack_write, _LAUNCH_ACK)
+        except OSError as exc:
+            # A published pair remains recoverable if cleanup cannot finish.
+            if not stop_groups(record_groups(record), deadline):
+                raise HelperError(
+                    "spawn", "relay ACK failed and the pair could not be stopped"
+                ) from exc
+            raise HelperError("spawn", "could not acknowledge the relay") from exc
+        finally:
+            os.close(ack_write)
 
         def settled() -> bool:
-            if group_state(pid, record.start) != "alive":
-                return True
-            return listener_ours(pid, port) and discovery_pid(home) == pid
+            return (
+                any(group_state(*g) != "alive" for g in record_groups(record))
+                or evaluate("opencode", record, home).state == "running"
+            )
 
         extra = {"name": "opencode", "stopped_previous": restarted or stopped_default}
-        if not deadline.wait(timing("opencode_ready"), settled):
+        ready = deadline.wait(timing("opencode_ready"), settled)
+        died = any(group_state(*g) != "alive" for g in record_groups(record))
+        if not ready or died:
             found = discovery_pid(home)
-            if not stop_groups([(pid, record.start)], deadline):
+            if not stop_groups(record_groups(record), deadline):
                 raise HelperError(
                     "spawn",
-                    "OpenCode did not become ready and its process group could not be stopped",
+                    "OpenCode pair did not become ready and its process groups "
+                    "could not be stopped",
                 )
+            if died:
+                tail = sanitize_tail("opencode.log", dir_fd=dirfd) + sanitize_tail(
+                    "opencode-relay.log", dir_fd=dirfd
+                )
+                return _start_result("exited", record, tail[-TAIL_LINES:], **extra)
             remove_file(dirfd, "opencode.json")
             if found is not None and found != pid:
                 raise HelperError("not-registered", "another OpenCode service registered itself")
-            raise HelperError("spawn", "OpenCode did not become ready")
-        if group_state(pid, record.start) != "alive":
-            return _start_result(
-                "exited", record, sanitize_tail("opencode.log", dir_fd=dirfd), **extra
-            )
+            raise HelperError("spawn", "OpenCode pair did not become ready")
         return _start_result("restarted" if restarted else "started", record, [], **extra)
     finally:
         if lockfd is not None:

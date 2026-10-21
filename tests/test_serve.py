@@ -70,6 +70,8 @@ def status_reply(state="running"):
                 "listening": state == "running",
                 "discovery_pid_ok": state == "running",
                 "foreign_listener": False,
+                "relay_refused": 0,
+                "relay_note": None,
             },
         },
     }
@@ -505,6 +507,108 @@ def test_every_attached_network_inspected(host):
         "djinn-network",
         "second",
     ]
+
+
+@pytest.mark.parametrize("interface", ["all", "default", "eth0", "eth0.1"])
+@pytest.mark.parametrize("value", ["1", "2", "-1", "invalid", "", None, 0])
+def test_route_localnet_host_sysctls_refused(host, interface, value):
+    host.inspect["HostConfig"]["Sysctls"] = {f"net.ipv4.conf.{interface}.route_localnet": value}
+    with pytest.raises(serve.ServeError) as caught:
+        serve.check_opencode_networks(serve.detect_container())
+    assert caught.value.code == "gate"
+    assert "Set route_localnet to 0" in str(caught.value)
+    assert "recreate the container" in str(caught.value)
+
+
+@pytest.mark.parametrize("network", ["djinn-network", "second"])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        "net.ipv4.conf.IFNAME.route_localnet=1",
+        "net.ipv4.conf.all.route_localnet=2",
+        "net.ipv4.conf.default.route_localnet=-1",
+        "net.ipv4.conf.eth0.route_localnet=invalid",
+        "net.ipv4.conf.IFNAME.route_localnet",
+        "net.ipv4.conf.IFNAME.route_localnet=",
+        "net.ipv4.conf.IFNAME.log_martians=1, net.ipv4.conf.IFNAME.route_localnet = 1 ",
+        "net.ipv4.conf.IFNAME.route_localnet=1,net.ipv4.conf.IFNAME.route_localnet=0",
+    ],
+)
+def test_route_localnet_endpoint_sysctls_refused(host, network, settings):
+    networks = host.inspect["NetworkSettings"]["Networks"]
+    networks.setdefault(network, {"NetworkID": "c" * 64})["DriverOpts"] = {
+        "com.docker.network.endpoint.sysctls": settings
+    }
+    with pytest.raises(serve.ServeError) as caught:
+        serve.check_opencode_networks(serve.detect_container())
+    assert caught.value.code == "gate"
+    assert "route_localnet" in str(caught.value)
+    assert "recreate the container" in str(caught.value)
+
+
+@pytest.mark.parametrize("sysctls", [None, {}, {"net.ipv4.conf.all.route_localnet": "0"}])
+@pytest.mark.parametrize(
+    "driver_opts",
+    [
+        None,
+        {},
+        {"com.docker.network.endpoint.sysctls": "net.ipv4.conf.IFNAME.route_localnet=0"},
+        {"com.docker.network.endpoint.sysctls": " net.ipv4.conf.IFNAME.route_localnet = 0 "},
+        {
+            "com.docker.network.endpoint.sysctls": (
+                "net.ipv4.conf.all.route_localnet=0,net.ipv4.conf.IFNAME.log_martians=1"
+            )
+        },
+    ],
+)
+def test_route_localnet_disabled_and_unrelated_sysctls_allowed(host, sysctls, driver_opts):
+    host.inspect["HostConfig"]["Sysctls"] = sysctls
+    if isinstance(sysctls, dict):
+        sysctls["net.ipv4.ip_forward"] = "1"
+    host.inspect["NetworkSettings"]["Networks"]["djinn-network"]["DriverOpts"] = driver_opts
+    assert runner.invoke(app, ["serve", "opencode"]).exit_code == 0
+
+
+@pytest.mark.parametrize("part", ["host", "endpoint", "driver-opts", "endpoint-sysctls"])
+@pytest.mark.parametrize("value", ["uninspectable", [], True])
+def test_route_localnet_uninspectable_metadata_refused(host, part, value):
+    networks = host.inspect["NetworkSettings"]["Networks"]
+    if part == "host":
+        host.inspect["HostConfig"]["Sysctls"] = value
+    elif part == "endpoint":
+        networks["djinn-network"] = value
+    elif part == "driver-opts":
+        networks["djinn-network"]["DriverOpts"] = value
+    else:
+        if isinstance(value, str):
+            value = 1
+        networks["djinn-network"]["DriverOpts"] = {"com.docker.network.endpoint.sysctls": value}
+    with pytest.raises(serve.ServeError) as caught:
+        serve.check_opencode_networks(serve.detect_container())
+    assert caught.value.code == "gate"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        ["opencode"],
+        ["claude", "opencode"],
+        ["--pair", "opencode"],
+        ["claude"],
+        ["--status"],
+        ["--stop"],
+    ],
+)
+def test_route_localnet_gate_only_for_opencode_start_and_pair(host, operation):
+    host.inspect["HostConfig"]["Sysctls"] = {"net.ipv4.conf.all.route_localnet": "1"}
+    result = runner.invoke(app, ["serve", *operation])
+    refused = "opencode" in operation
+    assert result.exit_code == (1 if refused else 0), result.output
+    if refused:
+        assert "Set route_localnet to 0" in result.output
+        assert not host.direct
+        assert not (Path(os.environ["XDG_STATE_HOME"]) / "djinn/serve/opencode-password").exists()
+        assert not any(argv[1] == "exec" for argv, _ in host.calls)
 
 
 @pytest.mark.parametrize(
@@ -1121,6 +1225,45 @@ def test_helper_rejects_status_schema(host, field, value):
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [("relay_refused", value) for value in (True, "0", 1.5, [], {})]
+    + [("relay_note", value) for value in (True, 0, [], {})],
+)
+def test_helper_rejects_relay_status_schema(host, field, value):
+    host.status["servers"]["opencode"][field] = value
+    with pytest.raises(serve.ServeError) as caught:
+        serve.exec_helper(CID, ["status"])
+    assert caught.value.code == "protocol"
+
+
+@pytest.mark.parametrize("field", ["relay_refused", "relay_note"])
+def test_helper_requires_relay_status_fields(host, field):
+    del host.status["servers"]["opencode"][field]
+    with pytest.raises(serve.ServeError) as caught:
+        serve.exec_helper(CID, ["status"])
+    assert caught.value.code == "protocol"
+
+
+def test_route_localnet_helper_failure_message(host, monkeypatch):
+    # Integration adds the error to the frozen enums; fake its decoded reply here.
+    reply = {"ok": False, "code": "route-localnet", "message": "unsafe [red]sysctl\x1b[31m"}
+    monkeypatch.setattr(
+        serve,
+        "exec_helper",
+        MagicMock(side_effect=serve.ServeError(reply["message"], code=reply["code"])),
+    )
+    result = runner.invoke(app, ["serve", "opencode"])
+    assert result.exit_code == 1
+    assert (
+        "OpenCode requires route_localnet=0 on all container interfaces; refusing." in result.output
+    )
+    assert "Disable loopback routing in the container and endpoint sysctls" in result.output
+    assert "new containers inherit its all/default values" in result.output
+    assert "then recreate the container" in result.output
+    assert "unsafe" not in result.output
+
+
+@pytest.mark.parametrize(
     "args,stdin", [(["status"], "secret"), (["opencode-start"], None), (["unknown"], None)]
 )
 def test_exec_input_restricted(host, args, stdin):
@@ -1173,6 +1316,7 @@ def test_helper_timeout_message(host, monkeypatch, password_input):
         "status-reason",
         "status-url",
         "status-tailnet-reason",
+        "status-relay-note",
     ],
 )
 def test_untrusted_text_is_printed_literally(host, monkeypatch, payload, site):
@@ -1226,6 +1370,8 @@ def test_untrusted_text_is_printed_literally(host, monkeypatch, payload, site):
             row.update(state="exited", last_line=payload)
         elif site == "status-reason":
             row.update(state="degraded", reason=payload)
+        elif site == "status-relay-note":
+            row.update(relay_refused=None, relay_note=payload)
         else:
             monkeypatch.setattr(
                 serve,
@@ -1240,6 +1386,22 @@ def test_untrusted_text_is_printed_literally(host, monkeypatch, payload, site):
 
     assert escape_nonprintable(payload) in result.output, result.output
     assert "\x1b" not in result.output
+
+
+@pytest.mark.parametrize("width", [80, 200])
+def test_status_endpoint_lines_render_as_lines(host, monkeypatch, width):
+    forged = "relay refused since start: 9"
+    monkeypatch.setattr(serve, "tailnet_state", lambda *a, **k: (None, "x\n" + forged, False))
+    monkeypatch.setenv("COLUMNS", str(width))
+    host.status["servers"]["opencode"].update(relay_refused=3, relay_note=None)
+    result = runner.invoke(app, ["serve", "--status"])
+    assert result.exit_code == 0, result.output
+    rows = [line.split("│") for line in result.output.splitlines() if line.count("│") == 6]
+    cells = [row[4].strip() for row in rows]
+    assert any(cell.startswith("tailnet: unknown") for cell in cells), result.output
+    assert any(cell.startswith("relay refused since start: 3") for cell in cells), result.output
+    # A newline inside a value stays escaped instead of forging a status line.
+    assert forged not in cells, result.output
 
 
 def test_status_table_uses_text_cells(host, monkeypatch):
@@ -1261,6 +1423,51 @@ def test_status_busy_and_degraded(host):
     assert "busy (start/stop in progress)" in result.output
     assert "degraded (not registered)" in result.output
     assert "port 4096 is used by another process" in result.output
+    assert "a djinn serve from before the update — recreate the container" in result.output
+
+
+@pytest.mark.parametrize(
+    "count,note,expected",
+    [(0, None, "relay refused since start: 0"), (27, None, "relay refused since start: 27")]
+    + [
+        (None, note, f"relay refused: unknown ({note})")
+        for note in ("missing", "unreadable", "foreign identity", "stale")
+    ],
+)
+def test_status_relay_count_or_unknown_note(host, monkeypatch, count, note, expected):
+    host.status["servers"]["opencode"].update(relay_refused=count, relay_note=note)
+    printed = []
+    monkeypatch.setattr(command.console, "print", lambda table: printed.append(table))
+    result = runner.invoke(app, ["serve", "--status"])
+    assert result.exit_code == 0, result.output
+    endpoints = [cell.plain for cell in printed[0].columns[3]._cells]
+    assert expected in endpoints[1]
+    assert "relay refused" not in endpoints[0]
+    if count is None:
+        assert "relay refused since start: 0" not in endpoints[1]
+
+
+@pytest.mark.parametrize(
+    "state,shown",
+    [("running", True), ("degraded", True), ("stopped", False), ("exited", False)],
+)
+def test_status_relay_line_only_while_a_relay_is_expected(host, monkeypatch, state, shown):
+    host.status["servers"]["opencode"].update(
+        state=state, reason="relay gone", relay_refused=None, relay_note="foreign identity"
+    )
+    printed = []
+    monkeypatch.setattr(command.console, "print", lambda table: printed.append(table))
+    assert runner.invoke(app, ["serve", "--status"]).exit_code == 0
+    endpoint = [cell.plain for cell in printed[0].columns[3]._cells][1]
+    assert ("relay refused" in endpoint) is shown, endpoint
+
+
+@pytest.mark.parametrize("reason", ["relay gone", "relay listener lost", "opencode gone"])
+def test_status_new_degraded_reasons_are_text(host, reason):
+    host.status["servers"]["opencode"].update(state="degraded", reason=reason)
+    result = runner.invoke(app, ["serve", "--status"])
+    assert result.exit_code == 0, result.output
+    assert f"degraded ({reason})" in result.output
 
 
 @pytest.mark.parametrize(

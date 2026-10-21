@@ -1932,9 +1932,9 @@ exactly one JSON object plus a newline: exit 0 with `ok: true`, or exit 1 with
 
 | Subcommand | Successful reply |
 | --- | --- |
-| `status` | `pid1_start`, `busy`, and `servers` keyed by `claude` and `opencode`; each row has `state`, `reason`, `pid`, `since`, `last_line`. OpenCode adds `listening`, `discovery_pid_ok`, `foreign_listener`. |
+| `status` | `pid1_start`, `busy`, and `servers` keyed by `claude` and `opencode`; each row has `state`, `reason`, `pid`, `since`, `last_line`. OpenCode adds `listening`, `discovery_pid_ok`, `foreign_listener`, `relay_refused` (int or null), `relay_note` (string or null); for an exited OpenCode, `last_line` is the relay's `relay failed:` line when that ends the relay log. |
 | `claude-start --prefix <slug>` | `name`, `result`, `pid`, `since`, `log_tail` |
-| `opencode-preflight` | `ok` only; reads environment, settings paths and service allowlist without changing files or processes |
+| `opencode-preflight` | `ok` only; reads environment, settings paths, service allowlist and route_localnet without changing files or processes |
 | `opencode-start --port 4096 [--cors <url>]` | The start fields plus `stopped_previous` |
 | `stop --name <name> [--name <name>]` | `results` keyed by requested name, each with `result` and `pid` |
 
@@ -1946,7 +1946,7 @@ sets; a schema test checks their equality:
 | State | `running`, `degraded`, `exited`, `stopped` |
 | Start result | `started`, `already-running`, `restarted`, `exited` |
 | Stop result | `stopped`, `not-running`, `survived` |
-| Error code | `state-dir`, `state-path`, `env-root`, `password`, `service-json`, `service-config`, `remote-config`, `spawn`, `not-registered`, `busy`, `timeout`, `usage` |
+| Error code | `state-dir`, `state-path`, `env-root`, `password`, `service-json`, `service-config`, `remote-config`, `route-localnet`, `spawn`, `not-registered`, `busy`, `timeout`, `usage` |
 
 #### State and Process Identity
 
@@ -1957,7 +1957,9 @@ tries the lock without waiting and sets `busy` if it is held. Records and logs
 use directory-relative access, `O_NOFOLLOW` and private files; record replacement
 is atomic. Records include leader PID/start time, Claude child PID/start time,
 PID 1 start time, working directory, argv tag, start timestamp, server port and
-OpenCode's CORS origin (or null).
+OpenCode's CORS origin (or null), plus its relay PID/start identity. Old OpenCode
+records without relay identity are rejected on decode; their wildcard listener
+on 4096 is foreign, with a literal stop/recreate hint, never adopted.
 
 PID 1's changed start time detects a container restart even when `/tmp` survives.
 A reused recorded PID also makes the record stale: status reports `stopped`
@@ -1967,14 +1969,19 @@ With the same PID 1 and all recorded groups gone, the state is `exited`; the rec
 sanitized log line remain until the next start/stop. A leaderless group still
 counts as alive when its remaining members have suitable start times.
 
-OpenCode is `running` only when its process group is alive, its PID owns the
-wildcard IPv4 LISTEN socket and its discovery registration names that PID.
-A live group with a missing listener or registration is `degraded`. Claude
-requires both supervisor and child groups; losing either is `degraded`.
+OpenCode is `running` only when both its backend and relay groups are alive,
+the backend owns `127.0.0.1:4097`, discovery names that backend PID, and the relay
+owns the port 4096 listener. A stale identity in either group makes the whole
+record stale and neither group is signalled. If at least one group remains,
+any missing part is `degraded` (for example `relay gone`, `relay listener lost`,
+`opencode gone`, `listener lost` or lost discovery); only both groups gone means
+`exited`. Stop and replacement stop every live group before record removal,
+even when the backend looks exited. Claude requires both supervisor and child
+groups; losing either is `degraded`.
 Starting a degraded server stops its remains before replacing it; starting a
 healthy server is a no-op, except for OpenCode password or CORS origin changes.
 
-The launch path forks once, then the child calls `setsid()` and verifies it is
+The backend launch forks, then the child calls `setsid()` and verifies it is
 the process-group leader. It keeps the working directory, redirects stdin to
 `/dev/null`, stdout/stderr to the new private log, and closes other descriptors,
 including the lock. OpenCode execs directly without a PTY or runtime log cap.
@@ -2007,8 +2014,8 @@ OpenCode readiness waits at most 15 s; Claude gets a 5 s grace period. Log tails
 strip ANSI/control characters and retain at most 20 lines. A mutating helper
 operation uses one 50 s monotonic deadline including lock wait; start/stop host
 execution is bounded at 60 s. Stop verifies identity, sends TERM to the recorded
-groups (Claude child then supervisor), waits up to 10 s, then KILL and up to
-2 s more, all within the deadline. PIDs/PGIDs ≤ 1 and the helper's own group are
+groups (OpenCode relay then backend; Claude child then supervisor), waits up to
+10 s, then KILL and up to 2 s more, all within the deadline. PIDs/PGIDs ≤ 1 and the helper's own group are
 excluded from signalling. Servers are not automatically restarted after crashes
 or container restarts. A failed readiness cleanup retains the surviving group's
 record and reports the failure, allowing status and a later stop to recover it.
@@ -2049,14 +2056,91 @@ container's writable layer. Neither file is in the synced carrier allowlist.
 A pre-existing default service is stopped only after the discovery PID is
 proved to have argv[0] basename `opencode` or `opencode.exe`, followed by
 `serve --service`, and own the LISTEN socket named by
-the discovery URL. Its start time is checked again before KILL. Unprovable or
-stale discovery signals nothing. Djinn never invokes native
+the discovery URL. Before password changes or default-service signals, a
+non-loopback listener on relay port 4096 refuses with the stop/recreate hint;
+this includes wildcard and IPv4-mapped addresses. Verified loopback default
+services can still be replaced. The service's start time is checked again before
+KILL. Unprovable or stale discovery signals nothing. Djinn never invokes native
 `opencode service stop`, which trusts the discovery PID without these checks.
-It starts `opencode serve --service --hostname 0.0.0.0 --port 4096`, optionally
+It starts `opencode serve --service --hostname 127.0.0.1 --port 4097`, optionally
 with `--cors <tailnet-url>`; bind/port are flags, not persistent service settings.
-A registration race fails with `not-registered` after stopping the new group.
+Discovery names `127.0.0.1:4097`. A registration race fails with `not-registered`
+after stopping the new pair. After default-service replacement, any remaining
+listener on port 4096 or backend port 4097, at any IPv4 or IPv6 address, refuses
+before password changes or spawning.
 After stop/restart, the next in-container client can start the normal loopback
 service again.
+
+#### Gateway Relay
+
+OpenCode's relay is forked from the helper's already-loaded Python code, in its
+own session/group; no runtime root or image change is needed. It binds
+`[::]:4096` with `IPV6_V6ONLY=0` when IPv6 is available, otherwise
+`0.0.0.0:4096`, and splices bytes to `127.0.0.1:4097` without interpreting them.
+The host's loopback publication and the `opencode-start --port 4096` protocol
+argument stay unchanged. The relay is independent of `--firewall`.
+
+Launch waits for the OpenCode leader, then forks the relay. A handoff pipe
+reports that the relay has bound its listener; the relay accepts nothing until
+the helper publishes the complete pair record and writes ACK on a separate
+pipe. Only then does readiness check both groups, backend listener/discovery
+and relay listener ownership. The helper alone retains the ACK write end;
+the relay closes inherited copies and the helper's lock fd. Before publication,
+the launch guard closes ACK unwritten and kills/reaps both unreaped direct
+children and their groups. After publication, early backend or relay death
+reports `exited` with the log tail and stops the surviving part; a failed cleanup
+retains a recoverable record. Stop, degraded replacement, password rotation and
+CORS changes operate on the pair, with the existing identity checks, signal
+floor and TERM/KILL fallback. Container restart makes the record stale.
+
+For each new connection the relay normalizes IPv4-mapped IPv6 to IPv4 and reads
+`/proc/net/route` or `/proc/net/ipv6_route` for that family. It admits exactly the
+single eligible default gateway: destination `0.0.0.0/0` or `::/0`, both
+`RTF_UP` and `RTF_GATEWAY` set, `RTF_REJECT` clear, non-unspecified next hop;
+IPv4 hex fields are little-endian. No eligible row, several eligible rows,
+malformed or unreadable routing state refuses with `gateway undetermined`.
+IPv6 link-local or otherwise scoped gateways and peers with nonzero scope IDs
+refuse. Genuine IPv6 packets with IPv4-mapped source addresses are normalized
+the same way and are not distinguished from IPv4 connections.
+
+There is no cached authorization: a route/network change is checked on the
+next connection, so an old gateway address reused by a peer is refused. Reading
+the route and admitting the connection are **not atomic**; an administrative
+route change racing that connection is not distinguished, and no duration
+bound is promised. Proc exposes only the first next hop of a multipath route;
+multipath is not detected and other next hops are not admitted. For a container
+on several networks only the default-route gateway of that family is admitted;
+a host publication through another network fails closed. Host-local connections
+to the container IP arrive as the gateway and are admitted. See the
+[source-address assumptions and residuals](SECURITY-MODEL.md#remote-agent-server-access).
+
+A single-threaded `selectors` loop owns all connections, refusal logs and the
+count. It permits at most 64 admitted connections; non-gateway refusals consume
+no slot, and excess admitted peers are accepted then closed and counted as
+limit refusals. Backend connect timeout is 5 s, idle timeout is 30 minutes with
+no bytes in either direction, and buffers are capped at 64 KiB per direction.
+Half-closes propagate. SIGPIPE stays ignored; EPIPE, reset and timeout close
+only the affected connection. TERM/INT close listener and connections and exit 0.
+Persistent accept errors pause new accepts for one second while established
+streams keep flowing, with one capped diagnostic per pause. Would-block,
+interrupted and aborted accepts retry without a pause.
+
+Refusal logs contain only source IPs and reasons, with userland-proxy/direct-routing
+and non-default-network hints where applicable; no content is logged. Refusal
+logs are rate-limited to the first per source per minute and capped like the
+other managed logs. The source map holds at most 256 entries; after expiry,
+new sources beyond that cap are counted without a source log line, with at
+most one `refusal log suppressed: too many sources` line per minute.
+Every refusal increments the count independently of log
+rate limiting, starting at zero on each relay start. Private
+`opencode-relay.count` is atomically replaced at most once per second and on
+exit, with a heartbeat at least every 10 s. Status trusts a count only when its
+relay identity matches the record and its heartbeat is at most 30 s old;
+otherwise `relay_refused` is null and `relay_note` explains missing, unreadable,
+foreign-identity or stale data. Failed writes log once per failure streak and
+retry without resetting the count. The host validates both fields and displays
+the count since start or its unknown note in the OpenCode row, never a fabricated
+zero. New degraded reasons pass through as literal text.
 
 #### Exposure Gates and Tailnet Discovery
 
@@ -2076,9 +2160,20 @@ Status/stop do not require the OpenCode exposure gates; non-detached status
 reports unavailability without executing the helper.
 
 Network inspection requires user bridge networks without trusted host
-interfaces or `routed`/`nat-unprotected` gateway modes. The Engine gate compares
-the leading version triple against 28.3.3 and refuses unknown versions. The
-daemon-wide routing/iptables prerequisites cannot be checked through this API;
+interfaces or `routed`/`nat-unprotected` gateway modes. The same inspected
+`HostConfig.Sysctls` and every attached endpoint's
+`DriverOpts["com.docker.network.endpoint.sysctls"]` must not set any
+`net.ipv4.conf.*.route_localnet` to a value other than `0`; start/pair refuse with
+code `gate` and a literal disable/recreate hint. The helper's preflight and start
+also read `/proc/sys/net/ipv4/conf/all/route_localnet` and every interface entry,
+including `default`; any nonzero integer, non-integer or unreadable value refuses
+with `route-localnet`. Effective interface routing is `all OR interface`, so
+either being nonzero suffices; nothing starts. This also catches values a new
+container inherits from the host's `all`/`default` entries. The host maps the
+helper code to a literal refusal that names the host as a possible source. There is no runtime watchdog (see the security boundary).
+The Engine gate compares the leading version triple against 28.3.3 and refuses
+unknown versions. The daemon-wide routing/iptables prerequisites cannot be
+checked through this API;
 see [the residual boundary](SECURITY-MODEL.md#remote-agent-server-access).
 
 `tailnet_state()` only runs `tailscale serve status --json`, with closed stdin

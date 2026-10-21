@@ -1071,7 +1071,10 @@ destination is unreachable, compare the `djinn-egress:` lines with the error.
 inside a running detached Djinn container, using its working directory, mounts
 and sign-ins. Repeating a start leaves a healthy server running when its settings
 match; OpenCode restarts if its password or tailnet CORS origin changes. Servers
-are not automatically restarted after a crash or container restart.
+are not automatically restarted after a crash or container restart. Before
+updating Djinn, run `djinn serve --stop opencode`: records from before the relay
+update are not adopted; stop a legacy server or recreate the container if it
+still occupies port 4096.
 
 Recreate an existing container once to get the OpenCode port publication:
 
@@ -1107,8 +1110,10 @@ djinn config show
 Changing the setting requires another `djinn clean`, then `djinn start --detach`.
 Djinn refuses a missing or different port binding with
 `The running container does not publish the OpenCode port on 127.0.0.1:<port>.`
-The host loopback publication is reachable by local host users and processes;
-the container address is also reachable by network peers. Read the
+The host loopback publication is reachable by local host users and processes.
+Inside the container, a gateway-only relay on port `4096` forwards admitted
+connections to OpenCode on `127.0.0.1:4097`; ordinary network peers are refused
+before reaching OpenCode. Read the assumptions and residual risks in the
 [inbound boundary](SECURITY-MODEL.md#remote-agent-server-access) before enabling it.
 
 The first `djinn serve opencode` generates a password at
@@ -1179,6 +1184,12 @@ cannot verify them:
   ipvlan or overlay refuse. Every attached bridge must omit
   `com.docker.network.bridge.trusted_host_interfaces`; IPv4 and IPv6 gateway
   modes must be neither `routed` nor `nat-unprotected`.
+- Container and endpoint sysctls must leave every
+  `net.ipv4.conf.*.route_localnet` disabled (`0`). The helper also checks the
+  actual container values before starting. A new container inherits the host's
+  `all`/`default` values, so a host with loopback routing enabled is refused too;
+  disable it on the host or in the container and endpoint sysctls, then recreate
+  the container.
 - OpenCode's default settings roots under the container's `/home/dev`.
   Mounts covering, inside or above `~/.config/opencode` or
   `~/.local/state/opencode` refuse. `HOME` must retain `/home/dev`, and
@@ -1215,18 +1226,32 @@ the daemon that the Codex TUI starts itself; `djinn serve codex` follows in
 `djinn serve --status` shows the detailed table, including OpenCode's local
 endpoint and the tailnet URL or the reason it is unknown. `djinn status` shows
 a compact snapshot in Services, with the local URL for running OpenCode.
+While OpenCode is running or degraded, its row shows `relay refused since
+start: <count>` (reset on relay restart), or `relay refused: unknown (<reason>)`
+when the counter is missing, unreadable, belongs to another relay or is stale;
+unknown never means zero.
+
+If legitimate browser/host connections close and this count rises, inspect the
+relay refusal log `/tmp/djinn-serve/opencode-relay.log` inside the container
+and check `userland-proxy`, direct routing and the publishing network. With
+`"userland-proxy": false`, Docker's loopback DNAT/masquerading is assumed to
+present the gateway source; this configuration has not been measured. A publish
+through a non-default network of a multi-network container is also refused.
+See the [assumption and its source](SECURITY-MODEL.md#remote-agent-server-access);
+the relay fails closed if the source is not the gateway.
 
 | State | Meaning |
 | --- | --- |
-| `running` | The recorded processes have matching identities. OpenCode also owns the listener and service registration; Claude has both its supervisor and child process groups. |
-| `degraded` | Recorded processes remain, but OpenCode lost its listener/registration, or Claude lost its child or supervisor. Run `djinn serve <name>` to stop the remains and restart it. |
+| `running` | The recorded processes have matching identities. OpenCode also has its loopback listener and service registration plus a live relay owning port 4096; Claude has both its supervisor and child process groups. |
+| `degraded` | Recorded processes remain, but OpenCode lost its backend, relay, listener or registration, or Claude lost its child or supervisor. Run `djinn serve <name>` to stop the remains and restart it. |
 | `exited` | The server ended in this container run. Its last sanitized log line remains visible until the next start or stop. |
 | `stopped` | No current managed server record, or stale state from a container restart or reused PID. Stale state is ignored and cleared when the state lock is available. |
 | `busy (start/stop in progress)` | A start or stop holds the state lock; retry the query after it finishes. This is a snapshot warning, not a server state. |
 
 Status distinguishes a missing container, a container started without `--detach`,
 and Docker errors. It also reports `port not published (recreate once)`, detected
-Funnel, and `note: port 4096 is used by another process` for a foreign listener.
+Funnel, and `note: port 4096 is used by another process` for a foreign listener,
+with the legacy hint `a djinn serve from before the update — recreate the container`.
 Stopping a managed server does not remove the port publication or the host's
 Tailscale Serve entry.
 
