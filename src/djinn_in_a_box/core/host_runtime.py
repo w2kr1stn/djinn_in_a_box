@@ -931,11 +931,12 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
         server, worker = _serve_filter(root, allowed)
     stop = threading.Event()
 
-    signalled = False  # a stop signal: the caller cleans up itself and kills us soon
+    signalled_at: float | None = None  # a stop signal: the caller cleans up and kills us soon
 
     def stopping(_signum: int, _frame: FrameType | None) -> None:
-        nonlocal signalled
-        signalled = True
+        nonlocal signalled_at
+        if signalled_at is None:
+            signalled_at = time.monotonic()
         stop.set()
 
     signal.signal(signal.SIGTERM, stopping)
@@ -1014,12 +1015,12 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                 try:
                     # Lock-free check: a stable dev takes no lock; changes are confirmed below.
                     actual = inspect_dev(state["container_name"], docker_path)
+                    if actual is not None:
+                        seen_id = actual[0]  # kept even when the state read below fails
                     fresh = read_state(root)
                 except _OBSERVER_RETRY as exc:
                     note(f"{type(exc).__name__}: {exc}")
                     continue  # Unknown state never authorizes cleanup.
-                if actual is not None:
-                    seen_id = actual[0]
                 if (
                     fresh is not None
                     and fresh["generation"] == generation
@@ -1148,7 +1149,10 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                             rebind_times = [*rebind_times, when][-FILTER_REBINDS:]
                             try:
                                 server.stop.set()
-                                server.retire_path()
+                                # The generation was re-checked under the guard: the path is
+                                # this runtime's, whoever bound it last (a failed attempt may
+                                # have left its own socket behind).
+                                (root / "export/auth.sock").unlink(missing_ok=True)
                                 server, worker = _serve_filter(root, allowed, server.clients)
                             except (OSError, RuntimeError) as exc:
                                 _say(
@@ -1198,18 +1202,16 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                     root=records_root,
                     detail={"rebinds": rebind_times},
                 )
-        limit = time.monotonic() + (
-            OBSERVER_SIGNALLED_CLOSE_SECONDS if signalled else OBSERVER_CLOSE_SECONDS
-        )
+        closing = time.monotonic()
         guard = contextlib.ExitStack()
         guarded = False
         while not guarded:
+            # A signal at any time caps the wait at its time plus two seconds.
+            limit = closing + OBSERVER_CLOSE_SECONDS
+            if signalled_at is not None:
+                limit = min(limit, signalled_at + OBSERVER_SIGNALLED_CLOSE_SECONDS)
             try:
-                guard.enter_context(
-                    creation_guard(
-                        root, timeout=0 if signalled else max(0, limit - time.monotonic())
-                    )
-                )
+                guard.enter_context(creation_guard(root, timeout=0))
                 guarded = True
             except retry as exc:
                 if time.monotonic() >= limit:

@@ -462,12 +462,15 @@ class Clock:
         self.now = 1000.0
         self.ticks = 0
         self.on_tick = None
+        self.on_sleep = None
 
     def monotonic(self) -> float:
         return self.now
 
     def sleep(self, seconds: float) -> None:
         self.now += seconds
+        if self.on_sleep is not None:
+            self.on_sleep()
 
 
 class Shim:
@@ -2049,7 +2052,7 @@ def test_post_bind_inode_read_failure_strands_no_socket(gitted, quick_filter, mo
     def lstat(self, *args, **kwargs):
         if state["armed"] and self == gitted.root / "export/auth.sock":
             state["seen"] += 1
-            if state["seen"] == 2 and not state["failed"]:  # 1: retire of the old, 2: new bind
+            if state["seen"] == 1 and not state["failed"]:  # the new bind's inode read
                 state["failed"] += 1
                 raise OSError(5, "one-shot lstat after bind")
         return real(self, *args, **kwargs)
@@ -2078,16 +2081,16 @@ def test_retirement_failure_is_a_logged_rebind_attempt(
     gitted, quick_filter, monkeypatch, capsys
 ):
     """G2: retire fails once; the consumed attempt has its line and its place in the history."""
-    real = git_agent.AgentFilter.retire_path
+    real = Path.unlink
     state = {"raised": 0}
 
-    def retire(self):
-        if self.stop.is_set() and not state["raised"]:
+    def unlink(self, *args, **kwargs):
+        if self == gitted.root / "export/auth.sock" and not state["raised"]:
             state["raised"] += 1
             raise OSError(5, "retire failed before construction")
-        real(self)
+        return real(self, *args, **kwargs)
 
-    monkeypatch.setattr(git_agent.AgentFilter, "retire_path", retire)
+    monkeypatch.setattr(Path, "unlink", unlink)
     kill_filters(gitted, after=3, limit=1)
     gitted.stop_at = 12
     gitted.run()
@@ -2105,16 +2108,19 @@ def test_retirement_failure_is_a_logged_rebind_attempt(
 def test_exhaustion_through_retirement_failures_keeps_every_attempt(
     gitted, quick_filter, monkeypatch
 ):
-    real = git_agent.AgentFilter.retire_path
+    real = Path.unlink
     failing = {"on": True}
 
-    def retire(self):
-        if failing["on"] and gitted.workers and not gitted.workers[0].is_alive():
+    def unlink(self, *args, **kwargs):
+        if (
+            failing["on"] and self == gitted.root / "export/auth.sock"
+            and gitted.workers and not gitted.workers[0].is_alive()
+        ):
             raise OSError(5, "retire failed")
-        real(self)
+        return real(self, *args, **kwargs)
 
     kill_filters(gitted, after=3, limit=1)
-    monkeypatch.setattr(git_agent.AgentFilter, "retire_path", retire)
+    monkeypatch.setattr(Path, "unlink", unlink)
     gitted.stop_at = 60
     try:
         gitted.run()
@@ -2161,3 +2167,145 @@ def test_first_tick_exit_records_both_ids(gitted):
     gitted.run()
     observed = gitted.exit_records()[0]["observed"]
     assert observed["expected_id"] == "dev-1" and observed["actual_id"] == "dev-1"
+
+
+# ---------------------------------------------------------------------------------------------
+# Fix round 3 (Code-Loop A it3).
+# ---------------------------------------------------------------------------------------------
+
+
+def test_failed_setup_with_failed_cleanup_is_recovered_by_the_next_attempt(
+    gitted, quick_filter, monkeypatch, capsys
+):
+    """K1: inode read fails after bind and the constructor's own cleanup fails once."""
+    sock = gitted.root / "export/auth.sock"
+    state = {"armed": False, "lstat": 0, "unlink": 0}
+    real_lstat, real_unlink = Path.lstat, Path.unlink
+
+    def lstat(self, *args, **kwargs):
+        if state["armed"] and self == sock and not state["lstat"]:
+            state["lstat"] += 1
+            raise OSError(5, "one-shot lstat after bind")
+        return real_lstat(self, *args, **kwargs)
+
+    def unlink(self, *args, **kwargs):
+        if state["lstat"] and self == sock and not state["unlink"]:
+            state["unlink"] += 1
+            raise OSError(5, "one-shot cleanup failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    kill_filters(gitted, after=3, limit=1)
+    kill = gitted.hook
+    seen = []
+
+    def hook(h, inside):
+        state["armed"] = h.clock.ticks >= 2
+        kill(h, inside)
+        if h.clock.ticks == 12:
+            seen.append(agent_keys(sock) == frozenset())
+
+    gitted.hook = hook
+    gitted.stop_at = 14
+    gitted.run()
+    assert state["lstat"] == 1 and state["unlink"] == 1 and seen == [True]
+    assert gitted.exit_records() == []  # no E7: the next attempt unlinked and bound again
+    assert len(rebind_stamps(capsys)) >= 2
+
+
+def test_thread_start_failure_with_failed_cleanup_is_recovered(gitted, quick_filter, monkeypatch):
+    """K1: the thread start fails and the constructor-side retirement fails once."""
+    real = git_agent.AgentFilter.retire_path
+    state = {"raised": 0, "armed": False}
+
+    def retire(self):
+        if state["armed"] and self is not gitted.servers[0] and not state["raised"]:
+            state["raised"] += 1
+            raise OSError(5, "one-shot cleanup failure")
+        real(self)
+
+    monkeypatch.setattr(git_agent.AgentFilter, "retire_path", retire)
+    kill_filters(gitted, after=3, limit=1)
+    kill = gitted.hook
+    seen = []
+
+    def hook(h, inside):
+        if h.clock.ticks == 3:
+            h.thread_failures = 1
+            state["armed"] = True
+        kill(h, inside)
+        if h.clock.ticks == 12:
+            seen.append(agent_keys(h.root / "export/auth.sock") == frozenset())
+
+    gitted.hook = hook
+    gitted.stop_at = 14
+    gitted.run()
+    assert state["raised"] == 1 and seen == [True]
+    assert gitted.exit_records() == []
+
+
+def test_late_signal_during_the_final_busy_guard_caps_the_wait(gitted):
+    """K2: a stop signal arriving mid-wait ends it two seconds after the signal."""
+    gitted.keys.results = [frozenset({b"unexpected"})]
+    gitted.busy_after = 1
+    sleeps = []
+    marks = {}
+
+    def on_sleep():
+        sleeps.append(gitted.clock.now)
+        if len(sleeps) == 1:
+            marks["start"] = gitted.clock.now
+        if len(sleeps) == 20:  # five seconds into the 30 s wait
+            marks["signal"] = gitted.clock.now
+            signal.raise_signal(signal.SIGTERM)
+
+    gitted.clock.on_sleep = on_sleep
+    gitted.stop_at = 10_000
+    gitted.run()
+    assert "signal" in marks, "the final wait ended before the signal"
+    assert 1.75 <= gitted.clock.now - marks["signal"] <= 2.5, sleeps[-3:]
+    assert gitted.clock.now - marks["start"] < 10
+
+
+def test_real_sigterm_during_the_final_control_wait_ends_within_two_seconds(attached):
+    """K2: real observer, control.lock held; SIGTERM while it waits for its final guard."""
+    holder = hold(hostctl.state_root() / "control.lock", 120)
+    log = attached.root / "observer.log"
+    try:
+        attached.runtime.agent.terminate()
+        attached.runtime.agent.wait(timeout=5)
+        wait_for(lambda: "observer-exit: agent-exited" in log.read_text(), 15, evidence(attached))
+        started = time.monotonic()
+        attached.observer.terminate()
+        attached.observer.wait(timeout=4)
+        assert time.monotonic() - started < 3.5
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+
+def test_replacement_id_seen_before_a_failed_state_read_is_recorded(gitted, monkeypatch):
+    """K3: the ID of a replacement observed in tick N survives a state-read retry."""
+    real = host_runtime.read_state
+    armed = []
+
+    def read_state(root):
+        if armed:
+            armed.clear()
+            raise OSError(5, "one-shot state read failure")
+        return real(root)
+
+    monkeypatch.setattr(host_runtime, "read_state", read_state)
+
+    def hook(h, inside):
+        if h.clock.ticks == 4 and not inside:
+            h.dev = ("dev-2", True, "g1")
+            armed.append(True)
+
+    gitted.hook = hook
+    gitted.keys.results = [frozenset()] * 3 + [frozenset({b"unexpected"})]
+    gitted.stop_at = 40
+    gitted.run()
+    observed = gitted.exit_records()[0]["observed"]
+    assert observed["expected_id"] == "dev-1" and observed["actual_id"] == "dev-2"
