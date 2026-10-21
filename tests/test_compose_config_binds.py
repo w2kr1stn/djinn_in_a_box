@@ -25,8 +25,10 @@ _ALLOWED_RW = frozenset(
 )
 
 
-def _compose(path: Path | None = None) -> dict[str, Any]:
-    return yaml.safe_load((path or _ROOT / "docker-compose.yml").read_text())
+def _compose(
+    path: Path | None = None, loader: type[yaml.SafeLoader] = yaml.SafeLoader
+) -> dict[str, Any]:
+    return yaml.load((path or _ROOT / "docker-compose.yml").read_text(), Loader=loader)
 
 
 def _binds(compose: dict[str, Any]) -> list[tuple[str, str, bool]]:
@@ -60,12 +62,12 @@ def _writable_config_binds(compose: dict[str, Any]) -> list[str]:
     ]
 
 
-def test_config_binds_are_read_only_except_the_default_source() -> None:
+def test_config_binds_are_read_only_except_the_default_source(compose_yaml_loader) -> None:
     paths = sorted(_ROOT.glob("docker-compose*.yml"))
     assert paths
     checked = []
     for path in paths:
-        compose = _compose(path)
+        compose = _compose(path, compose_yaml_loader)
         checked.extend(
             source for source, _, read_only in _binds(compose)
             if posixpath.normpath(source).split("/")[0] == "config" and read_only
@@ -81,7 +83,7 @@ def test_writable_config_source_spellings_are_refused(source: str) -> None:
     assert _writable_config_binds(compose)
 
 
-def test_every_compose_overlay_is_audited(tmp_path, monkeypatch) -> None:
+def test_every_compose_overlay_is_audited(tmp_path, monkeypatch, compose_yaml_loader) -> None:
     monkeypatch.setattr(f"{__name__}._ROOT", tmp_path)
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  dev:\n    volumes: [./config/opencode:/workflow:ro]\n"
@@ -90,7 +92,7 @@ def test_every_compose_overlay_is_audited(tmp_path, monkeypatch) -> None:
         "services:\n  dev:\n    volumes: [config/codex/:/workflow]\n"
     )
     with pytest.raises(AssertionError, match="docker-compose.extra.yml"):
-        test_config_binds_are_read_only_except_the_default_source()
+        test_config_binds_are_read_only_except_the_default_source(compose_yaml_loader)
 
 
 def test_long_syntax_writable_config_bind_is_refused() -> None:
