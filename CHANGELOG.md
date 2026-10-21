@@ -184,7 +184,8 @@ Versioning before and after the first stable release.
   overlaps protected host state, Docker storage, configured Git keys or Docker
   sockets; refuse other socket sources too. Checks cover resolved Compose binds
   and command-line mounts, with only the approved DIRECT socket excepted; refuse
-  hard-linked file sources and host carriers outside the resolved Compose allowlist (#179).
+  hard-linked file sources and host carriers outside the resolved Compose allowlist;
+  verify named-volume names and storage provenance (#179).
 - Refuse `djinn run` from `$HOME` without `--mount` when its implicit workspace
   contains private state. Start from a subdirectory or mount a directory outside
   private state read-only; `general.code_dir` must also avoid protected state (#179).

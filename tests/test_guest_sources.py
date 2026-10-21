@@ -17,6 +17,7 @@ import pytest
 from test_desktop_runtime import behavior, calls, write_json
 from typer.testing import CliRunner
 
+from djinn_in_a_box.config.declarations import VolumeDeclaration
 from djinn_in_a_box.config.ssh import GitIdentity
 from djinn_in_a_box.core import docker, host_runtime, host_sealing, hostctl, post_mortem
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
@@ -293,6 +294,10 @@ def compose_guest(boundary, monkeypatch):
         return docker.RunResult(0, stdout=json.dumps(resolved))
 
     def execute(args, **kwargs):
+        if args[1:3] == ["volume", "inspect"]:
+            return subprocess.CompletedProcess(
+                args, 1, "", f"Error response from daemon: get {args[3]}: no such volume",
+            )
         launches.append((args, kwargs))
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -331,9 +336,13 @@ def test_runtime_state_hardlink_is_refused(compose_guest, tmp_path, phase):
 
 def test_real_resolved_carrier_shape_passes(compose_guest):
     g = compose_guest
+    names = (
+        "djinn-opencode-data", "djinn-packages", "djinn-uv-cache", "djinn-tools-cache",
+        "djinn-vscode-server", "djinn-vscode-workspaces",
+    )
     g.resolved.update({
         "name": docker.COMPOSE_PROJECT,
-        "volumes": {"cache": {"name": "djinn-in-a-box_cache"}},
+        "volumes": {name: {"name": name} for name in names},
         "x-extension": {"description": "Compose extension"},
     })
     g.resolved["networks"]["default"]["ipam"] = {}
@@ -355,12 +364,137 @@ def test_real_resolved_carrier_shape_passes(compose_guest):
         "volumes": [
             {"type": "bind", "source": str(g.config.code_dir), "target": "/workspace",
              "bind": {"create_host_path": True}},
-            {"type": "volume", "source": "cache", "target": "/cache", "volume": {}},
+            *({"type": "volume", "source": name, "target": f"/cache/{name}", "volume": {}}
+              for name in names),
             {"type": "tmpfs", "target": "/scratch", "tmpfs": {"size": 1024}},
         ],
     })
     assert docker.compose_run(g.config, docker.ContainerOptions(), interactive=False).success
     assert len(g.launches) == 1
+
+
+@pytest.fixture
+def named_volume_guest(fake_owner, monkeypatch):
+    config, _, objects, log = fake_owner
+    runtime = host_runtime.runtime_root()
+    (runtime / "private").mkdir(parents=True)
+    monkeypatch.setattr(host_sealing, "execution_paths", lambda: {})
+    monkeypatch.setattr(docker, "get_shell_mount_args", lambda *a: [])
+    monkeypatch.setattr(docker, "_zone_overlay_mount_args_and_targets", lambda *a: ([], ()))
+    return SimpleNamespace(
+        owner=fake_owner, config=config, objects=objects, log=log, runtime=runtime,
+    )
+
+
+def run_named_volume(guest, name, *, volume=None, error=None, read_only=False):
+    resolved = copy.deepcopy(VALID)
+    resolved["services"]["dev"]["volumes"] = [
+        {"type": "bind", "source": str(guest.config.code_dir), "target": "/workspace"},
+        {"type": "volume", "source": "alias", "target": "/cache", "read_only": read_only},
+    ]
+    resolved["volumes"] = {"alias": {"name": name}}
+    write_json(guest.objects, {name: volume} if volume is not None else {})
+    behavior(
+        guest.owner, compose_config=resolved,
+        errors={f"volume inspect {name}": error} if error else {},
+    )
+    return docker.compose_run(guest.config, docker.ContainerOptions(), interactive=False)
+
+
+@pytest.mark.parametrize("name", [
+    "unknown-volume", "djinn-agent-docker", "djinn-hostctl-state", "djinn-desktop-dbus",
+    "djinn-desktop-audio", "djinn-in-a-box_cache",
+])
+def test_resolved_named_volume_requires_allowed_name(named_volume_guest, name):
+    g = named_volume_guest
+    with pytest.raises(docker.RunRefusedError, match=f"volume {name}.*; refusing"):
+        run_named_volume(g, name, volume={
+            "Name": name, "Driver": "local", "Options": None,
+            "Mountpoint": str(g.objects.parent / "docker-data/volumes" / name / "_data"),
+        })
+    assert not any(args[:1] == ["compose"] and "run" in args for args in calls(g.log))
+
+
+@pytest.mark.parametrize("options", [None, {}])
+def test_resolved_named_local_volume_passes(named_volume_guest, options):
+    g = named_volume_guest
+    name = "djinn-uv-cache"
+    assert run_named_volume(
+        g, name, volume={"Name": name, "Driver": "local", "Options": options},
+    ).success
+    assert ["volume", "inspect", name] in calls(g.log)
+
+
+@pytest.mark.parametrize("backup", ["data", "cache", "none"])
+def test_resolved_declared_volume_passes_in_every_category(named_volume_guest, backup):
+    g = named_volume_guest
+    g.config.mounts["scratch"] = VolumeDeclaration(volume=True, target="/scratch", backup=backup)
+    name = "djinn-scratch"
+    assert run_named_volume(
+        g, name, volume={"Name": name, "Driver": "local", "Options": None},
+    ).success
+    assert ["volume", "inspect", name] in calls(g.log)
+
+
+def test_resolved_absent_named_volume_passes(named_volume_guest):
+    g = named_volume_guest
+    assert run_named_volume(g, "djinn-uv-cache").success
+    assert ["volume", "inspect", "djinn-uv-cache"] in calls(g.log)
+
+
+@pytest.mark.parametrize("message", [
+    "Error response from daemon: get djinn-uv-cache: No such volume",
+    "Error response from daemon: No such container: djinn-uv-cache",
+    "Error response from daemon: open /x: no such file or directory",
+    "Docker daemon unavailable",
+])
+def test_resolved_named_volume_inspection_failures_refuse(named_volume_guest, message):
+    g = named_volume_guest
+    with pytest.raises(docker.RunRefusedError, match="cannot verify djinn-uv-cache:.*; refusing"):
+        run_named_volume(g, "djinn-uv-cache", error=message)
+    assert ["volume", "inspect", "djinn-uv-cache"] in calls(g.log)
+    assert not any(args[:1] == ["compose"] and "run" in args for args in calls(g.log))
+
+
+@pytest.mark.parametrize("read_only", [False, True], ids=["rw", "ro"])
+def test_resolved_named_bind_volume_protects_private_storage(named_volume_guest, read_only):
+    g = named_volume_guest
+    private = g.runtime / "private"
+    volume = {
+        "Name": "djinn-uv-cache", "Driver": "local",
+        "Options": {"o": "bind", "type": "none", "device": str(private)},
+    }
+    with pytest.raises(docker.RunRefusedError, match="protected host path") as error:
+        run_named_volume(g, "djinn-uv-cache", volume=volume, read_only=read_only)
+    assert f"{private} → /cache" in str(error.value)
+    assert ["volume", "inspect", "djinn-uv-cache"] in calls(g.log)
+    assert not any(args[:1] == ["compose"] and "run" in args for args in calls(g.log))
+
+
+def test_resolved_named_bind_volume_allows_scratch(named_volume_guest, tmp_path):
+    g = named_volume_guest
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    volume = {
+        "Name": "djinn-uv-cache", "Driver": "local",
+        "Options": {"o": "bind", "type": "none", "device": str(scratch)},
+    }
+    assert run_named_volume(g, "djinn-uv-cache", volume=volume).success
+    assert ["volume", "inspect", "djinn-uv-cache"] in calls(g.log)
+
+
+@pytest.mark.parametrize(("driver", "options"), [
+    ("remote", None),
+    ("local", {"type": "nfs", "device": "server:/cache", "o": "addr=server"}),
+    ("local", {"device": "/cache"}),
+])
+def test_resolved_named_volume_unknown_provenance_refuses(named_volume_guest, driver, options):
+    g = named_volume_guest
+    volume = {"Name": "djinn-uv-cache", "Driver": driver, "Options": options}
+    with pytest.raises(docker.RunRefusedError, match="cannot verify djinn-uv-cache:.*; refusing"):
+        run_named_volume(g, "djinn-uv-cache", volume=volume)
+    assert ["volume", "inspect", "djinn-uv-cache"] in calls(g.log)
+    assert not any(args[:1] == ["compose"] and "run" in args for args in calls(g.log))
 
 
 @pytest.mark.parametrize("key", ["volumes_from", "secrets", "configs", "devices", "future_carrier"])
@@ -472,7 +606,7 @@ def test_structural_base_binds(compose_guest, monkeypatch, family):
         {"type": "volume", "source": "named", "target": "/named"},
         {"type": "bind", "source": str(source), "target": target, "read_only": True},
     ]
-    g.resolved["volumes"] = {"named": {"name": "djinn-in-a-box_named"}}
+    g.resolved["volumes"] = {"named": {"name": "djinn-uv-cache"}}
     with pytest.raises(docker.RunRefusedError, match="protected host path") as error:
         docker.compose_run(g.config, docker.ContainerOptions(), interactive=False)
     assert f"{source} → {target}" in str(error.value)

@@ -1502,6 +1502,10 @@ version/fragment causes, return code and first stderr line.
 validation, then checks every bind in the resolved Compose configuration plus
 the run's `-v` mounts. It substitutes resolved sources in invocation and declared
 mounts, preserving targets, and checks base binds without rewriting them.
+Phase 2 allows only data/cache volume names (excluding `agent_docker.CACHE`) and
+declared volumes in any backup category. It strictly inspects existing volumes
+and uses `host_sealing.volume_bind_source()` to check bind devices as bind sources
+and refuse unknown storage provenance; absent volumes may be created by Compose.
 Resolved sources containing `:` are refused.
 The broad `host_sealing.protected_host_roots()` inventory includes the runtime
 root; `private_state_paths()` keeps the narrower sealing map, derived from the

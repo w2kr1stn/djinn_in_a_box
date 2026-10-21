@@ -135,7 +135,11 @@ refuses the run. See [mount usage](README.md#storage-and-mounts) for the private
 ancestor refusal and remedies.
 
 A run accepts only checked binds, named volumes whose definitions contain only
-`name` (no driver options), and `tmpfs` mounts. Every other host carrier in the
+`name` (no driver options), and `tmpfs` mounts. Named volumes must be Djinn's
+data/cache volumes (excluding the agent daemon's storage) or declared volumes,
+regardless of backup category. Existing volumes undergo the same storage inspection
+as sealing: a bind device is checked as a bind source; other drivers or options
+refuse the run. Every other host carrier in the
 resolved Compose configuration refuses the run, including `volumes_from`,
 secrets, configs, devices, volumes with driver options, other mount types or
 service keys outside the allowlist.

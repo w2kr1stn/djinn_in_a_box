@@ -2603,6 +2603,16 @@ def _guest_source_check(
             for key in service:
                 if key not in allowed:
                     raise RunRefusedError(f"unsupported run service key {key}; refusing")
+            categories = volume_categories(config)
+            allowed_volumes = {
+                name for category in ("data", "cache") for name in categories[category]
+            }
+            allowed_volumes.update(
+                f"{DECLARED_VOLUME_PREFIX}{name}"
+                for name, declaration in config.mounts.items()
+                if isinstance(declaration, VolumeDeclaration)
+            )
+            allowed_volumes.discard(agent_docker.CACHE)
             for mount in service["volumes"]:
                 kind = mount["type"]
                 if kind == "bind":
@@ -2616,6 +2626,19 @@ def _guest_source_check(
                             raise RunRefusedError(
                                 f"unsupported run volume {source} definition key {key}; refusing"
                             )
+                    name: str = definition["name"]
+                    source = name
+                    if name not in allowed_volumes:
+                        raise RunRefusedError(f"unsupported run volume {name}; refusing")
+                    volume = host_runtime.inspect_object(
+                        name, DOCKER_EXECUTABLE, "volume", missing="no such volume",
+                    )
+                    if volume is not None:
+                        device = host_sealing.volume_bind_source({
+                            "Name": name, "PlannedVolume": volume,
+                        })
+                        if device is not None:
+                            check(device, Path(mount["target"]))
                 elif kind != "tmpfs":
                     raise RunRefusedError(f"unsupported run volume type {kind}; refusing")
             for spec in _volume_specs_from_mount_args(mount_args or []):
