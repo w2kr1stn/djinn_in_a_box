@@ -828,6 +828,7 @@ FILTER_REBIND_BACKOFF_SECONDS = 5
 FILTER_REBIND_BACKOFF_CAP_SECONDS = 60
 OBSERVER_CLOSE_SECONDS = 30
 OBSERVER_SIGNALLED_CLOSE_SECONDS = 2
+HOSTCTL_CLOSE_NOTE_SECONDS = 300
 
 
 def _utc() -> str:
@@ -1356,8 +1357,28 @@ def observe_hostctl(
         # (subprocess.run kills on expiry), so they never depend on terminate().
         deadline = time.monotonic() + 2
         attempt = 0
+        first = ""
+        failed_reason = ""
+        noted = (float("-inf"), 0)  # last queued failure row: monotonic time, attempt
         delay = 0.5
         logged = float("-inf")
+
+        def note_failure(*, final: bool = False) -> None:
+            # Coalesce repeated failures, whatever their reasons: one row per note interval plus
+            # the final count on closure; an unpublished row is refreshed in place (bounded queue).
+            nonlocal noted
+            row: tuple[str, dict[str, Any]] = ("relay-close-failed", {
+                "generation": generation, "helper_id": helper_id,
+                "attempt": attempt, "reason": failed_reason, "first": first,
+            })
+            queued = [index for index, item in enumerate(pending) if item[0] == row[0]]
+            if queued:
+                pending[queued[0]] = row
+                noted = (noted[0], attempt)
+            elif final or time.monotonic() - noted[0] >= HOSTCTL_CLOSE_NOTE_SECONDS:
+                pending.append(row)
+                noted = (time.monotonic(), attempt)
+
         with hostctl.teardown_markers(root=records_root):
             while True:
                 guarded = False
@@ -1411,15 +1432,16 @@ def observe_hostctl(
                         if not isinstance(exc, Exception):
                             raise
                         attempt += 1
-                        pending.append(("relay-close-failed", {
-                            "generation": generation, "helper_id": helper_id,
-                            "attempt": attempt, "reason": reason,
-                        }))
+                        first = first or _utc()
+                        failed_reason = reason
+                        note_failure()
                     else:
                         log("Hostctl cleanup failed after verified closure")
                 if verified is not None:
                     event, verified_at = verified
                     until = verified_at + 60
+                    if attempt > noted[1]:
+                        note_failure(final=True)
                     pending.append((event, {"generation": generation, "helper_id": helper_id}))
                     break
                 publish_pending()

@@ -898,8 +898,9 @@ def _hostctl_journal_check(*, daemon: bool) -> Check:
                 pass
         if pending is not None:
             detail = (
-                f"hostctl closure pending: helper stop failed {count}×, "
-                f"last {pending.get('time', 'unknown')}"
+                f"hostctl closure pending: helper stop failed {count}× "
+                f"since {pending.get('first', 'unknown')}, "
+                f"last noted {pending.get('time', 'unknown')}"
             )
             if not daemon:
                 detail += "; unverifiable: Docker unavailable"

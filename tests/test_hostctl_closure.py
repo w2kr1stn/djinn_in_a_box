@@ -368,11 +368,126 @@ def test_stop_retry_backoff_journal_failures_and_throttle(window, monkeypatch, c
     assert len(calls) == failures + 1
     assert window.sleeps[:5] == [0.5, 1, 2, 4, 5]
     assert max(window.sleeps) == 5
-    assert [r["attempt"] for r in rows[:-1]] == list(range(1, failures + 1))
+    # The unpublished first row carries the count reached once the journal recovers (4);
+    # later failures inside the note interval fold into the final count on closure (18).
+    assert [r["attempt"] for r in rows[:-1]] == [4, failures]
     assert all(r["reason"] == "stop-unverified" for r in rows[:-1])
+    assert rows[0]["first"] and all(r["first"] == rows[0]["first"] for r in rows[:-1])
     assert rows[-1]["event"] == "relay-closed"
-    assert len(writes) > failures
+    assert len(writes) == 6
     assert capsys.readouterr().err.count("closure pending;") == 2
+
+
+@pytest.mark.parametrize("mode", ["stop", "alternate", "journal-down"])
+def test_hour_of_failed_stops_keeps_journal_and_queue_bounded(window, monkeypatch, mode):
+    # A stop that fails for a simulated hour (Docker gone or flapping) backs off to the 5 s
+    # cap and journals coalesced rows per note interval, never one row per attempt.
+    hour = 3600
+    failures = []
+    probe = {"after_stop": False, "flip": False}
+    ticks = iter(range(10**6))
+
+    def inspect(*, strict=False):
+        # "alternate": every other closure probe is unknown; the others reach a failing stop.
+        if mode == "alternate" and strict and window.clock < hour and not probe["after_stop"]:
+            probe["flip"] = not probe["flip"]
+            if probe["flip"]:
+                failures.append("inspection-unknown")
+                raise host_runtime.GitSSHError("inspection unknown")
+        probe["after_stop"] = False
+        return window.inspect(strict=strict)
+
+    def command(*args, **kwargs):
+        if args[0] == "stop" and window.clock < hour:
+            failures.append("stop-unverified")
+            probe["after_stop"] = True
+            raise hostctl.HostctlError("Docker stop failed (exit 1)")
+        return window.command(*args, **kwargs)
+
+    def sleep(seconds):
+        window.clock += seconds
+        window.sleeps.append(seconds)
+        if window.clock > 2 * hour:
+            pytest.fail("closure exceeded the simulated bound")
+
+    def journal(event, **kwargs):
+        if mode == "journal-down" and window.clock < hour:
+            return False
+        return window.journal(event, **kwargs)
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(hostctl, "journal", journal)
+    monkeypatch.setattr(host_runtime.time, "sleep", sleep)
+    monkeypatch.setattr(host_runtime, "_utc", lambda: f"t{next(ticks)}")
+    window.run()
+    rows = window.rows()
+    failed = [row for row in rows if row["event"] == "relay-close-failed"]
+    assert rows[-1]["event"] == "relay-closed" and len(failures) > 700
+    assert window.sleeps[:5] == [0.5, 1, 2, 4, 5] and max(window.sleeps) == 5
+    assert failed[-1]["attempt"] == len(failures)
+    assert failed[-1]["reason"] == failures[-1]
+    assert [row["attempt"] for row in failed] == sorted({row["attempt"] for row in failed})
+    assert {row["first"] for row in failed} == {"t0"}
+    if mode == "alternate":
+        assert set(failures) == {"inspection-unknown", "stop-unverified"}
+    if mode == "journal-down":
+        # The queue held one refreshed row for the whole outage.
+        assert len(failed) == 1
+    else:
+        interval = host_runtime.HOSTCTL_CLOSE_NOTE_SECONDS
+        assert hour // interval <= len(failed) <= 2 + hour // interval
+
+
+def test_failure_reason_change_folds_into_the_running_row(window, monkeypatch):
+    unknown = 0
+
+    def inspect(*, strict=False):
+        nonlocal unknown
+        if strict and unknown < 3:
+            unknown += 1
+            raise host_runtime.GitSSHError("inspection unknown")
+        return window.inspect(strict=strict)
+
+    stops = 0
+
+    def command(*args, **kwargs):
+        nonlocal stops
+        if args[0] == "stop" and stops < 3:
+            stops += 1
+            raise hostctl.HostctlError("Docker stop failed (exit 1)")
+        return window.command(*args, **kwargs)
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    monkeypatch.setattr(hostctl, "command", command)
+    window.run()
+    assert [(row["event"], row.get("reason"), row.get("attempt")) for row in window.rows()] == [
+        ("relay-close-failed", "inspection-unknown", 1),
+        ("relay-close-failed", "stop-unverified", 6),
+        ("relay-closed", None, None),
+    ]
+
+
+def test_refreshed_row_is_not_repeated_at_closure(window, monkeypatch):
+    stops = 0
+
+    def command(*args, **kwargs):
+        nonlocal stops
+        if args[0] == "stop" and stops < 4:
+            stops += 1
+            raise hostctl.HostctlError("Docker stop failed (exit 1)")
+        return window.command(*args, **kwargs)
+
+    def journal(event, **kwargs):
+        # Unavailable for the first three attempts; the fourth publishes the refreshed row.
+        return False if window.clock < 2 else window.journal(event, **kwargs)
+
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(hostctl, "journal", journal)
+    window.run()
+    assert [(row["event"], row.get("attempt")) for row in window.rows()] == [
+        ("relay-close-failed", 4), ("relay-closed", None),
+    ]
 
 
 @pytest.mark.parametrize("probe", ["initial", "after-stop", "failed-stop"])
@@ -572,7 +687,9 @@ def test_doctor_pending_uses_produced_journal(window, monkeypatch, daemon, snaps
     rows = hostctl_checks(None, daemon=daemon)
     row = next(r for r in rows if r.name == "Hostctl journal")
     assert row.status is Status.FAIL
-    assert "hostctl closure pending: helper stop failed 1×, last " in row.detail
+    first = window.rows()[0]["first"]
+    expected = f"hostctl closure pending: helper stop failed 1× since {first}, last noted "
+    assert expected in row.detail
     assert ("unverifiable" in row.detail) is (not daemon)
 
 
@@ -1601,7 +1718,8 @@ def test_fsync_after_complete_append_does_not_inflate_failed_attempts(window, mo
     monkeypatch.setattr(host_runtime.time, "sleep", sleep)
     with pytest.raises(SystemExit):
         window.run()
-    assert [row["attempt"] for row in window.rows()] == [1, 1, 2]
+    # The written-but-unconfirmed row stays queued and is refreshed with the next count.
+    assert [row["attempt"] for row in window.rows()] == [1, 2]
     row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
     assert row.status is Status.FAIL and "failed 2×" in row.detail
     # A delayed duplicate of a lower attempt must not reduce the count either.

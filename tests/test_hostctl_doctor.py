@@ -213,36 +213,48 @@ def test_doctor_tail_opening_anchors_current_generation(tmp_path, monkeypatch, f
     hostctl.journal("diagnostic", detail="x" * 80000)
     hostctl.journal("on", generation="current-B")
     if failure_first:
-        hostctl.journal("relay-close-failed", generation="current-B", attempt=3, time="current")
+        hostctl.journal(
+            "relay-close-failed", generation="current-B", attempt=3, first="start",
+            time="current",
+        )
     hostctl.journal("relay-close-failed", generation="old-A", attempt=9, time="old")
     hostctl.journal("relay-closed", generation="old-A")
     if not failure_first:
-        hostctl.journal("relay-close-failed", generation="current-B", attempt=3, time="current")
+        hostctl.journal(
+            "relay-close-failed", generation="current-B", attempt=3, first="start",
+            time="current",
+        )
     tail = (root / "journal.jsonl").read_bytes()[-65536:]
     assert b'"event": "on", "generation": "old-A"' not in tail
     row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
-    assert row.status is Status.FAIL and "failed 3×, last current" in row.detail
+    assert row.status is Status.FAIL and "failed 3× since start, last noted current" in row.detail
     assert "unverifiable" in row.detail
 
 
 def test_doctor_last_opening_selects_existing_generation_state(tmp_path):
     hostctl.journal("diagnostic", generation="current-B")
     hostctl.journal("on", generation="old-A")
-    hostctl.journal("relay-close-failed", generation="current-B", attempt=2, time="current")
+    hostctl.journal(
+        "relay-close-failed", generation="current-B", attempt=2, first="start",
+        time="current",
+    )
     hostctl.journal("on", generation="current-B")
     hostctl.journal("relay-close-failed", generation="old-A", attempt=9)
     hostctl.journal("off", generation="old-A")
     row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
-    assert row.status is Status.FAIL and "failed 2×, last current" in row.detail
+    assert row.status is Status.FAIL and "failed 2× since start, last noted current" in row.detail
 
 
 def test_doctor_without_opening_uses_first_seen_generation_order(tmp_path):
     hostctl.journal("relay-close-failed", generation="old-A", attempt=9)
-    hostctl.journal("relay-close-failed", generation="current-B", attempt=2, time="current")
+    hostctl.journal(
+        "relay-close-failed", generation="current-B", attempt=2, first="start",
+        time="current",
+    )
     hostctl.journal("relay-close-failed", generation="old-A", attempt=10)
     hostctl.journal("relay-closed", generation="old-A")
     row = next(r for r in hostctl_checks(None, daemon=False) if r.name == "Hostctl journal")
-    assert row.status is Status.FAIL and "failed 2×, last current" in row.detail
+    assert row.status is Status.FAIL and "failed 2× since start, last noted current" in row.detail
 
 
 @pytest.mark.parametrize("fields", [{}, {"attempt": "invalid"}])

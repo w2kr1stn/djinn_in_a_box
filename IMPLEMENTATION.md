@@ -1624,9 +1624,13 @@ retained before provenance recording, reconciliation and control guard release.
 Errors in these steps preserve the verified outcome and its original publication
 budget without retrying the stop. All observer diagnostic
 output is best effort, including retry, reconciliation and publication warnings.
-Each failed attempt journals
-`relay-close-failed` with generation, helper ID, attempt number and fixed reason
-`inspection-unknown` or `stop-unverified`. Observer writes for skipped publications
+Failed attempts journal
+`relay-close-failed` with generation, helper ID, running attempt count, `first`
+(UTC of the first failure) and fixed reason `inspection-unknown` or
+`stop-unverified` (the latest), coalesced whatever the reasons to one row on the
+first failure and per `HOSTCTL_CLOSE_NOTE_SECONDS` (300), plus the final count at
+verified closure; an unwritten row is refreshed in place. Doctor shows the count,
+`first` and the last noted time. Observer writes for skipped publications
 and closure outcomes use `journal(wait=0.5)`;
 busy or failed writes retain events in memory while stop attempts continue.
 The 60-second publication budget starts at verified closure, before reconciliation;

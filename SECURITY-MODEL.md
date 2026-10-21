@@ -577,8 +577,12 @@ After the budget expires, the observer attempts a warning; diagnostic output is
 best effort and cannot interrupt closure. `relay-closed` records verified
 closure under the control lock, or an already absent, stopped or replaced helper;
 `relay-closed-unlocked` records a verified fallback stop. `relay-close-failed`
-records each failed attempt with generation, helper ID, attempt number and a
-fixed reason (`inspection-unknown` or `stop-unverified`). Doctor reads a bounded
+records failed attempts with generation, helper ID, running attempt count, the
+UTC time of the first failure and a fixed reason (`inspection-unknown` or
+`stop-unverified`, the latest). Repeated failures are coalesced whatever their
+reasons: a row on the first failure and at most every five minutes, plus the
+final count on closure; an unwritten row is updated in place, so a lasting outage neither floods
+the rotated journal nor grows the observer's queue. Doctor reads a bounded
 journal tail even without the daemon or a status snapshot. Partial appends are
 separated from subsequent JSON rows; repeated writes count by the highest attempt
 number. The last opening event identifies the current generation in that tail;
