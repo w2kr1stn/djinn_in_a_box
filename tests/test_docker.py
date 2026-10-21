@@ -237,8 +237,9 @@ def test_restore_creates_only_missing_root_before_clear_and_extract(
         assert path == target and path.is_dir()
         calls.append("clear")
 
-    def extract(argv: list[str]) -> docker_mod.RunResult:
+    def extract(argv: list[str], **kwargs: Any) -> docker_mod.RunResult:
         assert argv == ["tar", "xzf", str(staging / "djinn-sync-claude.tar.gz"), "-C", str(target)]
+        assert kwargs == {"pass_fds": ()}
         calls.append("extract")
         return docker_mod.RunResult(1, stdout="partial", stderr="tar failed")
 
@@ -316,7 +317,7 @@ def test_sync_operations_handle_tree_beyond_recursion_limit(
     staging.mkdir()
     (staging / "djinn-sync-claude.tar.gz").write_bytes(b"dummy archive")
 
-    def extract(_argv: list[str]) -> docker_mod.RunResult:
+    def extract(_argv: list[str], **_: Any) -> docker_mod.RunResult:
         assert list(target.iterdir()) == []
         return docker_mod.RunResult(0)
 
@@ -3664,9 +3665,41 @@ def test_restore_sync_path_admits_every_configured_name(
     assert result.success
     assert result.extraction_admitted
     assert (root / name).is_dir()
-    extract.assert_called_once_with([
-        "tar", "xzf", str(staging / f"djinn-sync-{name}.tar.gz"), "-C", str(root / name),
-    ])
+    extract.assert_called_once_with(
+        ["tar", "xzf", str(staging / f"djinn-sync-{name}.tar.gz"), "-C", str(root / name)],
+        pass_fds=(),
+    )
+
+
+def test_restore_sync_path_hands_inherited_descriptors_to_the_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "djinn-sync-opencode.tar.gz").touch()
+    monkeypatch.setenv("DJINN_CONFIG_ROOT", str(tmp_path / "config"))
+    with patch.object(docker_mod, "_run_captured", return_value=docker_mod.RunResult(0)) as extract:
+        assert restore_sync_path("opencode", staging, inherit_fds=(7,)).success
+    assert extract.call_args.kwargs == {"pass_fds": (7,)}
+
+
+def test_run_captured_keeps_only_passed_descriptors_open_in_the_child(tmp_path: Path) -> None:
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    probe = [sys.executable, "-c", "import os, sys; os.fstat(int(sys.argv[1]))", str(descriptor)]
+    try:
+        assert docker_mod._run_captured(probe, pass_fds=(descriptor,)).success
+        assert not docker_mod._run_captured(probe).success
+    finally:
+        os.close(descriptor)
+
+
+def test_security_model_states_audit_agent_trust_boundary() -> None:
+    text = (Path(__file__).parents[1] / "SECURITY-MODEL.md").read_text()
+    assert (
+        "The audit agent is trusted at the level of the Docker socket and the read-write "
+        "`~/.djinn` mount; the audit-session design protects Djinn's own flows, "
+        "not against the agent."
+    ) in " ".join(text.split())
 
 
 def test_security_model_names_guarded_backup_restore_pathname_exception() -> None:
@@ -3692,3 +3725,78 @@ def test_running_discovery_has_prefix_deadline_and_closed_stdin(monkeypatch):
     monkeypatch.setattr(docker_mod.subprocess, "run", timed_out)
     assert docker_mod.get_running_containers("djinn-discard-test", timeout=0.25) is None
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("through_sync", [False, True])
+@pytest.mark.parametrize("denied_errno", [errno.EACCES, errno.EBUSY, errno.EPERM])
+def test_clear_keeps_named_top_level_entries_and_mount_placeholders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    through_sync: bool,
+    denied_errno: int,
+) -> None:
+    root = tmp_path / "carrier"
+    root.mkdir()
+    kept = root / "credentials.removed.json"
+    kept.write_text("[]")
+    placeholder = root / "mount"
+    placeholder.mkdir()
+    _deny_empty_placeholder_removal(monkeypatch, placeholder, denied_errno)
+    (root / "nested").mkdir()
+    (root / "nested" / kept.name).touch()
+    (root / "discard").touch()
+    keep = frozenset({kept.name})
+    if through_sync:
+        assert clear_sync_path(root, keep=keep)
+    else:
+        contained_paths.clear_directory(root, keep=keep)
+    assert kept.read_text() == "[]"
+    assert {child.name for child in root.iterdir()} == {kept.name, "mount"}
+    assert not list(placeholder.iterdir())
+
+
+@pytest.mark.parametrize("kind", ["volume", "bind"])
+def test_credential_export_never_pulls_an_image(kind) -> None:
+    argv = docker_mod._export_argv("djinn-in-a-box:latest", "dummy-data", kind, "dummy-token")
+    assert argv[argv.index("--pull") + 1] == "never"
+    assert "--read-only" not in argv
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_export_existing_opencode_data_reuses_adapter(exists: bool) -> None:
+    with (
+        patch.object(
+            docker_mod,
+            "_run_captured",
+            return_value=docker_mod.RunResult(
+                0, stdout="djinn-opencode-data\n" if exists else "djinn-other\n"
+            ),
+        ) as probe,
+        patch.object(docker_mod, "export_opencode_credentials", return_value=b"[]") as export,
+    ):
+        assert docker_mod.export_opencode_data_credentials() == b"[]"
+    probe.assert_called_once_with(
+        [docker_mod.DOCKER_EXECUTABLE, "volume", "ls", "--format", "{{.Name}}"], timeout=5
+    )
+    if exists:
+        export.assert_called_once_with(
+            image="djinn-in-a-box:latest", source="djinn-opencode-data", kind="volume"
+        )
+    else:
+        export.assert_not_called()
+
+
+def test_opencode_export_refuses_an_unverified_volume_lookup() -> None:
+    sentinel = os.urandom(32).hex()
+    result = docker_mod.RunResult(1, stdout=sentinel, stderr=sentinel)
+    assert sentinel in result.stdout and sentinel in result.stderr
+    with (
+        patch.object(docker_mod, "_run_captured", return_value=result),
+        patch.object(docker_mod, "export_opencode_credentials") as export,
+        pytest.raises(
+            docker_mod.CredentialExportError, match="existence could not be verified"
+        ) as exc,
+    ):
+        docker_mod.export_opencode_data_credentials()
+    assert sentinel not in str(exc.value)
+    export.assert_not_called()

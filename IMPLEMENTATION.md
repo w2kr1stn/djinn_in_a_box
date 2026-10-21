@@ -68,6 +68,7 @@ stores, and local command choices remain outside the published source.
 │       ├── docker.py
 │       ├── exceptions.py
 │       ├── hostinfo.py
+│       ├── opencode_credentials.py  # OpenCode login sync, also copied into the dev image
 │       ├── paths.py
 │       ├── seeding.py
 │       ├── session.py
@@ -78,7 +79,6 @@ stores, and local command choices remain outside the published source.
 │   ├── output-lib.sh
 │   ├── seed-lib.sh
 │   ├── mcp-register.sh
-│   ├── opencode-credentials.sh
 │   ├── init-firewall.sh
 │   ├── check-build-dns.sh
 │   ├── probe-claude-isolated.py  # maintainer re-probe of the claude-isolated agent
@@ -778,8 +778,7 @@ container start
   +-- restore ~/.claude.json from the persistent config root when present
   +-- claude_settings_merge ~/.claude_seed -> ~/.claude/settings.json
   +-- workflow-publisher.py admits OpenCode runtime entries and copies the personal carrier
-  +-- opencode-credentials.sh initializes config-root credentials and
-      canonical data-volume symlinks
+  +-- opencode-credentials.py sync --mode start merges OpenCode logins (refusal stops startup)
   +-- workflow-publisher.py publishes ~/.opencode/seed -> ~/.config/opencode
       using the read-only /home/dev/.djinn-canonical root and the runtime state manifest
   +-- source mcp-register.sh and register MCP servers
@@ -788,9 +787,9 @@ container start
   +-- root helper replays missing runtime packages (no network if none missing; warn and continue)
   +-- install optional cached tools
   +-- print security summary, including firewall, Docker access, and MCP state
-  +-- start checkpointing changed settings every 30 s
+  +-- start checkpointing OpenCode logins and changed settings every 30 s
   +-- run interactive zsh as a background job, waited on by PID 1
-  +-- stop/join checkpointer and sync once on shell exit or SIGTERM/SIGINT
+  +-- stop/join checkpointer, publish OpenCode logins, sync settings once on shell exit or SIGTERM/SIGINT
 ```
 
 The `Codex daemon` step invokes `/home/dev/codex-daemon-policy.py` with
@@ -1063,11 +1062,38 @@ container-local login server that the host browser cannot reach, so users must
 run `codex login --device-auth` (or choose the remote/headless option in its
 TUI). README documents this.
 
-Claude Code, Codex, GitHub CLI, and OpenCode persist credentials in config-root
-bind mounts. OpenCode `auth.json` and `mcp-auth.json` live under `~/.opencode`.
-Startup initializes missing files with mode `0600` and ensures the paths under
-`~/.local/share/opencode` are canonical symlinks to those files. Unexpected
-credential redirects are refused.
+Claude Code, Codex and the GitHub CLI persist credentials in config-root bind
+mounts. OpenCode 2 stores its logins (API keys, OAuth tokens, external logins
+and MCP OAuth) in the SQLite database `~/.local/share/opencode/opencode.db`,
+which lives in the `djinn-opencode-data` volume; the former `auth.json` and
+`mcp-auth.json` files are no longer used. Djinn mirrors those logins into the
+config-root file `<config-root>/opencode/credentials.json` (the `opencode auth
+export` format, mode `0600`). Logins removed everywhere are listed by ID in
+`<config-root>/opencode/credentials.removed.json`, which holds no secrets. The
+dev container syncs at start, every 30 s and at stop (exit, SIGTERM, SIGINT). A
+sync merges the database, `credentials.json` and Syncthing conflict copies of
+both files, writes the merged result to the config root first, and only then
+updates the database; at stop it only writes the config root, and the next start
+updates the database. The merge rule is the union of all logins by ID, minus the
+IDs in `credentials.removed.json`. When two copies of one ID differ, the OAuth
+login with the later expiry wins; otherwise a fixed order decides and Djinn warns
+with the ID. Which account of a provider is active stays per host; it is not
+synced.
+
+The mechanics:
+
+- `/home/dev/opencode-credentials.py` (from
+  `src/djinn_in_a_box/core/opencode_credentials.py`, standard library only) runs
+  every OpenCode credential command with `--standalone`, a fresh empty config
+  home and no project config, so plugins and MCP servers are not loaded.
+- Host-local state `~/.local/share/opencode/djinn-credentials-host.json` (no
+  secrets) records the fingerprints last seen in this database, the logins hidden
+  on this host, and an account to reactivate; it is reset when the database file
+  changes.
+- Writers take an exclusive `flock` on the carrier directory itself; files are
+  written atomically with compare-before-rename.
+- Exit codes of the helper: 0 done, 3 refused (path type or ownership), 1
+  anything else.
 
 Common mounts include:
 

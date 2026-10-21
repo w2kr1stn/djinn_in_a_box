@@ -196,6 +196,8 @@ def test_packages_clean_lifecycle(
         patch.object(container.host_runtime, "creation_guard", return_value=nullcontext()),
         patch.object(container.host_runtime, "inspect_dev", return_value=None),
         patch.object(container.hostctl, "delete_state_locked"),
+        patch.object(container, "_validate_opencode_carrier"),
+        patch.object(container, "_logout_opencode") as logout,
         patch.object(
             container,
             "delete_volumes",
@@ -207,6 +209,7 @@ def test_packages_clean_lifecycle(
         result = runner.invoke(app, ["clean", "all", "--force"])
     assert result.exit_code == 0, result.output
     assert PACKAGE_NAME in delete.call_args.args[0]
+    logout.assert_called_once_with(config)
 
 
 def test_default_backup_includes_packages_volume(

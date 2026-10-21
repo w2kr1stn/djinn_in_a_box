@@ -142,6 +142,56 @@ _session_sync_warn() {
     ui_warn "$message"
 }
 
+_sync_opencode_credentials() {
+    local mode=$1 rc=0 messages line
+    local -a warnings
+    messages=$(python3 "$OPENCODE_CREDENTIALS_HELPER" sync \
+        --carrier "$HOME/.opencode" \
+        --database "$HOME/.local/share/opencode/opencode.db" \
+        --host-state "$HOME/.local/share/opencode/djinn-credentials-host.json" \
+        --conflict-backup "$HOME/.local/state/djinn/opencode-credential-conflicts" \
+        --mode "$mode" 2>&1 >/dev/null) || rc=$?
+    while IFS= read -r line; do
+        case "$line" in
+            'conflicting values for '*|'conflict copy is invalid and stays: '*|\
+            'conflict copy stays, backup retried next time: '*) warnings+=("$line") ;;
+        esac
+    done <<< "$messages"
+    case "$mode" in
+        start)
+            if (( rc == 3 )); then
+                ui_err "OpenCode credential sync refused: $messages"
+                return 1
+            elif (( rc != 0 )); then
+                ui_warn "OpenCode credential sync failed (rc=$rc): $messages"
+            else
+                while IFS= read -r line; do
+                    [[ "$line" == 'sync start: '* ]] && ui_info "$line"
+                done <<< "$messages"
+                for line in "${warnings[@]}"; do ui_warn "$line"; done
+            fi
+            ;;
+        checkpoint)
+            if (( rc != 0 )); then
+                local outcome=failed
+                (( rc == 3 )) && outcome=refused
+                _session_sync_warn opencode-credentials "$mode" \
+                    "OpenCode credential sync $outcome (rc=$rc): $messages"
+            elif (( ${#warnings} )); then
+                _session_sync_warn opencode-credentials "$mode" "$(printf '%s\n' "${warnings[@]}")"
+            fi
+            ;;
+        final)
+            if (( rc != 0 )); then
+                ui_warn "OpenCode credential sync failed (rc=$rc): $messages"
+            else
+                for line in "${warnings[@]}"; do ui_warn "$line"; done
+            fi
+            ;;
+    esac
+    return 0
+}
+
 _capture_session_runtime() {
     cat -- "$1" > "$2" 2>/dev/null
 }

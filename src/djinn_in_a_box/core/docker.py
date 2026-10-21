@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import csv
 import errno
+import io
 import json
 import os
 import re
+import secrets
+import selectors
 import shutil
 import socket
 import stat
@@ -13,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from enum import Enum
@@ -56,6 +60,7 @@ from djinn_in_a_box.core.exceptions import (
     ZoneConfigurationError,
     ZoneRootValidationError,
 )
+from djinn_in_a_box.core.opencode_credentials import EXPORT_LIMIT
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
 
@@ -376,6 +381,7 @@ def _run_captured(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> RunResult:
     try:
         # A prompt (e.g. Compose asking to recreate a volume) must not wait on the terminal.
@@ -388,6 +394,7 @@ def _run_captured(
             env=env,
             check=False,
             timeout=timeout,
+            pass_fds=tuple(pass_fds),
         )
         return RunResult(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
     except FileNotFoundError as e:
@@ -429,6 +436,202 @@ def _run_streamed(
         return RunResult(returncode=127, stdout="", stderr=f"Command not found: {e}")
     except PermissionError as e:
         return RunResult(returncode=126, stdout="", stderr=f"Permission denied: {e}")
+
+
+CREDENTIAL_EXPORT_LABEL: Final = "djinn.credential-export"
+"""Label (value: a random token) on every one-off credential export container."""
+
+_CREDENTIAL_EXPORT_PREFIX: Final = "djinn-credexport-"
+_OPENCODE_DATA_TARGET: Final = "/home/dev/.local/share/opencode"
+_EXPORT_CONFIG_HOME: Final = "/run/credexport-config"
+_EXPORT_MEMORY: Final = "1g"
+_EXPORT_PIDS: Final = "256"
+_EXPORT_CHUNK: Final = 65536
+_EXPORT_CLEANUP_CHECKS: Final = 3
+_EXPORT_CLEANUP_PAUSE: Final = 0.2
+_EXPORT_ENVIRONMENT: Final = (
+    ("HOME", "/home/dev"),
+    ("XDG_CONFIG_HOME", _EXPORT_CONFIG_HOME),
+    ("OPENCODE_DISABLE_PROJECT_CONFIG", "true"),
+    ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
+    ("OPENCODE_DISABLE_MODELS_FETCH", "true"),
+    ("DO_NOT_TRACK", "1"),
+)
+
+
+class CredentialExportError(RuntimeError):
+    """The one-off export failed. The message is a fixed reason or a return code, never output."""
+
+
+def _export_mount(kind: Literal["volume", "bind"], source: str) -> list[str]:
+    # Docker parses --mount as CSV, including fields containing commas or quotes.
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="").writerow(
+        [f"type={kind}", f"src={source}", f"dst={_OPENCODE_DATA_TARGET}"]
+    )
+    return ["--mount", buffer.getvalue()]
+
+
+def _export_argv(image: str, source: str, kind: Literal["volume", "bind"], token: str) -> list[str]:
+    argv = [
+        DOCKER_EXECUTABLE,
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--name",
+        _CREDENTIAL_EXPORT_PREFIX + token,
+        "--label",
+        f"{CREDENTIAL_EXPORT_LABEL}={token}",
+        "--network",
+        "none",
+        "--log-driver",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        _EXPORT_PIDS,
+        "--memory",
+        _EXPORT_MEMORY,
+    ]
+    if kind == "bind":
+        # The session directory belongs to the executing user; the volume to the image user.
+        argv.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+    argv.extend(["--tmpfs", f"{_EXPORT_CONFIG_HOME}:rw,nosuid,nodev,size=8m,mode=1777"])
+    argv.extend(["--workdir", _EXPORT_CONFIG_HOME])
+    for key, value in _EXPORT_ENVIRONMENT:
+        argv.extend(["--env", f"{key}={value}"])
+    # Writable on purpose: OpenCode writes its log there and exits early on a read-only database.
+    argv.extend(_export_mount(kind, source))
+    return [*argv, "--entrypoint", "opencode", image, "auth", "export", "--standalone"]
+
+
+def _export_containers(token: str) -> list[str]:
+    result = _run_captured(
+        [
+            DOCKER_EXECUTABLE,
+            "ps",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"label={CREDENTIAL_EXPORT_LABEL}={token}",
+        ],
+        timeout=10,
+    )
+    if not result.success:
+        raise CredentialExportError("export container state could not be verified")
+    return result.stdout.split()
+
+
+def _remove_export_containers(token: str) -> None:
+    """Remove by label, then prove that none is left (abort check)."""
+    found = _export_containers(token)
+    if not found:
+        return
+    _run_captured([DOCKER_EXECUTABLE, "rm", "--force", *found], timeout=30)
+    for attempt in range(_EXPORT_CLEANUP_CHECKS):
+        if not _export_containers(token):
+            return
+        if attempt + 1 < _EXPORT_CLEANUP_CHECKS:
+            time.sleep(_EXPORT_CLEANUP_PAUSE)
+    raise CredentialExportError("export container could not be removed")
+
+
+def _read_export(
+    process: subprocess.Popen[bytes], output: bytearray, deadline: float
+) -> str | None:
+    """Collect stdout into ``output`` up to the bound; a failure reason, or None at EOF."""
+    stream = process.stdout
+    if stream is None:
+        return "export pipe missing"
+    with selectors.DefaultSelector() as selector:
+        selector.register(stream, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "export timed out"
+            if not selector.select(remaining):
+                continue
+            chunk = os.read(stream.fileno(), _EXPORT_CHUNK)
+            if not chunk:
+                return None
+            output += chunk
+            if len(output) > EXPORT_LIMIT:
+                return "export exceeds the size limit"
+
+
+def export_opencode_credentials(
+    *, image: str, source: str, kind: Literal["volume", "bind"], timeout: float = 60.0
+) -> bytes:
+    """Run ``opencode auth export`` in a one-off container and return its stdout.
+
+    ``source`` is the OpenCode data volume (``kind="volume"``, run as the image user) or an
+    absolute host directory (``kind="bind"``, run as the executing user), mounted read-write.
+    The container has no network, no logs, no capabilities and no Docker socket. stderr and the
+    stdout of a failed run are discarded; errors carry only a return code or a fixed reason.
+    A timeout or interruption removes the container by label and proves that none is left.
+    """
+    if kind not in ("volume", "bind") or not image or not source:
+        raise CredentialExportError("invalid export request")
+    if kind == "bind" and not os.path.isabs(source):
+        raise CredentialExportError("invalid export request")
+    from djinn_in_a_box.core import assistant  # noqa: PLC0415 - assistant imports this module
+
+    try:
+        assistant.local_daemon()
+    except (RuntimeError, OSError):
+        raise CredentialExportError("export requires a local Docker daemon") from None
+    token = secrets.token_hex(8)
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    reason: str | None = None
+    returncode: int | None = None
+    try:
+        try:
+            process = subprocess.Popen(
+                _export_argv(image, source, kind, token),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            reason = "Docker could not be started"
+        else:
+            try:
+                reason = _read_export(process, output, deadline)
+                if reason is None:
+                    try:
+                        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        reason = "export timed out"
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    process.stdout.close()
+    finally:
+        _remove_export_containers(token)
+    if reason is not None:
+        raise CredentialExportError(reason)
+    if returncode != 0:
+        raise CredentialExportError(f"export exited with status {returncode}")
+    return bytes(output)
+
+
+def export_opencode_data_credentials() -> bytes:
+    """Export the existing dev data volume through the one-off adapter; absent means empty."""
+    volumes = _run_captured([DOCKER_EXECUTABLE, "volume", "ls", "--format", "{{.Name}}"], timeout=5)
+    if not volumes.success:
+        raise CredentialExportError("OpenCode data volume existence could not be verified")
+    if "djinn-opencode-data" not in volumes.stdout.splitlines():
+        return b"[]"
+    return export_opencode_credentials(
+        image="djinn-in-a-box:latest", source="djinn-opencode-data", kind="volume"
+    )
 
 
 def _decode_timeout_output(
@@ -2989,7 +3192,7 @@ def backup_volume(name: str, dest_dir: Path) -> RunResult:
     )
 
 
-def restore_volume(name: str, source_dir: Path) -> RunResult:
+def restore_volume(name: str, source_dir: Path, *, inherit_fds: Sequence[int] = ()) -> RunResult:
     if name in PROTECTED_INTERNAL_VOLUMES:
         return RunResult(1, stderr="Hostctl identity must never be restored")
     archive_path = source_dir / f"{name}.tar.gz"
@@ -3012,7 +3215,8 @@ def restore_volume(name: str, source_dir: Path) -> RunResult:
             'rm -rf /data/* /data/.[!.]* && tar xzf "/backup/$1.tar.gz" -C /data',
             "--",
             name,
-        ]
+        ],
+        pass_fds=inherit_fds,
     )
 
 
@@ -3288,9 +3492,17 @@ class SyncRestoreResult(RunResult):
 
 
 def restore_sync_path(
-    path_name: str, source_dir: Path, config: AppConfig | None = None
+    path_name: str,
+    source_dir: Path,
+    config: AppConfig | None = None,
+    *,
+    inherit_fds: Sequence[int] = (),
 ) -> SyncRestoreResult:
-    """Extract djinn-sync-<name>.tar.gz into ${DJINN_CONFIG_ROOT}/<name>/."""
+    """Extract djinn-sync-<name>.tar.gz into ${DJINN_CONFIG_ROOT}/<name>/.
+
+    ``inherit_fds`` stay open in the extracting process, so a lock held on them lasts until the
+    carrier is written even if this process dies first.
+    """
     if path_name not in {name for names in SYNC_PATHS.values() for name in names}:
         return SyncRestoreResult(returncode=1, stderr=f"Unknown sync path name: {path_name}")
     archive = source_dir / f"{_SYNC_ARCHIVE_PREFIX}{path_name}.tar.gz"
@@ -3322,17 +3534,20 @@ def restore_sync_path(
             returncode=1, stderr=f"Failed to clear {target}: {error}{remedy}"
         )
 
-    result = _run_captured(["tar", "xzf", str(archive), "-C", str(target)])
+    result = _run_captured(["tar", "xzf", str(archive), "-C", str(target)], pass_fds=inherit_fds)
     return SyncRestoreResult(
         returncode=result.returncode, stdout=result.stdout, stderr=result.stderr,
         extraction_admitted=True,
     )
 
 
-def clear_sync_path(path: Path) -> bool:
-    """Remove the contents of a sync path (directory itself is preserved)."""
+def clear_sync_path(path: Path, keep: frozenset[str] = frozenset()) -> bool:
+    """Clear a sync directory, preserving its root and named top-level entries."""
     try:
-        clear_directory(path)
+        if keep:
+            clear_directory(path, keep=keep)
+        else:
+            clear_directory(path)
     except (PathContainmentError, OSError) as e:
         warning(f"Failed to clear sync path '{path}': {e}")
         if isinstance(e, PathContainmentError):

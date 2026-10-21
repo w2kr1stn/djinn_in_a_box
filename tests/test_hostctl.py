@@ -437,14 +437,21 @@ def test_all_clean_lock_covers_teardown_state_and_network_without_config(inputs,
         calls.append("network")
         return True
 
+    def logout(config):
+        assert hostctl._held.active
+        calls.append("opencode")
+
     monkeypatch.setattr(container, "compose_down", down)
+    monkeypatch.setattr(container, "_validate_opencode_carrier", lambda config: None)
+    monkeypatch.setattr(container, "_logout_opencode", logout)
     monkeypatch.setattr(hostctl, "delete_state_locked", delete_state)
     monkeypatch.setattr(container, "delete_volumes", lambda names: {})
     monkeypatch.setattr(container, "network_exists", lambda name: True)
     monkeypatch.setattr(container, "delete_network", delete_network)
     result = CliRunner().invoke(app, ["clean", "all", "--force"])
     assert result.exit_code == (1 if fail else 0)
-    assert calls == (["down", "state"] if fail else ["down", "state", "network"])
+    teardown = ["down", "opencode", "state"]
+    assert calls == (teardown if fail else [*teardown, "network"])
     if fail:
         assert "Cleanup complete" not in result.output
 

@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -28,11 +29,19 @@ from djinn_in_a_box.config.defaults import (
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
+from djinn_in_a_box.core import host_runtime, hostctl, opencode_credentials
+from djinn_in_a_box.core.assistant import (
+    credential_error_reason,
+    opencode_carrier,
+    recover_leftover_sessions,
+)
 from djinn_in_a_box.core.console import blank, error, info, success, warning
 from djinn_in_a_box.core.decorators import handle_config_errors
 from djinn_in_a_box.core.docker import (
+    CredentialExportError,
     backup_sync_path,
     backup_volume,
+    export_opencode_data_credentials,
     extract_sync_path_name,
     get_existing_sync_paths_by_category,
     get_existing_volumes_by_category,
@@ -42,7 +51,8 @@ from djinn_in_a_box.core.docker import (
     restore_volume,
 )
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
-from djinn_in_a_box.core.paths import BACKUPS_DIR
+from djinn_in_a_box.core.lock_holders import describe_holders
+from djinn_in_a_box.core.paths import BACKUPS_DIR, get_project_root
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
 DEFAULT_CATEGORIES: list[str] = ["credentials", "repo-dotfiles", "data"]
@@ -314,7 +324,15 @@ def backup(
 
 @handle_config_errors
 @_with_lifecycle_guard
-def restore() -> None:
+def restore(
+    discard_unexported_credentials: Annotated[
+        bool,
+        typer.Option(
+            "--discard-unexported-credentials",
+            help="Restore even if OpenCode preservation fails; unexported logins are lost",
+        ),
+    ] = False,
+) -> None:
     """Restore Docker volumes and sync paths from a backup archive.
 
     Finds the backup archive in ~/.djinn/backups/ and restores all contained
@@ -362,6 +380,11 @@ def restore() -> None:
 
     staging_dir = Path(tempfile.mkdtemp(prefix="djinn-restore-"))
     decrypt_dir: Path | None = None
+    # Held until the archives are restored, so a concurrent recovery cannot merge it early.
+    parked: opencode_credentials.Session | None = None
+    # While held, no audit-session recovery merges into the carrier this restore overwrites.
+    gates = ExitStack()
+    gate: int | None = None
 
     try:
         archive_to_extract = backup_file
@@ -404,6 +427,55 @@ def restore() -> None:
             error("Backup archive contains no volume archives")
             raise typer.Exit(1)
 
+        preserve_opencode = any(
+            archive.name in {"djinn-opencode-data.tar.gz", "djinn-sync-opencode.tar.gz"}
+            and archive.parent != declared_dir
+            for archive in inner_archives
+        )
+        if preserve_opencode:
+            try:
+                gate = gates.enter_context(opencode_credentials.restore_gate())
+            except (opencode_credentials.CredentialsError, OSError) as exc:
+                message = (
+                    "Restore refused: OpenCode restore gate could not be held: "
+                    f"{credential_error_reason(exc)}."
+                )
+                holder = describe_holders(opencode_credentials.default_audit_root())
+                error(f"{message} {holder}" if holder else message)
+                raise typer.Exit(1) from None
+            carrier = opencode_carrier(config)
+            try:
+                exported = export_opencode_data_credentials()
+                carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with opencode_credentials.carrier_lock(carrier) as lease:
+                    parked = opencode_credentials.park_for_restore(None, carrier, exported, lease)
+            except (CredentialExportError, opencode_credentials.CredentialsError, OSError) as exc:
+                reason = credential_error_reason(exc)
+                if not discard_unexported_credentials:
+                    error(
+                        f"Restore refused: OpenCode credentials could not be preserved: {reason}. "
+                        "Use --discard-unexported-credentials to overwrite them anyway."
+                    )
+                    raise typer.Exit(1) from None
+                warning(
+                    f"OpenCode credential preservation failed: {reason}; "
+                    "unexported logins are lost."
+                )
+                try:
+                    carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    with opencode_credentials.carrier_lock(carrier) as lease:
+                        parked = opencode_credentials.park_for_restore(None, carrier, b"[]", lease)
+                except (opencode_credentials.CredentialsError, OSError) as park_error:
+                    warning(
+                        "OpenCode carrier could not be parked: "
+                        f"{credential_error_reason(park_error)}"
+                    )
+
+        inherit = (
+            hostctl.held_control_descriptor(),
+            host_runtime.held_creation_descriptor(),
+            *((gate,) if gate is not None else ()),
+        )
         failed = False
         for archive in inner_archives:
             if archive.name.removesuffix(".tar.gz") in PROTECTED_INTERNAL_VOLUMES:
@@ -424,7 +496,7 @@ def restore() -> None:
                     continue
                 label = vol_name
                 info(f"  {label}")
-                result = restore_volume(vol_name, declared_dir)
+                result = restore_volume(vol_name, declared_dir, inherit_fds=inherit)
             elif is_sync_archive(archive.name):
                 path_name = extract_sync_path_name(archive.name)
                 label = f"sync/{path_name}"
@@ -433,7 +505,7 @@ def restore() -> None:
                     error(f"  {label}: unknown sync path name")
                     failed = True
                     continue
-                result = restore_sync_path(path_name, staging_dir, config)
+                result = restore_sync_path(path_name, staging_dir, config, inherit_fds=inherit)
                 if result.extraction_admitted:
                     try:
                         _harden_restored_sync_directories(
@@ -449,7 +521,7 @@ def restore() -> None:
                     continue
                 label = vol_name
                 info(f"  {label}")
-                result = restore_volume(vol_name, staging_dir)
+                result = restore_volume(vol_name, staging_dir, inherit_fds=inherit)
 
             if result.success and hardening_error is None:
                 success(f"  {label}")
@@ -461,6 +533,10 @@ def restore() -> None:
                 error(f"  {label}: {detail}")
                 failed = True
 
+        gates.close()
+        if preserve_opencode:
+            recover_leftover_sessions(get_project_root(), config, parked)
+
         blank()
         if failed:
             error("Restore completed with errors")
@@ -468,6 +544,9 @@ def restore() -> None:
         success(f"Restore complete: {len(inner_archives)} item(s)")
 
     finally:
+        gates.close()
+        if parked is not None:
+            parked.close()
         if decrypt_dir is not None:
             try:
                 shutil.rmtree(decrypt_dir)

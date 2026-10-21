@@ -84,6 +84,20 @@ def test_declared_ownership_helper_is_packaged():
     assert (_ROOT / 'scripts/ownership-repair.py').is_file()
 
 
+def test_credential_helper_is_packaged_at_the_entrypoint_default() -> None:
+    dockerfile = (_ROOT / "Dockerfile").read_text()
+    entrypoint = (_ROOT / "scripts" / "entrypoint.sh").read_text()
+    assert (
+        "COPY --chown=dev:dev src/djinn_in_a_box/core/opencode_credentials.py "
+        "/home/dev/opencode-credentials.py"
+    ) in dockerfile
+    assert (
+        'OPENCODE_CREDENTIALS_HELPER="${OPENCODE_CREDENTIALS_HELPER:-'
+        '/home/dev/opencode-credentials.py}"'
+    ) in entrypoint
+    assert "opencode-credentials.sh" not in dockerfile + entrypoint
+
+
 def test_runtime_delivery_packaging_uses_shared_publisher_and_canonical_mount() -> None:
     dockerfile = (_ROOT / "Dockerfile").read_text()
     compose = (_ROOT / "docker-compose.yml").read_text()

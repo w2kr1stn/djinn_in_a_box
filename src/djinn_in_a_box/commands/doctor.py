@@ -36,7 +36,7 @@ from djinn_in_a_box.config.zones import (
     load_zone_assignments,
 )
 from djinn_in_a_box.core import docker as docker_core
-from djinn_in_a_box.core import post_mortem
+from djinn_in_a_box.core import host_runtime, hostctl, opencode_credentials, post_mortem
 from djinn_in_a_box.core import session as session_core
 from djinn_in_a_box.core.config_sync import (
     audit_config_sync as audit_workflow_config,
@@ -77,6 +77,7 @@ from djinn_in_a_box.core.exceptions import (
     ConfigValidationError,
     ZoneConfigurationError,
 )
+from djinn_in_a_box.core.lock_holders import describe_holders
 from djinn_in_a_box.core.paths import CONFIG_FILE, get_project_root
 from djinn_in_a_box.core.seeding import SEED_MANIFEST, SeedingError, seed_config
 from djinn_in_a_box.core.session import (
@@ -459,6 +460,38 @@ def _path_size_bytes(path: Path) -> int:
     for child in children:
         total += _path_size_bytes(child)
     return total
+
+
+def _opencode_credentials_check(config_root: Path) -> Check:
+    findings = opencode_credentials.carrier_findings(config_root / "opencode")
+    remedies: list[str] = []
+    kinds = {finding.kind for finding in findings}
+    if "conflict-copy" in kinds:
+        remedies.append(
+            "The next dev start's credential sync merges, backs up and removes the copies."
+        )
+    if "audit-session" in kinds or "audit-root" in kinds:
+        remedies.append(
+            "The next `djinn audit` or `djinn start` recovers them; a session without a database "
+            "stays and can be removed by hand after inspection."
+        )
+    if "differing-value" in kinds:
+        remedies.append("The next dev start merges them.")
+    if "invalid-file" in kinds:
+        remedies.append(
+            "Inspect and repair the invalid or unreadable credential files "
+            "(owned by you, mode 0600), then retry."
+        )
+    if "stale-temp" in kinds:
+        remedies.append("The next credential writer removes stale temporary files.")
+    return Check(
+        "OpenCode credentials",
+        Status.WARN if findings else Status.PASS,
+        "; ".join(f"{item.kind}: {item.subject} {item.detail}".rstrip() for item in findings)
+        if findings
+        else "clean",
+        " ".join(remedies),
+    )
 
 
 def _zone_drift_entries(config: AppConfig, assignments: ZoneAssignments) -> tuple[Path, ...]:
@@ -1130,6 +1163,29 @@ def declaration_checks(
     return checks
 
 
+def lifecycle_locks_check() -> Check:
+    """Report exclusive lifecycle holders without creating paths or acquiring locks."""
+    try:
+        control_root = hostctl.state_root(create=False)
+    except hostctl.HostctlError as exc:
+        return Check("Lifecycle locks", Status.WARN, str(exc))
+    paths = (
+        ("control.lock", control_root / "control.lock"),
+        ("creator.lock", host_runtime.runtime_root(create=False) / "creator.lock"),
+        ("audit gate", Path(opencode_credentials.default_audit_root())),
+    )
+    holders = [
+        f"{name}: {holder}"
+        for name, path in paths
+        if (holder := describe_holders(path, exclusive_only=True))
+    ]
+    return Check(
+        "Lifecycle locks",
+        Status.WARN if holders else Status.PASS,
+        "; ".join(holders) if holders else "none held",
+    )
+
+
 def run_checks(config: AppConfig | None, config_error: str | None = None) -> list[Check]:
     """Run every diagnostic and return the results (no side effects)."""
     kept, latest, problem = post_mortem.latest()
@@ -1139,6 +1195,8 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             f"{kept} kept; latest {escape_nonprintable(str(latest))}" if latest else "none"
         ),
     )]
+
+    checks.append(lifecycle_locks_check())
 
     installed = _docker_installed()
     checks.append(
@@ -1260,6 +1318,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
             sops_check = _sops_age_key_check(config, root)
             if sops_check is not None:
                 checks.append(sops_check)
+            checks.append(_opencode_credentials_check(root))
 
             try:
                 assignments = load_zone_assignments(config)

@@ -30,6 +30,7 @@ from djinn_in_a_box.config.ssh import HostctlConfig, HostctlHost, duration_minut
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME
 from djinn_in_a_box.core import post_mortem
 from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+from djinn_in_a_box.core.lock_holders import describe_holders
 
 if TYPE_CHECKING:
     from djinn_in_a_box.core.docker import RunResult
@@ -89,15 +90,25 @@ def control_guard() -> Iterator[None]:
                 if deadline is None:
                     deadline = time.monotonic() + 15
                 if time.monotonic() >= deadline:
-                    raise HostctlError(
-                        "host control is busy; retry after the transition completes"
-                    ) from None
+                    message = "host control is busy; retry after the transition completes"
+                    holder = describe_holders(root / "control.lock")
+                    raise HostctlError(f"{message}; {holder}" if holder else message) from None
                 time.sleep(0.05)
         _held.active = True
+        _held.descriptor = fd
         yield
     finally:
         _held.active = False
+        _held.descriptor = None
         os.close(fd)
+
+
+def held_control_descriptor() -> int:
+    """Return this thread's held control fd without opening or acquiring anything."""
+    descriptor = getattr(_held, "descriptor", None)
+    if descriptor is None:
+        raise HostctlError("no host control lock is held by this thread")
+    return descriptor
 
 
 def command(*args: str, timeout: float = 5) -> str:

@@ -6,10 +6,13 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "output-lib.sh"
@@ -327,6 +330,13 @@ def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
     jq = shutil.which("jq")
     assert zsh is not None
     assert jq is not None
+    assert tmp_path.resolve().is_relative_to(Path("/tmp"))
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "opencode").symlink_to(ROOT / "tests" / "fake_opencode.py")
+    database = tmp_path / ".local/share/opencode/opencode.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
 
     mcp_config = tmp_path / "mcp-servers.json"
     mcp_config.write_text("{}", encoding="utf-8")
@@ -365,7 +375,11 @@ def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
         "SETTINGS_COPY_HELPER": str(ROOT / "scripts" / "settings-copy.py"),
         "CODEX_DAEMON_POLICY_HELPER": str(ROOT / "scripts" / "codex-daemon-policy.py"),
         "OWNERSHIP_REPAIR_HELPER": str(ROOT / "scripts" / "ownership-repair.py"),
-        "OPENCODE_CREDENTIALS_HELPER": str(ROOT / "scripts" / "opencode-credentials.sh"),
+        "OPENCODE_CREDENTIALS_HELPER": str(
+            ROOT / "src/djinn_in_a_box/core/opencode_credentials.py"
+        ),
+        "FAKE_OPENCODE_STATE": str(database),
+        "FAKE_OPENCODE_LOG": str(tmp_path / "fake-opencode.log"),
         "WORKFLOW_PUBLISHER": str(
             ROOT / "src" / "djinn_in_a_box" / "core" / "workflow_publisher.py"
         ),
@@ -376,16 +390,75 @@ def _entrypoint_environment(tmp_path: Path) -> dict[str, str]:
         "NO_COLOR": "1",
         "ENABLE_FIREWALL": "false",
         "DOCKER_DIRECT": "false",
-        "PATH": f"{Path(jq).parent}:{os.environ['PATH']}",
+        "PATH": f"{bin_dir}:{Path(jq).parent}:{os.environ['PATH']}",
     }
     env.pop("DOCKER_HOST", None)
     env.pop("DJINN_FORCE_UI_COLOR", None)
+    for key in tuple(env):
+        if key in ("OPENCODE_DB", "XDG_DATA_HOME") or (
+            key.startswith("FAKE_") and key not in ("FAKE_OPENCODE_STATE", "FAKE_OPENCODE_LOG")
+        ):
+            env.pop(key)
 
     env["TMPDIR"] = str(tmp_path)
     env["DJINN_DECLARED_VOLUME_TARGETS"] = "[]"
     env["DJINN_GIT_MANIFEST"] = ""
     env["DJINN_DETACHED"] = ""
     return env
+
+
+@pytest.mark.parametrize("kind", ("valid", "symlink", "invalid"))
+def test_entrypoint_credential_start_import_refusal_and_warning(tmp_path: Path, kind: str) -> None:
+    env = _entrypoint_environment(tmp_path)
+    carrier = tmp_path / ".opencode/credentials.json"
+    value = secrets.token_hex(32)
+    entry = {
+        "id": "provider-account",
+        "integrationID": "provider",
+        "label": "account",
+        "active": False,
+        "value": {"type": "key", "key": value},
+    }
+    if kind == "valid":
+        carrier.write_text(json.dumps([entry]))
+    elif kind == "symlink":
+        outside = tmp_path / "outside.json"
+        outside.write_text(json.dumps([entry]))
+        carrier.symlink_to(outside)
+    else:
+        carrier.write_text("invalid JSON")
+    ready = tmp_path / "shell-ran"
+    result = subprocess.run(
+        ["/bin/zsh", str(ROOT / "scripts/entrypoint.sh"), "-c", f"touch {shlex.quote(str(ready))}"],
+        env=env,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        timeout=20,
+        text=True,
+        check=False,
+    )
+    assert all(value not in stream for stream in (result.stdout, result.stderr)), (
+        "credential leaked"
+    )
+    assert result.stdout == ""
+    assert result.returncode == (1 if kind == "symlink" else 0), result.stderr
+    assert ready.exists() is (kind != "symlink")
+    if kind == "valid":
+        stored = json.loads(Path(env["FAKE_OPENCODE_STATE"]).read_text())["entries"]
+        assert len(stored) == 1
+        assert stored[0]["id"] == entry["id"]
+        assert all(stored[0]["value"].get(k) == v for k, v in entry["value"].items()), (
+            "credential import differed"
+        )
+        assert "[info] sync start:" in result.stderr
+    elif kind == "symlink":
+        assert "[err] OpenCode credential sync refused:" in result.stderr
+        assert "refused: entry is a symlink" in result.stderr
+    else:
+        assert "[warn] OpenCode credential sync failed" in result.stderr
+        assert "invalid JSON" in result.stderr
+        assert "[err] OpenCode credential" not in result.stderr
 
 
 def test_entrypoint_security_section_uses_plain_ascii_markers(tmp_path: Path) -> None:

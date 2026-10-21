@@ -105,6 +105,7 @@ is unsealed. Agent mode contributes no Docker cause only after the same-generati
 verification described below. Prefer no Docker access when unnecessary.
 
 The temporary audit assistant holds host Docker authority and shares `djinn-network`.
+The audit agent is trusted at the level of the Docker socket and the read-write `~/.djinn` mount; the audit-session design protects Djinn's own flows, not against the agent.
 
 `build.network = "host"` shares the host network namespace for image `RUN`
 steps, including access to loopback-only host services. It applies to the whole
@@ -740,6 +741,35 @@ cannot read files or run commands, so content reaches it only through the
 prompt. This rests on Claude Code's own flags, measured with Claude Code
 2.1.304; a later release can change them, so the re-probe runs after every
 Claude Code version bump.
+
+OpenCode logins exist in cleartext only in the OpenCode databases,
+`credentials.json` with its conflict copies and their private backup, and the
+audit sessions. `credentials.removed.json` holds IDs only. `opencode auth export`
+prints secrets; Djinn reads it only through a pipe or a private 0600 file, never
+into logs or command lines.
+
+A restore passes its held lifecycle lock descriptors to every destructive child,
+so its exclusion lasts as long as its last writer. Refusals and `djinn doctor`
+name the holder and explain how to wait or stop that process. If the Docker
+client is also killed, a volume-restore container can keep writing the volume
+on the daemon side after those locks close; it does not write the carrier.
+
+OpenCode credential residual risks:
+
+- A token refresh by a running OpenCode in the few hundred milliseconds between
+  Djinn's last read and its update of the same ID can be lost.
+- A mirror that does not create conflict copies can replace a concurrent file
+  version; logins still in a database are published again.
+- A restored `credentials.removed.json` from before a later logout everywhere can
+  make that login reappear.
+- Two values of one ID without an OAuth expiry difference, including MCP logins
+  with `expires: 0`, are decided by a fixed order, not by intent.
+- Host and container share the carrier lock on native Linux only; under Docker
+  Desktop a host-side and a container-side writer may not exclude each other.
+- If the export fails during `clean`, logins that exist only in the volume's
+  database are not logged out; Djinn warns.
+- An unknown OpenCode value format stops the sync safely until Djinn supports
+  it.
 
 `--firewall` is a container-side IPv4 outbound allowlist, not an exfiltration
 guarantee. Dev has `sudo` and `NET_ADMIN` and can change it. Rules allow DNS,

@@ -11,8 +11,10 @@ the registry's `sha512` integrity before extracting the same version.
 The host carrier `<config-root>/opencode/` is mounted at `~/.opencode/`.
 It persists exactly `opencode.json`, `cli.json` and `themes/<name>.json`, with
 non-empty UTF-8 theme names that do not start with `.` and no nested theme directories.
-Each file must be regular and at most 1 MiB. Credentials use separate stores;
-plugins, commands and agents belong to the workflow seed.
+Each file must be regular and at most 1 MiB. Logins live in OpenCode's database
+and are mirrored to `credentials.json` and `credentials.removed.json` in the same
+carrier (see [OpenCode logins](../README.md#opencode-logins)); plugins, commands
+and agents belong to the workflow seed.
 
 At startup, before workflow publication and MCP registration, Djinn checks the
 runtime root and its existing allowlisted entries, then atomically copies the
@@ -113,8 +115,10 @@ removed; SSE entries warn and lose their earlier managed registration.
 OpenCode uses Streamable HTTP.
 
 Audit launches `opencode --standalone --prompt <prompt>` in a fresh home, with v2
-`permissions` asking before `edit` and `shell`. It imports credentials only;
-the personal carrier and workflow are not imported.
+`permissions` asking before `edit` and `shell`. It seeds a private session
+directory from the config root. At the end Djinn merges new logins and token
+refreshes back by union, and an audit never logs out anywhere; the personal
+carrier and workflow are not imported.
 
 References: [v2 configuration](https://opencode.ai/v2/docs/config),
 [v2 CLI settings](https://opencode.ai/v2/docs/cli/config),

@@ -23,6 +23,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- An OpenCode `djinn audit` started while a lifecycle command runs is refused
+  after at most 15 s, naming the holding process; recovering old audit sessions
+  can additionally wait up to 30 s for the carrier (#162).
 - Raise the default OpenCode version to 2.1.1; a fresh build with the previous
   default 2.0.26 failed in OpenCode's npm postinstall. Maintainers now build
   once with the defaults alone after any default bump (#176).
@@ -34,6 +37,14 @@ Versioning before and after the first stable release.
   warns about runtime drift after a successful canonical sync (#166).
 - Check every delivery target before preflight changes workflow content, and
   print canonical auto-sync counts even when a later step refuses (#166).
+- Serialize `djinn clean volumes` with restore, backup, clean all, and dev
+  start/stop; a concurrent run fails after at most 15 s with "host control is busy",
+  naming the holding process.
+- Persist and sync OpenCode 2 logins, including MCP OAuth, through
+  `credentials.json` in the config root; audits import them and merge refreshes
+  back, global logout refuses while an audit runs, and deleting or restoring
+  the OpenCode data volume exports them first
+  (#162).
 - Require `DJINN_LIVE_DOCKER=1` before probing or running live Docker overlay
   tests; CI opts in on its test step.
 - Persist OpenCode `opencode.json`, `cli.json` and custom themes through the
@@ -169,6 +180,8 @@ Versioning before and after the first stable release.
 ### Removed
 
 - Docker socket proxy service, Compose file and `djinn logs proxy` command.
+- The `auth.json`/`mcp-auth.json` symlink bridge for OpenCode; remove those
+  config-root files by hand (#162).
 
 ### Added
 

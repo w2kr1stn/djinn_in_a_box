@@ -38,13 +38,23 @@ def _returns[T](value: T) -> Callable[..., T]:
 
 
 @pytest.fixture(autouse=True)
-def _ready_session_workflow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _ready_session_workflow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_home: Path
+) -> None:
+    from djinn_in_a_box.core.desktop import DesktopInspection
+
     # These older doctor tests isolate other rows; runtime behavior has its own fake-Docker tests.
     monkeypatch.setattr(
         doctor_mod, "_opencode_runtime_check",
         lambda config, *, daemon: doctor_mod.Check(
             "OpenCode runtime", doctor_mod.Status.WARN, "check unavailable"
         ),
+    )
+    monkeypatch.setattr(doctor_mod, "_docker_installed", lambda: False)
+    monkeypatch.setattr(
+        doctor_mod.docker_core,
+        "inspect_running_desktop",
+        lambda: DesktopInspection(channels=(), raw_sources=(), raw_verified=True),
     )
     monkeypatch.setattr(session_mod, "load_config", lambda: object())
     monkeypatch.setattr(
@@ -67,6 +77,7 @@ def _quiet_doctor_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor_mod, "buildx_ok", lambda: True)
     monkeypatch.setattr(doctor_mod, "_image_built", lambda: True)
     monkeypatch.setattr(doctor_mod, "network_exists", network_exists)
+    monkeypatch.setattr(doctor_mod, "agent_docker_checks", lambda **kwargs: [])
 
 
 def _check_named(checks: list[doctor_mod.Check], name: str) -> doctor_mod.Check:
