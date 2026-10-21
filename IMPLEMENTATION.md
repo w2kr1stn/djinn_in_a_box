@@ -2518,7 +2518,8 @@ djinn start
   v
 entrypoint.sh
   |
-  +-- optional pre-seed firewall initialization
+  +-- optional pre-seed firewall initialization (djinn run --allow: the root wrapper
+      applied and locked the rules before this entrypoint; it only checks the lock)
   +-- repair writable volume ownership
   +-- Seed & Config: merge Claude settings and publish the OpenCode workflow
       from the read-only canonical mount

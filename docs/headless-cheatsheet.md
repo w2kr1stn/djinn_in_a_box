@@ -120,6 +120,9 @@ djinn run claude "Debug this Dockerfile" --docker-direct
 # Enable the outbound firewall
 djinn run claude "Audit network usage" --firewall
 
+# Allow only the model provider for this run (replaces the firewall list)
+djinn run claude "Summarize the notes" --mount ~/notes:/home/dev/notes:ro --allow api.anthropic.com:443 --allow platform.claude.com:443
+
 # Show configured agents
 djinn agents
 ```
@@ -144,6 +147,7 @@ with the agent's return code.
 | `--docker`, `-d` | Enable the rootless companion daemon. |
 | `--docker-direct` | Enable direct host Docker socket access. |
 | `--firewall`, `-f` | Enable the outbound firewall inside the container. |
+| `--allow <entry>` | Repeatable. Allow outbound traffic only to this name, address or network (`:PORT` = TCP port only); replaces the `--firewall` list for this run. |
 | `--timeout <sec>`, `-t <sec>` | Timeout for the headless container run. |
 
 `--docker` and `--docker-direct` are mutually exclusive.

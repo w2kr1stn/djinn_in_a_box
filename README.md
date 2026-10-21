@@ -1002,6 +1002,68 @@ like) are deliberately absent; add the ones you actually use.
 See [outbound traffic limits](SECURITY-MODEL.md#credentials-backups-and-outbound-traffic)
 before using the firewall with sensitive data.
 
+### Per-run allowlist: `djinn run --allow`
+
+`djinn run … --allow ENTRY` turns the firewall on for that one run and replaces
+the fixed list with exactly the entries you give. Repeat `--allow` for each
+destination. It works only with `djinn run` and cannot be combined with
+`--docker` or `--docker-direct`.
+
+An entry is a name, an IPv4 address or an IPv4 network, each with an optional
+port: `NAME[:PORT]`, `ADDRESS[:PORT]` or `ADDRESS/PREFIX[:PORT]` (prefix 8–32,
+no host bits set). With a port, only TCP to that port is allowed; without one,
+every protocol and port to that destination.
+
+- A name is resolved once on the host before the run starts, and every address
+  it returns must be public. The run has no DNS: each name is written into the
+  container's hosts file with exactly those addresses, and any other name fails
+  to resolve. Most clients fail at once; OpenCode's runtime keeps retrying until
+  its resolver times out.
+- Private and tailnet ranges are reachable only when you list the address or
+  network itself, never through a name.
+- Refused entries: wildcards, empty entries, IPv6, URLs, unusual address
+  spellings such as `0x08080808`, networks that overlap `0.0.0.0/8`,
+  `127.0.0.0/8`, `169.254.0.0/16`, `224.0.0.0/4` or `240.0.0.0/4`, and names the
+  container maps itself (`localhost`, `host.docker.internal`, `djinn`).
+- Everything else is refused immediately, including the Docker networks, the
+  fixed list and IPv6.
+
+The rules are set by a root step before any agent code runs. After that step no
+process in the run, root through `sudo` included, can change the rules or open
+raw sockets. For the same reason an allowlist run refuses environment variables
+that hook into program start-up (`LD_*`, `BASH_ENV` and similar), mounts over
+system paths (`/`, `/bin`, `/sbin`, `/usr`, `/etc`, `/lib`, `/lib64`, `/run`) and
+mounts exactly at `/home` or `/home/dev`, and it gets no desktop relays.
+
+You can check what was applied. Before the start, `djinn run` prints
+`Firewall  Allowlist (N destinations)` and one `Egress` line per entry with the
+destinations it became. Inside the run, the rules are read back from the kernel
+and printed on stderr, one line per destination, followed by the lock line:
+
+```text
+djinn-egress: allow 203.0.113.10/32 tcp/443
+djinn-egress: locked 1
+```
+
+Djinn's block comes first. A run is locked only when the block ends with
+`djinn-egress: locked N`; later lines with the same prefix come from the run
+itself.
+
+Hosts the bundled CLIs contact (Claude Code 2.1.304, Codex 0.163.0,
+OpenCode 2.1.1):
+
+| CLI | Allow |
+|-----|-------|
+| Claude Code (subscription) | `api.anthropic.com:443`, `platform.claude.com:443` (token refresh) |
+| Codex | `api.openai.com:443` with an API key, or `chatgpt.com:443` with a ChatGPT login; `auth.openai.com:443` (token refresh) |
+| OpenCode | `opencode.ai:443` (its own service, needed at start), plus the API host of any other provider you configured, for example `api.anthropic.com:443` |
+
+With a cold tools cache, an allowlist run can take about three minutes longer to
+start, because the optional tool installers fail one after another; a warm cache
+avoids this. A firewall on the host can restrict private or tailnet destinations
+further: the allowlist only opens what the host lets through. If a listed
+destination is unreachable, compare the `djinn-egress:` lines with the error.
+
 ## Remote Agent Servers
 
 `djinn serve <claude|opencode ...>` starts the selected agent server modes
