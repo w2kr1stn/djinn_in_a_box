@@ -1598,6 +1598,38 @@ creator flock, which protects lengthy preparation. Enrollment runs in the
 host_runtime detached observer, outside the control lock; each publication
 rechecks helper identity and window generation.
 
+A busy control lock skips observation publication for that round while dev and
+companion checks continue. Three consecutive skipped rounds queue one
+`observation-skipped` note; publication catches up when the lock is free. Every
+closure path ends with the pinned helper stopped, including errors before
+admission and cancellation. Closure tries the control lock without waiting for
+at most two seconds, then uses an unlocked fallback. Both paths inspect with
+positive `No such container` absence semantics, confirm the launch ID and
+generation immediately before stopping that ID, and share `stop_and_verify`.
+A different helper is preserved. Failed or unknown outcomes retry with a
+0.5-second backoff doubling to five seconds, with one retry log line per minute.
+SIGTERM, SIGINT and SIGHUP ignore all three signals before raising the interrupt;
+closure subprocesses have timeouts because they inherit ignored signals.
+The PID-1 timer stays the outer bound.
+
+Verified closure journals `relay-closed` under the guard or when the helper is
+already absent, stopped or replaced; `relay-closed-unlocked` records a verified
+fallback stop. Under the control guard, verified closure also reconciles the pinned
+stopped helper's expiry logs; reconciliation may wait on its journal after the
+stop. Reconciliation errors log once and preserve the verified outcome without
+retrying the stop. Each failed attempt journals
+`relay-close-failed` with generation, helper ID, attempt number and fixed reason
+`inspection-unknown` or `stop-unverified`. Observer writes for skipped publications
+and closure outcomes use `journal(wait=0.5)`;
+busy or failed writes retain events in memory while stop attempts continue.
+After verified closure the retained events retry for at most 60 seconds, then
+a warning ends publication retries. Other journal callers keep blocking
+acquisition. Outcome publication precedes teardown diagnostics. Doctor reads a
+bounded 64 KiB journal tail before checking the daemon or snapshot and reports
+an unmatched failed closure as FAIL (unverifiable without Docker). A later
+verified outcome, newer generation, or positive live evidence of closure clears
+it; pre-stop intents do not.
+
 PID 1 persists generation, boot ID, UTC deadline and CLOCK_BOOTTIME deadline in
 the state volume and polls every 250 ms.
 The exec updater communicates over a helper-private Unix socket, atomically

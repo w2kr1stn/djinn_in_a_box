@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -210,6 +211,16 @@ def _isolate_agent_versions(monkeypatch, tmp_path):
     from djinn_in_a_box.core import paths
 
     monkeypatch.setattr(paths, "AGENT_VERSIONS_FILE", tmp_path / "host-config/agent-versions.toml")
+
+
+@pytest.fixture(autouse=True)
+def _restore_signal_dispositions():
+    """In-process observer runs ignore termination signals; later children would inherit it."""
+    signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    saved = {signum: signal.getsignal(signum) for signum in signals}
+    yield
+    for signum, handler in saved.items():
+        signal.signal(signum, handler)
 
 
 @pytest.fixture(autouse=True)

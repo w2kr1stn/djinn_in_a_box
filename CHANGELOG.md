@@ -40,6 +40,10 @@ Versioning before and after the first stable release.
   post-mortem records and a dev-visible `observer-exit` file. Doctor fails when
   the attached running dev loses its observer or filter, and warns after rebinds
   (#199).
+- Hostctl observation publication survives a busy control lock; every observer
+  closure verifies the pinned helper stopped, with an ID-bound fallback and
+  retries when the lock or daemon is unavailable. Doctor reports pending helper
+  closures from the host journal, including when Docker is unreachable (#199).
 - An OpenCode `djinn audit` started while a lifecycle command runs is refused
   after at most 15 s, naming the holding process; recovering old audit sessions
   can additionally wait up to 30 s for the carrier (#162).

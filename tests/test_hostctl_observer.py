@@ -121,7 +121,7 @@ sys.exit(1)
         "Config": {"Labels": {hostctl.GENERATION_LABEL: "generation-a"}},
     }
     hostctl.save_private("opening.json", {"generation": "generation-a", "dev_id": "expected-dev"})
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda: helper)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: helper)
     monkeypatch.setattr(hostctl, "node_status", lambda *a: {"BackendState": "NeedsLogin"})
     monkeypatch.setattr(hostctl, "reconcile", lambda *a: None)
     monkeypatch.setattr(host_runtime.signal, "signal", lambda *a: None)
@@ -146,7 +146,7 @@ sys.exit(1)
         events.append(event)
 
     def mark(*args, **kwargs):
-        assert events == ["stop", "external-dev-teardown"]
+        assert events == ["stop", "external-dev-teardown", "relay-closed"]
         assert kwargs == {"blocking": False, "root": records_root}
         assert not getattr(hostctl._held, "active", False)
         with hostctl.control_guard():
@@ -154,7 +154,7 @@ sys.exit(1)
         events.append("marker")
 
     def record(trigger, **kwargs):
-        assert events == ["stop", "external-dev-teardown", "marker"]
+        assert events == ["stop", "external-dev-teardown", "relay-closed", "marker"]
         assert not getattr(hostctl._held, "active", False)
         with hostctl.control_guard():
             pass
@@ -175,7 +175,7 @@ sys.exit(1)
     monkeypatch.setattr(post_mortem, "mark_terminated", mark)
     monkeypatch.setattr(post_mortem, "record", record)
     host_runtime.observe_hostctl("helper-id", "generation-a", str(binary), records_root)
-    assert events == ["stop", "external-dev-teardown", "marker", "record"]
+    assert events == ["stop", "external-dev-teardown", "relay-closed", "marker", "record"]
     assert "external-dev-teardown" in (hostctl.state_root() / "journal.jsonl").read_text()
     captured = capsys.readouterr()
     assert "recorder unavailable" not in captured.out + captured.err
@@ -231,7 +231,7 @@ def test_hostctl_other_closures_use_launcher_root(tmp_path, monkeypatch, closure
     }
     monkeypatch.setattr(hostctl, "HELPER_NAME", "helper-a")
     monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", "/isolated/docker")
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda: value)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: value)
     monkeypatch.setattr(hostctl, "reconcile", lambda *a: None)
     monkeypatch.setattr(host_runtime.signal, "signal", lambda *a: None)
     monkeypatch.setattr(host_runtime.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(

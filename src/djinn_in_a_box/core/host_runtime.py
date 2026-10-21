@@ -1305,28 +1305,134 @@ def start_hostctl_observer(helper_id: str, generation: str, docker_path: str) ->
 def observe_hostctl(
     helper_id: str, generation: str, docker_path: str, records_root: Path | None = None,
 ) -> None:
-    """Enroll and report; helper PID 1 remains the only expiry timer."""
+    """Enroll and report; every exit verifies closure of this ID and generation."""
     from djinn_in_a_box.core import hostctl
 
     if not Path(docker_path).is_absolute():
         raise GitSSHError("observer requires a pinned absolute Docker executable")
     hostctl.DOCKER_EXECUTABLE = docker_path
     hostctl.HELPER_NAME = helper_id
-    root = hostctl.state_root()
     enrollment = None
     dev_id = None
     admitted = False
     agent_evidence = None
     trust = None
-    opening = json.loads((root / "opening.json").read_text())
-    dev_id = opening.get("dev_id")
+    skipped = 0
+    pending: list[tuple[str, dict[str, Any]]] = []
+    external_teardown = False
+    teardown = None
+
+    def log(message: str) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        warning(f"{stamp} {message}")
+
+    def ignore_signals() -> None:
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
 
     def cancelled(_signum: int, _frame: FrameType | None) -> None:
+        ignore_signals()
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGTERM, cancelled)
-    signal.signal(signal.SIGINT, cancelled)
+    def publish_pending(*, until: float | None = None) -> None:
+        while pending:
+            wait = 0.5 if until is None else min(0.5, until - time.monotonic())
+            if wait <= 0:
+                break
+            event, fields = pending[0]
+            try:
+                if hostctl.journal(event, wait=wait, **fields) is False:
+                    break
+            except (ValueError, OSError, RuntimeError, subprocess.SubprocessError):
+                break
+            pending.pop(0)
+
+    def close_helper() -> None:
+        ignore_signals()
+        # Closure children inherit SIG_IGN. Inspect/stop commands all have timeouts
+        # (subprocess.run kills on expiry), so they never depend on terminate().
+        deadline = time.monotonic() + 2
+        attempt = 0
+        delay = 0.5
+        logged = float("-inf")
+        with hostctl.teardown_markers(root=records_root):
+            while True:
+                guarded = False
+                stopped = False
+                reason = "inspection-unknown"
+                try:
+                    with contextlib.ExitStack() as stack:
+                        try:
+                            stack.enter_context(hostctl.control_guard(timeout=0))
+                            guarded = True
+                        except (hostctl.HostctlError, OSError):
+                            remaining = deadline - time.monotonic()
+                            if remaining > 0:
+                                time.sleep(min(0.1, remaining))
+                                continue
+                        fresh = hostctl.inspect_helper(strict=True)
+                        if (
+                            fresh is not None
+                            and fresh["Id"] == helper_id
+                            and hostctl.generation(fresh) == generation
+                            and fresh["State"]["Running"]
+                        ):
+                            reason = "stop-unverified"
+                            started_at = str(fresh["State"].get("StartedAt", ""))
+                            try:
+                                fresh = hostctl.stop_and_verify(helper_id, generation, strict=True)
+                            finally:
+                                if guarded and started_at:
+                                    with contextlib.suppress(Exception):
+                                        hostctl._helper_marker(  # pyright: ignore[reportPrivateUsage]
+                                            helper_id, started_at,
+                                        )
+                            stopped = True
+                        if (
+                            guarded and fresh is not None
+                            and fresh["Id"] == helper_id
+                            and hostctl.generation(fresh) == generation
+                        ):
+                            # Reconciliation may wait on its journal only after verified closure.
+                            try:
+                                hostctl.reconcile(fresh)
+                            except BaseException:
+                                log("Hostctl expiry reconciliation failed after verified closure")
+                    event = (
+                        "relay-closed" if guarded or not stopped else "relay-closed-unlocked"
+                    )
+                    pending.append((event, {"generation": generation, "helper_id": helper_id}))
+                    break
+                except Exception:
+                    attempt += 1
+                    pending.append(("relay-close-failed", {
+                        "generation": generation, "helper_id": helper_id,
+                        "attempt": attempt, "reason": reason,
+                    }))
+                publish_pending()
+                if time.monotonic() - logged >= 60:
+                    log("Hostctl closure pending; retrying the pinned helper stop")
+                    logged = time.monotonic()
+                time.sleep(delay)
+                delay = min(delay * 2, 5)
+            until = time.monotonic() + 60
+            while pending:
+                publish_pending(until=until)
+                if not pending:
+                    break
+                remaining = until - time.monotonic()
+                if remaining <= 0:
+                    log("Hostctl helper closed; closure journal publication timed out")
+                    break
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 5)
+
     try:
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(signum, cancelled)
+        root = hostctl.state_root()
+        opening = json.loads((root / "opening.json").read_text())
+        dev_id = opening.get("dev_id")
         while True:
             helper = hostctl.inspect_helper()
             if (
@@ -1336,10 +1442,6 @@ def observe_hostctl(
             ):
                 return
             if not helper["State"]["Running"]:
-                with hostctl.control_guard():
-                    fresh = hostctl.inspect_helper()
-                    if fresh and fresh["Id"] == helper_id:
-                        hostctl.reconcile(fresh)
                 return
             observation = {
                 "generation": generation,
@@ -1412,67 +1514,68 @@ def observe_hostctl(
                     and enrollment.poll() == 0
                     and node.get("BackendState") == "Running"
                 ):
-                    with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
-                        fresh = hostctl.inspect_helper()
-                        if (
-                            fresh
-                            and fresh["Id"] == helper_id
-                            and hostctl.generation(fresh) == generation
-                        ):
-                            hostctl.control_journal(
-                                "relay-refused", generation=generation, reason=str(exc)
-                            )
-                            hostctl.stop_helper_locked()
+                    pending.append(("relay-refused", {
+                        "generation": generation, "reason": str(exc),
+                    }))
                     return
             actual = inspect_dev("djinn", docker_path)
             # A no-dev window admits a new dev only through the guarded creator.
             if actual and actual[1] and dev_id is None:
                 raise GitSSHError("unassessed dev appeared during open window")
             if dev_id is not None and (actual is None or not actual[1] or actual[0] != dev_id):
-                with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
-                    fresh = hostctl.inspect_helper()
-                    if fresh and fresh["Id"] == helper_id:
-                        hostctl.stop_helper_locked()
-                        hostctl.journal("external-dev-teardown", generation=generation)
-                with contextlib.suppress(Exception):
-                    post_mortem.record(
-                        "hostctl-teardown", docker_path=docker_path,
-                        candidates=[post_mortem.Candidate(dev_id, True, dev_id)],
-                        observed={
-                            "state": (
-                                "absent" if actual is None
-                                else "replaced" if actual[0] != dev_id else "stopped"
-                            ),
-                            "expected_id": dev_id,
-                            "actual_id": actual[0] if actual else None,
-                        },
-                        hostctl_generation=generation, root=records_root,
-                    )
+                pending.append(("external-dev-teardown", {"generation": generation}))
+                teardown = actual
+                external_teardown = True
                 return
             if admitted and not opening.get("creator"):
                 hostctl.verify_agent(dev_id, agent_evidence)
             temporary = root / f"observation-{generation}.tmp"
             temporary.write_text(json.dumps(observation))
             temporary.chmod(0o600)
-            with hostctl.control_guard():
-                fresh = hostctl.inspect_helper()
-                if (
-                    fresh is None
-                    or fresh["Id"] != helper_id
-                    or hostctl.generation(fresh) != generation
-                    or not fresh["State"]["Running"]
-                ):
-                    temporary.unlink(missing_ok=True)
-                    return
-                temporary.replace(root / "observation.json")
+            try:
+                with hostctl.control_guard(timeout=0):
+                    fresh = hostctl.inspect_helper()
+                    if (
+                        fresh is None
+                        or fresh["Id"] != helper_id
+                        or hostctl.generation(fresh) != generation
+                        or not fresh["State"]["Running"]
+                    ):
+                        temporary.unlink(missing_ok=True)
+                        return
+                    temporary.replace(root / "observation.json")
+                skipped = 0
+            except hostctl.HostctlBusy:
+                temporary.unlink(missing_ok=True)
+                skipped += 1
+                if skipped == 3:
+                    pending.append(("observation-skipped", {"generation": generation}))
+            publish_pending()
             time.sleep(0.5)
-    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        warning(f"Hostctl observation gap: {exc}")
-        with hostctl.teardown_markers(root=records_root), hostctl.control_guard():
-            fresh = hostctl.inspect_helper()
-            if fresh and fresh["Id"] == helper_id:
-                hostctl.stop_helper_locked()
+    except BaseException as exc:
+        log(f"Hostctl observation gap: {exc}")
+        if not isinstance(
+            exc, (KeyboardInterrupt, ValueError, OSError, RuntimeError, subprocess.SubprocessError),
+        ):
+            raise
     finally:
+        close_helper()
+        if external_teardown:
+            with contextlib.suppress(Exception):
+                post_mortem.record(
+                    "hostctl-teardown", docker_path=docker_path,
+                    candidates=[post_mortem.Candidate(dev_id, True, dev_id)]
+                    if dev_id else [],
+                    observed={
+                        "state": (
+                            "absent" if teardown is None
+                            else "replaced" if teardown[0] != dev_id else "stopped"
+                        ),
+                        "expected_id": dev_id,
+                        "actual_id": teardown[0] if teardown else None,
+                    },
+                    hostctl_generation=generation, root=records_root,
+                )
         if enrollment is not None and enrollment.poll() is None:
             enrollment.terminate()
             try:

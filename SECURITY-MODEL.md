@@ -546,12 +546,38 @@ cannot reopen a generation. Host observer loss does not remove this timer.
 `limit` resets the remaining duration through private, generation-checked IPC;
 it cannot resurrect an expired or closed window.
 
+The hostctl observer rechecks dev and companion evidence each round. A busy
+host control lock skips only that round's observation publication; checks keep
+running, and publication catches up after release. Several consecutive skips
+produce an `observation-skipped` journal note. Every closure path ends with the
+pinned helper stopped, also without the control lock: after at most two seconds
+of non-waiting lock attempts, the observer confirms the launch ID and generation
+again and stops exactly that ID. An inspection error remains unknown unless the
+engine positively reports `No such container`. Failed stops retry with backoff
+until closure is verified; cancellation ignores further termination signals
+before closure begins. The PID-1 timer stays the outer bound.
+
 The owner-only host journal is
 `$XDG_STATE_HOME/djinn/hostctl/journal.jsonl`, using `~/.local/state` when
 `XDG_STATE_HOME` is unset; an empty value refuses. It stays outside public SSH
 delivery and records on/off/limit attempts and outcomes, overrides, readiness
 and observed helper expiry, with rotation. Admission requires successful journal
-writes; a later host journal failure requests closure. New journal entries group
+writes; a later journal failure in admission or control operations requests
+helper closure. The observer's journal writes for skipped publications and closure
+outcomes wait at most half a second for the separate journal lock, retaining
+unwritten events for retry without delaying helper stop attempts. Guarded closure
+reconciles the stopped helper's expiry logs; this may wait on the journal after
+the stop is verified. Reconciliation errors are logged without retrying the stop.
+After verified closure, publication retries for at most 60 seconds,
+then records a warning in the observer log. `relay-closed` records verified
+closure under the control lock, or an already absent, stopped or replaced helper;
+`relay-closed-unlocked` records a verified fallback stop. `relay-close-failed`
+records each failed attempt with generation, helper ID, attempt number and a
+fixed reason (`inspection-unknown` or `stop-unverified`). Doctor reads a bounded
+journal tail even without the daemon or a status snapshot. An unmatched failure
+is a closure-pending FAIL until a verified outcome, a newer generation, or a
+live inspection proving that generation closed; unavailable Docker makes it
+unverifiable. New journal entries group
 bind-related causes and unknowns, including reasons built from them; standalone
 findings and existing entries are unchanged. Helper Docker logs
 (`docker logs djinn-hostctl`, rotated at 10 MB with three files) record connection

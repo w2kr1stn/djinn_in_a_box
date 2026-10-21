@@ -182,7 +182,11 @@ def test_readiness_journal_before_admission(tmp_path, monkeypatch):
     monkeypatch.setattr(host_runtime, "runtime_root", lambda: tmp_path)
     monkeypatch.setattr(host_runtime, "read_state", lambda root: None)
     monkeypatch.setattr(hostctl, "save_private", lambda *a: calls.append("snapshot"))
-    monkeypatch.setattr(hostctl, "journal", lambda *a, **k: calls.append("journal"))
+    def journal(*args, **kwargs):
+        assert "wait" not in kwargs
+        calls.append("journal")
+
+    monkeypatch.setattr(hostctl, "journal", journal)
 
     def command(*args):
         calls.append("admit")
@@ -320,7 +324,7 @@ def observer_setup(tmp_path, monkeypatch):
         )
         monkeypatch.setattr(hostctl, "HELPER_NAME", "helper-a")
         monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", "/bin/docker")
-        monkeypatch.setattr(hostctl, "inspect_helper", lambda: value)
+        monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: value)
         monkeypatch.setattr(hostctl, "node_status", lambda helper: status())
         monkeypatch.setattr(host_runtime, "inspect_dev", lambda *args: None)
 
@@ -335,12 +339,12 @@ def observer_setup(tmp_path, monkeypatch):
                 assert kwargs["stdin"] == subprocess.DEVNULL
             return Enrollment()
 
-        def stop() -> None:
+        def stop(*args, **kwargs):
             stopped.append("stop")
             value["State"]["Running"] = False
 
         monkeypatch.setattr(host_runtime.subprocess, "Popen", enroll)
-        monkeypatch.setattr(hostctl, "stop_helper_locked", stop)
+        monkeypatch.setattr(hostctl, "stop_and_verify", stop)
         return value, stopped
 
     return setup

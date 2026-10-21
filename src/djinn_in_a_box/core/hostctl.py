@@ -143,11 +143,23 @@ def generation(helper: dict[str, Any]) -> str:
     return str(helper["Config"]["Labels"][GENERATION_LABEL])
 
 
-def journal(event: str, **fields: Any) -> None:
+def journal(event: str, *, wait: float | None = None, **fields: Any) -> bool:
     root = state_root()
     fd = os.open(root / "journal.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if wait is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    time.sleep(min(0.05, remaining))
         path = root / "journal.jsonl"
         if path.exists() and path.stat().st_size >= JOURNAL_BYTES:
             for index in (2, 1):
@@ -165,6 +177,7 @@ def journal(event: str, **fields: Any) -> None:
                 stream.write(data + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            return True
         finally:
             os.close(out)
     finally:
@@ -684,6 +697,32 @@ def _record_stopped_helper(helper: dict[str, Any]) -> None:
             )
 
 
+def stop_and_verify(
+    identity: str, gen: str, *, strict: bool,
+) -> dict[str, Any] | None:
+    """Stop an inspected ID; None means it disappeared or was replaced after the stop."""
+    try:
+        command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        if not strict:
+            raise
+        # A timed-out stop may have taken effect. Only a verified outcome closes it.
+        current = inspect_helper(strict=True) if strict else inspect_helper()
+        if (
+            current is None or current["Id"] != identity or generation(current) != gen
+        ):
+            return None
+        if current["State"]["Running"]:
+            raise
+        return current
+    current = inspect_helper(strict=True) if strict else inspect_helper()
+    if current is None or current["Id"] != identity or generation(current) != gen:
+        return None
+    if current["State"]["Running"]:
+        raise HostctlError("Helper termination could not be verified")
+    return current
+
+
 def stop_helper_locked(*, remove: bool = False) -> None:
     helper = inspect_helper()
     if helper is None:
@@ -694,11 +733,12 @@ def stop_helper_locked(*, remove: bool = False) -> None:
     if was_running:
         started_at = str(helper["State"].get("StartedAt", ""))
         try:
-            command("stop", "-t", str(STOP_SECONDS), identity, timeout=STOP_SECONDS + 5)
+            current = stop_and_verify(identity, gen, strict=False)
         finally:
             if started_at:
                 _helper_marker(identity, started_at)
-    current = inspect_helper()
+    else:
+        current = inspect_helper()
     if current is None or current["Id"] != identity or generation(current) != gen:
         raise HostctlError("Helper changed during teardown; preserving resources")
     if current["State"]["Running"]:
