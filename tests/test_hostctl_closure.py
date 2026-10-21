@@ -1987,3 +1987,190 @@ def test_recovered_journal_allows_reconcile_and_clean(window, monkeypatch, wait,
             rows.append(row)
     assert sum(row["event"] == "expiry" and row["generation"] == "generation-a"
                for row in rows) == 1
+
+
+@pytest.mark.parametrize("outcome", [
+    "stopped", "found-stopped", "absent", "other-id", "other-generation", "vanished-after-stop",
+])
+@pytest.mark.parametrize(("unknown", "broken_log"), [
+    (False, False), (True, False), (True, True),
+], ids=["inspectable", "later-unknown", "unknown-and-log-error"])
+def test_guard_descriptor_close_preserves_verified_outcome(
+    window, monkeypatch, outcome, unknown, broken_log,
+):
+    import errno
+
+    original_close = hostctl.os.close
+    closure_fd = None
+    injected = False
+    extra_probes = []
+    vanished = False
+    foreign = copy.deepcopy(window.helper)
+    if outcome == "other-id":
+        foreign["Id"] = "helper-b"
+    elif outcome == "other-generation":
+        foreign["Config"]["Labels"][hostctl.GENERATION_LABEL] = "generation-b"
+
+    def inspect(*, strict=False):
+        nonlocal closure_fd
+        if injected:
+            extra_probes.append(strict)
+            if unknown:
+                raise host_runtime.GitSSHError("daemon unavailable after verified closure")
+        if strict:
+            closure_fd = hostctl.held_control_descriptor()
+            if outcome in ("found-stopped", "absent", "other-id", "other-generation"):
+                window.helper["State"]["Running"] = False
+            if outcome in ("other-id", "other-generation"):
+                return foreign
+            if outcome == "absent" or vanished:
+                return None
+        return window.inspect(strict=strict)
+
+    def command(*args, **kwargs):
+        nonlocal vanished
+        result = window.command(*args, **kwargs)
+        if args[0] == "stop" and outcome == "vanished-after-stop":
+            vanished = True
+        return result
+
+    def close(fd):
+        nonlocal injected
+        original_close(fd)
+        if fd == closure_fd and not injected and not window.helper["State"]["Running"]:
+            injected = True
+            raise OSError(errno.EIO, "control descriptor close failed after release")
+
+    def warning(message):
+        raise OSError(errno.ENOSPC, "diagnostic sink full")
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(hostctl.os, "close", close)
+    if broken_log:
+        monkeypatch.setattr(host_runtime, "warning", warning)
+    window.run()
+    assert injected and not extra_probes and not window.sleeps
+    assert window.stops == (["helper-a"] if outcome in ("stopped", "vanished-after-stop") else [])
+    assert not window.helper["State"]["Running"]
+    assert [(row["event"], row["helper_id"], row["generation"]) for row in window.rows()] == [
+        ("relay-closed", "helper-a", "generation-a"),
+    ]
+    if outcome in ("other-id", "other-generation"):
+        assert foreign["State"]["Running"]
+
+
+@pytest.mark.parametrize("step", ["guard-release", "marker", "reconcile", "reconcile-selection"])
+def test_post_verification_errors_keep_original_publication_budget(window, monkeypatch, step):
+    import errno
+
+    window.helper["State"]["StartedAt"] = "2026-10-21T12:00:00Z"
+    original_close = hostctl.os.close
+    closure_fd = None
+    failures = []
+    waits = []
+
+    def inspect(*, strict=False):
+        nonlocal closure_fd
+        if strict:
+            closure_fd = hostctl.held_control_descriptor()
+        return window.inspect(strict=strict)
+
+    def command(*args, **kwargs):
+        result = window.command(*args, **kwargs)
+        if args[0] == "stop":
+            window.sleep(3)
+        return result
+
+    def close(fd):
+        original_close(fd)
+        if step == "guard-release" and fd == closure_fd and not failures:
+            assert not window.helper["State"]["Running"]
+            failures.append(step)
+            window.sleep(11)
+            raise OSError(errno.EIO, "control descriptor close failed after release")
+
+    def marker(*args):
+        assert not window.helper["State"]["Running"]
+        if step in ("marker", "reconcile-selection"):
+            failures.append(step)
+            window.sleep(11)
+            if step == "marker":
+                raise SystemExit("post-verification provenance error")
+            del window.helper["Config"]
+
+    def reconcile(helper, **kwargs):
+        if step == "reconcile":
+            failures.append(step)
+            window.sleep(11)
+            raise KeyboardInterrupt
+
+    def journal(event, **kwargs):
+        waits.append((event, window.clock, kwargs["wait"]))
+        window.sleep(kwargs["wait"])
+        return False
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(hostctl, "_helper_marker", marker)
+    monkeypatch.setattr(hostctl, "reconcile", reconcile)
+    monkeypatch.setattr(hostctl, "journal", journal)
+    monkeypatch.setattr(hostctl.os, "close", close)
+    try:
+        window.run()
+    except BaseException as exc:
+        pytest.fail(f"post-verification error escaped closure: {type(exc).__name__}")
+    assert failures == [step] and window.stops == ["helper-a"]
+    assert window.clock == pytest.approx(63)  # Three seconds stopping, then the original 60s.
+    assert waits and all(event == "relay-closed" for event, _, _ in waits)
+    assert waits[0][1] == 14 and all(0 < wait <= 0.5 for _, _, wait in waits)
+    assert not window.helper["State"]["Running"]
+
+
+def test_guard_release_error_before_verification_remains_retryable(window, monkeypatch):
+    import errno
+
+    original_close = hostctl.os.close
+    closure_fd = None
+    injected = False
+
+    def inspect(*, strict=False):
+        nonlocal closure_fd
+        if strict and not injected:
+            closure_fd = hostctl.held_control_descriptor()
+            raise host_runtime.GitSSHError("inspection unknown before any stop")
+        return window.inspect(strict=strict)
+
+    def close(fd):
+        nonlocal injected
+        original_close(fd)
+        if fd == closure_fd and not injected:
+            assert window.helper["State"]["Running"]
+            injected = True
+            raise OSError(errno.EIO, "control descriptor close failed before verification")
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    monkeypatch.setattr(hostctl.os, "close", close)
+    window.run()
+    assert injected and window.stops == ["helper-a"]
+    assert window.sleeps == [0.5]
+    rows = window.rows()
+    assert [row["event"] for row in rows] == ["relay-close-failed", "relay-closed"]
+    assert rows[0]["reason"] == "inspection-unknown" and rows[0]["attempt"] == 1
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit])
+def test_pre_verification_base_exception_keeps_existing_propagation(window, monkeypatch, failure):
+    delivered = False
+
+    def inspect(*, strict=False):
+        nonlocal delivered
+        if strict and not delivered:
+            delivered = True
+            raise failure("fatal inspection failure")
+        return window.inspect(strict=strict)
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    with pytest.raises(failure):
+        window.run()
+    assert delivered and not window.stops

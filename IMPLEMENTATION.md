@@ -1618,8 +1618,10 @@ Verified closure journals `relay-closed` under the guard or when the helper is
 already absent, stopped or replaced; `relay-closed-unlocked` records a verified
 fallback stop. Under the control guard, verified closure also reconciles the pinned
 stopped helper's expiry logs using `reconcile(wait=0.5)`. A busy journal leaves
-expiry unmarked for a later reconciliation. Reconciliation errors log once and
-preserve the verified outcome without retrying the stop. All observer diagnostic
+expiry unmarked for a later reconciliation. The verified event and timestamp are
+retained before provenance recording, reconciliation and control guard release.
+Errors in these steps preserve the verified outcome and its original publication
+budget without retrying the stop. All observer diagnostic
 output is best effort, including retry, reconciliation and publication warnings.
 Each failed attempt journals
 `relay-close-failed` with generation, helper ID, attempt number and fixed reason

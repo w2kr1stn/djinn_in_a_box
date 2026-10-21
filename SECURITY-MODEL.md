@@ -569,7 +569,8 @@ unwritten events for retry without delaying helper stop attempts. Guarded closur
 reconciles the stopped helper's expiry logs with the same half-second lock wait.
 A busy journal leaves expiry unmarked so a later reconciliation can retain it.
 The 60-second publication budget starts at verified closure, before reconciliation.
-Reconciliation errors preserve the verified outcome without retrying the stop.
+Errors in reconciliation, provenance recording or control guard release preserve
+the verified outcome and its original budget without retrying the stop.
 After the budget expires, the observer attempts a warning; diagnostic output is
 best effort and cannot interrupt closure. `relay-closed` records verified
 closure under the control lock, or an already absent, stopped or replaced helper;

@@ -1361,7 +1361,7 @@ def observe_hostctl(
         with hostctl.teardown_markers(root=records_root):
             while True:
                 guarded = False
-                stopped = False
+                verified: tuple[str, float] | None = None
                 reason = "inspection-unknown"
                 try:
                     with contextlib.ExitStack() as stack:
@@ -1374,7 +1374,6 @@ def observe_hostctl(
                                 time.sleep(min(0.1, remaining))
                                 continue
                         fresh = hostctl.inspect_helper(strict=True)
-                        verified_at = time.monotonic()
                         if (
                             fresh is not None
                             and fresh["Id"] == helper_id
@@ -1385,15 +1384,18 @@ def observe_hostctl(
                             started_at = str(fresh["State"].get("StartedAt", ""))
                             try:
                                 fresh = hostctl.stop_and_verify(helper_id, generation, strict=True)
-                                verified_at = time.monotonic()
+                                verified = (
+                                    "relay-closed" if guarded else "relay-closed-unlocked",
+                                    time.monotonic(),
+                                )
                             finally:
                                 if guarded and started_at:
                                     with contextlib.suppress(Exception):
                                         hostctl._helper_marker(  # pyright: ignore[reportPrivateUsage]
                                             helper_id, started_at,
                                         )
-                            stopped = True
-                        until = verified_at + 60
+                        else:
+                            verified = ("relay-closed", time.monotonic())
                         if (
                             guarded and fresh is not None
                             and fresh["Id"] == helper_id
@@ -1404,17 +1406,22 @@ def observe_hostctl(
                                 hostctl.reconcile(fresh, wait=0.5)
                             except BaseException:
                                 log("Hostctl expiry reconciliation failed after verified closure")
-                    event = (
-                        "relay-closed" if guarded or not stopped else "relay-closed-unlocked"
-                    )
+                except BaseException as exc:
+                    if verified is None:
+                        if not isinstance(exc, Exception):
+                            raise
+                        attempt += 1
+                        pending.append(("relay-close-failed", {
+                            "generation": generation, "helper_id": helper_id,
+                            "attempt": attempt, "reason": reason,
+                        }))
+                    else:
+                        log("Hostctl cleanup failed after verified closure")
+                if verified is not None:
+                    event, verified_at = verified
+                    until = verified_at + 60
                     pending.append((event, {"generation": generation, "helper_id": helper_id}))
                     break
-                except Exception:
-                    attempt += 1
-                    pending.append(("relay-close-failed", {
-                        "generation": generation, "helper_id": helper_id,
-                        "attempt": attempt, "reason": reason,
-                    }))
                 publish_pending()
                 if time.monotonic() - logged >= 60:
                     log("Hostctl closure pending; retrying the pinned helper stop")
