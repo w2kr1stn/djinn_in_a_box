@@ -105,7 +105,7 @@ RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 # djinn update records local versions; builds pass higher versions as ARG overrides.
 # After bumping any default, build once with the defaults alone (no local
 # agent-versions.toml record) and commit the bump only after that build succeeds.
-ARG CLAUDE_CODE_VERSION=2.1.288
+ARG CLAUDE_CODE_VERSION=2.1.304
 ARG CODEX_VERSION=0.160.0
 ARG OPENCODE_VERSION=2.1.1
 

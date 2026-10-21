@@ -41,3 +41,13 @@
 # read_only_flags = ["--agent", "plan"]
 # json_flags = ["--format", "json"]
 # model_flag = "-m"
+#
+# [agents.claude-isolated]
+# binary = "claude"
+# description = "Claude Code without user or project context: no tools, MCP, hooks, settings or memory"
+# headless_flags = ["-p", "--no-session-persistence"]
+# read_only_flags = ["--safe-mode", "--setting-sources=", "--strict-mcp-config", "--disable-slash-commands", "--tools="]
+# write_flags = ["--safe-mode", "--setting-sources=", "--strict-mcp-config", "--disable-slash-commands", "--tools="]
+# json_flags = ["--output-format", "json"]
+# model_flag = "--model"
+# prompt_template = '-- "$AGENT_PROMPT"'

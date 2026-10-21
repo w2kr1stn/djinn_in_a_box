@@ -75,6 +75,10 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Accept `~/.config/djinn_in_a_box/agents.toml` only as a regular, single-link
+  file owned by the invoking user and not writable by group or others, in a
+  non-symlink directory with the same rules; any other state stops the command
+  instead of falling back to the built-in agents (#171).
 - Refuse managed writable binds selected by configuration that overlap host
   execution inputs or whose path contains `..` or `:`: the workspace root (also
   delivered to the agent-Docker companion), config-root tool directories (`claude`, `codex`,
@@ -133,6 +137,10 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Raise the default Claude Code version in the dev image to 2.1.304, the version the
+  `claude-isolated` agent was measured with (#171).
+- `djinn agents --json` writes raw JSON with every field, including
+  `prompt_template`, and sorted keys, independent of the terminal width (#171).
 - Keep Codex SQLite stores per host with
   `CODEX_SQLITE_HOME=/home/dev/.codex/sqlite` and a new `sqlite` local-zone default.
   Session-ID resume works across machines; picker/`--last` discovery and
@@ -164,6 +172,11 @@ Versioning before and after the first stable release.
 
 ### Added
 
+- `claude-isolated` agent: Claude Code with the stored subscription login but
+  without tools, MCP servers, `CLAUDE.md`/`AGENTS.md`, settings, hooks or
+  auto-memory, for headless model-only steps (#171).
+- `scripts/probe-claude-isolated.py` re-probes that isolation after a Claude Code
+  version bump (#171).
 - `djinn hostctl check [HOST]` shows target SSH approval banners in the owner's
   host terminal through the gated helper relay, with frozen peer trust and
   isolated temporary OpenSSH configuration. `on` adds a check hint, and `status`

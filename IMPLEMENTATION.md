@@ -81,6 +81,7 @@ stores, and local command choices remain outside the published source.
 │   ├── opencode-credentials.sh
 │   ├── init-firewall.sh
 │   ├── check-build-dns.sh
+│   ├── probe-claude-isolated.py  # maintainer re-probe of the claude-isolated agent
 │   └── update-agents.sh      # read-only discovery or maintainer default bumps
 ├── tools/
 │   ├── install.sh
@@ -313,7 +314,18 @@ Agent definitions are loaded by `load_agents()` with this priority:
 2. `~/.config/djinn_in_a_box/agents.toml`
 3. `DEFAULT_AGENTS` from `config/defaults.py`
 
-The shipped defaults cover `claude`, `codex`, and `opencode`.
+The shipped defaults cover `claude`, `codex`, `opencode`, and
+`claude-isolated`. A user file replaces all of them. Before it reads a user
+file, `load_agents()` opens the file's directory with `O_NOFOLLOW` and the file
+relative to that directory with `O_NOFOLLOW` and `O_NONBLOCK`, then checks both
+open descriptors. The directory must be a directory owned by the current user
+and not writable by group or others. The file must be a regular file with one
+link, owned by the current user and not writable by group or others. The
+content is read from the checked descriptor, decoded as strict UTF-8 and must
+hold a non-empty `agents` table of tables. Only a missing file selects the
+built-in agents, and an explicit missing path raises `ConfigNotFoundError`;
+every other failure raises `ConfigValidationError` with the path and the
+reason.
 
 ## Config Commands
 
@@ -2220,7 +2232,16 @@ the first target as the workdir. It then calls
 `compose_run(..., interactive=False, env={"AGENT_PROMPT": prompt})` and reports
 the complete resolved mount collection before execution.
 
-`agents()` lists configured agents, with verbose and JSON modes.
+`agents()` lists configured agents, with verbose and JSON modes. The JSON mode
+writes `json.dumps(definitions, indent=2, sort_keys=True)` plus a newline
+directly to stdout, with every `AgentConfig` field including `prompt_template`,
+so the bytes do not depend on the terminal width.
+
+`claude-isolated` keeps its five isolation flags in both `read_only_flags` and
+`write_flags`. The headless builder, the container session's headless builder
+and its interactive builder therefore all carry them. Its `prompt_template` is
+`-- "$AGENT_PROMPT"`. `scripts/probe-claude-isolated.py` is the maintainer
+re-probe described in the README.
 
 ## Session Workspace Contract
 

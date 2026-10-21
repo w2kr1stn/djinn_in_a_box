@@ -74,7 +74,9 @@ def session(
     ] = "default",
     agent: Annotated[
         str,
-        typer.Option("--agent", "-a", help="Agent to use (claude, codex, opencode)"),
+        typer.Option(
+            "--agent", "-a", help="Agent to use (claude, codex, opencode, claude-isolated)"
+        ),
     ] = "claude",
     model: Annotated[
         str | None,

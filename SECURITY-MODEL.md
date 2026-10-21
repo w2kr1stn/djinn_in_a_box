@@ -612,6 +612,13 @@ outside `~/.djinn/sessions`, only the workspace itself is checked. Measurements
 used Claude Code 2.1.296, Codex 0.162.1, OpenCode 1.19.0 and Git 2.39.5; a host
 Claude without `--setting-sources` fails to start.
 
+`load_agents()` enforces the rule for `agents.toml`: it accepts only a regular
+file with a single link, owned by the invoking user and not writable by group
+or others, in a directory that is not a symlink and follows the same ownership
+and mode rules. Anything else stops the command instead of falling back to the
+built-in agents. The single-link rule matters because the mount checks compare
+paths and direct aliases, not the contents of a mounted directory.
+
 ## Git keys and browser identity
 
 The dedicated host Git agent loads only declared identities; its export permits
@@ -725,6 +732,14 @@ are ordinary cleartext files protected by host directory permissions (`0700`);
 can read the credentials mounted for every CLI, including an `age` master
 decryption identity. Sealed does not mean those secrets are hidden. Prompt
 injection into a write-enabled agent can use or disclose them.
+
+The `claude-isolated` agent narrows what Claude Code loads, not what its
+container holds. The credentials and mounts above stay in the container, and
+the run keeps its network unless `--firewall` is set. Without tools the model
+cannot read files or run commands, so content reaches it only through the
+prompt. This rests on Claude Code's own flags, measured with Claude Code
+2.1.304; a later release can change them, so the re-probe runs after every
+Claude Code version bump.
 
 `--firewall` is a container-side IPv4 outbound allowlist, not an exfiltration
 guarantee. Dev has `sudo` and `NET_ADMIN` and can change it. Rules allow DNS,

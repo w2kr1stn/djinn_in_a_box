@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Generator
 from pathlib import Path
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands.agent import build_agent_command
+from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.agent_runner import UnknownAgentError
 from djinn_in_a_box.core.config_workflow import (
@@ -653,3 +655,84 @@ class TestRunCommand:
 
         assert exc_info.value.exit_code == 1
         mock_run.assert_not_called()
+
+
+class TestAgentsJson:
+    @pytest.fixture
+    def definitions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[str, AgentConfig]:
+        monkeypatch.setattr("djinn_in_a_box.config.loader.AGENTS_FILE", tmp_path / "absent.toml")
+        return load_agents()
+
+    @pytest.mark.parametrize("force_color", [False, True])
+    def test_complete_sorted_json_is_byte_stable(
+        self, definitions: dict[str, AgentConfig], force_color: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        expected = json.dumps(
+            {name: cfg.model_dump() for name, cfg in definitions.items()}, indent=2, sort_keys=True,
+        ) + "\n"
+        fields = {
+            "binary", "description", "headless_flags", "read_only_flags", "write_flags",
+            "json_flags", "model_flag", "default_model", "prompt_template",
+        }
+        if force_color:
+            monkeypatch.setenv("FORCE_COLOR", "1")
+        else:
+            monkeypatch.delenv("FORCE_COLOR", raising=False)
+        outputs = []
+        queries = []
+        for width in (20, 80, 400):
+            monkeypatch.setenv("COLUMNS", str(width))
+            # Override the autouse width fixture so a Rich regression really wraps/colors.
+            monkeypatch.setattr(
+                "djinn_in_a_box.commands.agent.console", Console(force_terminal=force_color),
+            )
+            for _ in range(2):
+                result = CliRunner().invoke(app, ["agents", "--json"])
+                assert result.exit_code == 0, result.output
+                assert result.stderr == ""
+                assert result.stdout_bytes == expected.encode("utf-8")
+                obj = json.loads(result.stdout)
+                assert list(obj) == sorted(obj)
+                for cfg in obj.values():
+                    assert set(cfg) == fields
+                    assert list(cfg) == sorted(cfg)
+                outputs.append(result.stdout_bytes)
+                queries.append(
+                    json.dumps(obj["claude-isolated"], sort_keys=True, separators=(",", ":")),
+                )
+        assert all(output == outputs[0] for output in outputs)
+        assert all(query == queries[0] for query in queries)
+
+    def test_one_changed_flag_changes_only_its_agent_object(
+        self, definitions: dict[str, AgentConfig], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        before = CliRunner().invoke(app, ["agents", "--json"])
+        assert before.exit_code == 0
+        preset = definitions["claude-isolated"]
+        changed = {
+            **definitions,
+            "claude-isolated": preset.model_copy(
+                update={"read_only_flags": [*preset.read_only_flags[:-1], "--tools=Read"]},
+            ),
+        }
+        monkeypatch.setattr("djinn_in_a_box.commands.agent.load_agents", lambda: changed)
+        after = CliRunner().invoke(app, ["agents", "--json"])
+        assert after.exit_code == 0
+        assert after.stdout_bytes == (
+            json.dumps(
+                {name: cfg.model_dump() for name, cfg in changed.items()}, indent=2, sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        old, new = json.loads(before.stdout), json.loads(after.stdout)
+        assert old.keys() == new.keys()
+        assert {name for name in old if old[name] != new[name]} == {"claude-isolated"}
+        old_flags = old["claude-isolated"].pop("read_only_flags")
+        new_flags = new["claude-isolated"].pop("read_only_flags")
+        assert old_flags[:-1] == new_flags[:-1]
+        assert old_flags[-1] == "--tools="
+        assert new_flags[-1] == "--tools=Read"
+        assert old == new

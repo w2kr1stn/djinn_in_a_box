@@ -198,6 +198,15 @@ KNOWN_CONFIG_ROOT_ENTRIES: Final[dict[str, frozenset[str]]] = {
 """Known top-level config-zone entries as exact names or shell-style patterns."""
 
 
+CLAUDE_ISOLATION_FLAGS: Final[list[str]] = [
+    "--safe-mode",
+    "--setting-sources=",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--tools=",
+]
+
+
 DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
     "claude": AgentConfig(
         binary="claude",
@@ -224,6 +233,19 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         read_only_flags=["--agent", "plan"],
         json_flags=["--format", "json"],
         model_flag="-m",
+    ),
+    "claude-isolated": AgentConfig(
+        binary="claude",
+        description=(
+            "Claude Code without user or project context: "
+            "no tools, MCP, hooks, settings or memory"
+        ),
+        headless_flags=["-p", "--no-session-persistence"],
+        read_only_flags=list(CLAUDE_ISOLATION_FLAGS),
+        write_flags=list(CLAUDE_ISOLATION_FLAGS),
+        json_flags=["--output-format", "json"],
+        model_flag="--model",
+        prompt_template='-- "$AGENT_PROMPT"',
     ),
 }
 """Default agent configurations (used when no user agents.toml exists)."""

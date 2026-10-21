@@ -756,13 +756,14 @@ residual risk.
 
 ## Agents
 
-Djinn has three built-in agent definitions:
+Djinn has four built-in agent definitions:
 
 | Agent name | Binary | Default headless mode | Notes |
 | --- | --- | --- | --- |
 | `claude` | `claude` | `claude -p` | read-only uses `--permission-mode plan`; write mode uses `--dangerously-skip-permissions` |
 | `codex` | `codex` | `codex exec` | write mode uses `--full-auto` |
 | `opencode` | `opencode` | `opencode run` | read-only uses `--agent plan`; model flag is `-m` |
+| `claude-isolated` | `claude` | `claude -p --no-session-persistence` | Claude Code without user or project context; see [Minimal-context Claude agent](#minimal-context-claude-agent) |
 
 List the effective definitions:
 
@@ -771,6 +772,69 @@ djinn agents
 djinn agents --verbose
 djinn agents --json
 ```
+
+### Minimal-context Claude agent
+
+`claude-isolated` runs Claude Code as a plain model call. It has no tools and no
+MCP servers, and it loads no `CLAUDE.md` or `AGENTS.md`, no user, project or local
+settings or hooks, no skills, commands or custom agents, and no auto-memory.
+Headless runs also keep no transcript. It still uses the stored subscription
+login, which Claude Code's `--bare` mode cannot use. A `djinn run claude-isolated`
+call runs this command:
+
+```text
+claude -p --no-session-persistence [--model M] --safe-mode --setting-sources= --strict-mcp-config --disable-slash-commands --tools= [--output-format json] -- "$AGENT_PROMPT"
+```
+
+- `--write` grants nothing extra, because the agent has no tools.
+- The prompt follows `--`, so a prompt that starts with `-` stays a prompt.
+- An interactive `djinn session --agent claude-isolated` uses the same isolation
+  flags but keeps Claude Code's normal transcript, because
+  `--no-session-persistence` works only with `-p`.
+- The host fallback of `djinn session` refuses this agent.
+- The model still sees Claude Code's own environment block: the working
+  directory, whether it is a Git repository, the platform, the shell and the OS
+  version.
+- A run still writes Claude Code's own app state: `~/.claude.json` with its
+  backups, and short-lived session files under `~/.claude/sessions/` that Claude
+  Code removes at exit. It writes no transcript, memory or prompt history.
+- The guarantee holds for the measured version, Claude Code 2.1.304, the dev
+  image's default. Flag behaviour can change between Claude Code releases, so
+  rerun the probe below after every change of the Claude Code version, including
+  an update that Claude Code installs by itself in a running container.
+
+To pin the exact definition a pipeline runs with, fingerprint it:
+
+```sh
+djinn agents --json | jq -cS '."claude-isolated"' | sha256sum
+```
+
+`djinn agents --json` prints every field of every effective agent definition,
+including `prompt_template`, with sorted keys and independent of the terminal
+width. The fingerprint changes whenever the definition changes, also when an
+`agents.toml` replaces the built-in agents.
+
+#### Re-probing the isolation
+
+Run the probe inside the Djinn container from a checkout:
+
+```sh
+uv run python scripts/probe-claude-isolated.py            # full probe
+uv run python scripts/probe-claude-isolated.py --offline  # without the login
+```
+
+The first part runs Claude Code in a temporary home without any login. It
+compares a run without the isolation flags against the preset: tools, MCP
+servers, skills, commands, custom agents, auto-memory, settings and hooks must
+appear in the first run and be absent in the second. The second part runs only
+when the first part passed, and it uses the stored login. It starts a few short isolated Claude Code runs, at most one of
+them without the isolation flags, and checks that a `CLAUDE.md` and an
+`AGENTS.md` canary stay out of the preset's context; only the `CLAUDE.md`
+canary has a positive control in the same probe. Like any normal run, these
+runs may refresh the login token and write Claude Code's app state. Afterwards
+the probe checks that no transcript, memory, session environment or
+prompt-history entry was left behind; it reports a finding as `FAIL` with the
+path and deletes nothing. Exit code 0 means that every check passed.
 
 ### Codex
 
@@ -812,6 +876,14 @@ The only automatically honored agent override path is:
 
 If that file exists, Djinn loads it instead of the built-in defaults. If it does
 not exist, Djinn uses the built-in definitions from the package.
+
+The host runs the commands this file defines, so Djinn accepts the file only
+when you alone control it. It must be a regular file with a single link (not a
+symlink or a hard link), owned by you and not writable by group or others, in a
+real directory (not a symlink) that you own and that is not writable by group or
+others. Otherwise `djinn run`, `djinn agents` and `djinn session` stop and name
+the reason instead of falling back to the built-in agents. A file that replaces
+the built-in agents without defining `claude-isolated` removes that agent too.
 
 The seeded file `config/agents.toml.example` is documentation only. Copy it to
 `~/.config/djinn_in_a_box/agents.toml` before editing if you want to override
@@ -1674,7 +1746,9 @@ After any default bump, by script or by hand, build once with the defaults
 alone: move `~/.config/djinn_in_a_box/agent-versions.toml` aside so no higher
 local version replaces a default, run `djinn build`, and commit the bump only
 after that build succeeds. CI does not build the image.
-The script's `--print` mode resolves versions without editing files.
+The script's `--print` mode resolves versions without editing files. After a
+Claude Code bump, also run `scripts/probe-claude-isolated.py`; see
+[Re-probing the isolation](#re-probing-the-isolation).
 
 ## Typical Workflows
 
