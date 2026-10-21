@@ -19,7 +19,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Required, TypedDict, cast
@@ -43,7 +43,14 @@ from djinn_in_a_box.config.defaults import (
     volume_categories,
 )
 from djinn_in_a_box.config.volumes import PROTECTED_INTERNAL_VOLUMES
-from djinn_in_a_box.core import agent_docker, desktop, host_runtime, host_sealing, post_mortem
+from djinn_in_a_box.core import (
+    agent_docker,
+    desktop,
+    host_runtime,
+    host_sealing,
+    hostctl,
+    post_mortem,
+)
 from djinn_in_a_box.core.console import escape_nonprintable, warning
 from djinn_in_a_box.core.contained_paths import (
     PathContainmentError,
@@ -66,7 +73,7 @@ from djinn_in_a_box.core.exceptions import (
 from djinn_in_a_box.core.opencode_credentials import EXPORT_LIMIT
 from djinn_in_a_box.core.paths import get_project_root, resolve_mount_path
 from djinn_in_a_box.core.signals import signals_as_interrupt, signals_ignored
-from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS
+from djinn_in_a_box.core.ssh_delivery import GIT_ENVIRONMENT, MANAGED_SSH_TARGETS, GitSSHError
 
 git_runtime = host_runtime.git_runtime
 
@@ -1038,7 +1045,12 @@ def _reserved_mount_targets(
     return [*targets, *accepted_runtime_targets]
 
 
-def _execution_input_check() -> Callable[[str | Path], str | None]:
+def _execution_input_check(
+    *,
+    inventory_factory: Callable[[], dict[str, tuple[Path, str, str]]] | None = None,
+    noun: str = "host execution input",
+    raise_errors: bool = False,
+) -> Callable[[str | Path], str | None]:
     """Share a lazy inventory and contain inventory/source comparison failures."""
     inputs: dict[str, tuple[Path, str, str]] | None = None
     inventory_error: str | None = None
@@ -1049,12 +1061,14 @@ def _execution_input_check() -> Callable[[str | Path], str | None]:
             return inventory_error
         try:
             if inputs is None:
-                inputs = host_sealing.execution_paths()
+                inputs = (inventory_factory or host_sealing.execution_paths)()
             match = host_sealing.execution_overlap(source, inputs)
             if match is not None:
                 name, path = match
-                return f"overlaps host execution input {name} ({path})"
+                return f"overlaps {noun} {name} ({path})"
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            if raise_errors:
+                raise
             cause = f"cannot be checked against host execution inputs ({exc})"
             if inputs is None:
                 inventory_error = cause
@@ -2511,11 +2525,123 @@ class RunRefusedError(RuntimeError):
     """A guest run could not establish its required isolation."""
 
 
+_RUN_CHECK_ERRORS = (
+    OSError, ValueError, KeyError, TypeError, RuntimeError, GitSSHError,
+    subprocess.SubprocessError,
+)
+
+
 def _guest_source_check(
     config: AppConfig, options: ContainerOptions, *,
     resolved: dict[str, Any] | None = None, mount_args: list[str] | None = None,
-) -> None:
-    """Integration boundary for A-S3's user-source and resolved Compose bind checks."""
+) -> Callable[[str | Path, Path], Path]:
+    """Check unescaped bind sources, sharing a lazy inventory within each phase."""
+    storage: dict[str, Path] = {}
+
+    def inventory() -> dict[str, tuple[Path, str, str]]:
+        roots = host_sealing.protected_host_roots(
+            (identity.key_file for identity in config.git.identities.values()), timeout=30,
+        )
+        for name in ("Docker data root", "helper backing storage"):
+            storage[name] = host_sealing.canonical(roots.pop(name))
+        return {
+            name: (host_sealing.canonical(path, strict=True), "protected", name)
+            for name, path in roots.items()
+        }
+
+    protected = _execution_input_check(
+        inventory_factory=inventory, noun="protected host path", raise_errors=True,
+    )
+
+    def check(source: str | Path, target: Path) -> Path:
+        # Only the approved overlay bind may carry host Docker authority.
+        if (options.docker_mode is DockerMode.DIRECT
+                and str(source) == str(target) == "/var/run/docker.sock"):
+            return Path(source)
+        try:
+            path = host_sealing.canonical(source, strict=True)
+            cause = "resolved source contains ':'" if ":" in str(path) else protected(path)
+            for name, root in storage.items():
+                if host_sealing.overlap(path, root):
+                    cause = f"overlaps protected host path {name} ({root})"
+                    break
+            if cause is None and stat.S_ISSOCK(host_sealing.host_file(path).stat().st_mode):
+                cause = "resolved source is a socket"
+        except _RUN_CHECK_ERRORS as exc:
+            raise RunRefusedError(f"cannot verify {source}: {exc}; refusing") from exc
+        if cause is not None:
+            remedy = (
+                "start from a subdirectory, or use `--mount <dir>:ro` for a directory "
+                "outside the private state"
+                if target == _WORKSPACE_PATH else "change --mount, the declaration or code_dir"
+            )
+            raise RunRefusedError(f"Bind {source} → {target}: {cause}; {remedy}; refusing")
+        return path
+
+    source: str | Path = "guest bind inventory"
+    try:
+        if resolved is None:
+            for mount in options.mounts:
+                source = mount.source
+                check(source, mount.target)
+            entries = inspect_declarations(config.mounts, config.environment)
+            for mount in entries.mounts.values():
+                if isinstance(mount, BindDeclaration):
+                    source = mount.source
+                    check(source, Path(mount.target))
+        else:
+            for mount in resolved["services"]["dev"]["volumes"]:
+                if mount["type"] == "bind":
+                    source = mount["source"]
+                    check(source, Path(mount["target"]))
+            for spec in _volume_specs_from_mount_args(mount_args or []):
+                source, _, _ = _normalize_runtime_mount_specification(spec)
+                # Keep the literal target for the exact approved DIRECT socket exception.
+                check(source, Path(spec.rsplit(":", 2)[1]))
+    except RunRefusedError:
+        raise
+    except _RUN_CHECK_ERRORS as exc:
+        raise RunRefusedError(f"cannot verify {source}: {exc}; refusing") from exc
+    return check
+
+
+def _guest_mount_args(
+    args: list[str], check: Callable[[str | Path, Path], Path],
+) -> list[str]:
+    """Resolve managed sources while retaining their already assigned targets."""
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        if flag in {"-v", "--volume"} or flag.startswith("--volume="):
+            spec = flag.split("=", 1)[1] if flag.startswith("--volume=") else args[index + 1]
+            source, target, mode = _normalize_runtime_mount_specification(spec)
+            source = str(check(source, target))
+            spec = f"{source}:{target}" + (f":{mode}" if mode else "")
+            if flag.startswith("--volume="):
+                result.append(f"--volume={spec}")
+            else:
+                result.extend([flag, spec])
+                index += 1
+        else:
+            result.append(flag)
+        index += 1
+    return result
+
+
+def _guest_direct_check() -> None:
+    """Check the window under the same transition guard used by hostctl."""
+    try:
+        with hostctl.control_guard():
+            helper = hostctl.inspect_helper()
+            if helper is not None and helper["State"]["Running"]:
+                raise RunRefusedError(
+                    "close the hostctl window (`djinn hostctl off`) or run without --docker-direct"
+                )
+    except RunRefusedError:
+        raise
+    except _RUN_CHECK_ERRORS as exc:
+        raise RunRefusedError(f"cannot verify hostctl helper: {exc}; refusing") from exc
 
 
 def _run_preflight(
@@ -2663,16 +2789,17 @@ def compose_run(
     guest = not interactive and service == "dev"
     if guest and options.docker_mode is DockerMode.AGENT:
         raise RuntimeMountSpecificationError("djinn run cannot use the dev's agent Docker daemon")
-    if guest:
-        _guest_source_check(config, options)
-    validate_managed_bind_sources(config)
+    source_check = _guest_source_check(config, options) if guest else None
+    if not guest:
+        validate_managed_bind_sources(config)
     # Fail before allocating a TTY: a background start would otherwise degenerate
     # into a SIGTTOU storm that kills the container. Headless runs pass -T and are
     # unaffected.
     if interactive and is_background_process_group():
         return RunResult(returncode=1, stderr=BACKGROUND_START_ERROR)
 
-    _validate_desktop_env(env)
+    if not guest:
+        _validate_desktop_env(env)
     project_root = get_project_root()
 
     # Build compose command
@@ -2703,14 +2830,29 @@ def compose_run(
         cmd.extend(["-e", f"{key}={value}"])
 
     mounts = tuple(
-        ContainerMount(mount.source, _normalize_mount_target(mount.target), mount.read_only)
+        ContainerMount(
+            source_check(mount.source, mount.target) if source_check else mount.source,
+            _normalize_mount_target(mount.target), mount.read_only,
+        )
         for mount in options.mounts
     )
-    shell_args = _canonicalize_runtime_mount_args(
-        get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
-    )
-    sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
-    zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+    try:
+        shell_args = _canonicalize_runtime_mount_args(
+            get_shell_mount_args(config) if shell_mount_args is None else shell_mount_args
+        )
+        sops_args = _canonicalize_runtime_mount_args(get_sops_age_key_mount_args(config))
+        zone_overlay_args, zone_overlay_targets = _zone_overlay_mount_args_and_targets(config)
+        if source_check:
+            shell_args = _guest_mount_args(shell_args, source_check)
+            sops_args = _guest_mount_args(sops_args, source_check)
+            zone_overlay_args = _guest_mount_args(zone_overlay_args, source_check)
+    except _RUN_CHECK_ERRORS as exc:
+        if not guest or isinstance(exc, RunRefusedError):
+            raise
+        raise RunRefusedError(f"cannot verify managed bind sources: {exc}; refusing") from exc
+    if guest:
+        _validate_desktop_env(env)
+        validate_managed_bind_sources(config)
     declarations = resolve_declared_entries(
         config,
         options,
@@ -2724,6 +2866,12 @@ def compose_run(
         caller_env=env,
     )
     declarations.require_valid()
+    if source_check:
+        declarations.mounts = [
+            replace(mount, source=str(source_check(mount.source, mount.target)))
+            if mount.kind == "bind" else mount
+            for mount in declarations.mounts
+        ]
     validate_container_mounts(
         mounts,
         config,
@@ -2732,6 +2880,8 @@ def compose_run(
         sops_args=sops_args,
         zone_overlay_targets=zone_overlay_targets,
     )
+    if guest and options.docker_mode is DockerMode.DIRECT:
+        _guest_direct_check()
 
     if options.egress is not None:
         validate_egress_inputs(config, mounts, env)
@@ -2872,8 +3022,10 @@ def _volume_specs_from_mount_args(args: list[str]) -> list[str]:
         if expecting_spec:
             specs.append(arg)
             expecting_spec = False
-        elif arg == "-v":
+        elif arg in {"-v", "--volume"}:
             expecting_spec = True
+        elif arg.startswith("--volume="):
+            specs.append(arg.split("=", 1)[1])
     return specs
 
 

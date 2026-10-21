@@ -538,10 +538,20 @@ def test_managed_refusal_precedes_all_creation(
         (docker, "resolve_declared_entries"),
         (docker, "validate_container_mounts"),
     ):
+        if kind == "headless" and name in {
+            "_validate_desktop_env", "get_project_root", "get_compose_files",
+            "get_shell_mount_args", "get_sops_age_key_mount_args",
+            "_zone_overlay_mount_args_and_targets",
+        }:
+            # Guest S3 checks collect these sources before execution-input validation.
+            continue
         spy = Mock(side_effect=AssertionError(f"unexpected {name}"))
         monkeypatch.setattr(obj, name, spy)
         spies.append(spy)
-    with pytest.raises(MountSpecificationError) as exc:
+    error_type = docker.RunRefusedError if kind == "headless" and failure == "zones" else (
+        MountSpecificationError
+    )
+    with pytest.raises(error_type) as exc:
         create(kind, config, mode)
     if failure == "overlap":
         assert str(exc.value) == expected("workspace", config.code_dir, config.code_dir)
@@ -549,9 +559,12 @@ def test_managed_refusal_precedes_all_creation(
         assert str(exc.value) == message
         assert not missing.exists()
     else:
-        assert str(exc.value).startswith(f"{LABELS['zones']} ")
-        assert "cannot be checked against host execution inputs (Invalid TOML" in str(exc.value)
-    if failure in {"overlap", "zones"}:
+        if kind == "headless":
+            assert "cannot verify managed bind sources" in str(exc.value)
+        else:
+            assert str(exc.value).startswith(f"{LABELS['zones']} ")
+            assert "cannot be checked against host execution inputs (Invalid TOML" in str(exc.value)
+    if failure == "overlap" or (failure == "zones" and kind != "headless"):
         inventory.assert_called_once_with()
     for spy in spies:
         spy.assert_not_called()

@@ -28,6 +28,7 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     ContainerOptions,
     MountCollisionError,
+    RunRefusedError,
     compose_run,
     compose_up_detached,
     get_sops_age_key_mount_args,
@@ -181,15 +182,18 @@ class TestComposeRun:
         assert f"{key_file}:{SOPS_AGE_KEY_TARGET}:ro" in cmd
         assert _EXPECTED_ENV in cmd
 
+    @pytest.mark.parametrize("interactive", [False, True])
     def test_fails_closed_before_docker_runs(
-        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig, tmp_path: Path
+        self, mock_run: MagicMock, _root: MagicMock, mock_app_config: AppConfig, tmp_path: Path,
+        interactive: bool,
     ) -> None:
-        with pytest.raises(SopsAgeKeyFileError, match="does not exist"):
+        error_type = SopsAgeKeyFileError if interactive else RunRefusedError
+        with pytest.raises(error_type, match="does not exist"):
             compose_run(
                 _with_key(mock_app_config, tmp_path / "absent"),
                 ContainerOptions(),
                 command="echo",
-                interactive=False,
+                interactive=interactive,
                 shell_mount_args=[],
             )
         mock_run.assert_not_called()
