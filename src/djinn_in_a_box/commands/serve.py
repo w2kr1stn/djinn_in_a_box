@@ -82,6 +82,12 @@ def _helper_failure(name: str, failure: core.ServeError) -> None:
             "OpenCode remote access (OpenTunnel) is enabled in its service settings; refusing. "
             "Remove it in the container with: opencode service unset remote"
         )
+    elif failure.code == "route-localnet":
+        _literal(
+            "Error: OpenCode requires route_localnet=0 on all container interfaces; refusing. "
+            "Disable loopback routing in the container and endpoint sysctls, "
+            "then recreate the container."
+        )
     elif failure.code == "service-config":
         keys = re.findall(r"service.json contains '([^']+)'", str(failure))
         if keys:
@@ -142,8 +148,16 @@ def _status_table(snapshot: core.Snapshot) -> None:
                 if snapshot.url
                 else f"\ntailnet: unknown ({snapshot.reason})"
             )
+            endpoint += (
+                f"\nrelay refused since start: {row['relay_refused']}"
+                if row["relay_refused"] is not None
+                else f"\nrelay refused: unknown ({row['relay_note']})"
+            )
             if row["foreign_listener"]:
-                endpoint += "\nnote: port 4096 is used by another process"
+                endpoint += (
+                    "\nnote: port 4096 is used by another process; possibly "
+                    "a djinn serve from before the update — recreate the container"
+                )
             if snapshot.funnel:
                 endpoint += "\n" + core.FUNNEL_WARNING
         else:

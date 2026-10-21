@@ -99,6 +99,13 @@ Versioning before and after the first stable release.
   file owned by the invoking user and not writable by group or others, in a
   non-symlink directory with the same rules; any other state stops the command
   instead of falling back to the built-in agents (#171).
+- Bind managed OpenCode to container loopback behind a gateway-only relay;
+  ordinary bridge peers are refused before reaching the API. Check inspected
+  container/endpoint `route_localnet` settings and actual values before start.
+  Status reports relay refusals since start or why the count is unknown. Stop
+  OpenCode before updating; legacy servers require stopping or container
+  recreation. Document direct-routing, source-address and ARP-spoofing residuals;
+  the password remains a second barrier (#167).
 - Refuse managed writable binds selected by configuration that overlap host
   execution inputs or whose path contains `..` or `:`: the workspace root (also
   delivered to the agent-Docker companion), config-root tool directories (`claude`, `codex`,

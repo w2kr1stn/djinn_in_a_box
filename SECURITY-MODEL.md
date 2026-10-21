@@ -118,43 +118,82 @@ build-time networking, not the resulting container's runtime network.
 [usage and prerequisites](README.md#remote-agent-servers) and the
 [process implementation](IMPLEMENTATION.md#remote-server-lifecycle).
 
-OpenCode listens on `0.0.0.0:4096` inside the container. Detached creation
-publishes it only on host `127.0.0.1:<serve.opencode_host_port>` (default
-`49380`). Every local host user/process can reach that loopback endpoint.
-**The container address is also reachable from the host and every peer on
-`djinn-network`**: agent-docker workloads through their companion, the hostctl
-helper, the audit assistant and anything else attached. Tailnet policy does not
-filter these bridge paths. The API requires the OpenCode password on these
-paths too. The unauthenticated web shell at `/` is a static page that reveals
-only the app version; it does not establish an authenticated API session.
+OpenCode binds only `127.0.0.1:4097` inside the container. A helper-managed
+relay listens on container port `4096` (dual-stack when IPv6 is available) and
+splices bytes only for a peer equal to the single eligible default-route gateway
+of that peer's address family, read afresh from the container's routing table
+for each connection. Unknown or ambiguous gateways refuse all new connections
+of that family. Ordinary bridge peers arrive with their own address and are
+closed before any byte reaches OpenCode; this admission rule is independent of
+`--firewall`. With several attached networks, a publish through a non-default
+network is refused too. Detached creation publishes `4096` only on host
+`127.0.0.1:<serve.opencode_host_port>` (default `49380`). Every local host
+user/process can reach that endpoint; host processes reaching the container IP
+directly arrive as the gateway and are admitted as well. Tailnet policy does
+not filter these host or bridge paths. The OpenCode password is a second
+barrier on every admitted API path. The unauthenticated web shell at `/` is a
+static page that reveals only the app version; it does not establish an
+authenticated API session.
+
+**Masqueraded direct routing is a residual:** a client on another Docker NAT
+network that can reach the container IP can arrive masqueraded as the serving
+network's gateway, indistinguishable from a legitimate host connection. This
+path occurs with `com.docker.network.bridge.trusted_host_interfaces` including
+the source bridge, IPv4 gateway mode `routed`/`nat-unprotected`, or daemon
+`allow-direct-routing`. Djinn refuses the visible trusted-interface and
+IPv4/IPv6 gateway-mode options on every attached network at OpenCode start/pair.
+The daemon's `allow-direct-routing` setting is invisible through Docker's API;
+keeping it absent or `false` is a host prerequisite, not a verified Djinn gate.
+Before rollout, check `/etc/docker/daemon.json` yourself for that setting and
+keep `iptables` absent or `true`. See
+[Docker's direct-routing documentation](https://docs.docker.com/engine/network/port-publishing/#direct-routing).
+
+**Source-address assumptions:** loopback publication with the default userland
+proxy has been measured to arrive as the bridge gateway. With
+`"userland-proxy": false`, gateway masquerading is an assumption based on
+[Moby's loopback DNAT and LOCAL-source masquerading rules](https://github.com/moby/moby/blob/master/integration/network/bridge/iptablesdoc/templates/usernet-portmap-noproxy.md),
+not a measurement of that configuration. If the assumption fails, legitimate
+host/browser connections close, the refusal count in `djinn serve --status`
+rises, and the relay log names the refused source and suggests checking
+`userland-proxy` / direct routing or a non-default network. The relay stays
+closed to that source; review the host daemon and publishing network. A real
+LAN client is assumed to retain its own source address and therefore be
+refused: Docker's source masquerading applies to container-subnet traffic;
+this LAN case has not been measured on a real LAN client.
+
+**ARP spoofing remains possible:** Docker grants
+[`NET_RAW` by default](https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities),
+so a default-configured peer on the same bridge can impersonate the gateway.
+The gateway check is not a hard boundary against a hostile peer on that network.
+Drop `NET_RAW` from such peers (`--cap-drop NET_RAW`) or put untrusted containers
+on a separate network; the OpenCode password remains the barrier if a peer
+impersonates the gateway.
+
+The host and helper refuse enabled `route_localnet` at start (the host also at
+pair), because it exposes the loopback backend; enabling it later needs
+Docker-API access or root in the container, which already control this boundary,
+so there is no runtime watchdog.
 
 Publication of container port `4096` lasts for the detached container's
 lifetime. Stopping the managed server leaves that mapping and any host
 Tailscale Serve entry in place. A foreign listener accepting connections on
 that container interface/port is therefore reachable through them as well,
 with whatever authentication that listener implements. `djinn serve --status`
-notes `note: port 4096 is used by another process`; it does not stop that process
-or revoke publication. An absent/stale discovery record never authorizes a
-signal: replacing OpenCode's default service requires command-line and socket
-ownership proof, and Djinn never calls native `opencode service stop`.
+notes `note: port 4096 is used by another process` and suggests a server from
+before the update and container recreation; it does not stop that process or
+revoke publication. Stop managed OpenCode before updating: old records without
+a relay identity are not adopted, so their wildcard server becomes a foreign
+listener; stop that legacy process or recreate the container. An absent/stale
+discovery record never authorizes a signal: replacing OpenCode's default service
+requires command-line and socket ownership proof, and Djinn never calls native
+`opencode service stop`.
 
-OpenCode start/pair require Docker Engine **28.3.3 or newer**, an exact IPv4
-loopback publication and only user bridge networks without
-`com.docker.network.bridge.trusted_host_interfaces` or IPv4/IPv6 gateway modes
-`routed`/`nat-unprotected`. Unknown versions or uninspectable networks refuse.
-The version gate includes the fix for
+OpenCode start/pair also require Docker Engine **28.3.3 or newer**, an exact
+IPv4 loopback publication and only user bridge networks. Unknown versions or
+uninspectable networks refuse. The version gate includes the fix for
 [CVE-2025-54388](https://github.com/moby/moby/security/advisories/GHSA-x4rx-4gw3-53p4),
 which let a firewalld reload expose published ports via container addresses
 despite loopback publication.
-
-**Host prerequisite:** check `/etc/docker/daemon.json` once before rollout.
-`allow-direct-routing` must be absent or `false`; `iptables` must be absent or
-`true`. These daemon-wide settings are invisible to Djinn through the Docker
-API. Even with the runtime gates, a daemon configured to permit direct routing
-or omit firewall rules can expose OpenCode beyond host loopback and the intended
-tailnet path. This residual risk, and access through the container address,
-remain until the structural container-side restriction tracked in
-[#167](https://github.com/w2kr1stn/djinn_in_a_box/issues/167).
 
 The host administrator owns the HTTPS Tailscale Serve entry and tailnet policy.
 Djinn only reads `tailscale serve status --json`; it never writes either.

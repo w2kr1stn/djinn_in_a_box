@@ -50,6 +50,7 @@ ERROR_CODES: Final = (
     "service-json",
     "service-config",
     "remote-config",
+    "route-localnet",
     "spawn",
     "not-registered",
     "busy",
@@ -83,6 +84,7 @@ class ContainerInfo:
     mounts: object = None
     network_mode: object = None
     networks: object = None
+    sysctls: object = None
 
     @property
     def detached(self) -> bool:
@@ -137,6 +139,7 @@ def detect_container(*, timeout: float = 10) -> ContainerInfo:
             data.get("Mounts"),
             host.get("NetworkMode"),
             data.get("NetworkSettings", {}).get("Networks"),
+            host.get("Sysctls"),
         )
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
         return ContainerInfo(ContainerState.UNKNOWN)
@@ -202,6 +205,15 @@ def check_opencode_roots(info: ContainerInfo) -> None:
             )
 
 
+def _check_route_localnet(key: str, value: object) -> None:
+    if re.fullmatch(r"net\.ipv4\.conf\..+\.route_localnet", key) and value != "0":
+        raise ServeError(
+            f"The container enables loopback routing ({key}={value}); refusing OpenCode. "
+            "Set route_localnet to 0 in the container and endpoint sysctls, "
+            "then recreate the container."
+        )
+
+
 def check_opencode_networks(info: ContainerInfo) -> None:
     unknown = "Could not inspect the container's networks; refusing to expose OpenCode."
     mode = info.network_mode
@@ -213,6 +225,12 @@ def check_opencode_networks(info: ContainerInfo) -> None:
     if not isinstance(attached, dict) or not attached:
         raise ServeError(unknown)
     networks = cast(dict[str, object], attached)
+    sysctls = info.sysctls
+    if sysctls is not None:
+        if not isinstance(sysctls, dict):
+            raise ServeError("Could not inspect the container's sysctls; refusing OpenCode.")
+        for key, value in cast(dict[str, object], sysctls).items():
+            _check_route_localnet(key, value)
     # NetworkMode may be a network ID; resolve it against the attached network metadata.
     if mode not in networks and not any(
         isinstance(v, dict) and cast(dict[str, object], v).get("NetworkID") == mode
@@ -220,6 +238,22 @@ def check_opencode_networks(info: ContainerInfo) -> None:
     ):
         raise ServeError(unknown)
     for name in networks:
+        endpoint = networks[name]
+        if not isinstance(endpoint, dict):
+            raise ServeError(unknown)
+        driver_opts = cast(dict[str, object], endpoint).get("DriverOpts")
+        if driver_opts is not None:
+            if not isinstance(driver_opts, dict):
+                raise ServeError(unknown)
+            endpoint_sysctls = cast(dict[str, object], driver_opts).get(
+                "com.docker.network.endpoint.sysctls"
+            )
+            if endpoint_sysctls is not None:
+                if not isinstance(endpoint_sysctls, str):
+                    raise ServeError(unknown)
+                for setting in endpoint_sysctls.split(","):
+                    key, _, value = setting.partition("=")
+                    _check_route_localnet(key.strip(), value.strip())
         try:
             result = _run_captured([DOCKER_EXECUTABLE, "network", "inspect", name], timeout=5)
             data = json.loads(result.stdout) if result.success else None
@@ -459,6 +493,10 @@ def _validate_reply(data: dict[str, Any], args: list[str]) -> None:
                 for k in ("listening", "discovery_pid_ok", "foreign_listener")
             ):
                 raise ValueError("invalid listener state")
+            if name == OPENCODE and (
+                not _nullable(row["relay_refused"], int) or not _nullable(row["relay_note"], str)
+            ):
+                raise ValueError("invalid relay status")
     elif args[0] == "stop":
         results = _object(data["results"])
         if set(results) != set(args[2::2]):

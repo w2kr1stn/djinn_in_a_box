@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import ctypes
+import errno
 import fcntl
 import importlib.util
 import io
@@ -144,10 +145,35 @@ while True:
 """
 
 
+# Cross-process leases exclude other helper test runs; ports outside the kernel's
+# ephemeral range exclude outgoing clients, including earlier tests' TIME_WAIT sockets.
+_PORT_LEASES: list[int] = []
+
+
 def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    ephemeral_low, ephemeral_high = map(
+        int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()
+    )
+    for port in range(20000, 65536):
+        if ephemeral_low <= port <= ephemeral_high:
+            continue
+        fd = os.open(
+            f"/tmp/djinn-serve-test-port-{port}.lock",  # noqa: S108 - synthetic test lease
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mod.relay_listener(port):
+                pass
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EADDRINUSE):
+                continue
+            raise
+        _PORT_LEASES.append(fd)
+        return port
+    raise AssertionError("no non-ephemeral test port available")
 
 
 def descendants() -> list[int]:
@@ -166,26 +192,37 @@ def descendants() -> list[int]:
     return found
 
 
+def reap_test_children() -> None:
+    for _ in range(40):
+        pids = descendants()
+        if not pids:
+            break
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        for pid in pids:
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+        time.sleep(0.05)
+    assert not descendants(), "unreaped test descendants"
+    # Port ownership ends only after all test children have been reaped.
+    for fd in _PORT_LEASES:
+        os.close(fd)
+    _PORT_LEASES.clear()
+
+
 @pytest.fixture(autouse=True)
 def subreaper() -> Iterator[None]:
-    """Daemons spawned by a helper subprocess re-parent to this process; reap them at teardown."""
+    """Reap every test child before releasing its cross-process port leases."""
     libc = ctypes.CDLL(None, use_errno=True)
     assert libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
     try:
         yield
     finally:
-        for _ in range(40):
-            pids = descendants()
-            if not pids:
-                break
-            for pid in pids:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
-            for pid in pids:
-                with contextlib.suppress(ChildProcessError):
-                    os.waitpid(pid, os.WNOHANG)
-            time.sleep(0.05)
-        libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+        try:
+            reap_test_children()
+        finally:
+            libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
 
 
 def test_descendants_ignore_a_patched_proc_stat(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,6 +256,7 @@ class Ctx:
     work: Path
     env: dict[str, str]
     port: int = field(default_factory=free_port)
+    backend: int = field(default_factory=free_port)
 
     def install(self, tool: str) -> None:
         script = {"opencode": FAKE_OPENCODE, "claude": FAKE_CLAUDE}[tool]
@@ -320,6 +358,24 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ctx]:
     assert str(state) != REAL_STATE_DIR and str(state).startswith(str(tmp_path))
     before = os.stat(REAL_STATE_DIR).st_mtime_ns if os.path.isdir(REAL_STATE_DIR) else None
     context = Ctx(root, home, state, fake, work, env)
+    while context.backend == context.port:
+        context.backend = free_port()
+    sysctl = root / "sysctl"
+    for interface in ("all", "default", "eth0", "lo"):
+        (sysctl / interface).mkdir(parents=True)
+        (sysctl / interface / "route_localnet").write_text("0\n")
+    route4, route6 = root / "route4", root / "route6"
+    route4.write_text(route4_table())
+    route6.write_text(route6_row())
+    env.update(
+        {
+            "DJINN_SERVE_TEST_BACKEND_PORT": str(context.backend),
+            "DJINN_SERVE_TEST_RELAY_PORT": str(context.port),
+            "DJINN_SERVE_TEST_SYSCTL_DIR": str(sysctl),
+            "DJINN_SERVE_TEST_ROUTE4": str(route4),
+            "DJINN_SERVE_TEST_ROUTE6": str(route6),
+        }
+    )
     context.install("opencode")
     context.install("claude")
     yield context
@@ -368,6 +424,7 @@ def test_protocol_enums_are_frozen() -> None:
         "service-json",
         "service-config",
         "remote-config",
+        "route-localnet",
         "spawn",
         "not-registered",
         "busy",
@@ -443,6 +500,8 @@ def test_record_codec_roundtrip_and_rejections() -> None:
         child_start="13",
         port=4096,
         cors="https://box.example.ts.net",
+        relay_pid=7,
+        relay_start="14",
     )
     assert mod.decode_record(mod.encode_record(record)) == record
     good = json.loads(mod.encode_record(record))
@@ -643,7 +702,7 @@ def test_state_function_is_total(
         return "100" if same else "999"
 
     def fake_group(pid: int, _start: str) -> str:
-        return groups[pid]
+        return groups.get(pid, groups.get(1, "alive") if groups.get(1) == "gone" else "alive")
 
     def fake_listening(_pid: int, _port: int) -> bool:
         return listening
@@ -657,6 +716,7 @@ def test_state_function_is_total(
     monkeypatch.setattr(mod, "pid1_start", fake_pid1)
     monkeypatch.setattr(mod, "group_state", fake_group)
     monkeypatch.setattr(mod, "listener_ours", fake_listening)
+    monkeypatch.setattr(mod, "relay_listener_ours", lambda *_: True)
     monkeypatch.setattr(mod, "discovery_pid", fake_discovery)
     monkeypatch.setattr(mod, "foreign_listener", fake_foreign)
     record = mod.Record(
@@ -669,6 +729,8 @@ def test_state_function_is_total(
         child_pid=2 if name == "claude" else None,
         child_start="6" if name == "claude" else None,
         port=4096 if name == "opencode" else None,
+        relay_pid=3 if name == "opencode" else None,
+        relay_start="7" if name == "opencode" else None,
     )
     ev = mod.evaluate(name, record, "/h")
     assert (ev.state, ev.reason) == (state, reason)
@@ -723,6 +785,8 @@ def test_refuses_to_signal_pid1_and_own_group(
             argv_tag="t",
             started_at="t",
             port=4096,
+            relay_pid=leader,
+            relay_start=mod.raw_start(leader),
         )
         (state / "opencode.json").write_bytes(mod.encode_record(record))
         out = io.StringIO()
@@ -747,7 +811,13 @@ def test_status_on_fresh_state(ctx: Ctx) -> None:
     assert out["pid1_start"] == mod.pid1_start()
     claude, opencode = out["servers"]["claude"], out["servers"]["opencode"]
     assert set(claude) == {"state", "reason", "pid", "since", "last_line"}
-    assert set(opencode) == set(claude) | {"listening", "discovery_pid_ok", "foreign_listener"}
+    assert set(opencode) == set(claude) | {
+        "listening",
+        "discovery_pid_ok",
+        "foreign_listener",
+        "relay_refused",
+        "relay_note",
+    }
     assert claude["state"] == opencode["state"] == "stopped"
     assert stat.S_IMODE(ctx.state.stat().st_mode) == 0o700
     assert stat.S_IMODE((ctx.state / "lock").stat().st_mode) == 0o600
@@ -1100,9 +1170,9 @@ def test_opencode_start_call_set_is_exact_and_password_stays_out(ctx: Ctx) -> No
         "serve",
         "--service",
         "--hostname",
-        "0.0.0.0",
+        "127.0.0.1",
         "--port",
-        str(ctx.port),
+        str(ctx.backend),
         "--cors",
         "https://box.tail.ts.net",
     ]
@@ -1123,7 +1193,7 @@ def test_opencode_start_call_set_is_exact_and_password_stays_out(ctx: Ctx) -> No
 def test_opencode_without_cors_has_no_cors_flag(ctx: Ctx) -> None:
     rc, _ = ctx.opencode()
     assert rc == 0
-    assert ctx.calls("opencode")[0]["argv"][-2:] == ["--port", str(ctx.port)]
+    assert ctx.calls("opencode")[0]["argv"][-2:] == ["--port", str(ctx.backend)]
     ctx.stop("opencode")
 
 
@@ -1175,8 +1245,7 @@ def test_ready_requires_listener_of_our_pid(ctx: Ctx) -> None:
         foreign.listen(1)
         rc, out = ctx.opencode(timing="opencode_ready=2,stop_wait=3")
     assert rc == 1 and out["code"] == "spawn", out
-    (call,) = ctx.calls("opencode")
-    assert is_gone(call["pid"]) and not (ctx.state / "opencode.json").exists()
+    assert ctx.calls("opencode") == [] and not (ctx.state / "opencode.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -1236,9 +1305,9 @@ def test_degraded_ours_is_stopped_then_restarted(ctx: Ctx) -> None:
     assert entry["reason"] == "listener lost" and entry["listening"] is False
     with socket.socket() as squatter:  # a foreign process now holds the port
         squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        squatter.bind(("0.0.0.0", ctx.port))  # noqa: S104
+        squatter.bind(("127.0.0.1", ctx.backend))  # noqa: S104
         squatter.listen(1)
-        assert ctx.status()["servers"]["opencode"]["foreign_listener"] is True
+        assert ctx.status()["servers"]["opencode"]["listening"] is False
     (ctx.fake / "oc-ctl").unlink()
     rc, second = ctx.opencode()
     assert rc == 0 and second["result"] == "restarted" and second["pid"] != first["pid"], second
@@ -1569,11 +1638,11 @@ import errno
 real_fresh_record = _fresh_record
 real_kill_failed_launch = _kill_failed_launch
 real_deadline_init = Deadline.__init__
-launch_end = 0
+launch_deadline = None
 def remember_deadline(self, seconds):
-    global launch_end
+    global launch_deadline
     real_deadline_init(self, seconds)
-    launch_end = self.end
+    launch_deadline = self
 Deadline.__init__ = remember_deadline
 def remember_spawn(pid, handoff, tag, port, cors=None):
     with open(os.path.join(os.environ["FAKE_DIR"], "spawned.json"), "w") as stream:
@@ -1589,12 +1658,15 @@ def remember_spawn(pid, handoff, tag, port, cors=None):
     return real_fresh_record(pid, handoff, tag, port, cors)
 def fail_save(*_):
     if os.environ["FAIL_RECORD_AT"] == "slow-save":
-        time.sleep(max(0, launch_end - time.monotonic() - 0.01))
+        # Expire the operation at the intended boundary, independent of startup scheduling.
+        launch_deadline.end = time.monotonic() - 1
     raise OSError(errno.ENOSPC, "No space left on device")
 def record_cleanup(pid, handoff, end):
     groups = ([handoff] if handoff else []) + [(pid, raw_start(pid) or "0")]
     with open(os.path.join(os.environ["FAKE_DIR"], "cleanup.json"), "w") as stream:
         json.dump(groups, stream)
+    with open(os.path.join(os.environ["FAKE_DIR"], "cleanup-clock.json"), "w") as stream:
+        json.dump({"expired": launch_deadline.left() <= 0}, stream)
     if os.environ["FAIL_CLEANUP"] == "raises":
         raise OSError(errno.EPERM, "Operation not permitted")
     if os.environ["FAIL_CLEANUP"] == "false":
@@ -1614,7 +1686,7 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     rc, out = ctx.run(
         *args,
         stdin=None if name == "claude" else '{"password":"synthetic-password"}',
-        timing="deadline=0.8,launch_cleanup=0.5",
+        timing="launch_cleanup=0.5",
         env={
             "FAIL_RECORD_AT": boundary,
             "FAIL_CLEANUP": cleanup,
@@ -1625,6 +1697,9 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     )
     assert rc == 1 and out["ok"] is False and out["code"] == "state-dir", out
     assert f"could not build or publish the {name} process record" in out["message"]
+    assert json.loads((ctx.fake / "cleanup-clock.json").read_text())["expired"] == (
+        boundary == "slow-save"
+    )
     spawned = json.loads((ctx.fake / "spawned.json").read_text())
     pids = [spawned["leader"]]
     if name == "claude":
@@ -2172,3 +2247,1195 @@ def test_opencode_preflight_refuses_arguments(ctx: Ctx) -> None:
     rc, out = ctx.run("opencode-preflight", "--unexpected", "value")
     assert rc == 1 and out["code"] == "usage", out
     assert not ctx.calls("opencode")
+
+
+# ----------------------------------------------------------- gateway relay (#167)
+
+
+def route4_table(gateway: str = "127.0.0.2", *, flags: str = "0003") -> str:
+    hop = socket.inet_aton(gateway)[::-1].hex().upper()
+    return (
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        f"eth0\t00000000\t{hop}\t{flags}\t0\t0\t0\t00000000\t0\t0\t0\n"
+    )
+
+
+def route6_row(gateway: str = "fd00:167:6::1", *, flags: str = "00000003") -> str:
+    hop = socket.inet_pton(socket.AF_INET6, gateway).hex()
+    return f"{'0' * 32} 00 {'0' * 32} 00 {hop} 00000400 00000000 00000000 {flags} eth0\n"
+
+
+def test_relay_production_defaults() -> None:
+    assert (mod.OPENCODE_PORT, mod.OPENCODE_INTERNAL_PORT) == (4096, 4097)
+    assert (mod.RELAY_LIMIT, mod.RELAY_BUFFER) == (64, 65536)
+    assert mod._TIMING["relay_connect"] == 5
+    assert mod._TIMING["relay_idle"] == 1800
+    assert mod._TIMING["relay_log_interval"] == 60
+    assert mod._TIMING["relay_heartbeat"] <= 10
+    assert mod._TIMING["relay_flush"] >= 1
+
+
+@pytest.mark.parametrize("version", [4, 6])
+@pytest.mark.parametrize("case", ["one", "none", "two", "duplicate", "malformed", "unreadable"])
+def test_real_route_tables(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, version: int, case: str
+) -> None:
+    path = Path(ctx.env[f"DJINN_SERVE_TEST_ROUTE{version}"])
+    env_key = mod.TEST_ROUTE4_ENV if version == 4 else mod.TEST_ROUTE6_ENV
+    monkeypatch.setenv(env_key, str(path))
+    row = route4_table() if version == 4 else route6_row()
+    if case == "none":
+        row = row.splitlines()[0] + "\n" if version == 4 else ""
+    elif case == "two":
+        row += (
+            (route4_table("127.0.0.3").splitlines()[1] + "\n")
+            if version == 4
+            else route6_row("fd00::2")
+        )
+    elif case == "duplicate":
+        row += (row.splitlines()[1] + "\n") if version == 4 else row
+    elif case == "malformed":
+        row += "invalid row\n"
+    path.write_text(row)
+    if case == "unreadable":
+        path.unlink()
+        path.mkdir()
+    if case == "one":
+        assert str(mod.current_gateway(version)) == (
+            "127.0.0.2" if version == 4 else "fd00:167:6::1"
+        )
+    else:
+        with pytest.raises((OSError, ValueError)):
+            mod.current_gateway(version)
+
+
+@pytest.mark.parametrize("flags", ["0000", "0001", "0002", "0203"])
+@pytest.mark.parametrize("version", [4, 6])
+def test_route_eligible_flags(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, version: int, flags: str
+) -> None:
+    key = f"DJINN_SERVE_TEST_ROUTE{version}"
+    path = Path(ctx.env[key])
+    monkeypatch.setenv(key, str(path))
+    path.write_text(route4_table(flags=flags) if version == 4 else route6_row(flags=flags))
+    with pytest.raises(ValueError, match="0 eligible"):
+        mod.current_gateway(version)
+
+
+@pytest.mark.parametrize("version", [4, 6])
+def test_route_destination_and_zero_hop(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, version: int
+) -> None:
+    key = f"DJINN_SERVE_TEST_ROUTE{version}"
+    path = Path(ctx.env[key])
+    monkeypatch.setenv(key, str(path))
+    if version == 4:
+        rows = [
+            route4_table("0.0.0.0"),
+            route4_table().replace("eth0\t00000000", "eth0\t0000007F"),
+            route4_table().replace("00000000\t0\t0\t0\n", "00FFFFFF\t0\t0\t0\n"),
+        ]
+    else:
+        rows = [
+            route6_row("::").replace("eth0", "lo"),
+            route6_row().replace("0" * 32 + " 00", "0" * 31 + "1 00", 1),
+            route6_row().replace(" 00 ", " 40 ", 1),
+        ]
+    for row in rows:
+        path.write_text(row)
+        with pytest.raises(ValueError, match="0 eligible"):
+            mod.current_gateway(version)
+    # Reject and zero-next-hop rows on lo must not count as another default.
+    path.write_text(
+        (route4_table() if version == 4 else route6_row())
+        + (
+            route4_table("0.0.0.0").splitlines()[1] + "\n"
+            if version == 4
+            else (route6_row("::", flags="00200200").replace("eth0", "lo"))
+        )
+    )
+    assert str(mod.current_gateway(version)) == ("127.0.0.2" if version == 4 else "fd00:167:6::1")
+
+
+def test_ipv4_little_endian_and_ipv6_scope(ctx: Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (mod.TEST_ROUTE4_ENV, mod.TEST_ROUTE6_ENV):
+        monkeypatch.setenv(key, ctx.env[key])
+    path = Path(ctx.env[mod.TEST_ROUTE4_ENV])
+    path.write_text(route4_table("172.22.0.1"))
+    assert str(mod.current_gateway(4)) == "172.22.0.1"
+    path.write_text(route4_table())
+    assert mod.admission(("::ffff:127.0.0.2", 1, 0, 0)) == ("127.0.0.2", None)
+    assert mod.admission(("::ffff:127.0.0.3", 1, 0, 0))[1] == "not gateway"
+    assert "scoped peer" in mod.admission(("fd00:167:6::1", 1, 0, 1))[1]
+    assert "scoped peer" in mod.admission(("fd00:167:6::1%eth0", 1, 0, 0))[1]
+    path6 = Path(ctx.env[mod.TEST_ROUTE6_ENV])
+    path6.write_text(route6_row("fe80::1"))
+    assert "scoped default gateway" in mod.admission(("fe80::1", 1, 0, 0))[1]
+    path6.write_text(route6_row("ff02::1"))
+    assert "scoped default gateway" in mod.admission(("ff02::1", 1, 0, 0))[1]
+    path6.write_text(route6_row())
+    assert mod.admission(("fd00:167:6::1", 1, 0, 0))[1] is None
+    path6.write_text("broken\n")
+    assert "gateway undetermined" in mod.admission(("fd00:167:6::1", 1, 0, 0))[1]
+
+
+@pytest.mark.parametrize("interface", ["all", "default", "eth0", "lo"])
+@pytest.mark.parametrize("value", ["1", "2", "-1", "no", "unreadable"])
+def test_route_localnet_preflight_and_start(ctx: Ctx, interface: str, value: str) -> None:
+    path = Path(ctx.env[mod.TEST_SYSCTL_ENV]) / interface / "route_localnet"
+    if value == "unreadable":
+        path.unlink()
+    else:
+        path.write_text(value)
+    for args in (("opencode-preflight",), ("opencode-start", "--port", str(ctx.port))):
+        rc, out = ctx.run(*args, stdin='{"password":"synthetic"}')
+        assert rc == 1 and out["code"] == "route-localnet", out
+    assert ctx.calls("opencode") == [] and not ctx.service_json().exists()
+    assert not (ctx.state / "opencode.json").exists()
+
+
+@dataclass
+class RelayHarness:
+    ctx: Ctx
+    backend: socket.socket
+    pid: int
+    listener_inode: int
+
+    def client(self, source: str = "127.0.0.2", *, ipv6: bool = False) -> socket.socket:
+        client = socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(3)
+        client.bind(("::ffff:" + source if ipv6 else source, 0))
+        client.connect(("::ffff:127.0.0.1" if ipv6 else "127.0.0.1", self.ctx.port))
+        return client
+
+    def target(self) -> socket.socket:
+        conn, _ = self.backend.accept()
+        conn.settimeout(3)
+        return conn
+
+    def count(self) -> Json:
+        return json.loads((self.ctx.state / "opencode-relay.count").read_text())
+
+
+def assert_relay_handoff(ctx: Ctx, pid: int, readfd: int) -> None:
+    handoff = mod._read_handoff(readfd, 3)
+    if handoff != (pid, mod.raw_start(pid)):
+        log = ctx.state / "opencode-relay.log"
+        detail = log.read_text(errors="replace")[-8192:] if log.exists() else "missing relay log"
+        print(f"relay pid={pid}, stat={REAL_PROC_STAT(pid)}, log:\n{detail}", file=sys.stderr)
+        pytest.fail(f"relay handoff {handoff!r}; relay log: {detail}")
+
+
+def reap_relay(pid: int) -> None:
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return
+    except ChildProcessError:
+        return
+    # The unreaped direct child anchors its PID throughout signalling.
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        os.kill(pid, signal.SIGKILL)  # child may still be waiting to call setsid()
+    if not wait_for(lambda: mod.proc_start(pid) is None, 2):
+        os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+
+
+@pytest.fixture
+def relay(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Iterator[RelayHarness]:
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    settings = getattr(request, "param", "relay_heartbeat=0.1,relay_flush=0.03,relay_idle=3")
+    if settings == "counter-fail":
+        real_write = mod.write_atomic
+
+        def flaky_write(dirfd: int, final: str, data: bytes) -> None:
+            if (ctx.fake / "counter-fail").exists():
+                raise OSError("test write failure")
+            real_write(dirfd, final, data)
+
+        monkeypatch.setattr(mod, "write_atomic", flaky_write)
+        settings = "relay_heartbeat=0.1,relay_flush=0.03,relay_idle=3"
+    if settings == "target-socket-fail":
+        real_socket = socket.socket
+        parent_pid = os.getpid()
+
+        def allocate_socket(*args: Any, **kwargs: Any) -> socket.socket:
+            if (
+                os.getpid() != parent_pid
+                and args[:1] == (socket.AF_INET,)
+                and (ctx.fake / "target-socket-fail").exists()
+            ):
+                raise OSError("target socket allocation failed")
+            return real_socket(*args, **kwargs)
+
+        monkeypatch.setattr(mod.socket, "socket", allocate_socket)
+        settings = "relay_idle=3,relay_heartbeat=0.1,relay_flush=0.03"
+    if settings == "small-buffer":
+
+        class BoundedBuffer(bytearray):
+            def extend(self, data: bytes) -> None:
+                super().extend(data)
+                if len(self) > 1024:
+                    (ctx.fake / "buffer-overflow").touch()
+
+        real_socket = socket.socket
+
+        class PartialSocket(real_socket):
+            def send(self, data: bytes | bytearray, flags: int = 0) -> int:
+                return super().send(data[:13], flags)
+
+        monkeypatch.setattr(mod, "bytearray", BoundedBuffer, raising=False)
+        monkeypatch.setattr(mod.socket, "socket", PartialSocket)
+        monkeypatch.setattr(mod, "RELAY_BUFFER", 1024)
+        settings = "relay_idle=3,relay_heartbeat=0.1,relay_flush=0.03"
+    monkeypatch.setenv(mod.TEST_TIMING_ENV, settings)
+    backend = socket.socket()
+    backend.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    backend.bind(("127.0.0.1", 0))
+    ctx.backend = backend.getsockname()[1]
+    monkeypatch.setenv(mod.TEST_BACKEND_ENV, str(ctx.backend))
+    backend.listen(128)
+    backend.settimeout(3)
+    listener = mod.relay_listener(0)
+    ctx.port = listener.getsockname()[1]
+    monkeypatch.setenv(mod.TEST_RELAY_ENV, str(ctx.port))
+    listener_inode = os.fstat(listener.fileno()).st_ino
+    fd = mod.open_state_dir()
+    readfd, writefd = os.pipe()
+    ack_read, ack_write = os.pipe()
+    pid = mod.spawn_relay(fd, ctx.port, writefd, ack_read, listener=listener)
+    os.close(writefd)
+    os.close(ack_read)
+    try:
+        assert_relay_handoff(ctx, pid, readfd)
+        # Socket bound, but no accept before publication's ACK.
+        backend.settimeout(0.1)
+        with socket.socket() as pending:
+            pending.bind(("127.0.0.2", 0))
+            pending.connect(("127.0.0.1", ctx.port))
+            with pytest.raises(TimeoutError):
+                backend.accept()
+        os.write(ack_write, mod._LAUNCH_ACK)
+        backend.settimeout(3)
+        probe, _ = backend.accept()
+        probe.close()
+        assert wait_for(lambda: (ctx.state / "opencode-relay.count").exists())
+        yield RelayHarness(ctx, backend, pid, listener_inode)
+    finally:
+        os.close(ack_write)
+        os.close(readfd)
+        os.close(fd)
+        backend.close()
+        listener.close()
+        reap_relay(pid)
+
+
+def refused(client: socket.socket) -> None:
+    with contextlib.suppress(ConnectionResetError):
+        assert client.recv(1) == b""
+
+
+def test_relay_gateway_route_refresh_and_refusal_logs(relay: RelayHarness) -> None:
+    with relay.client() as client, relay.target() as target:
+        client.sendall(b"opaque\\x00\\xff")
+        assert target.recv(99) == b"opaque\\x00\\xff"
+        target.sendall(b"response")
+        assert client.recv(99) == b"response"
+    with relay.client("127.0.0.3") as client:
+        refused(client)
+    assert wait_for(lambda: relay.count()["refused"] == 1)
+    Path(relay.ctx.env[mod.TEST_ROUTE4_ENV]).write_text(route4_table("127.0.0.3"))
+    with relay.client() as client:
+        refused(client)
+    with relay.client("127.0.0.3") as client, relay.target() as target:
+        client.sendall(b"new network")
+        assert target.recv(99) == b"new network"
+    assert wait_for(lambda: relay.count()["refused"] == 2)
+    log = (relay.ctx.state / "opencode-relay.log").read_text()
+    assert "refused 127.0.0.3 (not the bridge gateway for" in log
+    assert "userland-proxy / direct routing" in log
+    assert "non-default network of a multi-network container" in log
+    assert "opaque" not in log and "response" not in log
+
+
+def test_relay_mapped_socket_and_half_close(relay: RelayHarness) -> None:
+    with relay.client(ipv6=True) as client, relay.target() as target:
+        client.sendall(b"request")
+        client.shutdown(socket.SHUT_WR)
+        assert target.recv(99) == b"request"
+        assert target.recv(99) == b""
+        target.sendall(b"last reply")
+        target.shutdown(socket.SHUT_WR)
+        assert client.recv(99) == b"last reply"
+        assert client.recv(99) == b""
+    assert is_alive(relay.pid)
+
+
+def test_relay_refused_peers_never_take_capacity(relay: RelayHarness) -> None:
+    for _ in range(70):
+        with relay.client("127.0.0.3") as client:
+            refused(client)
+    with relay.client() as client, relay.target() as target:
+        client.sendall(b"still available")
+        assert target.recv(99) == b"still available"
+    assert wait_for(lambda: relay.count()["refused"] == 70)
+    log = (relay.ctx.state / "opencode-relay.log").read_text()
+    assert log.count("refused 127.0.0.3") == 1
+
+
+def test_relay_capacity_limit_counted_and_logged(relay: RelayHarness) -> None:
+    clients: list[socket.socket] = []
+    targets: list[socket.socket] = []
+    try:
+        for _ in range(64):
+            clients.append(relay.client())
+            targets.append(relay.target())
+        with relay.client() as overflow:
+            refused(overflow)
+        assert wait_for(lambda: relay.count()["refused"] == 1)
+        assert (
+            "refused 127.0.0.2 (connection limit reached)"
+            in (relay.ctx.state / "opencode-relay.log").read_text()
+        )
+    finally:
+        for conn in clients + targets:
+            conn.close()
+
+
+def test_relay_counter_heartbeat_without_connections(relay: RelayHarness) -> None:
+    first = relay.count()
+    assert first["relay_pid"] == relay.pid and first["refused"] == 0
+    assert first["relay_start"] == mod.raw_start(relay.pid)
+    assert wait_for(lambda: relay.count()["updated_at"] > first["updated_at"])
+    assert stat.S_IMODE((relay.ctx.state / "opencode-relay.count").stat().st_mode) == 0o600
+
+
+def test_relay_connection_reset_is_contained(relay: RelayHarness) -> None:
+    with relay.client() as client, relay.target() as target:
+        target.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+    with relay.client() as client, relay.target() as target:
+        client.sendall(b"after reset")
+        assert target.recv(99) == b"after reset"
+    assert is_alive(relay.pid)
+
+
+@pytest.mark.parametrize("case", ["valid", "missing", "foreign", "stale", "unreadable"])
+def test_relay_counter_status_identity_freshness(ctx: Ctx, case: str) -> None:
+    rc, out = ctx.opencode()
+    assert rc == 0, out
+    record = ctx.record("opencode")
+    # Freeze the writer so status fixtures cannot race a heartbeat.
+    os.kill(record["relay_pid"], signal.SIGSTOP)
+    path = ctx.state / "opencode-relay.count"
+    payload = {
+        "relay_pid": record["relay_pid"],
+        "relay_start": record["relay_start"],
+        "refused": 12,
+        "updated_at": time.time(),
+    }
+    if case == "foreign":
+        payload["relay_start"] = "0"
+    if case == "stale":
+        payload["updated_at"] = time.time() - 31
+    path.write_text(json.dumps(payload) if case != "unreadable" else "invalid")
+    if case == "missing":
+        path.unlink()
+    try:
+        entry = ctx.status()["servers"]["opencode"]
+        assert entry["relay_refused"] == (12 if case == "valid" else None)
+        assert entry["relay_note"] == (
+            None if case == "valid" else ("foreign identity" if case == "foreign" else case)
+        )
+    finally:
+        os.kill(record["relay_pid"], signal.SIGCONT)
+        ctx.stop("opencode")
+
+
+def test_pair_record_requires_relay_identity(ctx: Ctx) -> None:
+    assert ctx.opencode()[0] == 0
+    record = ctx.record("opencode")
+    assert mod.decode_record(json.dumps(record).encode()) is not None
+    for key, value in (
+        ("relay_pid", None),
+        ("relay_pid", True),
+        ("relay_pid", 1),
+        ("relay_start", None),
+        ("relay_start", "bad"),
+    ):
+        assert mod.decode_record(json.dumps({**record, key: value}).encode()) is None
+    for key in ("relay_pid", "relay_start"):
+        assert (
+            mod.decode_record(json.dumps({k: v for k, v in record.items() if k != key}).encode())
+            is None
+        )
+    assert mod.record_groups(mod.decode_record(json.dumps(record).encode())) == [
+        (record["relay_pid"], record["relay_start"]),
+        (record["pid"], record["start"]),
+    ]
+    ctx.stop("opencode")
+
+
+@pytest.mark.parametrize("gone,reason", [("relay_pid", "relay gone"), ("pid", "opencode gone")])
+def test_pair_degraded_stop_and_restart(ctx: Ctx, gone: str, reason: str) -> None:
+    assert ctx.opencode()[0] == 0
+    first = ctx.record("opencode")
+    os.killpg(first[gone], signal.SIGKILL)
+    assert is_gone(first[gone])
+    entry = ctx.status()["servers"]["opencode"]
+    assert entry["state"] == "degraded" and entry["reason"] == reason
+    survivor = first["pid" if gone == "relay_pid" else "relay_pid"]
+    assert is_alive(survivor)
+    rc, out = ctx.opencode()
+    assert rc == 0 and out["result"] == "restarted", out
+    assert is_gone(survivor)
+    second = ctx.record("opencode")
+    assert ctx.stop("opencode")[0] == 0
+    assert is_gone(second["pid"]) and is_gone(second["relay_pid"])
+
+
+def test_relay_death_after_ack_stops_backend(ctx: Ctx) -> None:
+    injected = """
+real_write = os.write
+def kill_after_ack(fd, data):
+    result = real_write(fd, data)
+    if data == _LAUNCH_ACK:
+        record = load_record(open_state_dir(), "opencode")
+        os.killpg(record.relay_pid, signal.SIGKILL)
+        time.sleep(0.1)
+    return result
+os.write = kill_after_ack
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic"}',
+        source=SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected,
+    )
+    assert rc == 0 and out["result"] == "exited", out
+    record = ctx.record("opencode")
+    assert is_gone(record["pid"]) and is_gone(record["relay_pid"])
+
+
+@pytest.mark.parametrize("relay", ["relay_idle=0.2,relay_connect=1"], indirect=True)
+def test_relay_idle_timeout_and_activity(relay: RelayHarness) -> None:
+    with relay.client() as client, relay.target() as target:
+        for _ in range(5):
+            client.sendall(b"keepalive")
+            assert target.recv(99) == b"keepalive"
+            time.sleep(0.08)
+        refused(client)
+    assert is_alive(relay.pid)
+
+
+@pytest.mark.parametrize("relay", ["relay_connect=0.2,relay_idle=3"], indirect=True)
+def test_relay_connect_timeout(relay: RelayHarness) -> None:
+    # A full real loopback accept queue leaves the relay's nonblocking connect pending.
+    relay.backend.listen(0)
+    with socket.create_connection(("127.0.0.1", relay.ctx.backend), timeout=1) as filler:
+        assert filler.fileno() >= 0
+        started = time.monotonic()
+        with relay.client() as client:
+            refused(client)
+        assert 0.15 <= time.monotonic() - started < 1.5
+    assert is_alive(relay.pid)
+
+
+def test_relay_sigpipe_ignored_and_client_reset_contained(relay: RelayHarness) -> None:
+    os.kill(relay.pid, signal.SIGPIPE)
+    with relay.client() as client, relay.target() as target:
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+        client.close()
+        with contextlib.suppress(OSError):
+            target.sendall(b"broken pipe" * 10000)
+    with relay.client() as client, relay.target() as target:
+        target.sendall(b"still alive")
+        assert client.recv(99) == b"still alive"
+
+
+@pytest.mark.parametrize("relay", ["counter-fail"], indirect=True)
+def test_relay_counter_write_failure_retries_without_reset(relay: RelayHarness) -> None:
+    flag = relay.ctx.fake / "counter-fail"
+    log = relay.ctx.state / "opencode-relay.log"
+    for expected in (1, 2):
+        flag.touch()
+        with relay.client("127.0.0.3") as client:
+            refused(client)
+        assert wait_for(
+            lambda expected=expected: log.read_text().count("counter write failed") == expected
+        )
+        time.sleep(0.15)
+        assert log.read_text().count("counter write failed") == expected
+        flag.unlink()
+        assert wait_for(lambda expected=expected: relay.count()["refused"] == expected)
+
+
+@pytest.mark.parametrize("relay", ["relay_flush=0.5,relay_heartbeat=10"], indirect=True)
+def test_relay_counter_flush_is_throttled_and_final(relay: RelayHarness) -> None:
+    first = relay.count()
+    for _ in range(2):
+        with relay.client("127.0.0.3") as client:
+            refused(client)
+    time.sleep(0.1)
+    assert relay.count() == first
+    os.killpg(relay.pid, signal.SIGTERM)
+    assert is_gone(relay.pid)
+    assert relay.count()["refused"] == 2
+
+
+@pytest.mark.parametrize("relay", ["relay_log_interval=0.2"], indirect=True)
+def test_relay_refusal_log_rate_limit_expires(relay: RelayHarness) -> None:
+    for _ in range(2):
+        with relay.client("127.0.0.3") as client:
+            refused(client)
+    log = relay.ctx.state / "opencode-relay.log"
+    assert log.read_text().count("refused 127.0.0.3") == 1
+    time.sleep(0.25)
+    with relay.client("127.0.0.3") as client:
+        refused(client)
+    assert wait_for(lambda: log.read_text().count("refused 127.0.0.3") == 2)
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unreadable", "none", "two"])
+def test_relay_undetermined_gateway_log_and_no_backend(relay: RelayHarness, failure: str) -> None:
+    path = Path(relay.ctx.env[mod.TEST_ROUTE4_ENV])
+    if failure == "unreadable":
+        path.unlink()
+    elif failure == "none":
+        path.write_text(route4_table().splitlines()[0] + "\n")
+    elif failure == "two":
+        path.write_text(route4_table() + route4_table("127.0.0.3").splitlines()[1] + "\n")
+    else:
+        path.write_text("malformed\n")
+    with relay.client() as client:
+        refused(client)
+    relay.backend.settimeout(0.15)
+    with pytest.raises(TimeoutError):
+        relay.backend.accept()
+    assert (
+        "refused 127.0.0.2 (gateway undetermined:"
+        in (relay.ctx.state / "opencode-relay.log").read_text()
+    )
+
+
+@pytest.mark.parametrize("main", ["alive", "gone", "stale"])
+@pytest.mark.parametrize("gate", ["alive", "gone", "stale"])
+@pytest.mark.parametrize("listeners", [(True, True), (True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("discovery", [10, None, 99])
+def test_full_pair_state_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    main: str,
+    gate: str,
+    listeners: tuple[bool, bool],
+    discovery: int | None,
+) -> None:
+    monkeypatch.setattr(mod, "pid1_start", lambda: "1")
+    monkeypatch.setattr(mod, "group_state", lambda pid, _: main if pid == 10 else gate)
+    monkeypatch.setattr(mod, "listener_ours", lambda *_: listeners[0])
+    monkeypatch.setattr(mod, "relay_listener_ours", lambda *_: listeners[1])
+    monkeypatch.setattr(mod, "discovery_pid", lambda _: discovery)
+    monkeypatch.setattr(mod, "foreign_listener", lambda *_: False)
+    record = mod.Record(
+        10, "2", "1", "/", "opencode-serve", "now", port=4096, relay_pid=11, relay_start="3"
+    )
+    ev = mod.evaluate("opencode", record, "/")
+    if "stale" in (main, gate):
+        assert ev.stale and (ev.state, ev.reason) == ("stopped", "stale record")
+    elif main == gate == "gone":
+        assert ev.state == "exited"
+    elif main == "gone":
+        assert (ev.state, ev.reason) == ("degraded", "opencode gone")
+    elif gate == "gone":
+        assert (ev.state, ev.reason) == ("degraded", "relay gone")
+    elif not listeners[1]:
+        assert (ev.state, ev.reason) == ("degraded", "relay listener lost")
+    elif not listeners[0]:
+        assert (ev.state, ev.reason) == ("degraded", "listener lost")
+    elif discovery != 10:
+        assert (ev.state, ev.reason) == (
+            "degraded",
+            "not registered" if discovery is None else "registered to another process",
+        )
+    else:
+        assert (ev.state, ev.reason, ev.listening, ev.discovery_ok) == ("running", None, True, True)
+
+
+@pytest.mark.parametrize("port_name", ["port", "backend"])
+def test_foreign_listener_refused_before_spawn(ctx: Ctx, port_name: str) -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", getattr(ctx, port_name)))
+        listener.listen()
+        rc, out = ctx.opencode()
+    assert rc == 1 and out["code"] == "spawn", out
+    assert "foreign listener" in out["message"]
+    if port_name == "port":
+        assert "stop it or recreate the container" in out["message"]
+    assert not ctx.calls("opencode")
+
+
+def test_pair_publication_ack_and_descriptor_ownership(ctx: Ctx) -> None:
+    injection = """
+real_save = save_record
+real_write = os.write
+def save_pair(dirfd, name, record):
+    if name == "opencode":
+        assert record.relay_pid is not None and relay_listener_ours(record.relay_pid, record.port)
+        assert not os.path.exists(os.path.join(os.environ[TEST_STATE_ENV], "opencode-relay.count"))
+        assert signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN
+    real_save(dirfd, name, record)
+def ack_pair(fd, data):
+    if data == _LAUNCH_ACK:
+        record = load_record(open_state_dir(), "opencode")
+        assert record is not None and record.relay_pid is not None
+    return real_write(fd, data)
+save_record = save_pair
+os.write = ack_pair
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic"}',
+        source=SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injection,
+    )
+    assert rc == 0 and out["result"] == "started", out
+    record = ctx.record("opencode")
+    relay_pid = record["relay_pid"]
+    assert os.getpgid(relay_pid) == os.getsid(relay_pid) == relay_pid
+    assert mod.listener_ours(record["pid"], ctx.backend)
+    assert not mod.listener_ours(relay_pid, ctx.port)
+    assert mod.relay_listener_ours(relay_pid, ctx.port)
+    assert wait_for(lambda: (ctx.state / "opencode-relay.count").exists())
+    targets = []
+    for entry in Path(f"/proc/{relay_pid}/fd").iterdir():
+        with contextlib.suppress(FileNotFoundError):
+            targets.append(os.readlink(entry))
+    assert not any("pipe:[" in target or target.endswith("/lock") for target in targets)
+    # A second operation can acquire the helper lock while the pair runs.
+    assert not ctx.status()["busy"]
+    assert ctx.stop("opencode")[0] == 0
+
+
+@pytest.mark.parametrize(
+    "fault", ["no-handoff", "wrong-handoff", "save", "relay-fork", "ack-eof", "stubborn-relay"]
+)
+def test_pair_launch_guard_cleans_both_children(ctx: Ctx, fault: str) -> None:
+    injection = """
+real_spawn = spawn
+real_relay = spawn_relay
+real_save = save_record
+fault = os.environ["FAULT"]
+def remember_spawn(*args, **kwargs):
+    pid = real_spawn(*args, **kwargs)
+    open(os.path.join(os.environ["FAKE_DIR"], "backend.pid"), "w").write(str(pid))
+    return pid
+def remember_relay(*args):
+    if fault == "relay-fork":
+        raise OSError("relay fork failed")
+    pid = real_relay(*args)
+    open(os.path.join(os.environ["FAKE_DIR"], "relay.pid"), "w").write(str(pid))
+    return pid
+spawn = remember_spawn
+spawn_relay = remember_relay
+if fault == "no-handoff":
+    _read_handoff = lambda *_: None
+elif fault == "wrong-handoff":
+    _read_handoff = lambda *_: (9999999, "1")
+elif fault in ("save", "stubborn-relay"):
+    def failed_save(*_):
+        raise OSError("save failed")
+    save_record = failed_save
+    if fault == "stubborn-relay":
+        def stubborn(dirfd, port, handoff, ack):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            os.write(handoff, f"{os.getpid()} {raw_start(os.getpid())}\\n".encode())
+            while True:
+                time.sleep(0.1)
+        run_relay = stubborn
+elif fault == "ack-eof":
+    def unacked(dirfd, port, handoff, ack):
+        os.close(ack)
+        os.write(handoff, f"{os.getpid()} {raw_start(os.getpid())}\\n".encode())
+        os.close(handoff)
+    run_relay = unacked
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic"}',
+        env={"FAULT": fault},
+        source=SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injection,
+    )
+    assert (rc == 1 and out["code"] in ("spawn", "state-dir")) or out.get("result") == "exited", out
+    for name in ("backend", "relay"):
+        path = ctx.fake / f"{name}.pid"
+        if path.exists():
+            assert is_gone(int(path.read_text()))
+    if fault != "ack-eof":
+        assert not (ctx.state / "opencode.json").exists()
+
+
+@pytest.mark.parametrize("relay", ["small-buffer"], indirect=True)
+def test_relay_buffer_bound_and_partial_writes(relay: RelayHarness) -> None:
+    payload = bytes(range(256)) * 128
+    with relay.client() as client, relay.target() as target:
+        client.sendall(payload)
+        received = bytearray()
+        while len(received) < len(payload):
+            received.extend(target.recv(8192))
+        assert received == payload
+        target.sendall(payload)
+        received.clear()
+        while len(received) < len(payload):
+            received.extend(client.recv(8192))
+        assert received == payload
+    assert not (relay.ctx.fake / "buffer-overflow").exists()
+
+
+@pytest.mark.parametrize("fault", ["eof", "invalid", "term", "int"])
+def test_relay_unacked_exits_without_accepting(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    fd = mod.open_state_dir()
+    readfd, writefd = os.pipe()
+    ack_read, ack_write = os.pipe()
+    listener = mod.relay_listener(0)
+    ctx.port = listener.getsockname()[1]
+    pid = mod.spawn_relay(fd, ctx.port, writefd, ack_read, listener=listener)
+    os.close(writefd)
+    os.close(ack_read)
+    try:
+        assert_relay_handoff(ctx, pid, readfd)
+        if fault == "invalid":
+            os.write(ack_write, b"bad\n")
+        elif fault in ("term", "int"):
+            os.killpg(pid, signal.SIGTERM if fault == "term" else signal.SIGINT)
+        else:
+            os.close(ack_write)
+            ack_write = -1
+        assert wait_for(lambda: mod.proc_start(pid) is None, 1)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert not mod.listener_inodes(ctx.port, wildcard_v4=False)
+    finally:
+        try:
+            for entry in (fd, readfd, ack_write):
+                if entry >= 0:
+                    os.close(entry)
+        finally:
+            listener.close()
+            reap_relay(pid)
+
+
+@pytest.mark.parametrize("entry", ["stop", "prepare"])
+def test_exited_looking_pair_still_stops_live_groups(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    assert ctx.opencode()[0] == 0
+    record = mod.decode_record((ctx.state / "opencode.json").read_bytes())
+    monkeypatch.setattr(mod, "evaluate", lambda *_: mod.Eval("exited"))
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    if entry == "stop":
+        assert mod.cmd_stop(["--name", "opencode"])["results"]["opencode"]["result"] == "stopped"
+    else:
+        fd = mod.open_state_dir()
+        try:
+            assert mod._prepare(fd, "opencode", str(ctx.home), mod.Deadline(5)) == (None, True)
+        finally:
+            os.close(fd)
+    assert is_gone(record.pid) and is_gone(record.relay_pid)
+    assert not (ctx.state / "opencode.json").exists()
+
+
+def test_relay_ipv4_fallback_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_socket = socket.socket
+
+    def no_ipv6(family: int, kind: int) -> socket.socket:
+        if family == socket.AF_INET6:
+            raise OSError(97, "IPv6 unavailable")
+        return real_socket(family, kind)
+
+    port = free_port()
+    monkeypatch.setattr(mod.socket, "socket", no_ipv6)
+    with mod.relay_listener(port) as listener:
+        assert listener.family == socket.AF_INET
+        assert listener.getsockname()[0] == "0.0.0.0"
+
+
+def test_pair_test_ports_are_independent_of_arguments(ctx: Ctx) -> None:
+    rc, out = ctx.run("opencode-start", "--port", "4096", stdin='{"password":"synthetic"}')
+    assert rc == 0 and out["result"] == "started", out
+    assert ctx.record("opencode")["port"] == ctx.port
+    assert mod.listener_ours(out["pid"], ctx.backend)
+    ctx.stop("opencode")
+
+
+def test_pair_readiness_requires_relay_listener(ctx: Ctx) -> None:
+    injection = """
+def relay_without_listener(dirfd, port, handoff, ack):
+    os.write(handoff, f"{os.getpid()} {raw_start(os.getpid())}\\n".encode())
+    os.close(handoff)
+    assert os.read(ack, len(_LAUNCH_ACK)) == _LAUNCH_ACK
+    os.close(ack)
+    while True:
+        time.sleep(0.1)
+run_relay = relay_without_listener
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic"}',
+        timing="opencode_ready=0.3,stop_wait=1",
+        source=SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injection,
+    )
+    assert rc == 1 and out["code"] == "spawn", out
+    assert "did not become ready" in out["message"]
+    assert not (ctx.state / "opencode.json").exists()
+    assert is_gone(ctx.calls("opencode")[0]["pid"])
+
+
+@pytest.mark.parametrize("fault", ["root", "all", "default"])
+def test_route_localnet_missing_inputs_fail_closed(ctx: Ctx, fault: str) -> None:
+    root = Path(ctx.env[mod.TEST_SYSCTL_ENV])
+    if fault == "root":
+        ctx.env[mod.TEST_SYSCTL_ENV] = str(root / "missing")
+    else:
+        (root / fault / "route_localnet").unlink()
+        (root / fault).rmdir()
+    rc, out = ctx.run("opencode-preflight")
+    assert rc == 1 and out["code"] == "route-localnet", out
+
+
+def test_route_localnet_has_no_runtime_watchdog(ctx: Ctx) -> None:
+    assert ctx.opencode()[0] == 0
+    record = ctx.record("opencode")
+    (Path(ctx.env[mod.TEST_SYSCTL_ENV]) / "all" / "route_localnet").write_text("1")
+    time.sleep(0.25)
+    assert ctx.status()["servers"]["opencode"]["state"] == "running"
+    assert is_alive(record["pid"]) and is_alive(record["relay_pid"])
+    assert ctx.stop("opencode")[0] == 0
+
+
+@pytest.mark.parametrize("version", [4, 6])
+@pytest.mark.parametrize("bad", ["address", "flags", "number", "header", "prefix"])
+def test_route_malformed_fields(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, version: int, bad: str
+) -> None:
+    key = f"DJINN_SERVE_TEST_ROUTE{version}"
+    path = Path(ctx.env[key])
+    monkeypatch.setenv(key, str(path))
+    rows = (route4_table() if version == 4 else route6_row()).splitlines()
+    fields = rows[-1].split()
+    if bad == "address":
+        fields[2 if version == 4 else 4] = "G" * (8 if version == 4 else 32)
+    elif bad == "flags":
+        fields[3 if version == 4 else 8] = "-1"
+    elif bad == "number":
+        fields[6 if version == 4 else 5] = "no"
+    elif bad == "prefix":
+        if version == 4:
+            fields[7] = "0"
+        else:
+            fields[3] = "81"
+    elif version == 4:
+        rows[0] = "wrong header"
+    else:
+        fields.pop()
+    rows[-1] = " ".join(fields)
+    if bad == "flags":
+        rows.append((route4_table() if version == 4 else route6_row()).splitlines()[-1])
+    path.write_text("\n".join(rows) + "\n")
+    with pytest.raises(ValueError):
+        mod.current_gateway(version)
+
+
+def test_relay_native_ipv6_gateway(relay: RelayHarness) -> None:
+    Path(relay.ctx.env[mod.TEST_ROUTE6_ENV]).write_text(route6_row("::1"))
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as client:
+        client.settimeout(3)
+        client.bind(("::1", 0))
+        client.connect(("::1", relay.ctx.port))
+        with relay.target() as target:
+            client.sendall(b"native ipv6")
+            assert target.recv(99) == b"native ipv6"
+            target.sendall(b"ok")
+            assert client.recv(99) == b"ok"
+
+
+@pytest.mark.parametrize("relay", ["target-socket-fail"], indirect=True)
+def test_relay_target_socket_failure_is_contained(relay: RelayHarness) -> None:
+    flag = relay.ctx.fake / "target-socket-fail"
+    flag.touch()
+    with relay.client() as client:
+        refused(client)
+    flag.unlink()
+    with relay.client() as client, relay.target() as target:
+        client.sendall(b"after allocation error")
+        assert target.recv(99) == b"after allocation error"
+    assert is_alive(relay.pid)
+
+
+def test_relay_exit_after_ack_reports_tail(ctx: Ctx) -> None:
+    injection = """
+def die_after_ack(dirfd, port, handoff, ack):
+    listener = relay_listener(port)
+    os.write(handoff, f"{os.getpid()} {raw_start(os.getpid())}\\n".encode())
+    os.close(handoff)
+    assert os.read(ack, len(_LAUNCH_ACK)) == _LAUNCH_ACK
+    os.write(2, b"relay stopped after ACK\\n")
+    os._exit(1)
+run_relay = die_after_ack
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic"}',
+        source=SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injection,
+    )
+    assert rc == 0 and out["result"] == "exited", out
+    assert "relay stopped after ACK" in out["log_tail"]
+    record = ctx.record("opencode")
+    assert is_gone(record["pid"]) and is_gone(record["relay_pid"])
+
+
+# -------------------------------------------------------- relay allocation RCA
+
+
+def test_port_leases_exclude_outgoing_ephemeral_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    low, high = map(int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+    port = free_port()
+    assert not low <= port <= high
+    real_read = Path.read_text
+
+    def ephemeral_pool(path: Path, *args: Any, **kwargs: Any) -> str:
+        if str(path) == "/proc/sys/net/ipv4/ip_local_port_range":
+            return "20000 65535"
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", ephemeral_pool)
+    with pytest.raises(AssertionError, match="no non-ephemeral test port available"):
+        free_port()
+
+
+def test_port_leases_are_exclusive_until_test_cleanup() -> None:
+    first = free_port()
+    assert free_port() != first
+    fd = os.open(f"/tmp/djinn-serve-test-port-{first}.lock", os.O_RDWR)  # noqa: S108
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+
+
+def test_port_probe_covers_other_loopback_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The old 127.0.0.1-only probe succeeds even though the wildcard relay cannot bind.
+    port = free_port()
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.2", port))
+        with socket.socket() as narrow:
+            narrow.bind(("127.0.0.1", port))
+        with pytest.raises(OSError) as failure:
+            mod.relay_listener(port)
+        assert failure.value.errno == errno.EADDRINUSE
+
+        real_listener = mod.relay_listener
+        probed: list[int] = []
+
+        def record_probe(candidate: int) -> socket.socket:
+            probed.append(candidate)
+            if len(probed) == 1:
+                raise OSError(errno.EADDRINUSE, "occupied wildcard port")
+            return real_listener(candidate)
+
+        monkeypatch.setattr(mod, "relay_listener", record_probe)
+        selected = free_port()
+        assert len(probed) == 2 and selected == probed[1]
+        assert probed[0] != selected
+
+
+def test_relay_inherits_reserved_listener_and_parent_closes_copy(relay: RelayHarness) -> None:
+    assert relay.listener_inode in mod.socket_inodes(relay.pid)
+    assert relay.listener_inode not in mod.socket_inodes(os.getpid())
+    assert mod.relay_listener_ours(relay.pid, relay.ctx.port)
+
+
+@pytest.mark.parametrize("failure", ["fork", "log-open"])
+def test_spawn_relay_fork_failure_closes_reserved_listener(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    fd = mod.open_state_dir()
+    readfd, writefd = os.pipe()
+    ack_read, ack_write = os.pipe()
+    baseline = len(os.listdir("/proc/self/fd"))
+    listener = mod.relay_listener(0)
+
+    def cannot_fork() -> None:
+        raise OSError(errno.EAGAIN, "fork failed")
+
+    real_open = os.open
+
+    def cannot_open(path: str, *args: Any, **kwargs: Any) -> int:
+        if path == "opencode-relay.log":
+            raise OSError(errno.ENOSPC, "log failed")
+        return real_open(path, *args, **kwargs)
+
+    if failure == "fork":
+        monkeypatch.setattr(mod.os, "fork", cannot_fork)
+    else:
+        monkeypatch.setattr(mod.os, "open", cannot_open)
+    try:
+        with pytest.raises(OSError, match="failed"):
+            mod.spawn_relay(fd, 0, writefd, ack_read, listener=listener)
+        assert listener.fileno() == -1
+        assert len(os.listdir("/proc/self/fd")) == baseline
+    finally:
+        listener.close()
+        for entry in (fd, readfd, writefd, ack_read, ack_write):
+            os.close(entry)
+
+
+def test_handoff_failure_prints_relay_log(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    (ctx.state / "opencode-relay.log").write_text(
+        "relay failed: [Errno 98] Address already in use\n"
+    )
+    monkeypatch.setattr(mod, "_read_handoff", lambda *_: None)
+    with pytest.raises(pytest.fail.Exception, match="Address already in use"):
+        assert_relay_handoff(ctx, os.getpid(), -1)
+    assert "relay failed: [Errno 98] Address already in use" in capsys.readouterr().err
+
+
+def test_relay_setup_failure_is_reaped(ctx: Ctx, monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in ctx.env.items():
+        monkeypatch.setenv(key, value)
+    fd = mod.open_state_dir()
+    readfd, writefd = os.pipe()
+    ack_read, ack_write = os.pipe()
+    listener = mod.relay_listener(0)
+    pid = mod.spawn_relay(fd, listener.getsockname()[1], writefd, ack_read, listener=listener)
+    os.close(writefd)
+    os.close(ack_read)
+    try:
+        assert_relay_handoff(ctx, pid, readfd)
+        # Model an assertion before ACK; cleanup must close and reap this still-live child.
+        assert is_alive(pid)
+    finally:
+        os.close(ack_write)
+        os.close(readfd)
+        os.close(fd)
+        reap_relay(pid)
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
+    assert not is_alive(pid)
+
+
+def test_start_handoff_error_reports_relay_log(ctx: Ctx) -> None:
+    injection = """
+real_spawn = spawn
+def remember_backend(*args, **kwargs):
+    pid = real_spawn(*args, **kwargs)
+    with open(os.path.join(os.environ["FAKE_DIR"], "diagnostic-backend.pid"), "w") as stream:
+        stream.write(str(pid))
+    return pid
+spawn = remember_backend
+def failed_relay(*_args):
+    raise OSError(errno.EADDRINUSE, "Address already in use")
+run_relay = failed_relay
+sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
+"""
+    rc, out = ctx.run(
+        "opencode-start",
+        "--port",
+        str(ctx.port),
+        stdin='{"password":"synthetic"}',
+        source=SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injection,
+    )
+    assert rc == 1 and out["code"] == "spawn", out
+    assert "relay failed: [Errno 98] Address already in use" in out["message"]
+    assert is_gone(int((ctx.fake / "diagnostic-backend.pid").read_text()))
+
+
+def test_child_cleanup_precedes_port_lease_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    free_port()
+    leased_fd = _PORT_LEASES[-1]
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    real_close = os.close
+    observed: list[bool] = []
+
+    def close(fd: int) -> None:
+        if fd == leased_fd:
+            observed.append(child.poll() is not None)
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", close)
+    reap_test_children()
+    assert observed == [True]
+    assert child.poll() is not None
+
+
+def test_relay_reaper_kill_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    signals: list[tuple[int, int]] = []
+    waits: list[int] = []
+
+    def waitpid(pid: int, options: int) -> tuple[int, int]:
+        waits.append(options)
+        return (0, 0) if options == os.WNOHANG else (pid, 9)
+
+    monkeypatch.setattr(os, "waitpid", waitpid)
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(sys.modules[__name__], "wait_for", lambda *_: False)
+    reap_relay(700001)
+    assert signals == [(700001, signal.SIGTERM), (700001, signal.SIGKILL)]
+    assert waits == [os.WNOHANG, 0]
+
+
+def test_relay_reaper_handles_child_before_setsid(monkeypatch: pytest.MonkeyPatch) -> None:
+    signals: list[tuple[int, int]] = []
+
+    def no_group(*_args: Any) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "waitpid", lambda pid, options: (0, 0) if options else (pid, 9))
+    monkeypatch.setattr(os, "killpg", no_group)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(sys.modules[__name__], "wait_for", lambda *_: True)
+    reap_relay(700001)
+    assert signals == [(700001, signal.SIGKILL)]
+
+
+def test_incomplete_child_cleanup_retains_port_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    free_port()
+    fd = _PORT_LEASES[-1]
+    with monkeypatch.context() as patch:
+        patch.setattr(sys.modules[__name__], "descendants", lambda: [700001])
+        patch.setattr(os, "kill", lambda *_: None)
+        patch.setattr(os, "waitpid", lambda *_: (0, 0))
+        patch.setattr(time, "sleep", lambda *_: None)
+        with pytest.raises(AssertionError, match="unreaped test descendants"):
+            reap_test_children()
+        assert os.fstat(fd).st_mode
