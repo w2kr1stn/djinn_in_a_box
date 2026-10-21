@@ -207,10 +207,19 @@ def reconcile(helper: dict[str, Any], *, wait: float | None = None) -> None:
             # Marker written only after durable append. Journal scanning closes the
             # append/marker crash gap; never infer an expiry timestamp from exit.
             rows = (root / "journal.jsonl").read_text() if (root / "journal.jsonl").exists() else ""
-            if not any(
-                row.get("event") == "expiry" and row.get("generation") == gen
-                for row in (json.loads(line) for line in rows.splitlines())
-            ) and journal(
+            recorded = False
+            for row_line in rows.splitlines():
+                try:
+                    raw_row: Any = json.loads(row_line)
+                except ValueError:
+                    continue
+                if not isinstance(raw_row, dict):
+                    continue
+                row = cast(dict[str, Any], raw_row)
+                if row.get("event") == "expiry" and row.get("generation") == gen:
+                    recorded = True
+                    break
+            if not recorded and journal(
                 "expiry", wait=wait,
                 generation=gen,
                 deadline=event.get("deadline"),

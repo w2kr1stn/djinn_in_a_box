@@ -1321,6 +1321,7 @@ def observe_hostctl(
     pending: list[tuple[str, dict[str, Any]]] = []
     external_teardown = False
     teardown = None
+    cancel_requested = False
 
     def log(message: str) -> None:
         with contextlib.suppress(BaseException):
@@ -1332,8 +1333,9 @@ def observe_hostctl(
             signal.signal(signum, signal.SIG_IGN)
 
     def cancelled(_signum: int, _frame: FrameType | None) -> None:
+        nonlocal cancel_requested
         ignore_signals()
-        raise KeyboardInterrupt
+        cancel_requested = True
 
     def publish_pending(*, until: float | None = None) -> None:
         while pending:
@@ -1433,10 +1435,14 @@ def observe_hostctl(
     try:
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(signum, cancelled)
+            if cancel_requested:
+                break
         root = hostctl.state_root()
         opening = json.loads((root / "opening.json").read_text())
         dev_id = opening.get("dev_id")
         while True:
+            if cancel_requested:
+                return
             helper = hostctl.inspect_helper()
             if (
                 helper is None
@@ -1491,6 +1497,8 @@ def observe_hostctl(
                     checked = hostctl.admission_assessment(trust)
                     if checked is None:
                         time.sleep(0.1)
+                        if cancel_requested:
+                            return
                         continue
                     with hostctl.control_guard():
                         fresh = hostctl.inspect_helper()
@@ -1555,6 +1563,8 @@ def observe_hostctl(
                     pending.append(("observation-skipped", {"generation": generation}))
             publish_pending()
             time.sleep(0.5)
+            if cancel_requested:
+                return
     except BaseException as exc:
         log(f"Hostctl observation gap: {exc}")
         if not isinstance(

@@ -1608,8 +1608,10 @@ positive `No such container` absence semantics, confirm the launch ID and
 generation immediately before stopping that ID, and share `stop_and_verify`.
 A different helper is preserved. Failed or unknown outcomes retry with a
 0.5-second backoff doubling to five seconds, with one retry log line per minute.
-SIGTERM, SIGINT and SIGHUP ignore all three signals before raising the interrupt;
-closure subprocesses have timeouts because they inherit ignored signals.
+The SIGTERM, SIGINT and SIGHUP handler ignores all three signals and sets a cancel
+flag without raising. The observer checks that flag at each round and after sleeps,
+then enters closure through its normal finalizer.
+Closure subprocesses have timeouts because they inherit ignored signals.
 The PID-1 timer stays the outer bound.
 
 Verified closure journals `relay-closed` under the guard or when the helper is
@@ -1630,8 +1632,8 @@ callers, including `reconcile()` without a wait argument, keep blocking acquisit
 Journal appends insert a missing newline after a partial earlier write, keeping
 retries parseable. Failed closure counts use the highest attempt number so a
 disk flush (`fsync`) error after a complete append cannot inflate them. Outcome
-publication precedes teardown diagnostics. Doctor reads a
-bounded 64 KiB journal tail before checking the daemon or snapshot and reports
+publication precedes teardown diagnostics. Doctor reads a bounded 64 KiB journal
+tail independently of whether Docker or a status snapshot is available and reports
 an unmatched failed closure as FAIL (unverifiable without Docker). A later
 verified outcome, newer generation, or positive live evidence of closure clears
 it; pre-stop intents do not. Closure state is retained per generation, with the

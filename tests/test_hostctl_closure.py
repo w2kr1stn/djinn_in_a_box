@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -199,7 +200,7 @@ def test_every_exit_closes_under_long_control_hold(window, monkeypatch, path):
             finally:
                 assert all(window.signals[s] == signal.SIG_IGN for s in
                            (signal.SIGTERM, signal.SIGINT, signal.SIGHUP))
-                # A second delivery is ignored before KeyboardInterrupt reaches closure.
+                # A second delivery is ignored while cancellation waits for a checkpoint.
                 if path == "two-signals":
                     assert window.signals[signal.SIGHUP] == signal.SIG_IGN
 
@@ -280,6 +281,7 @@ def test_publication_skips_keep_checks_and_catch_up(window, monkeypatch):
     checks = []
     companions = []
     publications = []
+    inodes = []
     deadline = REAL_MONOTONIC() + 40
     monkeypatch.setattr(host_runtime.time, "monotonic", REAL_MONOTONIC)
 
@@ -290,6 +292,7 @@ def test_publication_skips_keep_checks_and_catch_up(window, monkeypatch):
     def sleep(seconds):
         if not holders:
             publications.append((window.root / "observation.json").read_text())
+            inodes.append((window.root / "observation.json").stat().st_ino)
             holders.extend(hold(window.root / name, 31) for name in
                            ("control.lock", "journal.lock"))
         elif all(p.poll() is not None for p in holders):
@@ -297,7 +300,9 @@ def test_publication_skips_keep_checks_and_catch_up(window, monkeypatch):
             current = (window.root / "observation.json").read_text()
             if current != publications[0]:
                 publications.append(current)
-                raise KeyboardInterrupt
+                inodes.append((window.root / "observation.json").stat().st_ino)
+                assert inodes[-1] != inodes[-2]
+                window.signals[signal.SIGTERM](signal.SIGTERM, None)
         assert REAL_MONOTONIC() < deadline
         REAL_SLEEP(seconds)
 
@@ -310,7 +315,8 @@ def test_publication_skips_keep_checks_and_catch_up(window, monkeypatch):
         for holder in holders:
             holder.wait(timeout=35)
     assert len(checks) >= 25 and len(companions) == len(checks)
-    assert len(publications) == 2
+    assert len(publications) == 2 and len(inodes) == 2
+    assert all(json.loads(row)["generation"] == "generation-a" for row in publications)
     assert window.stops == ["helper-a"]  # Only cancellation closes it after catch-up.
     assert [r["event"] for r in window.rows()] == ["observation-skipped", "relay-closed"]
 
@@ -655,23 +661,27 @@ def test_stop_retries_while_real_journal_lock_stays_held(window, monkeypatch):
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
-def test_signal_handler_ignores_all_signals_before_interrupt(window, monkeypatch, signum):
+def test_signal_handler_ignores_all_signals_and_requests_closure(window, monkeypatch, signum):
+    delivered = []
+
     def tick(*args):
         assert window.admitted
         assert set(window.signals) == {signal.SIGTERM, signal.SIGINT, signal.SIGHUP}
         handler = window.signals[signum]
         try:
             handler(signum, None)
-        except KeyboardInterrupt:
-            assert all(h == signal.SIG_IGN for h in window.signals.values())
-            raise
-        pytest.fail("signal was not routed through the closure interrupt")
+        except BaseException as exc:
+            pytest.fail(f"signal handler raised: {type(exc).__name__}")
+        delivered.append(signum)
+        assert all(h == signal.SIG_IGN for h in window.signals.values())
+        return None
 
     monkeypatch.setattr(host_runtime, "inspect_dev", tick)
     try:
         window.run()
     except BaseException as exc:
         pytest.fail(f"signal escaped the observer: {type(exc).__name__}")
+    assert delivered == [signum]
     assert window.stops == ["helper-a"]
     assert window.rows()[-1]["event"] == "relay-closed"
 
@@ -1085,7 +1095,13 @@ host_runtime.observe_hostctl('helper-a', 'generation-a', '/isolated/docker')
             holder = hold_until_eof(root / "control.lock", 31)
             os.kill(observer.pid, signal.SIGTERM if signum == "pair" else signum)
             if signum == "pair":
-                until(lambda: "Hostctl observation gap:" in log.read_text())
+                def ignored():
+                    status = Path(f"/proc/{observer.pid}/status").read_text().splitlines()
+                    mask = int(next(line.split()[1] for line in status
+                                    if line.startswith("SigIgn:")), 16)
+                    return all(mask & (1 << (int(sig) - 1)) for sig in
+                               (signal.SIGTERM, signal.SIGINT, signal.SIGHUP))
+                until(ignored)
                 os.kill(observer.pid, signal.SIGINT)
                 os.kill(observer.pid, signal.SIGHUP)
             returncode = observer.wait(timeout=5)
@@ -1213,6 +1229,14 @@ def test_cancellation_during_signal_registration_also_closes(window, monkeypatch
             delivered = True
             handler(signum, None)
 
+    root = hostctl.state_root
+
+    def checked_root(**kwargs):
+        if delivered:
+            assert all(handler == signal.SIG_IGN for handler in window.signals.values())
+        return root(**kwargs)
+
+    monkeypatch.setattr(hostctl, "state_root", checked_root)
     monkeypatch.setattr(host_runtime.signal, "signal", register)
     try:
         window.run()
@@ -1587,6 +1611,7 @@ def test_observation_publication_reader_barrier_is_atomic(window, monkeypatch, i
     public = window.root / "observation.json"
     old = {"generation": "generation-a", "time": -1}
     public.write_text(json.dumps(old))
+    old_inode = public.stat().st_ino
     original = type(public).write_text
     halfway = threading.Event()
     read_done = threading.Event()
@@ -1630,6 +1655,10 @@ def test_observation_publication_reader_barrier_is_atomic(window, monkeypatch, i
     assert not child.is_alive() and seen == [old]
     published = json.loads(public.read_text())
     assert published == old if interrupted else published["time"] != old["time"]
+    if interrupted:
+        assert public.stat().st_ino == old_inode
+    else:
+        assert public.stat().st_ino != old_inode
     assert window.rows()[-1]["event"] == "relay-closed"
 
 
@@ -1705,3 +1734,256 @@ def test_reconcile_forwards_wait_and_marks_only_written_expiry(window, monkeypat
 def test_reconcile_wait_is_keyword_only(window):
     with pytest.raises(TypeError):
         hostctl.reconcile(window.helper, 0.5)
+
+
+def test_cancellation_checkpoints_are_structural():
+    import ast
+    import inspect
+
+    observer = ast.parse(inspect.getsource(host_runtime.observe_hostctl)).body[0]
+    handler = next(node for node in observer.body
+                   if isinstance(node, ast.FunctionDef) and node.name == "cancelled")
+    assert not any(isinstance(node, ast.Raise) for node in ast.walk(handler))
+    main_try = next(node for node in observer.body if isinstance(node, ast.Try))
+    loop = next(node for node in main_try.body if isinstance(node, ast.While))
+
+    def cancellation_return(node):
+        return (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name) and node.test.id == "cancel_requested"
+            and len(node.body) == 1 and isinstance(node.body[0], ast.Return)
+        )
+
+    assert cancellation_return(loop.body[0]), "cancellation must be checked before each round"
+    sleeps = 0
+    for node in ast.walk(loop):
+        for _, value in ast.iter_fields(node):
+            if not isinstance(value, list):
+                continue
+            for index, statement in enumerate(value):
+                if (
+                    isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                    and isinstance(statement.value.func, ast.Attribute)
+                    and isinstance(statement.value.func.value, ast.Name)
+                    and statement.value.func.value.id == "time"
+                    and statement.value.func.attr == "sleep"
+                ):
+                    sleeps += 1
+                    assert index + 1 < len(value) and cancellation_return(value[index + 1]), (
+                        "each observation sleep must return on cancellation before continuing"
+                    )
+    assert sleeps == 2
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+@pytest.mark.parametrize("boundary", [
+    "before-closure", "before-first-ignore", "after-first-ignore", "during-closure",
+    "second-signal",
+])
+def test_real_signals_at_closure_boundaries(tmp_path, signum, boundary):
+    script = '''import copy, json, linecache, os, pathlib, signal, sys, types
+from djinn_in_a_box.core import host_runtime, hostctl
+root = pathlib.Path(sys.argv[1])
+signum = int(sys.argv[2])
+boundary = sys.argv[3]
+helper = {'Id': 'helper-a', 'State': {'Running': True},
+          'Config': {'Labels': {hostctl.GENERATION_LABEL: 'generation-a'}}}
+clock = [0.0]
+sent = []
+stops = []
+verified = []
+closing = False
+real_signal = signal.signal
+hostctl.state_root = lambda **kwargs: root
+hostctl.save_private('opening.json', {'generation': 'generation-a', 'dev_id': None})
+def deliver(sig):
+    sent.append(sig)
+    os.kill(os.getpid(), sig)
+def register(sig, handler):
+    if closing and not sent and handler == signal.SIG_IGN:
+        if boundary == 'before-first-ignore':
+            deliver(signum)
+        elif boundary == 'after-first-ignore':
+            result = real_signal(sig, handler)
+            deliver(signum)
+            return result
+    return real_signal(sig, handler)
+def trace(frame, event, arg):
+    if (boundary == 'before-closure' and not sent and event == 'line'
+        and frame.f_code.co_name == 'observe_hostctl'
+        and linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
+            == 'close_helper()'):
+        deliver(signum)
+    return trace
+def inspect(*, strict=False):
+    if strict:
+        assert all(signal.getsignal(sig) == signal.SIG_IGN for sig in
+                   (signal.SIGTERM, signal.SIGINT, signal.SIGHUP))
+        if boundary == 'during-closure' and not sent:
+            deliver(signum)
+        elif boundary == 'second-signal' and len(sent) == 1:
+            deliver(signal.SIGHUP if signum != signal.SIGHUP else signal.SIGINT)
+        verified.append(helper['State']['Running'])
+    return copy.deepcopy(helper)
+def command(*args, **kwargs):
+    if args[0] == 'logs':
+        return ''
+    assert args == ('stop', '-t', '3', 'helper-a') and kwargs == {'timeout': 8}
+    stops.append(args[-1])
+    if len(stops) == 1:
+        raise hostctl.HostctlError('transient stop failure')
+    helper['State']['Running'] = False
+    return ''
+def gap(*args):
+    global closing
+    if boundary == 'second-signal':
+        if not sent:
+            deliver(signum)
+        return None
+    closing = True
+    raise host_runtime.GitSSHError('ordinary observation gap')
+def sleep(seconds):
+    clock[0] += seconds
+    if clock[0] > 10:
+        raise RuntimeError('observer did not reach cancellation checkpoint')
+hostctl.inspect_helper = inspect
+hostctl.command = command
+hostctl.node_status = lambda *a: {'BackendState': 'Starting'}
+host_runtime.inspect_dev = gap
+host_runtime.warning = lambda *a: None
+host_runtime.signal.signal = register
+host_runtime.subprocess.Popen = lambda *a, **k: types.SimpleNamespace(poll=lambda: 0, returncode=0)
+host_runtime.time.monotonic = lambda: clock[0]
+host_runtime.time.sleep = sleep
+sys.settrace(trace)
+escaped = None
+try:
+    host_runtime.observe_hostctl('helper-a', 'generation-a', '/isolated/docker', root / 'records')
+except BaseException as exc:
+    escaped = type(exc).__name__
+finally:
+    sys.settrace(None)
+rows = [json.loads(line) for line in (root / 'journal.jsonl').read_text().splitlines()]
+(root / 'result.json').write_text(json.dumps({
+    'running': helper['State']['Running'], 'stops': stops, 'sent': sent,
+    'verified': verified, 'escaped': escaped, 'clock': clock[0], 'rows': rows}))
+'''
+    result_path = tmp_path / "result.json"
+    with (tmp_path / "observer.log").open("w") as log:
+        child = REAL_POPEN(
+            [sys.executable, "-c", script, str(tmp_path), str(int(signum)), boundary],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        )
+        try:
+            assert child.wait(timeout=5) == 0, (tmp_path / "observer.log").read_text()
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+    result = json.loads(result_path.read_text())
+    assert result["escaped"] is None and not result["running"], result
+    assert result["stops"] == ["helper-a", "helper-a"]
+    assert result["verified"][-1] is False and result["clock"] <= 1
+    assert len(result["sent"]) == (2 if boundary == "second-signal" else 1)
+    assert [row["event"] for row in result["rows"]] == ["relay-close-failed", "relay-closed"]
+
+
+def test_each_observation_publication_replaces_inode(window, monkeypatch):
+    public = window.root / "observation.json"
+    public.write_text(json.dumps({"generation": "generation-a", "time": -1}))
+    previous = public.stat().st_ino
+    publications = []
+
+    def tick(seconds):
+        nonlocal previous
+        value = json.loads(public.read_text())
+        current = public.stat().st_ino
+        assert current != previous, "observation publication rewrote the existing inode"
+        assert value["generation"] == "generation-a" and value["time"] == window.clock
+        publications.append(current)
+        previous = current
+        if len(publications) == 3:
+            window.signals[signal.SIGTERM](signal.SIGTERM, None)
+        window.sleep(seconds)
+
+    monkeypatch.setattr(host_runtime, "inspect_dev", lambda *a: None)
+    monkeypatch.setattr(host_runtime.time, "time", lambda: window.clock)
+    monkeypatch.setattr(host_runtime.time, "sleep", tick)
+    window.run()
+    assert len(publications) == 3
+    assert not window.helper["State"]["Running"]
+
+
+@pytest.mark.parametrize("wait", [None, 0.5])
+@pytest.mark.parametrize("partial_event", ["relay-closed", "expiry"])
+def test_recovered_journal_allows_reconcile_and_clean(window, monkeypatch, wait, partial_event):
+    original = hostctl.os.fdopen
+    injected = []
+
+    class PartialWriter:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, data):
+            if not injected:
+                injected.append(True)
+                self.stream.write(data[:len(data) // 2])
+                self.stream.flush()
+                raise OSError("partial append")
+            return self.stream.write(data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hostctl.os, "fdopen", lambda *a, **kw: PartialWriter(original(*a, **kw)))
+        with pytest.raises(OSError, match="partial append"):
+            hostctl.journal(partial_event, generation="generation-a")
+    assert hostctl.journal(partial_event, generation="generation-a") is True
+    # Malformed fragments and valid non-object JSON cannot block valid later records.
+    with (window.root / "journal.jsonl").open("a") as stream:
+        stream.write('null\n[]\ntrue\n42\n"text"\n')
+    hostctl.journal("expiry", generation="other-generation")
+    helper = window.helper
+    helper["State"]["Running"] = False
+    removed = []
+    marker = window.root / "observed-expiry.json"
+
+    def inspect(**kwargs):
+        return None if removed else copy.deepcopy(helper)
+
+    def command(*args, **kwargs):
+        if args[0] == "logs":
+            return json.dumps({"event": "expiry", "generation": "generation-a", "time": "exact"})
+        assert args == ("rm", "helper-a")
+        assert marker.exists(), "cleanup must reconcile before removing the helper"
+        removed.append(args[-1])
+        return ""
+
+    monkeypatch.setattr(hostctl, "inspect_helper", inspect)
+    monkeypatch.setattr(hostctl, "command", command)
+    monkeypatch.setattr(hostctl, "_record_stopped_helper", lambda *a: None)
+    with hostctl.control_guard():
+        hostctl.reconcile(helper, wait=wait)
+        assert json.loads(marker.read_text()) == ["generation-a"]
+        marker.unlink()  # Reconstruct the marker from the valid recovered/durable expiry.
+        hostctl.stop_helper_locked(remove=True)
+    assert removed == ["helper-a"]
+    assert inspect() is None and json.loads(marker.read_text()) == ["generation-a"]
+    rows = []
+    for line in (window.root / "journal.jsonl").read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    assert sum(row["event"] == "expiry" and row["generation"] == "generation-a"
+               for row in rows) == 1
