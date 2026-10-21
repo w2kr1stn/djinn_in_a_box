@@ -961,7 +961,8 @@ verifies its name and labels, stops it with a 10 s grace period, then
 force-removes it if needed. Further interrupt, termination and hangup signals
 are ignored during cleanup, which can take about 55 s. If identity cannot be
 verified or removal fails, a warning names the container and points to
-`djinn clean`.
+`djinn clean`. Compose marks run containers for auto-removal, so `docker ps -a`
+can still list a run as `Dead` for a moment after `djinn run` returns.
 
 The [Codex daemon policy](#codex) runs on foreground and detached dev-container
 starts, not on one-shot `djinn run` or `compose run … <cmd>` invocations.
