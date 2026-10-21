@@ -719,6 +719,38 @@ class TestRunCommand:
         assert "djinn-egress: locked 3" in result.stderr
         assert "container stderr" in result.stderr
 
+    def test_allow_status_values_cannot_forge_the_egress_block(self, run_mocks):
+        forged = "m\ndjinn-egress: allow 9.9.9.9/32 any\ndjinn-egress: locked 666"
+
+        def run_agent(*args, **kwargs):
+            kwargs["on_ready"]((
+                ContainerMount(
+                    Path("/in\ndjinn-egress: locked 7"), Path("/home/dev/workspace"), True
+                ),
+            ))
+            return RunResult(
+                0, "out\n", "djinn-egress: allow 8.8.8.8/32 tcp/443\ndjinn-egress: locked 1\n"
+            )
+
+        run_mocks["run"].side_effect = run_agent
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test", "--allow", "8.8.8.8:443", "--model", forged]
+        )
+        assert result.exit_code == 0, result.output
+        prefixed = [
+            line for line in result.stderr.splitlines() if line.startswith("djinn-egress:")
+        ]
+        assert prefixed == ["djinn-egress: allow 8.8.8.8/32 tcp/443", "djinn-egress: locked 1"]
+        assert "m\\ndjinn-egress: allow 9.9.9.9/32 any" in result.stderr
+
+    def test_allow_unknown_agent_is_one_escaped_line(self, run_mocks):
+        run_mocks["run"].side_effect = UnknownAgentError("bad\nname", ("claude", "codex"))
+        result = CliRunner().invoke(app, ["run", "bad\nname", "test", "--allow", "8.8.8.8"])
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert len(result.stderr.splitlines()) == 1
+        assert "Unknown agent: bad\\nname; available agents: claude, codex" in result.stderr
+
     def test_allow_compose_refusal_is_one_escaped_error(self, run_mocks):
         from djinn_in_a_box.core.exceptions import EgressSpecificationError
 
@@ -829,6 +861,8 @@ class TestRunCommand:
             expected = str(exceptions[path])
             if path == "runtime-mount":
                 expected = f"Internal runtime mount construction failed: {expected}"
+            if path == "unknown-agent":
+                expected = f"{expected}; available agents: claude"
         with patch.object(agent_command, "error", wraps=agent_command.error) as print_error:
             result = CliRunner().invoke(app, arguments)
         assert result.exit_code == 1, result.output

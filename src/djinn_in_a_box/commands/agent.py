@@ -77,16 +77,22 @@ def _show_run_status(
     egress: EgressPlan | None = None,
 ) -> None:
     """Render CLI-only execution status after runner prerequisites pass."""
+
+    # Allowlist callers read Djinn's leading `djinn-egress:` block from stderr, so no
+    # caller-derived value may start a line of its own there.
+    def shown(value: object) -> str:
+        return escape_nonprintable(str(value)) if egress is not None else str(value)
+
     err_console.print()
-    info(f"Running {agent} (headless)...")
+    info(f"Running {escape(shown(agent)) if egress is not None else agent} (headless)...")
     err_console.print()
 
-    status_line("Agent", agent)
+    status_line("Agent", shown(agent))
     for mount in mounts:
         mode = "ro" if mount.read_only else "rw"
         status_line(
             "Mount",
-            f"{mount.source} -> {mount.target} ({mode})",
+            shown(f"{mount.source} -> {mount.target} ({mode})"),
             value_style="path",
         )
 
@@ -95,10 +101,10 @@ def _show_run_status(
         None,
     )
     if workspace is not None:
-        status_line("Workspace", str(workspace), value_style="path")
+        status_line("Workspace", shown(workspace), value_style="path")
 
     if model:
-        status_line("Model", model)
+        status_line("Model", shown(model))
 
     if write:
         status_line("Mode", "Read/Write (--write)", "status.disabled")
@@ -296,8 +302,12 @@ def run(
             ),
         )
     except UnknownAgentError as e:
-        error(str(e), soft_wrap=egress is not None)
-        console.print(f"Available agents: {', '.join(e.available)}")
+        if egress is not None:
+            message = f"{e}; available agents: {', '.join(e.available)}"
+            error(escape(escape_nonprintable(message)), soft_wrap=True)
+        else:
+            error(str(e))
+            console.print(f"Available agents: {', '.join(e.available)}")
         raise typer.Exit(1) from None
     except AgentNetworkError as e:
         error(str(e), soft_wrap=egress is not None)
