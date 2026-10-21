@@ -1785,7 +1785,9 @@ seeded from the config root, and the audit's database lives in that directory, s
 it survives a crash. At the end Djinn merges new logins and token refreshes back
 by union — an audit never logs out anywhere — and deletes the session; a session
 left over after a crash is recovered by the next `djinn audit` or `djinn start`,
-and `djinn doctor` reports leftovers.
+and `djinn doctor` reports leftovers. Starting an OpenCode audit waits at most
+15 s for a running restore, backup, clean or dev transition, then refuses and
+names the holding process.
 
 Resolve the latest Claude Code, Codex and OpenCode versions from npm:
 

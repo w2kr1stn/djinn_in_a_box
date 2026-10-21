@@ -43,6 +43,7 @@ CALLEES = {
     "remove_stale_own_temps",
     "_consume_copies",
     "_begin_write",
+    "open_audit_session",
 }
 CLASSES = {"restore", "control", "gate", "container", "primitive", "not-carrier"}
 
@@ -70,6 +71,8 @@ INVENTORY = [
     ("commands/container.py", "clean_all", "clear_sync_path", "control"),
     ("core/assistant.py", "recover_leftover_sessions", "recover_audit_sessions", "gate"),
     ("core/assistant.py", "finish_session", "recover_leftover_sessions", "gate"),
+    # Admission takes control internally; the audit runtime only keeps its session lease.
+    ("core/assistant.py", "run_audit", "open_audit_session", "control"),
     ("core/assistant.py", "run_audit", "recover_leftover_sessions", "gate"),
     ("core/assistant.py", "run_audit", "recover_leftover_sessions", "gate"),
     ("core/opencode_credentials.py", "write_host_state", "write_atomic", "not-carrier"),

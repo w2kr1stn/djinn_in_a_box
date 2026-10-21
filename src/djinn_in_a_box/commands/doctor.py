@@ -463,13 +463,13 @@ def _path_size_bytes(path: Path) -> int:
 
 
 def _opencode_credentials_check(config_root: Path) -> Check:
-    findings = [
-        finding
-        for finding in opencode_credentials.carrier_findings(config_root / "opencode")
-        if finding.kind != "conflict-copy"
-    ]
+    findings = opencode_credentials.carrier_findings(config_root / "opencode")
     remedies: list[str] = []
     kinds = {finding.kind for finding in findings}
+    if "conflict-copy" in kinds:
+        remedies.append(
+            "The next dev start's credential sync merges, backs up and removes the copies."
+        )
     if "audit-session" in kinds or "audit-root" in kinds:
         remedies.append(
             "The next `djinn audit` or `djinn start` recovers them; a session without a database "

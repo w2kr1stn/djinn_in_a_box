@@ -728,6 +728,7 @@ def _refuse_running_audit_sessions() -> None:
 
 def _logout_opencode(config: AppConfig | None) -> None:
     """Recover and export outside the single lease, then tombstone and clear under it."""
+    _refuse_running_audit_sessions()
     recover_leftover_sessions(get_project_root(), config)
     _refuse_running_audit_sessions()
     exported = b"[]"

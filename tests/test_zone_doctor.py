@@ -250,7 +250,7 @@ def test_opencode_credential_doctor_reports_each_kind_without_values(
     assert kind in row.detail
     assert subject in row.detail and detail in row.detail
     assert sentinel not in row.detail + row.remedy
-    assert "conflict-copy" not in row.detail
+    assert ("conflict-copy" in row.detail) == (kind == "differing-value")
     if kind in {"audit-session", "audit-root"}:
         assert "next `djinn audit` or `djinn start`" in row.remedy
         assert "without a database" in row.remedy
@@ -265,16 +265,27 @@ def test_opencode_credential_doctor_clean_is_pass(zone_config):
     assert row.detail == "clean"
 
 
-def test_opencode_doctor_accepts_an_identical_conflict_copy_without_zone_drift(zone_config):
+@pytest.mark.parametrize(
+    "name,document",
+    [
+        ("credentials.sync-conflict-20261020-120000-ABCDEFG.json", []),
+        ("credentials.removed.sync-conflict-20261020-120000-ABCDEFG.json", ["removed"]),
+    ],
+)
+def test_opencode_doctor_reports_pending_conflict_copy_without_zone_drift(
+    zone_config, name, document
+):
     root = zone_config.config_root / "opencode"
     root.mkdir(parents=True)
-    copy = root / "credentials.sync-conflict-20261020-120000-ABCDEFG.json"
-    copy.write_text("[]")
+    copy = root / name
+    copy.write_text(json.dumps(document))
     copy.chmod(0o600)
     checks = doctor_mod.run_checks(zone_config)
     row = _check_named(checks, "OpenCode credentials")
-    assert row.status is doctor_mod.Status.PASS
-    assert copy.name not in row.detail
+    assert row.status is doctor_mod.Status.WARN
+    assert "conflict-copy" in row.detail
+    assert copy.name in row.detail
+    assert "next dev start's credential sync merges, backs up and removes" in row.remedy
     drift = _check_named(checks, "Zone drift")
     assert drift.status is doctor_mod.Status.PASS
     assert copy.name not in drift.detail

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
@@ -18,6 +19,7 @@ from typing import Any, cast
 from djinn_in_a_box.config.loader import load_config
 from djinn_in_a_box.config.models import AppConfig, AssistantAgent, AssistantConfig
 from djinn_in_a_box.config.zones import load_zone_assignments
+from djinn_in_a_box.core import hostctl
 from djinn_in_a_box.core import opencode_credentials as credentials
 from djinn_in_a_box.core.agent_versions import (
     AgentVersionError,
@@ -337,8 +339,8 @@ def cleanup(name: str) -> None:
 
 
 def _reason(error: Exception) -> str:
-    """A value-free reason: credential errors are value-free by contract, OS errors name no path."""
-    if isinstance(error, credentials.CredentialsError):
+    """Credential/control errors are value-free by contract; OS errors name no path."""
+    if isinstance(error, credentials.CredentialsError | hostctl.HostctlError):
         return str(error)
     if isinstance(error, OSError) and error.strerror:
         return error.strerror
@@ -431,23 +433,28 @@ def audit_session_mounts(session: credentials.Session) -> list[tuple[Path, Path]
 
 def open_audit_session(config: AppConfig | None) -> credentials.Session:
     """Create the session and write its seed. Without a usable carrier the audit has no seed."""
-    try:
-        session = credentials.create_audit_session()
-    except (credentials.CredentialsError, OSError) as error:
-        raise AssistantError(
-            f"Could not create the OpenCode audit session: {_reason(error)}"
-        ) from error
-    carrier = opencode_carrier(config)
-    try:
-        carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with credentials.carrier_lock(carrier) as lease:
-            credentials.write_seed(session, credentials.materialize_seed(carrier, lease))
-    except (credentials.CredentialsError, OSError) as error:
-        warning(f"OpenCode audit starts without a login seed: {_reason(error)}")
-    except BaseException:
-        session.close()
-        raise
-    return session
+    with contextlib.ExitStack() as guards:
+        try:
+            guards.enter_context(hostctl.control_guard())
+        except (hostctl.HostctlError, OSError) as error:
+            raise AssistantError(f"Could not start the OpenCode audit: {_reason(error)}") from error
+        try:
+            session = credentials.create_audit_session()
+        except (credentials.CredentialsError, OSError) as error:
+            raise AssistantError(
+                f"Could not create the OpenCode audit session: {_reason(error)}"
+            ) from error
+        carrier = opencode_carrier(config)
+        try:
+            carrier.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with credentials.carrier_lock(carrier) as lease:
+                credentials.write_seed(session, credentials.materialize_seed(carrier, lease))
+        except (credentials.CredentialsError, OSError) as error:
+            warning(f"OpenCode audit starts without a login seed: {_reason(error)}")
+        except BaseException:
+            session.close()
+            raise
+        return session
 
 
 def finish_session(

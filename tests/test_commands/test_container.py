@@ -2382,7 +2382,8 @@ def test_global_logout_refuses_running_audits_before_destructive_work(
         assert {p.name: p.read_bytes() for p in carrier.iterdir() if p.is_file()} == carrier_before
 
 
-def test_global_logout_rechecks_sessions_after_recovery(credential_cleanup, monkeypatch):
+@pytest.mark.parametrize("command", ["volumes", "all"])
+def test_global_logout_rechecks_sessions_after_recovery(credential_cleanup, monkeypatch, command):
     _, _, _, oc = credential_cleanup
     sessions = []
 
@@ -2393,7 +2394,10 @@ def test_global_logout_rechecks_sessions_after_recovery(credential_cleanup, monk
     export = MagicMock(side_effect=AssertionError("export must wait for the audit to finish"))
     monkeypatch.setattr(container, "export_opencode_data_credentials", export)
     try:
-        result = runner.invoke(app, ["clean", "all", "--force"])
+        args = ["clean", command, "--force"]
+        if command == "volumes":
+            args.append("--credentials")
+        result = runner.invoke(app, args)
         assert result.exit_code == 1, result.output
         assert len(sessions) == 1
         assert sessions[0].id in result.output
@@ -2942,7 +2946,7 @@ def test_clean_all_exports_before_delete_and_keeps_tombstones(
     assert ("logins only in the database are not covered" in result.output) == failed
 
 
-def test_credentials_cleanup_warns_for_each_kept_audit_session_before_refusal(credential_cleanup):
+def test_credentials_cleanup_names_each_running_audit_before_recovery(credential_cleanup):
     _, _, _, oc = credential_cleanup
     first = oc.create_audit_session()
     second = oc.create_audit_session()
@@ -2950,7 +2954,8 @@ def test_credentials_cleanup_warns_for_each_kept_audit_session_before_refusal(cr
         result = runner.invoke(app, ["clean", "volumes", "--credentials", "--force"])
         assert result.exit_code == 1, result.output
         for session in (first, second):
-            assert f"session {session.id} was kept: in use" in result.output
+            assert f"{session.id} (running since" in result.output
+        assert "was kept: in use" not in result.output
         assert "OpenCode credentials refused" in result.output
     finally:
         first.close()
