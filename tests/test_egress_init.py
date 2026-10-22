@@ -580,7 +580,9 @@ def test_composition_wrapper_firewall_setpriv_entrypoint(
 
 
 @requires_zsh
-def test_entrypoint_stays_the_process_that_handles_term(tmp_path: Path) -> None:
+def test_entrypoint_stays_the_process_that_handles_term(
+    tmp_path: Path, default_child_signals
+) -> None:
     rig = Rig(tmp_path, setpriv_mode="exec")
     pid_file = tmp_path / "entrypoint.pid"
     rig.entrypoint.write_text(
@@ -592,6 +594,7 @@ def test_entrypoint_stays_the_process_that_handles_term(tmp_path: Path) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=base_env(),
+        preexec_fn=default_child_signals,
         start_new_session=True,
     )
     try:

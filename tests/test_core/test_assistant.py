@@ -481,23 +481,33 @@ def _owned(f, name):
     }
 
 
-def test_cleanup_waits_for_an_auto_removal_already_in_progress(installation, monkeypatch):
+@pytest.fixture
+def removal_clock(monkeypatch):
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(a, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep))
+    return now
+
+
+def test_cleanup_waits_for_an_auto_removal_already_in_progress(installation, removal_clock):
     f = installation
     _owned(f, "fixture")
     f.docker.removing = 4
-    monkeypatch.setattr(a, "REMOVAL_POLL_SECONDS", 0)
     a.cleanup("fixture")
+    assert removal_clock[0] > 0
     assert "fixture" not in f.docker.containers
 
 
-def test_cleanup_fails_visibly_when_an_auto_removal_never_ends(installation, monkeypatch):
+def test_cleanup_fails_visibly_when_an_auto_removal_never_ends(installation, removal_clock):
     f = installation
     _owned(f, "fixture")
     f.docker.removing = 10**9
-    monkeypatch.setattr(a, "REMOVAL_POLL_SECONDS", 0)
-    monkeypatch.setattr(a, "REMOVAL_WAIT_SECONDS", 0.05)
     with pytest.raises(a.AssistantError, match="cleanup failed"):
         a.cleanup("fixture")
+    assert removal_clock[0] >= a.REMOVAL_WAIT_SECONDS
 
 
 @pytest.mark.parametrize(

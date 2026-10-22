@@ -213,6 +213,18 @@ def _isolate_agent_versions(monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "AGENT_VERSIONS_FILE", tmp_path / "host-config/agent-versions.toml")
 
 
+@pytest.fixture
+def default_child_signals():
+    """Pass as preexec_fn for children whose signal handling assumes a normal launch."""
+    def reset():
+        for signum in (
+            signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGPIPE
+        ):
+            signal.signal(signum, signal.SIG_DFL)
+
+    return reset
+
+
 @pytest.fixture(autouse=True)
 def _restore_signal_dispositions():
     """In-process observer runs ignore termination signals; later children would inherit it."""
