@@ -2537,7 +2537,12 @@ def validate_egress_inputs(
         (f"mounts.{name}", Path(mount.target)) for name, mount in declarations.mounts.items()
     )
     for setting, path in targets:
-        target = _resolve_image_aliases(_normalize_mount_target(path))
+        try:
+            target = _resolve_image_aliases(_normalize_mount_target(path))
+        except MountSpecificationError as exc:
+            raise EgressSpecificationError(
+                escape_nonprintable(f"{setting}: {exc}")
+            ) from exc
         if target in (Path("/"), Path("/home"), Path("/home/dev")) or any(
             target == root or target.is_relative_to(root) or root.is_relative_to(target)
             for root in map(Path, ("/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/run"))

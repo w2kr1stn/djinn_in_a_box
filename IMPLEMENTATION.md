@@ -1358,10 +1358,11 @@ The same module owns the repeatable user-mount contract:
 - `validate_container_mounts()` checks the targets actually occupied by this
   `dev` invocation, including Compose, image-alias, runtime, Direct-socket,
   zone-overlay, and user mounts. Equal targets and user targets that are
-  ancestors of an occupied target raise `MountCollisionError`. An invocation
-  mount strictly inside another invocation bind (`--here` or `--mount`) is also
-  refused, naming both mounts, Docker's creation of root-owned mount-point
-  directories inside the outer host directory, and the remedy of choosing a
+  ancestors of an occupied target raise `MountCollisionError`, retaining the
+  conflict-path diagnostic for equality and a later containing mount. A later
+  invocation mount strictly inside an earlier invocation bind (`--here` or
+  `--mount`) is also refused, naming both mounts, Docker's creation of root-owned
+  mount-point directories inside the outer host directory, and the remedy of choosing a
   target outside it. Children of other occupied targets remain valid except at
   or below the shared `MANAGED_TARGET_ROOTS`. Assigned
   zone targets are reserved like other occupied targets. The managed-root set
@@ -1389,8 +1390,10 @@ The same module owns the repeatable user-mount contract:
   The execution inventory and guard comparison use strict presence checks that
   propagate inspection errors; other sealing paths retain lenient checks.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
-  `MountCollisionError` reports the two involved mounts and the conflict path;
-  managed-root conflicts identify the Djinn-managed root.
+  `MountCollisionError` identifies the involved mounts. Equality and containing
+  mounts report the conflict path; a later inner invocation mount instead
+  reports the root-owned-directory cause and outside-target remedy.
+  Managed-root conflicts identify the Djinn-managed root and conflict path.
 
 `nested_declarations()` compares normalized, image-alias-resolved targets and
 returns declared mounts strictly inside invocation binds in declaration order.

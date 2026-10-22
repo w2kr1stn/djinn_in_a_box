@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 from collections.abc import Callable
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -3242,6 +3243,37 @@ def test_nested_declarations_keep_input_order_and_ignore_invalid(tmp_path):
     )
 
 
+def test_nested_declarations_below_second_distinct_invocation_bind(tmp_path):
+    mounts = (
+        ContainerMount(tmp_path / "first", Path("/first")),
+        ContainerMount(tmp_path / "review", Path("/review")),
+    )
+    assert docker_mod.nested_declarations(
+        [("bind", "/review/bind"), ("control", "/elsewhere"), ("volume", "/review/data")],
+        mounts,
+    ) == (
+        docker_mod.NestedDeclaration("bind", Path("/review/bind"), Path("/review")),
+        docker_mod.NestedDeclaration("volume", Path("/review/data"), Path("/review")),
+    )
+
+
+@pytest.mark.parametrize("targets", list(permutations(("/review", "/unrelated", "/review/child"))))
+def test_three_invocation_mounts_refuse_nesting_in_every_order(tmp_path, mock_app_config, targets):
+    mounts = tuple(ContainerMount(tmp_path / str(index), Path(target))
+                   for index, target in enumerate(targets))
+    with pytest.raises(MountCollisionError) as exc:
+        validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
+    message = str(exc.value)
+    for target in ("/review", "/review/child"):
+        assert f"{tmp_path / str(targets.index(target))} -> {target}" in message
+    if targets.index("/review") < targets.index("/review/child"):
+        assert "root-owned directory" in message
+        assert "choose a target outside /review" in message
+    else:
+        assert "conflicts with mount" in message
+        assert "conflict path: /review/child" in message
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("read_only", [False, True], ids=["rw", "ro"])
 @pytest.mark.parametrize(
@@ -3294,14 +3326,14 @@ def test_invocation_siblings_and_equal_targets(tmp_path, mock_app_config, target
 
 
 @pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
-@pytest.mark.parametrize("form", ["here", "explicit", "derived", "normalized", "none"])
+@pytest.mark.parametrize("form", ["here", "explicit", "derived", "normalized", "second", "none"])
 def test_nested_declarations_filtered_on_every_creator(
     tmp_path, monkeypatch, declared_creator, generated_overrides, kind, form,
 ):
     outer = {
         "here": "/home/dev/workspace", "explicit": "/review",
         "derived": "/home/dev/mount/tools", "normalized": "/home/dev/workspace",
-        "none": "/home/dev/workspace",
+        "second": "/review", "none": "/home/dev/workspace",
     }[form]
     raw_bind = f"//{outer.lstrip('/')}//old/../bind/" if form == "normalized" else f"{outer}/bind"
     config = AppConfig.model_validate({
@@ -3326,6 +3358,8 @@ def test_nested_declarations_filtered_on_every_creator(
 
     monkeypatch.setattr(docker_mod.subprocess, "run", capture)
     mounts = () if form == "none" else (ContainerMount(tmp_path, Path(outer)),)
+    if form == "second":
+        mounts = (ContainerMount(tmp_path, Path("/first")), *mounts)
     assert _call_declared_creator(kind, config, ContainerOptions(mounts=mounts)).success
     fragment = payloads[0]
     service = fragment["services"]["dev"]
@@ -4278,6 +4312,25 @@ def test_egress_mount_class_positive_controls(tmp_path, target):
         (ContainerMount(Path("/input"), Path(target)),),
         {},
     )
+
+
+@pytest.mark.parametrize("source", ["runtime", "declared"])
+def test_egress_invalid_target_keeps_setting_and_escaped_cause(tmp_path, source):
+    from djinn_in_a_box.core.exceptions import EgressSpecificationError
+
+    target = "/proc/poison\ndjinn-egress: locked 666"
+    config = AppConfig(code_dir=tmp_path, mounts={
+        "bad": {"volume": True, "target": target, "backup": "none"},
+    } if source == "declared" else {})
+    mounts = (ContainerMount(Path("/input\nsource"), Path(target)),) if source == "runtime" else ()
+    with pytest.raises(EgressSpecificationError) as exc:
+        docker_mod.validate_egress_inputs(config, mounts, {})
+    setting = "mounts.bad" if source == "declared" else "--mount /input\\nsource"
+    assert str(exc.value) == (
+        f"{setting}: Mount target /proc/poison\\ndjinn-egress: locked 666 "
+        "is not allowed under /proc, /sys, or /dev"
+    )
+    assert len(str(exc.value).splitlines()) == 1
 
 
 @pytest.mark.parametrize("source", ["hook", "mount"])

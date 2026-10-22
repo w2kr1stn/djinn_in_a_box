@@ -83,10 +83,10 @@ def fake_docker(git_inputs, monkeypatch):
     binary.parent.mkdir()
     binary.write_text(
         f"#!{sys.executable}\n"
-        "import json, pathlib, sys\n"
+        "import json, os, pathlib, sys\n"
         f"state = pathlib.Path({str(state)!r})\n"
         "with state.with_suffix('.calls').open('a') as calls:\n"
-        "    calls.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "    calls.write(json.dumps({'ppid': os.getppid(), 'argv': sys.argv[1:]}) + '\\n')\n"
         "if sys.argv[1:3] == ['rm', '-f']:\n"
         "    state.unlink()\n"
         "    sys.exit(0)\n"
@@ -230,7 +230,7 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
 
 @pytest.mark.parametrize("with_git", [True, False], ids=["git", "desktop-only"])
 def test_interrupt_during_foreground_start_removes_dev_and_state(
-    git_inputs, fake_docker, capsys, with_git
+    git_inputs, fake_docker, capsys, monkeypatch, with_git
 ):
     config = git_inputs
     if not with_git:
@@ -245,6 +245,7 @@ def test_interrupt_during_foreground_start_removes_dev_and_state(
     dev_id = "dev-interrupted"
     observer = None
     runtime = None
+    shutdown_index = None
     try:
         with pytest.raises(KeyboardInterrupt), git_runtime(config, "djinn") as runtime:
             observed_dev(fake_docker, runtime, dev_id=dev_id)
@@ -262,13 +263,40 @@ def test_interrupt_during_foreground_start_removes_dev_and_state(
             assert state["resources"] == {}
             assert (runtime.agent is not None) == with_git
             assert not runtime.detached
+
+            terminate = observer.terminate
+
+            def record_shutdown():
+                nonlocal shutdown_index
+                shutdown_index = len(fake_docker.with_suffix(".calls").read_text().splitlines())
+                terminate()
+
+            monkeypatch.setattr(observer, "terminate", record_shutdown)
             raise KeyboardInterrupt
 
         assert observer.poll() is not None
+        assert observer.returncode == 0
         calls = [
             json.loads(line) for line in fake_docker.with_suffix(".calls").read_text().splitlines()
         ]
-        assert [call for call in calls if call[0] in ("stop", "rm")] == [["rm", "-f", dev_id]]
+        assert [call["argv"] for call in calls if call["argv"][0] in ("stop", "rm")] == [
+            ["rm", "-f", dev_id],
+        ]
+        assert shutdown_index is not None
+        removal_index = next(index for index, call in enumerate(calls)
+                             if call["argv"] == ["rm", "-f", dev_id])
+        assert calls[removal_index]["ppid"] == os.getpid()
+        final_inspections = [
+            index for index, call in enumerate(calls)
+            if index >= shutdown_index and call == {
+                "ppid": observer.pid, "argv": ["container", "inspect", "djinn"],
+            }
+        ]
+        # At most one polling inspect can be in flight when terminate is sent.
+        # Two later observer inspections prove finalization inspected the
+        # still-running dev; only the creator then removes it.
+        assert len(final_inspections) >= 2
+        assert shutdown_index <= final_inspections[0] < final_inspections[-1] < removal_index
         assert not fake_docker.exists()
         assert not (root / "state.json").exists()
         assert "Runtime cleanup preserved resources" not in capsys.readouterr().err

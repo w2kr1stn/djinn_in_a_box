@@ -177,46 +177,65 @@ class TestRunCommand:
             }
 
     @pytest.mark.parametrize("allow", [False, True])
+    @pytest.mark.parametrize("second", [False, True])
     def test_run_reports_nested_declarations_before_launch(
-        self, run_mocks, tmp_path, monkeypatch, allow,
+        self, run_mocks, tmp_path, monkeypatch, allow, second,
     ):
+        from djinn_in_a_box.core import agent_runner
         from djinn_in_a_box.core.console import err_console
 
         monkeypatch.setattr(err_console, "width", 200)
+        outer = "/review" if second else "/home/dev/workspace"
         config = AppConfig(code_dir=tmp_path, mounts={
             "bind": {
                 "source": str(tmp_path),
-                "target": "//home/dev/workspace/old/../[data]\ndjinn-egress: locked 666",
+                "target": f"/{outer}/old/../[data]\ndjinn-egress: locked 666",
             },
-            "volume": {"volume": True, "target": "/home/dev/workspace/volume", "backup": "none"},
+            "volume": {"volume": True, "target": f"{outer}/volume", "backup": "none"},
             "control": {"source": str(tmp_path), "target": "/home/dev/workspace2"},
         })
         run_mocks["load_config"].return_value = config
+        run_mocks["run"].side_effect = agent_runner.run_headless_agent
+        monkeypatch.setattr(
+            agent_runner, "load_agents", lambda: {"claude": AgentConfig(binary="claude")},
+        )
 
-        def run_agent(*args, **kwargs):
-            kwargs["on_ready"](kwargs["resolved_mounts"])
+        def launch(*args, **kwargs):
+            # CliRunner captures stderr while the real runner is still executing.
+            import sys
+
+            sys.stderr.flush()
+            output = sys.stderr.buffer.getvalue().decode()
+            assert output.count("Skipped") == 2
+            assert f"mounts.volume -> {outer}/volume (inside {outer})" in output
+            assert "mounts.control" not in output
             return RunResult(0, "agent launched\n", "")
 
-        run_mocks["run"].side_effect = run_agent
+        monkeypatch.setattr(agent_runner, "compose_run", launch)
         monkeypatch.chdir(tmp_path)
+        mount_args = (
+            ["--mount", f"{tmp_path}:/first", "--mount", f"{tmp_path}:/review"] if second else []
+        )
         result = CliRunner().invoke(
-            app, ["run", "claude", "test"] + (["--allow", "8.8.8.8"] if allow else []),
+            app, ["run", "claude", "test"] + mount_args
+            + (["--allow", "8.8.8.8"] if allow else []),
         )
         assert result.exit_code == 0, result.output
         assert result.stdout == "agent launched\n"
         assert result.stderr.count("Skipped") == 2
-        expected = "mounts.volume -> /home/dev/workspace/volume (inside /home/dev/workspace)"
+        expected = f"mounts.volume -> {outer}/volume (inside {outer})"
         assert expected in result.stderr
         assert "mounts.control" not in result.stderr
         if allow:
-            expected = "mounts.bind -> /home/dev/workspace/[data]\\ndjinn-egress: locked 666"
+            expected = f"mounts.bind -> {outer}/[data]\\ndjinn-egress: locked 666"
             assert expected in result.stderr
             assert "\\[data]" not in result.stderr
             assert not any(line.startswith("djinn-egress:") for line in result.stderr.splitlines())
 
     @pytest.mark.parametrize("here", [False, True])
+    @pytest.mark.parametrize("allow", [False, True])
     def test_invalid_declared_target_keeps_named_run_diagnostic(
-        self, run_mocks, tmp_path, monkeypatch, here,
+        self, run_mocks, tmp_path, monkeypatch, here, allow,
     ):
         from djinn_in_a_box.core import agent_runner, docker
 
@@ -237,10 +256,13 @@ class TestRunCommand:
         with patch("djinn_in_a_box.commands.agent.resolve_container_mounts", return_value=(
             (ContainerMount(tmp_path, Path("/home/dev/workspace")),) if here else ()
         )):
-            result = CliRunner().invoke(app, ["run", "claude", "test"])
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test"] + (["--allow", "8.8.8.8"] if allow else []),
+            )
         assert result.exit_code == 1, result.output
         assert result.exception is None or isinstance(result.exception, SystemExit)
-        assert "Declared mount 'bad'" in result.stderr and "/proc" in result.stderr
+        assert ("mounts.bad" if allow else "Declared mount 'bad'") in result.stderr
+        assert "/proc" in result.stderr
         assert "Traceback" not in result.output
         creation.assert_not_called()
 

@@ -636,12 +636,14 @@ class TestStartCommand:
             }
 
     @pytest.mark.parametrize("detach", [False, True])
+    @pytest.mark.parametrize("second", [False, True])
     def test_start_reports_nested_declarations_before_creation(
-        self, start_mocks, tmp_path, monkeypatch, detach,
+        self, start_mocks, tmp_path, monkeypatch, detach, second,
     ):
+        outer = "/review" if second else "/home/dev/workspace"
         config = AppConfig(code_dir=tmp_path, mounts={
-            "bind": {"source": str(tmp_path), "target": "//home/dev/workspace/old/../bind/"},
-            "volume": {"volume": True, "target": "/home/dev/workspace/data", "backup": "none"},
+            "bind": {"source": str(tmp_path), "target": f"/{outer}/old/../bind/"},
+            "volume": {"volume": True, "target": f"{outer}/data", "backup": "none"},
             "control": {"source": str(tmp_path), "target": "/srv/data"},
         })
         start_mocks["load"].return_value = config
@@ -650,15 +652,19 @@ class TestStartCommand:
         def launch(*args, **kwargs):
             output = start_mocks["err_output"].getvalue()
             assert output.count("Skipped") == 2
-            assert "mounts.bind -> /home/dev/workspace/bind (inside /home/dev/workspace)" in output
-            expected = "mounts.volume -> /home/dev/workspace/data (inside /home/dev/workspace)"
+            assert f"mounts.bind -> {outer}/bind (inside {outer})" in output
+            expected = f"mounts.volume -> {outer}/data (inside {outer})"
             assert expected in output
             assert "mounts.control" not in output
             assert output.index("Mount") < output.index("Skipped")
             return RunResult(0)
 
         start_mocks["detached" if detach else "run"].side_effect = launch
-        result = runner.invoke(app, ["start", "--here"] + (["--detach"] if detach else []))
+        mount_args = (
+            ["--mount", f"{tmp_path}:/first", "--mount", f"{tmp_path}:/review"]
+            if second else ["--here"]
+        )
+        result = runner.invoke(app, ["start"] + mount_args + (["--detach"] if detach else []))
         assert result.exit_code == 0, result.output
         start_mocks["detached" if detach else "run"].assert_called_once()
 

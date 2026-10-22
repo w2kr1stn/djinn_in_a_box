@@ -427,6 +427,11 @@ def run_entrypoint(
 def test_entrypoint_locks_skips_default_firewall_and_reports_summary(tmp_path: Path) -> None:
     env, sudo_log, library_marker = guard_env(tmp_path)
     agent_marker = tmp_path / "agent-ran"
+    replay_marker = tmp_path / "replay-ran"
+    replay = tmp_path / "package-replay.sh"
+    replay.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(replay_marker))}\n")
+    replay.chmod(0o755)
+    env["PACKAGE_REPLAY"] = str(replay)
     script = entrypoint_copy(tmp_path, status_file(tmp_path, CAPBND_CLEARED))
     result = run_entrypoint(script, env, agent_marker)
 
@@ -444,6 +449,11 @@ def test_entrypoint_locks_skips_default_firewall_and_reports_summary(tmp_path: P
     # The guard ran before the library; the library still loads afterwards.
     assert library_marker.exists()
     assert lines.index("POISONED-LIBRARY-RAN") > 0
+    info = "Packages: skipped in allowlist mode (no network)."
+    assert result.stderr.count(info) == 1
+    assert next(index for index, line in enumerate(lines) if info in line) > 0
+    assert not replay_marker.exists()
+    assert "Package replay exited unexpectedly" not in result.stderr
 
 
 @requires_zsh

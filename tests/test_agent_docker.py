@@ -173,8 +173,12 @@ def test_profile_refuses_untrusted_delivery(evidence, section, key, value):
 
 @pytest.mark.parametrize("creator", ["foreground", "detached"])
 @pytest.mark.parametrize("read_only", [True, False, None], ids=["ro", "rw", "default"])
-def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, read_only):
+@pytest.mark.parametrize("second", [False, True])
+def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, read_only, second):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    outer = "/review" if second else "/home/dev/workspace"
+    first_target = "/first" if second else outer
+    second_target = outer if second else "/readonly"
     for name in ("code", "here", "ro", "declared"):
         (tmp_path / name).mkdir()
     config = AppConfig(
@@ -187,18 +191,18 @@ def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, 
             "data": {"volume": True, "target": "/data", "backup": "cache"},
             "nested-bind": {
                 "source": str(tmp_path / "declared"),
-                "target": "/home/dev/workspace/bind", "read_only": True,
+                "target": f"{outer}/bind", "read_only": True,
             },
             "nested-volume": {
-                "volume": True, "target": "/home/dev/workspace/data", "backup": "none",
+                "volume": True, "target": f"{outer}/data", "backup": "none",
             },
         },
     )
     options = docker.ContainerOptions(
         docker_mode=docker.DockerMode.AGENT,
         mounts=(
-            docker.ContainerMount(tmp_path / "here", Path("/home/dev/workspace")),
-            docker.ContainerMount(tmp_path / "ro", Path("/readonly"), True),
+            docker.ContainerMount(tmp_path / "here", Path(first_target)),
+            docker.ContainerMount(tmp_path / "ro", Path(second_target), True),
         ),
     )
     fragments = []
@@ -235,8 +239,8 @@ def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, 
     assert {(m["source"], m["target"], m["read_only"]) for m in workspace} == {
         (str(tmp_path / "code"), "/home/dev/projects", False),
         (str(tmp_path / "home/.djinn/sessions"), "/home/dev/sessions", False),
-        (str(tmp_path / "here"), "/home/dev/workspace", False),
-        (str(tmp_path / "ro"), "/readonly", True),
+        (str(tmp_path / "here"), first_target, False),
+        (str(tmp_path / "ro"), second_target, True),
         (str(tmp_path / "declared"), "/declared", read_only is True),
         ("djinn-data", "/data", False),
     }
