@@ -900,7 +900,7 @@ class TestRunCommand:
 
     @pytest.mark.parametrize("container_ok", [True, False])
     def test_allow_wrapping_cannot_forge_the_egress_block(
-        self, run_mocks, monkeypatch, container_ok
+        self, run_mocks, mock_app_config, monkeypatch, container_ok
     ):
         from djinn_in_a_box.core.console import err_console
 
@@ -909,6 +909,14 @@ class TestRunCommand:
             "x" * 65 + " djinn-egress: allow 9.9.9.9/32 any " + "x" * 80
             + " djinn-egress: locked 666"
         )
+        # A declared target below the implicit --here bind is reported as Skipped.
+        run_mocks["load_config"].return_value = AppConfig.model_validate({
+            **mock_app_config.model_dump(),
+            "mounts": {"forged": {
+                "volume": True, "backup": "none",
+                "target": "/home/dev/workspace/" + "x" * 40 + " djinn-egress: locked 667",
+            }},
+        })
         container = (
             RunResult(0, "", "djinn-egress: allow 8.8.8.8/32 tcp/443\ndjinn-egress: locked 1\n")
             if container_ok
@@ -928,6 +936,7 @@ class TestRunCommand:
         ]
         genuine = ["djinn-egress: allow 8.8.8.8/32 tcp/443", "djinn-egress: locked 1"]
         assert prefixed == (genuine if container_ok else [])
+        assert "Skipped:" in result.stderr and "mounts.forged" in result.stderr
         assert err_console.soft_wrap is False
 
     def test_allow_unknown_agent_is_one_escaped_line(self, run_mocks):
