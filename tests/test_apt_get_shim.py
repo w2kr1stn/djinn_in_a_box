@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
 
 import pytest
 from test_djinn_apt_root import (
@@ -14,6 +13,7 @@ from test_djinn_apt_root import (
     ROOT,
     FakeTools,
     HelperHarness,
+    children_cpu_seconds,
     executable,
     substitute,
 )
@@ -222,9 +222,9 @@ LONG = "A" * 32769
 def test_long_token_refused_promptly(tmp_path, args):
     # Per-byte escaping of a 32 KiB token took seconds; long tokens are sized instead.
     shim = ShimHarness(tmp_path)
-    started = time.monotonic()
+    started = children_cpu_seconds()
     result = shim.run(args)
-    assert time.monotonic() - started < 2
+    assert children_cpu_seconds() - started < 2
     assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
     assert f"({len(args[-1])}-byte argument)" in result.stderr
     assert shim.tools.sudo_calls() == []
