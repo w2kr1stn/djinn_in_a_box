@@ -83,8 +83,13 @@ def fake_docker(git_inputs, monkeypatch):
     binary.parent.mkdir()
     binary.write_text(
         f"#!{sys.executable}\n"
-        "import pathlib, sys\n"
+        "import json, pathlib, sys\n"
         f"state = pathlib.Path({str(state)!r})\n"
+        "with state.with_suffix('.calls').open('a') as calls:\n"
+        "    calls.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1:3] == ['rm', '-f']:\n"
+        "    state.unlink()\n"
+        "    sys.exit(0)\n"
         "if state.exists():\n"
         "    print(state.read_text())\n"
         "else:\n"
@@ -221,6 +226,59 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
                 observer.terminate()
             observer.wait(timeout=8)
         runtime.close()
+
+
+@pytest.mark.parametrize("with_git", [True, False], ids=["git", "desktop-only"])
+def test_interrupt_during_foreground_start_removes_dev_and_state(
+    git_inputs, fake_docker, capsys, with_git
+):
+    config = git_inputs
+    if not with_git:
+        config = git_inputs.model_copy(
+            update={
+                "git": git_inputs.git.model_copy(
+                    update={"identities": {}, "signing_identity": None}
+                )
+            }
+        )
+    root = runtime_root()
+    dev_id = "dev-interrupted"
+    observer = None
+    runtime = None
+    try:
+        with pytest.raises(KeyboardInterrupt), git_runtime(config, "djinn") as runtime:
+            observed_dev(fake_docker, runtime, dev_id=dev_id)
+            observer = runtime.observer
+            assert observer is not None
+            deadline = time.monotonic() + 8
+            while not (root / "attached").exists() and time.monotonic() < deadline:
+                assert observer.poll() is None
+                time.sleep(0.05)
+            assert (root / "attached").exists()
+            assert observer.poll() is None
+            state = json.loads((root / "state.json").read_text())
+            assert state["dev_id"] == dev_id
+            assert state["generation"] == runtime.generation
+            assert state["resources"] == {}
+            assert (runtime.agent is not None) == with_git
+            assert not runtime.detached
+            raise KeyboardInterrupt
+
+        assert observer.poll() is not None
+        calls = [
+            json.loads(line) for line in fake_docker.with_suffix(".calls").read_text().splitlines()
+        ]
+        assert [call for call in calls if call[0] in ("stop", "rm")] == [["rm", "-f", dev_id]]
+        assert not fake_docker.exists()
+        assert not (root / "state.json").exists()
+        assert "Runtime cleanup preserved resources" not in capsys.readouterr().err
+    finally:
+        if observer is not None:
+            if observer.poll() is None:
+                observer.terminate()
+            observer.wait(timeout=8)
+        if runtime is not None:
+            runtime.close()
 
 
 def test_detached_agent_survives_actual_creator_exit(git_inputs, fake_docker):
