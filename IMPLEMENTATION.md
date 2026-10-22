@@ -1358,8 +1358,13 @@ The same module owns the repeatable user-mount contract:
 - `validate_container_mounts()` checks the targets actually occupied by this
   `dev` invocation, including Compose, image-alias, runtime, Direct-socket,
   zone-overlay, and user mounts. Equal targets and user targets that are
-  ancestors of an occupied target raise `MountCollisionError`; child targets
-  remain valid except at or below the shared `MANAGED_TARGET_ROOTS`. Assigned
+  ancestors of an occupied target raise `MountCollisionError`, retaining the
+  conflict-path diagnostic for equality and a later containing mount. A later
+  invocation mount strictly inside an earlier invocation bind (`--here` or
+  `--mount`) is also refused, naming both mounts, Docker's creation of root-owned
+  mount-point directories inside the outer host directory, and the remedy of choosing a
+  target outside it. Children of other occupied targets remain valid except at
+  or below the shared `MANAGED_TARGET_ROOTS`. Assigned
   zone targets are reserved like other occupied targets. The managed-root set
   includes the five recursively repaired roots, the reserved root-owned package root
   `/var/lib/djinn-packages`, managed SSH targets, desktop
@@ -1385,8 +1390,22 @@ The same module owns the repeatable user-mount contract:
   The execution inventory and guard comparison use strict presence checks that
   propagate inspection errors; other sealing paths retain lenient checks.
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
-  `MountCollisionError` reports the two involved mounts and the conflict path;
-  managed-root conflicts identify the Djinn-managed root.
+  `MountCollisionError` identifies the involved mounts. Equality and containing
+  mounts report the conflict path; a later inner invocation mount instead
+  reports the root-owned-directory cause and outside-target remedy.
+  Managed-root conflicts identify the Djinn-managed root and conflict path.
+
+`nested_declarations()` compares normalized, image-alias-resolved targets and
+returns declared mounts strictly inside invocation binds in declaration order.
+Invalid declaration targets are left to the existing named validation errors.
+Both creators resolve and validate every declaration before filtering this list,
+then use the filtered declarations for Compose volumes, top-level volume
+definitions, `DJINN_DECLARED_VOLUME_TARGETS` and AGENT workspace delivery to dev
+and its daemon. The original config stays intact: guest source-check phase 1
+still checks every declared bind, including omitted ones, while phase 2 checks
+the resulting Compose configuration. The `run` and `start` status blocks use the
+same helper to report each omission as `Skipped`; allowlist run values use the
+existing control-character escaping.
 
 `managed_bind_problems(config)` collects problems for configurable managed
 writable sources without provisioning: the expanded `config.code_dir`,
@@ -2802,6 +2821,7 @@ entrypoint.sh
   +-- Codex daemon: disable updater, reconcile image version, prune old releases
       (no command arguments; failures warn and continue)
   +-- Packages: dev wrapper calls root helper replay for the root-owned persistent list
+      (skipped with one info line in allowlist runs: no network)
   +-- Tools: install optional tools
   +-- Security: summarize firewall and Docker access
   +-- run interactive shell as a background job

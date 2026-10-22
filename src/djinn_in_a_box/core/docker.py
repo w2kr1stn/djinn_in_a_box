@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -242,6 +242,31 @@ class ContainerMount:
     source: Path
     target: Path
     read_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class NestedDeclaration:
+    name: str
+    target: Path
+    enclosing_target: Path
+
+
+def nested_declarations(
+    targets: Iterable[tuple[str, str | Path]], mounts: tuple[ContainerMount, ...],
+) -> tuple[NestedDeclaration, ...]:
+    """Classify strict descendants of invocation binds, deferring invalid declarations."""
+    enclosing_targets = tuple(_normalize_mount_target(mount.target) for mount in mounts)
+    nested: list[NestedDeclaration] = []
+    for name, raw_target in targets:
+        try:
+            target = _normalize_mount_target(raw_target)
+        except (MountSpecificationError, ValueError):
+            continue
+        for enclosing_target in enclosing_targets:
+            if target != enclosing_target and target.is_relative_to(enclosing_target):
+                nested.append(NestedDeclaration(name, target, enclosing_target))
+                break
+    return tuple(nested)
 
 
 class MountCollisionError(ValueError):
@@ -1193,7 +1218,7 @@ def validate_container_mounts(
             for variant in _image_alias_variants(target)
         )
 
-    for mount in normalized_mounts:
+    for index, mount in enumerate(normalized_mounts):
         if ":" in str(mount.source):
             # Compose's short volume syntax would split the checked source.
             raise MountSpecificationError(f"Mount source {mount.source} must not contain ':'")
@@ -1210,6 +1235,15 @@ def validate_container_mounts(
                 msg = (
                     f"Mount {mount.source} -> {mount_target} conflicts with {description} "
                     f"(conflict path: {display_target})"
+                )
+                raise MountCollisionError(msg)
+        for outer in normalized_mounts[:index]:
+            if mount_target.is_relative_to(outer.target):
+                msg = (
+                    f"Mount {mount.source} -> {mount_target} is inside mount "
+                    f"{outer.source} -> {outer.target}; Docker would create the inner mount "
+                    "point as a root-owned directory inside the outer mount's host directory; "
+                    f"choose a target outside {outer.target}"
                 )
                 raise MountCollisionError(msg)
         occupied.append((mount_target, f"mount {mount.source} -> {mount_target}", mount_target))
@@ -2503,7 +2537,12 @@ def validate_egress_inputs(
         (f"mounts.{name}", Path(mount.target)) for name, mount in declarations.mounts.items()
     )
     for setting, path in targets:
-        target = _resolve_image_aliases(_normalize_mount_target(path))
+        try:
+            target = _resolve_image_aliases(_normalize_mount_target(path))
+        except MountSpecificationError as exc:
+            raise EgressSpecificationError(
+                escape_nonprintable(f"{setting}: {exc}")
+            ) from exc
         if target in (Path("/"), Path("/home"), Path("/home/dev")) or any(
             target == root or target.is_relative_to(root) or root.is_relative_to(target)
             for root in map(Path, ("/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/run"))
@@ -2928,6 +2967,10 @@ def compose_run(
         caller_env=env,
     )
     declarations.require_valid()
+    skipped = {entry.name for entry in nested_declarations(
+        ((mount.name, mount.target) for mount in declarations.mounts), mounts,
+    )}
+    declarations.mounts = [mount for mount in declarations.mounts if mount.name not in skipped]
     if source_check:
         declarations.mounts = [
             replace(mount, source=str(source_check(mount.source, mount.target)))
@@ -3169,6 +3212,10 @@ def compose_up_detached(
         caller_env=env,
     )
     declarations.require_valid()
+    skipped = {entry.name for entry in nested_declarations(
+        ((mount.name, mount.target) for mount in declarations.mounts), mounts,
+    )}
+    declarations.mounts = [mount for mount in declarations.mounts if mount.name not in skipped]
     validate_container_mounts(
         mounts,
         config,

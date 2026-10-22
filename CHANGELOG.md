@@ -29,6 +29,15 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Default `djinn run`, `djinn run --here` and `djinn start --here` no longer
+  receive declared binds or volumes nested below `/home/dev/workspace`; declared
+  mounts below any invocation `--mount` target are also left out and named in
+  stderr status. This prevents root-owned stub directories in the bound host
+  directory. An invocation `--mount` inside `--here` or another `--mount` is now
+  refused (#206).
+- Allowlist runs (`djinn run --allow`) skip the startup package replay with one
+  info line instead of printing apt failures after the `djinn-egress:` block;
+  recorded runtime packages are not installed there (#205).
 - `--firewall` now allows Claude's current sign-in token host
   `platform.claude.com` instead of the unused `console.anthropic.com`, so a
   subscription token can be refreshed under the firewall (#178).

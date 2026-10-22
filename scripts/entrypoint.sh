@@ -220,7 +220,9 @@ fi
 # =============================================================================
 ui_section "Packages"
 PACKAGE_REPLAY="${PACKAGE_REPLAY:-/home/dev/package-replay.sh}"
-if [[ -f "$PACKAGE_REPLAY" ]]; then
+if [[ -n "${DJINN_EGRESS_ALLOW:-}" ]]; then
+    ui_info "Packages: skipped in allowlist mode (no network)."
+elif [[ -f "$PACKAGE_REPLAY" ]]; then
     if ! "$PACKAGE_REPLAY" >&2; then
         ui_warn "Package replay exited unexpectedly; continuing startup."
     fi

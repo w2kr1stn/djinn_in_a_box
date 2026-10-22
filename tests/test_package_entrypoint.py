@@ -12,8 +12,19 @@ from djinn_in_a_box.config.declarations import DJINN_ENV_KEYS
 from djinn_in_a_box.core.docker import MANAGED_VOLUME_REPAIR_TARGETS
 
 
+def package_environment(**extra):
+    env = dict(os.environ)
+    env.pop("DJINN_EGRESS_ALLOW", None)
+    env.update(extra)
+    return env
+
+
+@pytest.mark.parametrize("command", [False, True])
+@pytest.mark.parametrize(
+    "marker", [None, "", "203.0.113.10/32/tcp/443"], ids=["unset", "empty", "allowlist"],
+)
 @pytest.mark.parametrize("case", ["success", "failure", "missing"])
-def test_packages_section_order_and_failure_continue(tmp_path, case):
+def test_packages_section_order_and_failure_continue(tmp_path, case, marker, command):
     source = (ROOT / "scripts/entrypoint.sh").read_text()
     # Check the complete entrypoint before slicing, including any section moved
     # outside the harness boundary.
@@ -50,17 +61,20 @@ def test_packages_section_order_and_failure_continue(tmp_path, case):
     harness.write_text(
         "set -euo pipefail\n"
         'ui_section() { print -u2 -- "SECTION $1"; }\n'
-        'ui_warn() { print -u2 -- "WARN $1"; }\n' + section + "\nprint FOLLOWING_STARTUP_STEP\n"
+        'ui_warn() { print -u2 -- "WARN $1"; }\n'
+        'ui_info() { print -u2 -- "INFO $1"; }\n' + section + "\nprint FOLLOWING_STARTUP_STEP\n"
     )
+    child_env = package_environment(
+        HOME=str(tmp_path),
+        MCP_REGISTER=str(mcp),
+        PACKAGE_REPLAY=str(replay),
+        CODEX_DAEMON_POLICY_HELPER=str(policy),
+    )
+    if marker is not None:
+        child_env["DJINN_EGRESS_ALLOW"] = marker
     result = subprocess.run(
-        ["zsh", str(harness)],
-        env=dict(
-            os.environ,
-            HOME=str(tmp_path),
-            MCP_REGISTER=str(mcp),
-            PACKAGE_REPLAY=str(replay),
-            CODEX_DAEMON_POLICY_HELPER=str(policy),
-        ),
+        ["zsh", str(harness)] + (["-c", "true"] if command else []),
+        env=child_env,
         text=True,
         capture_output=True,
         timeout=5,
@@ -69,14 +83,23 @@ def test_packages_section_order_and_failure_continue(tmp_path, case):
     assert result.returncode == 0
     assert result.stdout == "FOLLOWING_STARTUP_STEP\n"
     lines = result.stderr.splitlines()
-    assert lines[:5] == [
-        "SECTION MCP", "MCP_RAN", "SECTION Codex daemon", "POLICY_RAN", "SECTION Packages"
-    ]
+    prefix = ["SECTION MCP", "MCP_RAN"]
+    if not command:
+        prefix += ["SECTION Codex daemon", "POLICY_RAN"]
+    prefix += ["SECTION Packages"]
+    assert lines[:len(prefix)] == prefix
     assert lines[-2:] == ["SECTION Tools", "TOOLS_RAN"]
-    assert ("REPLAY_RAN" in lines) == (case != "missing")
-    assert result.stderr.count("WARN") == (1 if case == "failure" else 0)
-    if case == "failure":
+    assert ("REPLAY_RAN" in lines) == (not marker and case in ("success", "failure"))
+    assert result.stderr.count("WARN") == int(not marker and case == "failure")
+    if not marker and case == "failure":
         assert "continuing startup" in result.stderr
+    info_line = "INFO Packages: skipped in allowlist mode (no network)."
+    if marker:
+        assert lines[lines.index("SECTION Packages") + 1] == info_line
+        assert result.stderr.count(info_line) == 1
+        assert "WARN" not in result.stderr
+    else:
+        assert not any(line.startswith("INFO Packages: skipped") for line in lines)
 
 
 def test_packages_ownership_target():
@@ -113,12 +136,12 @@ def test_codex_daemon_step_guard_order_arguments_and_failure_continue(tmp_path, 
         "set -euo pipefail\n"
         'ui_section() { print -u2 -- "SECTION $1"; }\n'
         'ui_warn() { print -u2 -- "WARN $1"; }\n'
+        'ui_info() { print -u2 -- "INFO $1"; }\n'
         + section + "\nprint FOLLOWING_STARTUP_STEP\n"
     )
     result = subprocess.run(
         ["zsh", str(harness)] + (["-c", "true"] if command else []),
-        env=dict(
-            os.environ,
+        env=package_environment(
             HOME=str(tmp_path),
             MCP_REGISTER=str(mcp),
             PACKAGE_REPLAY=str(replay),

@@ -83,8 +83,13 @@ def fake_docker(git_inputs, monkeypatch):
     binary.parent.mkdir()
     binary.write_text(
         f"#!{sys.executable}\n"
-        "import pathlib, sys\n"
+        "import json, os, pathlib, sys\n"
         f"state = pathlib.Path({str(state)!r})\n"
+        "with state.with_suffix('.calls').open('a') as calls:\n"
+        "    calls.write(json.dumps({'ppid': os.getppid(), 'argv': sys.argv[1:]}) + '\\n')\n"
+        "if sys.argv[1:3] == ['rm', '-f']:\n"
+        "    state.unlink()\n"
+        "    sys.exit(0)\n"
         "if state.exists():\n"
         "    print(state.read_text())\n"
         "else:\n"
@@ -221,6 +226,89 @@ def test_observer_releases_on_external_dev_transition(git_inputs, fake_docker, t
                 observer.terminate()
             observer.wait(timeout=8)
         runtime.close()
+
+
+@pytest.mark.parametrize("with_git", [True, False], ids=["git", "desktop-only"])
+def test_interrupt_during_foreground_start_removes_dev_and_state(
+    git_inputs, fake_docker, capsys, monkeypatch, with_git
+):
+    config = git_inputs
+    if not with_git:
+        config = git_inputs.model_copy(
+            update={
+                "git": git_inputs.git.model_copy(
+                    update={"identities": {}, "signing_identity": None}
+                )
+            }
+        )
+    root = runtime_root()
+    dev_id = "dev-interrupted"
+    observer = None
+    runtime = None
+    shutdown_index = None
+    try:
+        with pytest.raises(KeyboardInterrupt), git_runtime(config, "djinn") as runtime:
+            observed_dev(fake_docker, runtime, dev_id=dev_id)
+            observer = runtime.observer
+            assert observer is not None
+            deadline = time.monotonic() + 8
+            while not (root / "attached").exists() and time.monotonic() < deadline:
+                assert observer.poll() is None
+                time.sleep(0.05)
+            assert (root / "attached").exists()
+            assert observer.poll() is None
+            state = json.loads((root / "state.json").read_text())
+            assert state["dev_id"] == dev_id
+            assert state["generation"] == runtime.generation
+            assert state["resources"] == {}
+            assert (runtime.agent is not None) == with_git
+            assert not runtime.detached
+
+            terminate = observer.terminate
+
+            def record_shutdown():
+                nonlocal shutdown_index
+                shutdown_index = len(fake_docker.with_suffix(".calls").read_text().splitlines())
+                terminate()
+
+            monkeypatch.setattr(observer, "terminate", record_shutdown)
+            raise KeyboardInterrupt
+
+        assert observer.poll() is not None
+        assert observer.returncode == 0
+        calls = [
+            json.loads(line) for line in fake_docker.with_suffix(".calls").read_text().splitlines()
+        ]
+        assert [call["argv"] for call in calls if call["argv"][0] in ("stop", "rm")] == [
+            ["rm", "-f", dev_id],
+        ]
+        assert shutdown_index is not None
+        removal_index = next(index for index, call in enumerate(calls)
+                             if call["argv"] == ["rm", "-f", dev_id])
+        assert calls[removal_index]["ppid"] == os.getpid()
+        final_inspections = [
+            index for index, call in enumerate(calls)
+            if index >= shutdown_index and call == {
+                "ppid": observer.pid, "argv": ["container", "inspect", "djinn"],
+            }
+        ]
+        # Observer inspections after the shutdown cutoff and before the creator's
+        # removal show the observer was still inspecting the running dev while it
+        # shut down. Ordinary polling between cutoff and signal can count here too,
+        # so this is supporting evidence only; the finalizer cleanup itself is pinned
+        # by the observer tests (test_observer_tolerance, test_observer_releases_*).
+        assert len(final_inspections) >= 2
+        assert shutdown_index <= final_inspections[0] < final_inspections[-1] < removal_index
+        assert not fake_docker.exists()
+        assert not (root / "state.json").exists()
+        assert "Runtime cleanup preserved resources" not in capsys.readouterr().err
+    finally:
+        if observer is not None:
+            if observer.poll() is None:
+                observer.terminate()
+            observer.wait(timeout=8)
+        if runtime is not None:
+            runtime.close()
 
 
 def test_detached_agent_survives_actual_creator_exit(git_inputs, fake_docker):

@@ -141,6 +141,7 @@ class TestRunCommand:
     @pytest.fixture
     def run_mocks(
         self,
+        mock_app_config,
     ) -> Generator[dict[str, Any]]:
         """Common mocks for run command tests."""
         with (
@@ -164,7 +165,7 @@ class TestRunCommand:
                 return_value=WorkflowImageCompatibility.COMPATIBLE,
             ) as mock_image_compatibility,
         ):
-            config = object()
+            config = mock_app_config
             mock_config.return_value = config
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
             yield {
@@ -174,6 +175,96 @@ class TestRunCommand:
                 "load_config": mock_config,
                 "image_compatibility": mock_image_compatibility,
             }
+
+    @pytest.mark.parametrize("allow", [False, True])
+    @pytest.mark.parametrize("second", [False, True])
+    def test_run_reports_nested_declarations_before_launch(
+        self, run_mocks, tmp_path, monkeypatch, allow, second,
+    ):
+        from djinn_in_a_box.core import agent_runner
+        from djinn_in_a_box.core.console import err_console
+
+        monkeypatch.setattr(err_console, "width", 200)
+        outer = "/review" if second else "/home/dev/workspace"
+        config = AppConfig(code_dir=tmp_path, mounts={
+            "bind": {
+                "source": str(tmp_path),
+                "target": f"/{outer}/old/../[data]\ndjinn-egress: locked 666",
+            },
+            "volume": {"volume": True, "target": f"{outer}/volume", "backup": "none"},
+            "control": {"source": str(tmp_path), "target": "/home/dev/workspace2"},
+        })
+        run_mocks["load_config"].return_value = config
+        run_mocks["run"].side_effect = agent_runner.run_headless_agent
+        monkeypatch.setattr(
+            agent_runner, "load_agents", lambda: {"claude": AgentConfig(binary="claude")},
+        )
+
+        def launch(*args, **kwargs):
+            # CliRunner captures stderr while the real runner is still executing.
+            import sys
+
+            sys.stderr.flush()
+            output = sys.stderr.buffer.getvalue().decode()
+            assert output.count("Skipped") == 2
+            assert f"mounts.volume -> {outer}/volume (inside {outer})" in output
+            assert "mounts.control" not in output
+            return RunResult(0, "agent launched\n", "")
+
+        monkeypatch.setattr(agent_runner, "compose_run", launch)
+        monkeypatch.chdir(tmp_path)
+        mount_args = (
+            ["--mount", f"{tmp_path}:/first", "--mount", f"{tmp_path}:/review"] if second else []
+        )
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test"] + mount_args
+            + (["--allow", "8.8.8.8"] if allow else []),
+        )
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "agent launched\n"
+        assert result.stderr.count("Skipped") == 2
+        expected = f"mounts.volume -> {outer}/volume (inside {outer})"
+        assert expected in result.stderr
+        assert "mounts.control" not in result.stderr
+        if allow:
+            expected = f"mounts.bind -> {outer}/[data]\\ndjinn-egress: locked 666"
+            assert expected in result.stderr
+            assert "\\[data]" not in result.stderr
+            assert not any(line.startswith("djinn-egress:") for line in result.stderr.splitlines())
+
+    @pytest.mark.parametrize("here", [False, True])
+    @pytest.mark.parametrize("allow", [False, True])
+    def test_invalid_declared_target_keeps_named_run_diagnostic(
+        self, run_mocks, tmp_path, monkeypatch, here, allow,
+    ):
+        from djinn_in_a_box.core import agent_runner, docker
+
+        config = AppConfig(code_dir=tmp_path, mounts={
+            "bad": {"volume": True, "target": "/proc/x", "backup": "none"},
+        })
+        run_mocks["load_config"].return_value = config
+        run_mocks["run"].side_effect = agent_runner.run_headless_agent
+        monkeypatch.setattr(
+            agent_runner, "load_agents", lambda: {"claude": AgentConfig(binary="claude")},
+        )
+        creation = MagicMock(side_effect=AssertionError("container created"))
+        monkeypatch.setattr(docker.subprocess, "run", creation)
+        monkeypatch.setattr(docker, "get_shell_mount_args", lambda *a: [])
+        monkeypatch.setattr(docker, "get_sops_age_key_mount_args", lambda *a: [])
+        monkeypatch.setattr(docker, "_zone_overlay_mount_args_and_targets", lambda *a: ([], ()))
+        monkeypatch.chdir(tmp_path)
+        with patch("djinn_in_a_box.commands.agent.resolve_container_mounts", return_value=(
+            (ContainerMount(tmp_path, Path("/home/dev/workspace")),) if here else ()
+        )):
+            result = CliRunner().invoke(
+                app, ["run", "claude", "test"] + (["--allow", "8.8.8.8"] if allow else []),
+            )
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert ("mounts.bad" if allow else "Declared mount 'bad'") in result.stderr
+        assert "/proc" in result.stderr
+        assert "Traceback" not in result.output
+        creation.assert_not_called()
 
     def test_run_validates_agent_name(
         self,
@@ -809,7 +900,7 @@ class TestRunCommand:
 
     @pytest.mark.parametrize("container_ok", [True, False])
     def test_allow_wrapping_cannot_forge_the_egress_block(
-        self, run_mocks, monkeypatch, container_ok
+        self, run_mocks, mock_app_config, monkeypatch, container_ok
     ):
         from djinn_in_a_box.core.console import err_console
 
@@ -818,6 +909,14 @@ class TestRunCommand:
             "x" * 65 + " djinn-egress: allow 9.9.9.9/32 any " + "x" * 80
             + " djinn-egress: locked 666"
         )
+        # A declared target below the implicit --here bind is reported as Skipped.
+        run_mocks["load_config"].return_value = AppConfig.model_validate({
+            **mock_app_config.model_dump(),
+            "mounts": {"forged": {
+                "volume": True, "backup": "none",
+                "target": "/home/dev/workspace/" + "x" * 40 + " djinn-egress: locked 667",
+            }},
+        })
         container = (
             RunResult(0, "", "djinn-egress: allow 8.8.8.8/32 tcp/443\ndjinn-egress: locked 1\n")
             if container_ok
@@ -837,6 +936,7 @@ class TestRunCommand:
         ]
         genuine = ["djinn-egress: allow 8.8.8.8/32 tcp/443", "djinn-egress: locked 1"]
         assert prefixed == (genuine if container_ok else [])
+        assert "Skipped:" in result.stderr and "mounts.forged" in result.stderr
         assert err_console.soft_wrap is False
 
     def test_allow_unknown_agent_is_one_escaped_line(self, run_mocks):
