@@ -152,10 +152,12 @@ def test_unknown_arguments_are_rejected(script_env, args):
 
 def test_maintainer_mode_updates_temp_dockerfile(script_env):
     project, env, _ = script_env
+    git_env = {**env, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     for argv in (["git", "init", "-q"], ["git", "add", "."],
                  ["git", "-c", "user.name=Test Operator", "-c", "user.email=test@example.com",
-                  "-c", "core.hooksPath=/dev/null", "commit", "-qm", "baseline"]):
-        subprocess.run(argv, cwd=project, env=env, stdin=subprocess.DEVNULL,
+                  "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                  "commit", "-qm", "baseline"]):
+        subprocess.run(argv, cwd=project, env=git_env, stdin=subprocess.DEVNULL,
                        capture_output=True, timeout=10, check=True)
     result = run_script(project, env)
     assert result.returncode == 0, result.stderr
