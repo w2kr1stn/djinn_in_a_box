@@ -635,6 +635,62 @@ class TestStartCommand:
                 "recover": mock_recover,
             }
 
+    @pytest.mark.parametrize("detach", [False, True])
+    def test_start_reports_nested_declarations_before_creation(
+        self, start_mocks, tmp_path, monkeypatch, detach,
+    ):
+        config = AppConfig(code_dir=tmp_path, mounts={
+            "bind": {"source": str(tmp_path), "target": "//home/dev/workspace/old/../bind/"},
+            "volume": {"volume": True, "target": "/home/dev/workspace/data", "backup": "none"},
+            "control": {"source": str(tmp_path), "target": "/srv/data"},
+        })
+        start_mocks["load"].return_value = config
+        monkeypatch.chdir(tmp_path)
+
+        def launch(*args, **kwargs):
+            output = start_mocks["err_output"].getvalue()
+            assert output.count("Skipped") == 2
+            assert "mounts.bind -> /home/dev/workspace/bind (inside /home/dev/workspace)" in output
+            expected = "mounts.volume -> /home/dev/workspace/data (inside /home/dev/workspace)"
+            assert expected in output
+            assert "mounts.control" not in output
+            assert output.index("Mount") < output.index("Skipped")
+            return RunResult(0)
+
+        start_mocks["detached" if detach else "run"].side_effect = launch
+        result = runner.invoke(app, ["start", "--here"] + (["--detach"] if detach else []))
+        assert result.exit_code == 0, result.output
+        start_mocks["detached" if detach else "run"].assert_called_once()
+
+    @pytest.mark.parametrize("detach", [False, True])
+    @pytest.mark.parametrize("here", [False, True])
+    def test_invalid_declared_target_keeps_named_start_diagnostic(
+        self, start_mocks, tmp_path, monkeypatch, detach, here,
+    ):
+        from djinn_in_a_box.core import docker
+
+        config = AppConfig(code_dir=tmp_path, mounts={
+            "bad": {"volume": True, "target": "/proc/x", "backup": "none"},
+        })
+        start_mocks["load"].return_value = config
+        start_mocks["detached"].side_effect = docker.compose_up_detached
+        start_mocks["run"].side_effect = docker.compose_run
+        monkeypatch.setattr(docker, "get_sops_age_key_mount_args", lambda *a: [])
+        monkeypatch.setattr(docker, "_zone_overlay_mount_args_and_targets", lambda *a: ([], ()))
+        monkeypatch.setattr(docker, "is_background_process_group", lambda: False)
+        creation = MagicMock(side_effect=AssertionError("container created"))
+        monkeypatch.setattr(docker.subprocess, "run", creation)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            app, ["start"] + (["--detach"] if detach else []) + (["--here"] if here else []),
+        )
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        output = start_mocks["err_output"].getvalue()
+        assert "Declared mount 'bad'" in output and "/proc" in output
+        assert "Traceback" not in result.output
+        creation.assert_not_called()
+
     def test_start_prepares_both_runtime_views_before_network(
         self, start_mocks: dict[str, Any]
     ) -> None:

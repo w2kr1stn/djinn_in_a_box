@@ -3199,6 +3199,181 @@ def _call_declared_creator(kind, config, options=None, **kwargs):
     return docker.compose_run(config, options, interactive=kind == "interactive", **kwargs)
 
 
+@pytest.mark.parametrize(
+    "outer, target, expected",
+    [
+        ("/home/dev/workspace", "/home/dev/workspace/data", True),
+        ("/review", "/review/data", True),
+        ("/home/dev/mount/tools", "/home/dev/mount/tools/data", True),
+        ("/var/run/review", "/run/review/data", True),
+        ("/run/review", "/var/run/review/data", True),
+        ("/home/dev/.config/claude/review", "/home/dev/.claude/review/data", True),
+        ("/home/dev/.claude/review", "/home/dev/.config/claude/review/data", True),
+        ("//review//old/../", "/review/data", True),
+        ("/review", "//review//old/../data/", True),
+        ("/review", "/review/old/../", False),
+        ("/home/dev/workspace", "/home/dev/workspace2/data", False),
+        ("/review", "/review/../elsewhere/data", False),
+        ("/review", "/proc/x", False),
+    ],
+)
+def test_nested_declarations_boundaries(tmp_path, outer, target, expected):
+    result = docker_mod.nested_declarations(
+        [("data", target)], (ContainerMount(tmp_path, Path(outer)),),
+    )
+    assert bool(result) is expected
+    if expected:
+        assert result == (docker_mod.NestedDeclaration(
+            "data", docker_mod._normalize_mount_target(target),
+            docker_mod._normalize_mount_target(outer),
+        ),)
+
+
+def test_nested_declarations_keep_input_order_and_ignore_invalid(tmp_path):
+    targets = [("second", "/review/b"), ("bad", "/proc/x"), ("first", "/review/a")]
+    mounts = (ContainerMount(tmp_path, Path("/review")),)
+    assert [entry.name for entry in docker_mod.nested_declarations(iter(targets), mounts)] == [
+        "second", "first",
+    ]
+    assert docker_mod.nested_declarations(targets, ()) == ()
+    assert docker_mod.nested_declarations(targets, (*mounts, *mounts)) == (
+        docker_mod.NestedDeclaration("second", Path("/review/b"), Path("/review")),
+        docker_mod.NestedDeclaration("first", Path("/review/a"), Path("/review")),
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("read_only", [False, True], ids=["rw", "ro"])
+@pytest.mark.parametrize(
+    "outer, inner",
+    [
+        ("/home/dev/workspace", "/home/dev/workspace/sub"),
+        ("/review", "/review/sub"),
+        ("//review//old/../", "/review/sub"),
+        ("/review", "//review//old/../sub/"),
+        ("/var/run/review", "/run/review/sub"),
+        ("/run/review", "/var/run/review/sub"),
+        ("/home/dev/.config/claude/review", "/home/dev/.claude/review/sub"),
+        ("/home/dev/.claude/review", "/home/dev/.config/claude/review/sub"),
+    ],
+)
+def test_nested_invocation_mounts_refused(
+    tmp_path, mock_app_config, outer, inner, reverse, read_only,
+):
+    mounts = (
+        ContainerMount(tmp_path / "outer", Path(outer)),
+        ContainerMount(tmp_path / "inner", Path(inner), read_only),
+    )
+    with pytest.raises(MountCollisionError) as exc:
+        validate_container_mounts(
+            mounts[::-1] if reverse else mounts, mock_app_config, DockerMode.NONE,
+        )
+    message = str(exc.value)
+    assert str(tmp_path / "outer") in message and str(tmp_path / "inner") in message
+    assert str(docker_mod._normalize_mount_target(outer)) in message
+    assert str(docker_mod._normalize_mount_target(inner)) in message
+    if reverse:
+        assert "conflicts with mount" in message and "conflict path:" in message
+    else:
+        assert "Docker would create the inner mount point as a root-owned directory" in message
+        assert "inside the outer mount's host directory" in message
+        assert f"choose a target outside {docker_mod._normalize_mount_target(outer)}" in message
+
+
+@pytest.mark.parametrize("target", ["/review/other", "/review/data/../"])
+def test_invocation_siblings_and_equal_targets(tmp_path, mock_app_config, target):
+    mounts = (ContainerMount(tmp_path, Path("/review")), ContainerMount(tmp_path, Path(target)))
+    if target == "/review/other":
+        validate_container_mounts(
+            (ContainerMount(tmp_path, Path("/review/sibling")), mounts[1]),
+            mock_app_config, DockerMode.NONE,
+        )
+    else:
+        with pytest.raises(MountCollisionError, match="conflicts with mount.*conflict path"):
+            validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
+
+
+@pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("form", ["here", "explicit", "derived", "normalized", "none"])
+def test_nested_declarations_filtered_on_every_creator(
+    tmp_path, monkeypatch, declared_creator, generated_overrides, kind, form,
+):
+    outer = {
+        "here": "/home/dev/workspace", "explicit": "/review",
+        "derived": "/home/dev/mount/tools", "normalized": "/home/dev/workspace",
+        "none": "/home/dev/workspace",
+    }[form]
+    raw_bind = f"//{outer.lstrip('/')}//old/../bind/" if form == "normalized" else f"{outer}/bind"
+    config = AppConfig.model_validate({
+        **declared_creator.model_dump(),
+        "mounts": {
+            "archive.disk": {"source": str(tmp_path / "archive$disk"), "target": raw_bind},
+            "worker": {"volume": True, "target": f"{outer}/data", "backup": "none"},
+            "control": {
+                "source": str(tmp_path), "target": "/home/dev/workspace2", "read_only": True,
+            },
+            "kept": {"volume": True, "target": "/kept", "backup": "none"},
+        },
+    })
+    payloads = []
+
+    def capture(cmd, **kwargs):
+        if kwargs.get("capture_output"):
+            assert kwargs["stdin"] is subprocess.DEVNULL
+        (override,) = generated_overrides(cmd)
+        payloads.append(json.loads(override.read_text()))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", capture)
+    mounts = () if form == "none" else (ContainerMount(tmp_path, Path(outer)),)
+    assert _call_declared_creator(kind, config, ContainerOptions(mounts=mounts)).success
+    fragment = payloads[0]
+    service = fragment["services"]["dev"]
+    delivered = [entry for entry in service["volumes"] if isinstance(entry, dict)]
+    expected_targets = {"/home/dev/workspace2", "/kept"}
+    if form == "none":
+        expected_targets.update((f"{outer}/bind", f"{outer}/data"))
+    assert {entry["target"] for entry in delivered} == expected_targets
+    assert next(entry for entry in delivered if entry["target"] == "/home/dev/workspace2") == {
+        "type": "bind", "source": str(tmp_path), "target": "/home/dev/workspace2",
+        "read_only": True, "bind": {"create_host_path": False},
+    }
+    assert set(fragment["volumes"]) == (
+        {"djinn-kept", "djinn-worker"} if form == "none" else {"djinn-kept"}
+    )
+    assert json.loads(service["environment"]["DJINN_DECLARED_VOLUME_TARGETS"]) == (
+        [f"{outer}/data", "/kept"] if form == "none" else ["/kept"]
+    )
+    assert set(config.mounts) == {"archive.disk", "worker", "control", "kept"}
+
+
+@pytest.mark.parametrize("kind", ["interactive", "headless", "detached"])
+@pytest.mark.parametrize("cause", ["marker", "overlap", "missing"])
+def test_left_out_declarations_still_validated(
+    tmp_path, monkeypatch, declared_creator, kind, cause,
+):
+    from djinn_in_a_box.core.exceptions import DeclarationSpecificationError
+
+    entry = {"source": str(tmp_path), "target": "/review/data"}
+    if cause == "marker":
+        entry["marker"] = ".missing"
+    elif cause == "missing":
+        entry["source"] = str(tmp_path / "missing")
+    mounts = {"bad": entry}
+    if cause == "overlap":
+        mounts["inner"] = {"source": str(tmp_path), "target": "/review/data/inner"}
+    config = AppConfig.model_validate({**declared_creator.model_dump(), "mounts": mounts})
+    creation, allocation = MagicMock(), MagicMock()
+    monkeypatch.setattr(docker_mod.subprocess, "run", creation)
+    monkeypatch.setattr(docker_mod.tempfile, "mkstemp", allocation)
+    with pytest.raises(DeclarationSpecificationError, match="Declared mount 'bad'"):
+        _call_declared_creator(
+            kind, config, ContainerOptions(mounts=(ContainerMount(tmp_path, Path("/review")),)),
+        )
+    creation.assert_not_called()
+    allocation.assert_not_called()
+
+
 @pytest.mark.parametrize("port", [None, 49381], ids=["default", "configured"])
 def test_detached_override_publishes_opencode_on_loopback_only(
     monkeypatch, declared_creator, generated_overrides, port,

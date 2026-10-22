@@ -1358,8 +1358,12 @@ The same module owns the repeatable user-mount contract:
 - `validate_container_mounts()` checks the targets actually occupied by this
   `dev` invocation, including Compose, image-alias, runtime, Direct-socket,
   zone-overlay, and user mounts. Equal targets and user targets that are
-  ancestors of an occupied target raise `MountCollisionError`; child targets
-  remain valid except at or below the shared `MANAGED_TARGET_ROOTS`. Assigned
+  ancestors of an occupied target raise `MountCollisionError`. An invocation
+  mount strictly inside another invocation bind (`--here` or `--mount`) is also
+  refused, naming both mounts, Docker's creation of root-owned mount-point
+  directories inside the outer host directory, and the remedy of choosing a
+  target outside it. Children of other occupied targets remain valid except at
+  or below the shared `MANAGED_TARGET_ROOTS`. Assigned
   zone targets are reserved like other occupied targets. The managed-root set
   includes the five recursively repaired roots, the reserved root-owned package root
   `/var/lib/djinn-packages`, managed SSH targets, desktop
@@ -1387,6 +1391,18 @@ The same module owns the repeatable user-mount contract:
 - `MountSpecificationError` reports invalid mount grammar or reserved targets;
   `MountCollisionError` reports the two involved mounts and the conflict path;
   managed-root conflicts identify the Djinn-managed root.
+
+`nested_declarations()` compares normalized, image-alias-resolved targets and
+returns declared mounts strictly inside invocation binds in declaration order.
+Invalid declaration targets are left to the existing named validation errors.
+Both creators resolve and validate every declaration before filtering this list,
+then use the filtered declarations for Compose volumes, top-level volume
+definitions, `DJINN_DECLARED_VOLUME_TARGETS` and AGENT workspace delivery to dev
+and its daemon. The original config stays intact: guest source-check phase 1
+still checks every declared bind, including omitted ones, while phase 2 checks
+the resulting Compose configuration. The `run` and `start` status blocks use the
+same helper to report each omission as `Skipped`; allowlist run values use the
+existing control-character escaping.
 
 `managed_bind_problems(config)` collects problems for configurable managed
 writable sources without provisioning: the expanded `config.code_dir`,

@@ -185,6 +185,13 @@ def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, 
                 **({"read_only": read_only} if read_only is not None else {}),
             },
             "data": {"volume": True, "target": "/data", "backup": "cache"},
+            "nested-bind": {
+                "source": str(tmp_path / "declared"),
+                "target": "/home/dev/workspace/bind", "read_only": True,
+            },
+            "nested-volume": {
+                "volume": True, "target": "/home/dev/workspace/data", "backup": "none",
+            },
         },
     )
     options = docker.ContainerOptions(
@@ -220,6 +227,9 @@ def test_creators_share_only_resolved_workspace(tmp_path, monkeypatch, creator, 
     else:
         assert docker.compose_run(config, options, interactive=creator == "foreground").success
     fragment = fragments[-1]
+    assert fragment["volumes"] == {"djinn-data": {"name": "djinn-data"}}
+    targets = fragment["services"]["dev"]["environment"]["DJINN_DECLARED_VOLUME_TARGETS"]
+    assert json.loads(targets) == ["/data"]
     workspace = fragment["services"]["agent-docker"]["volumes"]
     assert workspace == fragment["services"]["dev"]["volumes"]
     assert {(m["source"], m["target"], m["read_only"]) for m in workspace} == {

@@ -141,6 +141,7 @@ class TestRunCommand:
     @pytest.fixture
     def run_mocks(
         self,
+        mock_app_config,
     ) -> Generator[dict[str, Any]]:
         """Common mocks for run command tests."""
         with (
@@ -164,7 +165,7 @@ class TestRunCommand:
                 return_value=WorkflowImageCompatibility.COMPATIBLE,
             ) as mock_image_compatibility,
         ):
-            config = object()
+            config = mock_app_config
             mock_config.return_value = config
             mock_run.return_value = RunResult(returncode=0, stdout="output", stderr="")
             yield {
@@ -174,6 +175,74 @@ class TestRunCommand:
                 "load_config": mock_config,
                 "image_compatibility": mock_image_compatibility,
             }
+
+    @pytest.mark.parametrize("allow", [False, True])
+    def test_run_reports_nested_declarations_before_launch(
+        self, run_mocks, tmp_path, monkeypatch, allow,
+    ):
+        from djinn_in_a_box.core.console import err_console
+
+        monkeypatch.setattr(err_console, "width", 200)
+        config = AppConfig(code_dir=tmp_path, mounts={
+            "bind": {
+                "source": str(tmp_path),
+                "target": "//home/dev/workspace/old/../[data]\ndjinn-egress: locked 666",
+            },
+            "volume": {"volume": True, "target": "/home/dev/workspace/volume", "backup": "none"},
+            "control": {"source": str(tmp_path), "target": "/home/dev/workspace2"},
+        })
+        run_mocks["load_config"].return_value = config
+
+        def run_agent(*args, **kwargs):
+            kwargs["on_ready"](kwargs["resolved_mounts"])
+            return RunResult(0, "agent launched\n", "")
+
+        run_mocks["run"].side_effect = run_agent
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            app, ["run", "claude", "test"] + (["--allow", "8.8.8.8"] if allow else []),
+        )
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "agent launched\n"
+        assert result.stderr.count("Skipped") == 2
+        expected = "mounts.volume -> /home/dev/workspace/volume (inside /home/dev/workspace)"
+        assert expected in result.stderr
+        assert "mounts.control" not in result.stderr
+        if allow:
+            expected = "mounts.bind -> /home/dev/workspace/[data]\\ndjinn-egress: locked 666"
+            assert expected in result.stderr
+            assert "\\[data]" not in result.stderr
+            assert not any(line.startswith("djinn-egress:") for line in result.stderr.splitlines())
+
+    @pytest.mark.parametrize("here", [False, True])
+    def test_invalid_declared_target_keeps_named_run_diagnostic(
+        self, run_mocks, tmp_path, monkeypatch, here,
+    ):
+        from djinn_in_a_box.core import agent_runner, docker
+
+        config = AppConfig(code_dir=tmp_path, mounts={
+            "bad": {"volume": True, "target": "/proc/x", "backup": "none"},
+        })
+        run_mocks["load_config"].return_value = config
+        run_mocks["run"].side_effect = agent_runner.run_headless_agent
+        monkeypatch.setattr(
+            agent_runner, "load_agents", lambda: {"claude": AgentConfig(binary="claude")},
+        )
+        creation = MagicMock(side_effect=AssertionError("container created"))
+        monkeypatch.setattr(docker.subprocess, "run", creation)
+        monkeypatch.setattr(docker, "get_shell_mount_args", lambda *a: [])
+        monkeypatch.setattr(docker, "get_sops_age_key_mount_args", lambda *a: [])
+        monkeypatch.setattr(docker, "_zone_overlay_mount_args_and_targets", lambda *a: ([], ()))
+        monkeypatch.chdir(tmp_path)
+        with patch("djinn_in_a_box.commands.agent.resolve_container_mounts", return_value=(
+            (ContainerMount(tmp_path, Path("/home/dev/workspace")),) if here else ()
+        )):
+            result = CliRunner().invoke(app, ["run", "claude", "test"])
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Declared mount 'bad'" in result.stderr and "/proc" in result.stderr
+        assert "Traceback" not in result.output
+        creation.assert_not_called()
 
     def test_run_validates_agent_name(
         self,

@@ -83,6 +83,7 @@ from djinn_in_a_box.core.docker import (
     get_shell_mount_args,
     get_sync_paths_to_clear_by_category,
     is_container_running,
+    nested_declarations,
     network_exists,
     resolve_container_mounts,
     resolve_docker_mode,
@@ -327,6 +328,14 @@ def start(
             "Mount",
             f"{resolved_mount.source} -> {resolved_mount.target} ({mode})",
             value_style="path",
+        )
+
+    for skipped in nested_declarations(
+        ((name, declaration.target) for name, declaration in config.mounts.items()), mounts,
+    ):
+        status_line(
+            "Skipped",
+            f"mounts.{skipped.name} -> {skipped.target} (inside {skipped.enclosing_target})",
         )
 
     # Shell mount status

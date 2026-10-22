@@ -316,6 +316,67 @@ def compose_guest(boundary, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("source_kind", ["protected", "missing"])
+def test_phase_one_still_checks_left_out_declared_binds(compose_guest, tmp_path, source_kind):
+    g = compose_guest
+    source = g.runtime / "private" if source_kind == "protected" else tmp_path / "missing"
+    g.config.mounts["hidden"] = {
+        "source": str(source), "target": "/home/dev/workspace/hidden", "read_only": True,
+    }
+    here = tmp_path / "here"
+    here.mkdir()
+    options = docker.ContainerOptions(mounts=(
+        docker.ContainerMount(here, Path("/home/dev/workspace")),
+    ))
+    diagnostic = "host runtime" if source_kind == "protected" else "cannot verify"
+    with pytest.raises(docker.RunRefusedError, match=diagnostic):
+        docker.compose_run(g.config, options, interactive=False)
+    assert not g.invocations and not g.launches
+
+
+@pytest.mark.parametrize("outer", ["/home/dev/workspace", "/review", "/home/dev/mount/tools"])
+def test_guest_filters_nested_declarations_after_source_checks(
+    compose_guest, tmp_path, monkeypatch, outer,
+):
+    g = compose_guest
+    source, here = tmp_path / "source", tmp_path / "here"
+    source.mkdir()
+    here.mkdir()
+    g.config.mounts.update({
+        "bind": {"source": str(source), "target": f"{outer}/bind", "read_only": True},
+        "volume": VolumeDeclaration(volume=True, target=f"{outer}/data", backup="none"),
+        "control": {"source": str(source), "target": "/srv/data", "read_only": True},
+    })
+    source_check = docker._guest_source_check
+    substitutions = []
+
+    def checked_sources(*args, **kwargs):
+        check = source_check(*args, **kwargs)
+
+        def substitute(source, target):
+            substitutions.append(str(target))
+            return check(source, target)
+
+        return substitute
+
+    monkeypatch.setattr(docker, "_guest_source_check", checked_sources)
+    assert docker.compose_run(g.config, docker.ContainerOptions(mounts=(
+        docker.ContainerMount(here, Path(outer)),
+    )), interactive=False).success
+    fragment = g.fragments[0]
+    assert fragment["services"]["dev"]["volumes"] == [{
+        "type": "bind", "source": str(source), "target": "/srv/data",
+        "read_only": True, "bind": {"create_host_path": False},
+    }]
+    assert fragment.get("volumes", {}) == {}
+    targets = fragment["services"]["dev"]["environment"]["DJINN_DECLARED_VOLUME_TARGETS"]
+    assert json.loads(targets) == []
+    assert len(g.launches) == 1
+    assert g.launches[0][1]["stdin"] is subprocess.DEVNULL
+    assert f"{outer}/bind" not in substitutions
+    assert "/srv/data" in substitutions
+
+
 @pytest.mark.parametrize("phase", ["user", "resolved"])
 def test_runtime_state_hardlink_is_refused(compose_guest, tmp_path, phase):
     state = compose_guest.runtime / host_runtime.STATE_FILE

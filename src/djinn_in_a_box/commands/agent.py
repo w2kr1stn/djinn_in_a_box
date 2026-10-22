@@ -41,8 +41,10 @@ from djinn_in_a_box.core.docker import (
     ContainerMount,
     DockerMode,
     MountCollisionError,
+    NestedDeclaration,
     RunRefusedError,
     get_config_root,
+    nested_declarations,
     resolve_container_mounts,
     resolve_docker_mode,
     validate_managed_bind_sources,
@@ -77,6 +79,7 @@ def _show_run_status(
     firewall: bool,
     timeout: int | None,
     egress: EgressPlan | None = None,
+    skipped_mounts: tuple[NestedDeclaration, ...] = (),
 ) -> None:
     """Render CLI-only execution status after runner prerequisites pass."""
 
@@ -96,6 +99,12 @@ def _show_run_status(
             "Mount",
             shown(f"{mount.source} -> {mount.target} ({mode})"),
             value_style="path",
+        )
+
+    for skipped in skipped_mounts:
+        status_line(
+            "Skipped",
+            shown(f"mounts.{skipped.name} -> {skipped.target} (inside {skipped.enclosing_target})"),
         )
 
     workspace = next(
@@ -339,6 +348,11 @@ def run(
                 firewall=firewall,
                 egress=egress,
                 timeout=timeout,
+                skipped_mounts=nested_declarations(
+                    ((name, declaration.target)
+                     for name, declaration in checked_config.mounts.items()),
+                    mounts,
+                ),
             ),
         )
     except UnknownAgentError as e:

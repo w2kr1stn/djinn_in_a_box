@@ -943,10 +943,10 @@ value overrides `default_model` for that invocation.
 
 | Command | Container behavior | Workspace behavior | Main use |
 | --- | --- | --- | --- |
-| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets | Daily interactive shell; `--detach` for a long-lived container |
+| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets. Declared mounts below invocation targets are left out | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn serve` | Starts Claude Remote Control or the OpenCode web UI/API inside the running detached container | Uses the container's working directory, mounts and sign-ins | [Remote agent access](#remote-agent-servers), status, stop and OpenCode pairing |
-| `djinn run AGENT PROMPT` | Runs a [guest](#quickstart) headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values | One-shot agent prompts |
+| `djinn run AGENT PROMPT` | Runs a [guest](#quickstart) headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values. Declared mounts below invocation targets are left out | One-shot agent prompts |
 | `djinn session` | Uses `docker exec` into a running `djinn` container when available; otherwise host fallback checks the selected agent binary on `PATH` and applies workspace checks before launch. Claude, Codex, and OpenCode host fallback receives that agent's confirmed canonical workflow at its native host root. Running-container OpenCode sessions refresh the live runtime through the shared publisher before invocation. | Uses `~/.djinn/sessions/<project>` on the host and `/home/dev/sessions/<project>` in the container; `--create` creates the host workspace | Reusable session workspaces |
 
 `djinn run` exit codes:
@@ -1468,13 +1468,18 @@ See [Git keys and browser identity](SECURITY-MODEL.md#git-keys-and-browser-ident
 for the signing capability and target-key restrictions.
 
 `--here` mounts the current directory at `/home/dev/workspace` for both `start` and
-`run`; for `run` it can be combined with any number of `--mount` values. Each
+`run`; it can be combined with any number of `--mount` values. Declared binds and
+volumes below `/home/dev/workspace` are left out when `--here` is active, including
+the implicit `--here` of a default `djinn run`. Each
 `--mount SRC[:DST[:ro|rw]]` adds a host directory; without `DST`, Djinn derives
 `/home/dev/mount/<basename>`, and `:ro` makes that mount read-only. The working
 directory is `/home/dev/workspace` with `--here`, otherwise the first mount target;
 `djinn start` without mounts passes no `--workdir`, so the Compose service default
 `working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` applies: `/home/dev/projects`
 in projects mode or `/home/dev/aios` in aios mode.
+An invocation `--mount` target strictly inside `--here` or another `--mount`
+target is refused; choose a target outside the enclosing mount. This avoids Docker
+creating a root-owned mount-point directory inside the outer mount's host directory.
 The managed-source check in [Configuration](#configuration) also applies without
 `--mount` or `--here`.
 At creation, a writable `--mount`, `--here`, or `djinn run`'s implicit `--here`
@@ -1516,8 +1521,16 @@ unless you explicitly request the `cache` category.
 Declared targets must be absolute. They cannot equal or contain a built-in,
 reserved, assigned zone, active workspace or `--mount`/`--here` target; nested
 declared targets are refused too. Target reservations cover all Docker modes,
-even inactive ones. Children of built-in, reserved, zone or invocation targets
-are allowed, with one exception shared with invocation `--mount`: neither may sit
+even inactive ones. A declared bind or volume strictly below an invocation
+`--here` or `--mount` target is left out for that invocation, after validation.
+Before startup, stderr names each one in a `Skipped` status line:
+`mounts.<name> -> <target> (inside <enclosing target>)`. Otherwise Docker would
+create missing mount-point directories as root inside the outer bind's host
+directory. This applies to `run`, interactive `start` and `start --detach`.
+`--mount <dir>` without `--here` keeps declarations below `/home/dev/workspace`,
+but leaves out declarations below that `--mount`'s chosen or derived target.
+Children of built-in, reserved and zone targets are allowed, with one exception
+shared with invocation `--mount`: neither may sit
 at or below the Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
 `/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
 Their existing recursive ownership repair remains in place. The root-owned
