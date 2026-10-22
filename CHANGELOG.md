@@ -29,6 +29,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Allowlist runs (`djinn run --allow`) skip the startup package replay with one
+  info line instead of printing apt failures after the `djinn-egress:` block;
+  recorded runtime packages are not installed there (#205).
 - `--firewall` now allows Claude's current sign-in token host
   `platform.claude.com` instead of the unused `console.anthropic.com`, so a
   subscription token can be refreshed under the firewall (#178).

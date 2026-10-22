@@ -775,7 +775,10 @@ announces and calls the root helper's `replay` mode, which checks the recorded
 names against installed packages. If none are missing, it makes no
 network calls. Otherwise it updates apt, warns and skips names not present in the
 apt cache, then installs the remaining missing packages. Replay problems are
-warnings and do not stop startup. The helper checks the opened file descriptor:
+warnings and do not stop startup. In an allowlist run (`djinn run --allow`) the
+step does not replay: the run has no DNS, so it prints `Packages: skipped in
+allowlist mode (no network).` and continues.
+The helper checks the opened file descriptor:
 only a regular root-owned file of at most 1 MiB, in a root-owned directory, is
 accepted. Symlinks and group- or world-writable files or directories are refused
 with a warning. Replay uses one linear parse and considers at most 256 distinct names
@@ -1086,6 +1089,11 @@ OpenCode 2.1.1):
 | Claude Code (subscription) | `api.anthropic.com:443`, `platform.claude.com:443` (token refresh) |
 | Codex | `api.openai.com:443` with an API key, or `chatgpt.com:443` with a ChatGPT login; `auth.openai.com:443` (token refresh) |
 | OpenCode | `opencode.ai:443` (its own service, needed at start), plus the API host of any other provider you configured, for example `api.anthropic.com:443` |
+
+Recorded runtime packages ([Runtime Packages](#runtime-packages)) are not
+installed in an allowlist run. The run has no DNS, so the Packages step skips
+the replay and prints `Packages: skipped in allowlist mode (no network).` on
+stderr after Djinn's `djinn-egress:` block.
 
 With a cold tools cache, an allowlist run can take about three minutes longer to
 start, because the optional tool installers fail one after another; a warm cache

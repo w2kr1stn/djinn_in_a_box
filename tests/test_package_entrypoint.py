@@ -12,7 +12,7 @@ from djinn_in_a_box.config.declarations import DJINN_ENV_KEYS
 from djinn_in_a_box.core.docker import MANAGED_VOLUME_REPAIR_TARGETS
 
 
-@pytest.mark.parametrize("case", ["success", "failure", "missing"])
+@pytest.mark.parametrize("case", ["success", "failure", "missing", "allowlist"])
 def test_packages_section_order_and_failure_continue(tmp_path, case):
     source = (ROOT / "scripts/entrypoint.sh").read_text()
     # Check the complete entrypoint before slicing, including any section moved
@@ -50,17 +50,21 @@ def test_packages_section_order_and_failure_continue(tmp_path, case):
     harness.write_text(
         "set -euo pipefail\n"
         'ui_section() { print -u2 -- "SECTION $1"; }\n'
-        'ui_warn() { print -u2 -- "WARN $1"; }\n' + section + "\nprint FOLLOWING_STARTUP_STEP\n"
+        'ui_warn() { print -u2 -- "WARN $1"; }\n'
+        'ui_info() { print -u2 -- "INFO $1"; }\n' + section + "\nprint FOLLOWING_STARTUP_STEP\n"
     )
+    child_env = {key: value for key, value in os.environ.items() if key != "DJINN_EGRESS_ALLOW"}
+    child_env.update(
+        HOME=str(tmp_path),
+        MCP_REGISTER=str(mcp),
+        PACKAGE_REPLAY=str(replay),
+        CODEX_DAEMON_POLICY_HELPER=str(policy),
+    )
+    if case == "allowlist":
+        child_env["DJINN_EGRESS_ALLOW"] = "203.0.113.10/32/tcp/443"
     result = subprocess.run(
         ["zsh", str(harness)],
-        env=dict(
-            os.environ,
-            HOME=str(tmp_path),
-            MCP_REGISTER=str(mcp),
-            PACKAGE_REPLAY=str(replay),
-            CODEX_DAEMON_POLICY_HELPER=str(policy),
-        ),
+        env=child_env,
         text=True,
         capture_output=True,
         timeout=5,
@@ -73,10 +77,17 @@ def test_packages_section_order_and_failure_continue(tmp_path, case):
         "SECTION MCP", "MCP_RAN", "SECTION Codex daemon", "POLICY_RAN", "SECTION Packages"
     ]
     assert lines[-2:] == ["SECTION Tools", "TOOLS_RAN"]
-    assert ("REPLAY_RAN" in lines) == (case != "missing")
+    assert ("REPLAY_RAN" in lines) == (case in ("success", "failure"))
     assert result.stderr.count("WARN") == (1 if case == "failure" else 0)
     if case == "failure":
         assert "continuing startup" in result.stderr
+    info_line = "INFO Packages: skipped in allowlist mode (no network)."
+    if case == "allowlist":
+        assert lines[lines.index("SECTION Packages") + 1] == info_line
+        assert result.stderr.count(info_line) == 1
+        assert "WARN" not in result.stderr
+    else:
+        assert not any(line.startswith("INFO Packages: skipped") for line in lines)
 
 
 def test_packages_ownership_target():

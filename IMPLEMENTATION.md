@@ -2802,6 +2802,7 @@ entrypoint.sh
   +-- Codex daemon: disable updater, reconcile image version, prune old releases
       (no command arguments; failures warn and continue)
   +-- Packages: dev wrapper calls root helper replay for the root-owned persistent list
+      (skipped with one info line in allowlist runs: no network)
   +-- Tools: install optional tools
   +-- Security: summarize firewall and Docker access
   +-- run interactive shell as a background job
