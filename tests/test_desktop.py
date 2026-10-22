@@ -471,6 +471,7 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         assert "Desktop dbus missing: helper health starting (readiness timeout)" in " ".join(
             warning.split()
         )
+        assert sleeps == []
     assert events[-1] == ("retain" if creator == "detached" else "close")
 
 

@@ -38,7 +38,7 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
 
     def git_status():
         return subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=project,
+            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=project, env=git_env,
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10, check=True,
         ).stdout
 
@@ -49,6 +49,8 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
     monkeypatch.chdir(caller)
     for key in ("PATH", "npm_calls", "TERM", "NO_COLOR"):
         monkeypatch.setenv(key, env[key])
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setattr(container, "get_project_root", lambda: project)
     monkeypatch.setattr(docker, "get_project_root", lambda: project)
     monkeypatch.setattr(assistant, "get_project_root", lambda: project)

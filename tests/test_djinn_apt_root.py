@@ -1342,6 +1342,20 @@ def test_replay_check_budget(tmp_path, budget, stage):
     )
 
 
+def test_replay_check_budget_accumulates(tmp_path):
+    # The budget is checked after every package check, not once: it runs out at the third.
+    replay = HelperHarness(tmp_path)
+    names = [f"pkg{index}" for index in range(12)]
+    replay.list.write_text("\n".join(names) + "\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "1"))
+    check_clock(replay, [100, 100, 100, 102])
+    replay.tools.configure(states={name: ["installed", 0] for name in names})
+    result = replay.run()
+    assert result.returncode == 0
+    assert result.stdout.count("Package checks exceeded 1 s; replay skipped.") == 1
+    assert len(replay.tools.events("dpkg")) == 3
+
+
 @pytest.mark.parametrize("stage", ["dpkg", "cache"])
 def test_replay_budget_covers_final_check(tmp_path, stage):
     replay = HelperHarness(tmp_path)
@@ -1372,12 +1386,12 @@ def test_replay_update_does_not_spend_check_budget(tmp_path):
 def test_replay_update_timeout_kills_fake(tmp_path):
     replay = HelperHarness(tmp_path)
     replay.list.write_text("jq\n")
-    replay.script.write_text(substitute(replay.script.read_text(), "update_timeout", "300", "1"))
+    replay.script.write_text(substitute(replay.script.read_text(), "update_timeout", "300", "3"))
     # Python sleeps in the fake itself: timeout can kill it without orphan children.
-    replay.tools.configure(update_delay=3)
+    replay.tools.configure(update_delay=60)
     result = replay.run()
     assert result.returncode == 0
-    assert "Package list update timed out after 1 s; replay skipped." in result.stdout
+    assert "Package list update timed out after 3 s; replay skipped." in result.stdout
     assert len([event["argv"] for event in replay.tools.events("apt")]) == 1
     assert replay.tools.events("cache") == []
     pid = replay.tools.events("apt")[0]["pid"]

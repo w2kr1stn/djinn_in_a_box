@@ -67,7 +67,8 @@ def script_env(tmp_path):
     )
     npm.chmod(0o755)
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "npm_calls": str(calls),
-           "TERM": "dumb", "NO_COLOR": "1"}
+           "TERM": "dumb", "NO_COLOR": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     return project, env, calls
 
 
