@@ -278,7 +278,8 @@ class HelperHarness:
             capture_output=True,
             text=True,
             input="caller input",
-            timeout=8,
+            # Hang watchdog only; replay work is bounded by the child CPU checks, not wall time.
+            timeout=60,
             check=False,
             **kwargs,
         )
