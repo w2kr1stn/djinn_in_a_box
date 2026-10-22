@@ -292,9 +292,11 @@ def test_interrupt_during_foreground_start_removes_dev_and_state(
                 "ppid": observer.pid, "argv": ["container", "inspect", "djinn"],
             }
         ]
-        # At most one polling inspect can be in flight when terminate is sent.
-        # Two later observer inspections prove finalization inspected the
-        # still-running dev; only the creator then removes it.
+        # Observer inspections after the shutdown cutoff and before the creator's
+        # removal show the observer was still inspecting the running dev while it
+        # shut down. Ordinary polling between cutoff and signal can count here too,
+        # so this is supporting evidence only; the finalizer cleanup itself is pinned
+        # by the observer tests (test_observer_tolerance, test_observer_releases_*).
         assert len(final_inspections) >= 2
         assert shutdown_index <= final_inspections[0] < final_inspections[-1] < removal_index
         assert not fake_docker.exists()
