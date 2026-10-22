@@ -19,6 +19,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from djinn_in_a_box.commands.doctor import preflight
+from djinn_in_a_box.config.declarations import inspect_declarations
 from djinn_in_a_box.config.defaults import (
     DESKTOP_RUNTIME_VOLUMES,
     SYNC_PATHS,
@@ -330,8 +331,9 @@ def start(
             value_style="path",
         )
 
+    declared = inspect_declarations(config.mounts, config.environment).mounts
     for skipped in nested_declarations(
-        ((name, declaration.target) for name, declaration in config.mounts.items()), mounts,
+        ((name, declaration.target) for name, declaration in declared.items()), mounts,
     ):
         status_line(
             "Skipped",

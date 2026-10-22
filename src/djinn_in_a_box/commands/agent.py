@@ -13,6 +13,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
+from djinn_in_a_box.config.declarations import inspect_declarations
 from djinn_in_a_box.config.loader import load_agents, load_config
 from djinn_in_a_box.config.models import ConfigSyncSource
 from djinn_in_a_box.core.agent_runner import (
@@ -349,8 +350,9 @@ def run(
                 egress=egress,
                 timeout=timeout,
                 skipped_mounts=nested_declarations(
-                    ((name, declaration.target)
-                     for name, declaration in checked_config.mounts.items()),
+                    ((name, declaration.target) for name, declaration in inspect_declarations(
+                        checked_config.mounts, checked_config.environment,
+                    ).mounts.items()),
                     mounts,
                 ),
             ),
