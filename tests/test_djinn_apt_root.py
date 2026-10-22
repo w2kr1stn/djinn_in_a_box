@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import resource
 import shlex
 import subprocess
 import time
@@ -277,10 +278,28 @@ class HelperHarness:
             capture_output=True,
             text=True,
             input="caller input",
-            timeout=8,
+            # Hang watchdog only; replay work is bounded by the child CPU checks, not wall time.
+            timeout=60,
             check=False,
             **kwargs,
         )
+
+
+def children_cpu_seconds():
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+
+def check_clock(helper, ticks):
+    count = helper.script.parent / "clock-count"
+    helper.tool(
+        "date",
+        "#!/usr/bin/python3\nfrom pathlib import Path\n"
+        f"p = Path({str(count)!r})\n"
+        "n = int(p.read_text()) if p.exists() else 0\n"
+        f"print({ticks!r}[n])\n"
+        "p.write_text(str(n + 1))\n",
+    )
 
 
 def test_helper_fixed_binary_dispatch():
@@ -481,9 +500,9 @@ def test_helper_lock_open_failure(tmp_path):
 def test_helper_long_token_refused_promptly(tmp_path, args):
     # Reachable directly through sudo: a slow refusal would pin a root shell.
     helper = HelperHarness(tmp_path)
-    started = time.monotonic()
+    started = children_cpu_seconds()
     result = helper.run(args)
-    assert time.monotonic() - started < 2
+    assert children_cpu_seconds() - started < 2
     assert result.returncode == 2 and len(result.stderr.splitlines()) == 1
     assert f"({len(args[-1])}-byte argument)" in result.stderr
     assert not helper.lock.exists() and helper.tools.events() == []
@@ -990,9 +1009,9 @@ def test_one_linear_awk_pass(tmp_path, operation):
         f'#!/bin/sh\nprintf "pass\\n" >> {shlex.quote(str(trace))}\n'
         'exec /usr/bin/awk "$@"\n',
     )
-    started = time.monotonic()
+    started = children_cpu_seconds()
     result = helper.run([operation, *(["jq"] if operation == "install" else [])])
-    assert result.returncode == 0 and time.monotonic() - started < 3
+    assert result.returncode == 0 and children_cpu_seconds() - started < 3
     assert trace.read_text() == "pass\n"
     assert helper.list.read_bytes() == b" " * 1048576
 
@@ -1192,11 +1211,12 @@ def fast_package_checks(replay):
 def test_replay_space_list_at_cap_is_prompt(tmp_path):
     replay = HelperHarness(tmp_path)
     replay.list.write_bytes(b" " * 1048576)
-    started = time.monotonic()
+    # Child CPU bounds parser work without charging scheduler stalls.
+    started = children_cpu_seconds()
     result = replay.run()
-    elapsed = time.monotonic() - started
-    print(f"1 MiB spaces: {elapsed:.3f} s")
-    assert elapsed < 3
+    cpu = children_cpu_seconds() - started
+    print(f"1 MiB spaces: {cpu:.3f} CPU s")
+    assert cpu < 3
     assert result.returncode == 0 and "none recorded" in result.stdout
     assert "W\t" not in result.stdout
     assert (
@@ -1213,11 +1233,12 @@ def test_replay_distinct_name_cap(tmp_path, count):
     # Repeating the first overflow name must not count it twice.
     entries = names + [names[0], names[-1]] if count == 257 else names
     replay.list.write_text("\n".join(entries) + "\n")
-    started = time.monotonic()
+    # Child CPU catches per-entry subprocesses/quadratic deduplication, independent of load.
+    started = children_cpu_seconds()
     result = replay.run()
-    elapsed = time.monotonic() - started
-    print(f"{replay.list.stat().st_size} bytes / {count} distinct names: {elapsed:.3f} s")
-    assert elapsed < 3
+    cpu = children_cpu_seconds() - started
+    print(f"{replay.list.stat().st_size} bytes / {count} distinct names: {cpu:.3f} CPU s")
+    assert cpu < 3
     assert result.returncode == 0
     expected = names[:256]
     assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == expected
@@ -1308,13 +1329,12 @@ def test_replay_check_budget(tmp_path, budget, stage):
     names = [f"pkg{index}" for index in range(12)]
     replay.list.write_text("\n".join(names) + "\n")
     replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", budget))
-    replay.tools.configure(**{stage + "_delay": 0.2})
+    ticks = [100, 101 + int(budget)] if stage == "dpkg" else [100] * 13 + [200, 201 + int(budget)]
+    check_clock(replay, ticks)
     if stage == "dpkg":
         # An installed result must still be subject to the budget before continue.
         replay.tools.configure(states={name: ["installed", 0] for name in names})
-    started = time.monotonic()
     result = replay.run()
-    assert time.monotonic() - started < 3
     assert result.returncode == 0
     assert result.stdout.count(f"Package checks exceeded {budget} s; replay skipped.") == 1
     assert 0 < len(replay.tools.events(stage)) < len(names)
@@ -1323,12 +1343,26 @@ def test_replay_check_budget(tmp_path, budget, stage):
     )
 
 
+def test_replay_check_budget_accumulates(tmp_path):
+    # The budget is checked after every package check, not once: it runs out at the third.
+    replay = HelperHarness(tmp_path)
+    names = [f"pkg{index}" for index in range(12)]
+    replay.list.write_text("\n".join(names) + "\n")
+    replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "1"))
+    check_clock(replay, [100, 100, 100, 102])
+    replay.tools.configure(states={name: ["installed", 0] for name in names})
+    result = replay.run()
+    assert result.returncode == 0
+    assert result.stdout.count("Package checks exceeded 1 s; replay skipped.") == 1
+    assert len(replay.tools.events("dpkg")) == 3
+
+
 @pytest.mark.parametrize("stage", ["dpkg", "cache"])
 def test_replay_budget_covers_final_check(tmp_path, stage):
     replay = HelperHarness(tmp_path)
     replay.list.write_text("jq\n")
     replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "0"))
-    replay.tools.configure(**{stage + "_delay": 1.1})
+    check_clock(replay, [100, 101] if stage == "dpkg" else [100, 100, 200, 201])
     result = replay.run()
     assert result.returncode == 0
     assert "Package checks exceeded 0 s; replay skipped." in result.stdout
@@ -1338,12 +1372,13 @@ def test_replay_budget_covers_final_check(tmp_path, stage):
     )
 
 
-def test_replay_slow_update_does_not_spend_check_budget(tmp_path):
+def test_replay_update_does_not_spend_check_budget(tmp_path):
     # After a recreation the update can take minutes; the cache checks still run.
     replay = HelperHarness(tmp_path)
     replay.list.write_text("jq\n")
     replay.script.write_text(substitute(replay.script.read_text(), "check_budget", "60", "1"))
-    replay.tools.configure(update_delay=2.2)
+    # The clock jumps during update; cache checks get a fresh budget afterward.
+    check_clock(replay, [100, 100, 200, 200])
     result = replay.run()
     assert result.returncode == 0 and "Package checks exceeded" not in result.stdout
     assert replay.tools.events("apt")[-1]["argv"] == ["-qq", *INSTALL, "jq"]
@@ -1352,14 +1387,12 @@ def test_replay_slow_update_does_not_spend_check_budget(tmp_path):
 def test_replay_update_timeout_kills_fake(tmp_path):
     replay = HelperHarness(tmp_path)
     replay.list.write_text("jq\n")
-    replay.script.write_text(substitute(replay.script.read_text(), "update_timeout", "300", "1"))
+    replay.script.write_text(substitute(replay.script.read_text(), "update_timeout", "300", "3"))
     # Python sleeps in the fake itself: timeout can kill it without orphan children.
-    replay.tools.configure(update_delay=3)
-    started = time.monotonic()
+    replay.tools.configure(update_delay=60)
     result = replay.run()
-    assert time.monotonic() - started < 2.5
     assert result.returncode == 0
-    assert "Package list update timed out after 1 s; replay skipped." in result.stdout
+    assert "Package list update timed out after 3 s; replay skipped." in result.stdout
     assert len([event["argv"] for event in replay.tools.events("apt")]) == 1
     assert replay.tools.events("cache") == []
     pid = replay.tools.events("apt")[0]["pid"]

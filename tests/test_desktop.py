@@ -302,6 +302,19 @@ def test_caller_cannot_override_endpoint(creator, key, tmp_path, monkeypatch):
 )
 @pytest.mark.parametrize("mode", list(docker.DockerMode))
 def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monkeypatch, capsys):
+    if outcome in {"starting", "late-healthy"}:
+        # Only poll sleeps spend the readiness budget; host scheduling cannot consume it.
+        clock = [100.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        monkeypatch.setattr(
+            docker, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep)
+        )
+
     config = AppConfig(code_dir=tmp_path)
     e = endpoint()
     audio_delivered = outcome in {"audio-only", "both", "independent"}
@@ -453,10 +466,12 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
     )
     if outcome == "late-healthy":
         assert len(polls) >= 2
+        assert sleeps == [0.1]
     if outcome == "starting":
         assert "Desktop dbus missing: helper health starting (readiness timeout)" in " ".join(
             warning.split()
         )
+        assert sleeps == []
     assert events[-1] == ("retain" if creator == "detached" else "close")
 
 

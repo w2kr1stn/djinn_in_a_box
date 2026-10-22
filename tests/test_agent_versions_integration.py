@@ -1,5 +1,6 @@
 """Join real discovery, persistence and Git cleanliness to both image builders."""
 
+import os
 import subprocess
 from unittest.mock import MagicMock
 
@@ -27,15 +28,17 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
         stream.write("ARG DOCKER_VERSION=27.4.1\n")
     for name in ("docker-compose.yml", "docker-compose.desktop.yml"):
         (project / name).write_bytes((ROOT / name).read_bytes())
+    git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     for argv in (["git", "init", "-q"], ["git", "add", "."],
                  ["git", "-c", "user.name=Test Operator", "-c", "user.email=test@example.com",
-                  "-c", "core.hooksPath=/dev/null", "commit", "-qm", "baseline"]):
-        subprocess.run(argv, cwd=project, stdin=subprocess.DEVNULL,
+                  "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                  "commit", "-qm", "baseline"]):
+        subprocess.run(argv, cwd=project, env=git_env, stdin=subprocess.DEVNULL,
                        capture_output=True, timeout=10, check=True)
 
     def git_status():
         return subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=project,
+            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=project, env=git_env,
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10, check=True,
         ).stdout
 
@@ -46,6 +49,8 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
     monkeypatch.chdir(caller)
     for key in ("PATH", "npm_calls", "TERM", "NO_COLOR"):
         monkeypatch.setenv(key, env[key])
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setattr(container, "get_project_root", lambda: project)
     monkeypatch.setattr(docker, "get_project_root", lambda: project)
     monkeypatch.setattr(assistant, "get_project_root", lambda: project)

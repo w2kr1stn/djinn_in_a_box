@@ -100,7 +100,7 @@ def test_redirected_native_credential_is_refused(tmp_path):
     assert (store / names[0]).read_text() == '{"token":"before"}'
 
 
-def test_signal_flushes_credentials(tmp_path):
+def test_signal_flushes_credentials(tmp_path, default_child_signals):
     entry, env, native, store, names = prepare(tmp_path, "codex")
     payload = (
         f"printf signal-refresh > {shlex.quote(str(native / names[0]))}; kill -TERM $PPID; sleep 1"
@@ -108,6 +108,7 @@ def test_signal_flushes_credentials(tmp_path):
     r = subprocess.run(
         ["bash", str(entry), "bash", "-c", payload],
         env=env,
+        preexec_fn=default_child_signals,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -248,9 +249,11 @@ def test_opencode_failed_import_does_not_stop_the_audit(tmp_path):
 
 
 @pytest.mark.parametrize(("signal_name", "status"), (("TERM", 143), ("INT", 130), ("HUP", 129)))
-def test_opencode_signal_still_exports(tmp_path, signal_name, status):
+def test_opencode_signal_still_exports(tmp_path, signal_name, status, default_child_signals):
     entry, env, store, _, _ = prepare_opencode(tmp_path, [credential("cred_one")])
-    r = run_entry(entry, env, f"kill -{signal_name} $PPID; sleep 1")
+    r = run_entry(
+        entry, env, f"kill -{signal_name} $PPID; sleep 1", preexec_fn=default_child_signals
+    )
     assert r.returncode == status, r.stderr
     assert {item["id"] for item in json.loads((store / "final.json").read_text())} == {"cred_one"}
 
