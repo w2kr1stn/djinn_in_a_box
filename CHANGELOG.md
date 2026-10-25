@@ -29,6 +29,10 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Claude Code's `skills/.trash`, where it moves account skills that rotated
+  out of `skills/synced`, is now tool-owned runtime state like `skills/synced`:
+  Djinn never reads, projects or deletes it, so a skill rotation no longer
+  blocks `djinn config status`, `djinn config sync` or `djinn start` (#212).
 - Default `djinn run`, `djinn run --here` and `djinn start --here` no longer
   receive declared binds or volumes nested below `/home/dev/workspace`; declared
   mounts below any invocation `--mount` target are also left out and named in

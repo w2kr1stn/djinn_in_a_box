@@ -599,21 +599,28 @@ def test_escaping_paths_block_without_target_or_manifest_mutation(
 
 # --- Tool-owned runtime state inside a source root -------------------------
 # Claude Code syncs account skills into skills/synced/<bucket>/<skill>/ through
-# the writable ./config/claude/skills bind-mount, and any interpreter may drop a
-# __pycache__ beside a hook script. Neither is an authored workflow source.
+# the writable ./config/claude/skills bind-mount, moves stale buckets to
+# skills/.trash/<id>/<skill>/, and any interpreter may drop a __pycache__ beside
+# a hook script. None of these is an authored workflow source.
 
 _BUCKET = "8838fb9b-ff03-4afc-9dca-4826659fd5b1_cc3e3300-e0c1-4cbe-9603-b1aca8eac330"
 _BINARY = b"\x00\x01\xff\xfe binary, not UTF-8 \xc3\x28\n"
+_TRASH = "skills/.trash/1792824060765-2409-49tif0"
 
 
 def _claude_runtime_state(root: Path) -> dict[str, bytes]:
-    """Write the two runtime trees that blocked `djinn start`, verbatim in shape."""
+    """Write the runtime trees that blocked `djinn start`, verbatim in shape."""
     synced = f"skills/synced/{_BUCKET}"
     written = {
         f"skills/synced/.bucket-{_BUCKET}": b"",
         f"{synced}/manifest.json": b'{"version": 1}\n',
         f"{synced}/morning/SKILL.md": b"---\nname: morning\ndescription: Brief\n---\n\nB.\n",
         f"{synced}/morning/assets/fonts/fraunces-latin-600-normal.woff2": _BINARY,
+        f"{_TRASH}/deep-research/SKILL.md": (
+            b"---\nname: deep-research\ndescription: Research\n---\n\nR.\n"
+        ),
+        f"{_TRASH}/deep-research/LICENSE.txt": b"License.\n",
+        f"{_TRASH}/computer-use/assets/icon.woff2": _BINARY,
         "scripts/__pycache__/status-line.cpython-311.pyc": _BINARY,
     }
     for relative, content in written.items():
@@ -636,6 +643,7 @@ def test_claude_runtime_state_is_not_read_as_a_workflow_source(tmp_path: Path) -
 
     assert not [item for item in identifiers if item.startswith("invalid-utf8:")]
     assert "skill-entrypoint:synced" not in identifiers
+    assert "skill-entrypoint:.trash" not in identifiers
     assert identifiers == set()
 
 
@@ -655,6 +663,7 @@ def test_runtime_state_survives_a_sync_and_is_not_projected(tmp_path: Path) -> N
     for target in ("codex", "opencode"):
         target_root = project / "config" / target
         assert not (target_root / "skills/synced").exists()
+        assert not (target_root / "skills/.trash").exists()
         assert not (target_root / "scripts/__pycache__").exists()
         assert (target_root / "skills/check/SKILL.md").is_file()
         assert (target_root / "skills/check/references/guide.md").is_file()
@@ -669,10 +678,13 @@ def test_runtime_state_churn_is_not_workflow_drift(tmp_path: Path) -> None:
     assert sync_config(project, config_path=config_path).success
     assert audit_config_sync(project, config_path=config_path).clean
 
-    # A fresh account sync and a fresh bytecode cache appear between two starts.
+    # A fresh account sync, a skill rotation and a fresh bytecode cache appear
+    # between two starts.
     _write(source_root, f"skills/synced/{_BUCKET}/pdf/assets/logo.woff2", _BINARY + b"more")
     _write(source_root, "scripts/__pycache__/run.cpython-314.pyc", _BINARY)
     (source_root / f"skills/synced/.bucket-{_BUCKET}").unlink()
+    _write(source_root, "skills/.trash/1792824061000-77-AbCdEf/pdf/SKILL.md", _BINARY)
+    (source_root / f"{_TRASH}/deep-research/LICENSE.txt").unlink()
 
     assert audit_config_sync(project, config_path=config_path).clean
     assert audit_config_sync(project, config_path=config_path).clean
@@ -717,3 +729,18 @@ def test_synced_is_reserved_for_claude_only(tmp_path: Path, tool: ConfigSyncSour
 
     assert "synced" in names
     assert _issue_ids(source_root, tool) == set()
+
+
+@pytest.mark.parametrize("tool", ["codex", "opencode"])
+def test_trash_is_exempt_for_claude_only(tmp_path: Path, tool: ConfigSyncSource) -> None:
+    """Requirement 3: no known writer puts skills/.trash into a Codex or OpenCode source."""
+    project, _config_path = _workspace(tmp_path, tool)
+    source_root = project / "config" / tool
+    _full_source(source_root, tool)
+    _write(
+        source_root,
+        f"{_TRASH}/pdf/SKILL.md",
+        "---\nname: pdf\ndescription: PDF\n---\n\nRead PDFs.\n",
+    )
+
+    assert "skill-entrypoint:.trash" in _issue_ids(source_root, tool)

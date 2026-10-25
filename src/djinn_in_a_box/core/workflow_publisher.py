@@ -329,9 +329,10 @@ _NATIVE_ONLY_PATHS: Mapping[str, frozenset[PurePosixPath]] = {
 # Subtrees a tool writes into its own source root at runtime. They are not
 # workflow sources: they must never be read, decoded, fingerprinted or
 # projected, and they must never be deleted either — the writing tool owns them.
-# Claude Code syncs account skills into skills/synced/<bucket-id>/<skill>/.
+# Claude Code syncs account skills into skills/synced/<bucket-id>/<skill>/ and
+# moves stale buckets to skills/.trash/<id>/<skill>/, a sibling it prunes itself.
 _RUNTIME_RESIDUE_PREFIXES: Mapping[str, frozenset[PurePosixPath]] = {
-    "claude": frozenset({PurePosixPath("skills/synced")}),
+    "claude": frozenset({PurePosixPath("skills/synced"), PurePosixPath("skills/.trash")}),
     "codex": frozenset(),
     "opencode": frozenset(),
 }
