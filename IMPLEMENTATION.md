@@ -465,17 +465,18 @@ its spec path.
 
 Tool-owned runtime state inside a source root is not a workflow source.
 `workflow_publisher.runtime_residue_prefixes()` names the per-tool subtrees
-(`skills/synced/**` under a Claude source; none for Codex and OpenCode), and
-`is_runtime_residue()` adds `__pycache__` unconditionally, because the
-interpreter defines it as a regenerable cache. Both are skipped at every point
-that reads the source — the adapter scan and `_read_file_tree`, whose result
-also becomes the audit snapshot — so the bytes are never read, decoded,
-fingerprinted, copied or projected. The exclusion is deliberately not a
-binary filter: a `.pyc` outside `__pycache__` and a `.pyd` shipped inside a skill
-are still UTF-8 failures. Excluded paths are never deleted; the writing tool owns
-them, and a change to one is not drift, which is what keeps repeated audits
-stable while Claude Code re-syncs its account skills through the writable
-`./config/claude/skills` bind-mount.
+(`skills/synced/**` and `skills/.trash/**` under a Claude source; none for Codex
+and OpenCode), and `is_runtime_residue()` adds `__pycache__` unconditionally,
+because the interpreter defines it as a regenerable cache. Both are skipped at
+every point that reads the source — the adapter scan and `_read_file_tree`,
+whose result also becomes the audit snapshot — so the bytes are never read,
+decoded, fingerprinted, copied or projected. The exclusion is deliberately not a
+binary filter: a `.pyc` outside `__pycache__` and a `.pyd` shipped inside a
+skill are still UTF-8 failures. Excluded paths are never deleted; the writing
+tool owns them, and a change to one is not drift, which is what keeps repeated
+audits stable while Claude Code re-syncs its account skills, and moves stale
+ones to `skills/.trash`, through the writable `./config/claude/skills`
+bind-mount.
 
 `core/config_sync_adapters.py` holds the closed ownership table, native readers,
 renderers, and validation. It produces a transient typed IR; it is never a

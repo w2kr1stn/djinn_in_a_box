@@ -625,8 +625,10 @@ _GOLDEN_TREE = {
     "scripts/run.py": (b"#!/usr/bin/env python3\n", True),
     "__pycache__/x.pyc": (b"\x00", False),
     "skills/synced/b/s/SKILL.md": (b"synced\n", False),
+    "skills/.trash/t/s/SKILL.md": (b"trash\n", False),
 }
-# Digest of _GOLDEN_TREE computed by the path-based reader this module replaced.
+# Digest of _GOLDEN_TREE computed by the path-based reader this module replaced;
+# the runtime residue in it must not change the digest.
 _GOLDEN_FINGERPRINT = "3afd9d0631a433d66325b9de40b37544701ac19017750da64354f8e34ca33449"
 
 
@@ -679,7 +681,14 @@ def test_source_tree_refuses_links_and_special_files(tmp_path: Path, kind: str) 
 
 
 @pytest.mark.parametrize(
-    "residue", ("skills/synced", "skills/synced/bucket", "scripts/__pycache__")
+    "residue",
+    (
+        "skills/synced",
+        "skills/synced/bucket",
+        "skills/.trash",
+        "skills/.trash/rotation",
+        "scripts/__pycache__",
+    ),
 )
 def test_links_at_or_inside_runtime_residue_stay_ignored(tmp_path: Path, residue: str) -> None:
     _canonical, _target, outside = _roots(tmp_path)

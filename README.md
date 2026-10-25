@@ -502,21 +502,23 @@ delivery. `djinn doctor` reports it as zone drift in config-root `claude/` and
 The agent CLIs write into their own config root while they run. With the default
 Claude source, those writes land in the workflow source because
 `config/claude/skills` and `config/claude/scripts` are bind-mounted read-write so
-you can edit skills in place. Two such trees are runtime state, not authored
+you can edit skills in place. Three such trees are runtime state, not authored
 workflow, and Djinn skips them everywhere it reads a source:
 
 | Path | Written by | Treatment |
 | --- | --- | --- |
 | `skills/synced/**` (Claude source only) | Claude Code, syncing account skills | Left in place for Claude, never projected to Codex/OpenCode |
+| `skills/.trash/**` (Claude source only) | Claude Code, moving stale account skills out of `skills/synced` (it deletes them itself later) | Left in place for Claude, never projected to Codex/OpenCode |
 | `**/__pycache__/**` (any source) | any Python interpreter | Left in place, never read |
 
 Skipped means skipped, not deleted: Djinn never removes these files, and
-changing them is not workflow drift, so a fresh account sync or a new bytecode
-cache cannot block the next `djinn start`. The exclusion is narrow on purpose. A
-binary file anywhere else — including a `.pyc` outside `__pycache__` or a `.pyd`
-shipped with a skill — is still reported as a non-UTF-8 workflow source, because
-portable workflow artifacts must be text. `synced` is reserved only under a
-Claude source; under a Codex or OpenCode source it is an ordinary skill name.
+changing them is not workflow drift, so a fresh account sync, a skill rotation
+or a new bytecode cache cannot block the next `djinn start`. The exclusion is
+narrow on purpose. A binary file anywhere else — including a `.pyc` outside
+`__pycache__` or a `.pyd` shipped with a skill — is still reported as a
+non-UTF-8 workflow source, because portable workflow artifacts must be text.
+`synced` and `.trash` are reserved only under a Claude source; under a Codex or
+OpenCode source `synced` is an ordinary skill name and `.trash` an invalid one.
 
 Runtime delivery is deliberately broader than cross-tool projection. The shared
 publisher receives each complete native view, including its present hooks,

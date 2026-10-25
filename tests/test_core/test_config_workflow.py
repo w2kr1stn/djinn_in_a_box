@@ -897,6 +897,10 @@ def _runtime_state(source_root: Path, *, generation: int = 0) -> None:
     cache = source_root / "scripts" / "__pycache__"
     cache.mkdir(parents=True, exist_ok=True)
     (cache / f"status-line.cpython-31{generation}.pyc").write_bytes(_BINARY)
+    trash = source_root / "skills" / ".trash" / f"1792824060765-2409-{generation}" / "deep-research"
+    trash.mkdir(parents=True, exist_ok=True)
+    (trash / "SKILL.md").write_bytes(b"---\nname: deep-research\ndescription: R\n---\n\nR.\n")
+    (trash / "LICENSE.txt").write_bytes(_BINARY)
 
 
 def test_runtime_state_does_not_block_repeated_workflow_preparation(tmp_path: Path) -> None:
@@ -927,9 +931,11 @@ def test_runtime_state_does_not_block_repeated_workflow_preparation(tmp_path: Pa
     assert second.success, second.problems
     assert second.problems == ()
     assert not (target.destination_root / "skills" / "synced").exists()
+    assert not (target.destination_root / "skills" / ".trash").exists()
     assert not (target.destination_root / "scripts" / "__pycache__").exists()
     # Nothing of the tool's own data was removed to get there.
     assert (source_root / "skills" / "synced" / _BUCKET).is_dir()
+    assert len(list((source_root / "skills" / ".trash").iterdir())) == 2
     assert list((source_root / "scripts" / "__pycache__").iterdir())
 
 
