@@ -47,6 +47,49 @@ jobs:
       - name: Run Bandit
         run: uvx bandit -r src/ --severity-level medium --confidence-level medium
 
+  measure:
+    name: Measure runner (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install shell-test dependencies
+        run: sudo apt-get update && sudo apt-get install -y zsh jq age
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Per-process tool cost
+        run: uv run python .github/measure/runner_costs.py
+
+      - name: Replay child CPU (three runs)
+        run: |
+          for round in 1 2 3; do
+            uv run pytest -s -q -p no:cacheprovider tests/test_djinn_apt_root.py \
+              -k "distinct_name_cap or space_list_at_cap" 2>&1 | grep -E "CPU s|passed|failed" || true
+          done
+
+      - name: Herdr directory target message
+        run: |
+          uv run pytest -q -p no:cacheprovider tests/test_tools_herdr_installer.py \
+            -k test_directory_at_target_is_not_entered 2>&1 | grep -E "^E |passed|failed" || true
+
   hostctl:
     name: Hostctl supervisor
     runs-on: ubuntu-24.04
