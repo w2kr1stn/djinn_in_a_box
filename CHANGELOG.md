@@ -29,6 +29,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `djinn doctor`'s Git discovery skips Syncthing's version archive
+  (`.stversions`), so archived copies of a repository's `.git` entry no longer
+  produce a "configuration could not be inspected" warning (#215).
 - Claude Code's `skills/.trash`, where it moves account skills that rotated
   out of `skills/synced`, is now tool-owned runtime state like `skills/synced`:
   Djinn never reads, projects or deletes it, so a skill rotation no longer

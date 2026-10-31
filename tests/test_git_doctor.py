@@ -131,6 +131,21 @@ def test_doctor_reports_unreadable_scan_root_as_warning(git_inputs, monkeypatch)
     assert "1 directories not scanned" in discovery[0].detail
 
 
+def test_doctor_skips_syncthing_version_archive(git_inputs):
+    repo = _create_repo(git_inputs.code_dir / "repo")
+    archived = git_inputs.code_dir / ".stversions" / "repo~20261031-120000"
+    archived.mkdir(parents=True)
+    # Syncthing keeps old copies of a worktree's gitlink file; git rejects them.
+    (archived / ".git").write_text("gitdir: /nonexistent/.git/worktrees/repo\n")
+    rows = git_diagnostics(git_inputs)
+    discovery = [row for row in rows if row.name == "Git discovery"]
+    assert len(discovery) == 1
+    assert "1 repositories scanned" in discovery[0].detail
+    assert not any(".stversions" in row.name or ".stversions" in row.detail for row in rows)
+    assert not any(row.name == f"Git references: {archived}" for row in rows)
+    assert str(repo) not in "\n".join(row.detail for row in rows if row.status == "warn")
+
+
 def test_global_git_reference_is_reported_once_for_multiple_repositories(git_inputs):
     home = Path.home()
     included = home / "global-included.gitconfig"
