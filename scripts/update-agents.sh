@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE="$SCRIPT_DIR/../Dockerfile"
 OUTPUT_LIB="${OUTPUT_LIB:-$SCRIPT_DIR/output-lib.sh}"
 
+# The output library path is configurable at runtime.
+# shellcheck disable=SC1090
 if [[ -r "$OUTPUT_LIB" ]] && source "$OUTPUT_LIB"; then
     :
 else

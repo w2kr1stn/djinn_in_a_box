@@ -36,6 +36,18 @@ jobs:
       - name: Run Ruff
         run: uv run ruff check src/ tests/
 
+      - name: Lint shell scripts
+        run: |
+          shellcheck_files=()
+          while IFS= read -r -d '' script; do
+            if head -n 1 "$script" | grep -q '^#!.*zsh'; then
+              zsh -n "$script"
+            else
+              shellcheck_files+=("$script")
+            fi
+          done < <(git ls-files -z '*.sh')
+          uvx --from shellcheck-py==0.11.0.1 shellcheck "${shellcheck_files[@]}"
+
       - name: Run Pyright
         run: uv run pyright src/
 
@@ -46,6 +58,14 @@ jobs:
 
       - name: Run Bandit
         run: uvx bandit -r src/ --severity-level medium --confidence-level medium
+
+      - name: Audit locked dependencies
+        run: |
+          ignored=(
+            # --ignore-vuln <ID>  # <package>: <reason>; revisit by <YYYY-MM-DD>
+          )
+          uv export --frozen --all-groups --no-emit-project --format requirements-txt -o "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit==2.10.1 --requirement "$RUNNER_TEMP/requirements.txt" --require-hashes --disable-pip --progress-spinner off "${ignored[@]}"
 
   hostctl:
     name: Hostctl supervisor

@@ -97,7 +97,7 @@ info() { printf 'I\t%s\n' "$1"; }
 warn() { printf 'W\t%s\n' "$1"; }
 
 # Invoked by the exit trap.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2329
 cleanup() {
     [ -z "$record_tmp" ] || run_clean "$rm_bin" -f -- "$record_tmp"
     [ -z "$work_dir" ] || run_clean "$rm_bin" -rf -- "$work_dir"
