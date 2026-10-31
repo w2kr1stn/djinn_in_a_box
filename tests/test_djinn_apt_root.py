@@ -1233,12 +1233,7 @@ def test_replay_distinct_name_cap(tmp_path, count):
     # Repeating the first overflow name must not count it twice.
     entries = names + [names[0], names[-1]] if count == 257 else names
     replay.list.write_text("\n".join(entries) + "\n")
-    # Child CPU catches per-entry subprocesses/quadratic deduplication, independent of load.
-    started = children_cpu_seconds()
     result = replay.run()
-    cpu = children_cpu_seconds() - started
-    print(f"{replay.list.stat().st_size} bytes / {count} distinct names: {cpu:.3f} CPU s")
-    assert cpu < 3
     assert result.returncode == 0
     expected = names[:256]
     assert [event["argv"][-1] for event in replay.tools.events("dpkg")] == expected
@@ -1254,6 +1249,31 @@ def test_replay_distinct_name_cap(tmp_path, count):
         assert result.stdout.count("not replayed") == 1
     else:
         assert "not replayed" not in result.stdout
+
+
+def replay_child_cpu(directory, count):
+    replay = HelperHarness(directory)
+    fast_package_checks(replay)
+    replay.list.write_text("".join(f"pkg{index:07d}\n" for index in range(count)))
+    started = children_cpu_seconds()
+    result = replay.run()
+    cpu = children_cpu_seconds() - started
+    assert result.returncode == 0 and "installing 256 of 256" in result.stdout
+    return cpu
+
+
+def test_replay_names_past_the_cap_add_no_per_name_work(tmp_path):
+    # Child CPU, not wall time, so machine load does not count. Each of the 256 capped names
+    # starts about ten short processes (env, date, grep, two fakes); their cost depends on the
+    # runner's tools (about 1.5 s with GNU coreutils, 4.5 s with ubuntu-26.04's uutils), so the
+    # bound is the difference to a 256-name replay in the same run, not an absolute budget.
+    # Names past the cap may only cost the one linear parse (under 0.1 s on both images): one
+    # process per extra name would add at least 95,000 x 0.35 ms, about 33 s, and quadratic
+    # deduplication about 4.5e9 comparisons.
+    capped = replay_child_cpu(tmp_path / "capped", 256)
+    full = replay_child_cpu(tmp_path / "full", 1048576 // 11)
+    print(f"256 names: {capped:.3f} CPU s, {1048576 // 11} names: {full:.3f} CPU s")
+    assert full - capped < 1
 
 
 def test_replay_name_byte_limit(tmp_path):
