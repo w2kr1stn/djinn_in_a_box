@@ -204,6 +204,8 @@ if [[ "${1-}" == "--allow" ]]; then
     exit "$allowlist_status"
 fi
 
+# The output library path is configurable at runtime.
+# shellcheck disable=SC1090
 if [[ -r "$OUTPUT_LIB" ]] && source "$OUTPUT_LIB"; then
     :
 else

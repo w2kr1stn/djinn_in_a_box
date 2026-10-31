@@ -23,6 +23,8 @@ if [[ "$DJINN_ASSISTANT_AGENT" == claude && -f "$store/claude.json" ]]; then
     jq '{oauthAccount} | with_entries(select(.value != null))' "$store/claude.json" > "$HOME/.claude.json"
 fi
 
+# Runs from the EXIT trap, which shellcheck cannot see through.
+# shellcheck disable=SC2329
 persist_credentials() {
     local name failed=0
     for name in "${names[@]}"; do
@@ -69,7 +71,7 @@ import_opencode() {
 }
 
 # Runs from the EXIT trap, which shellcheck cannot see through.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2329
 export_opencode() {
     local temporary
     temporary=$(mktemp "$store/.final.XXXXXX") || return 1
@@ -89,6 +91,8 @@ else
     trap 'persist_credentials || exit 1' EXIT
 fi
 child=
+# Runs from the signal traps, which shellcheck cannot see through.
+# shellcheck disable=SC2329
 terminate() {
     trap '' TERM INT HUP
     if [[ -n "$child" ]]; then

@@ -135,6 +135,9 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Lint shell scripts in CI with ShellCheck 0.11 and `zsh -n` for zsh scripts,
+  and audit locked dependencies with pip-audit. Update pytest to 9.2.0 and
+  Pygments to 2.21.0 to fix PYSEC-2026-1845 and PYSEC-2026-2987 (#217).
 - Accept `~/.config/djinn_in_a_box/agents.toml` only as a regular, single-link
   file owned by the invoking user and not writable by group or others, in a
   non-symlink directory with the same rules; any other state stops the command
