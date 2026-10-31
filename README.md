@@ -341,7 +341,7 @@ Supported `djinn config set` keys are:
 | Key | Meaning | Default or source |
 | --- | --- | --- |
 | `general.code_dir` | Host workspace root mounted at the path selected by `general.workspace` | chosen during `djinn init` |
-| `general.workspace` | `projects` mounts at `/home/dev/projects`; `aios` mounts at `/home/dev/aios` | `projects` |
+| `general.workspace` | `projects` mounts at `/home/dev/projects`; `aimi` mounts at `/home/dev/aimi` | `projects` |
 | `general.timezone` | IANA timezone passed as `TZ` | detected from host, fallback `UTC` |
 | `general.config_root` | Host root for credentials and local CLI state | `~/.djinn/config` |
 | `resources.cpu_limit` | Compose CPU limit | `4` |
@@ -363,9 +363,9 @@ Set the mode and host root explicitly; mode values must be lowercase:
 djinn config set general.workspace projects
 djinn config set general.code_dir /path/to/projects
 
-# AIOS workspace root
-djinn config set general.workspace aios
-djinn config set general.code_dir /path/to/aios
+# aimi workspace root
+djinn config set general.workspace aimi
+djinn config set general.code_dir /path/to/aimi
 ```
 
 Memory values must use Docker-style units such as `8G`, `4096M`, or `512K`.
@@ -945,7 +945,7 @@ value overrides `default_model` for that invocation.
 
 | Command | Container behavior | Workspace behavior | Main use |
 | --- | --- | --- | --- |
-| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets. Declared mounts below invocation targets are left out | Daily interactive shell; `--detach` for a long-lived container |
+| `djinn start` | Runs the `dev` service interactively with `docker compose run --rm`; removed after exit. `--detach` uses `docker compose up -d` instead and leaves no client attached | Starts in `/home/dev/projects` (`projects`) or `/home/dev/aimi` (`aimi`) without an extra mount; `--here` mounts `/home/dev/workspace`; repeatable `--mount` values add directories at chosen or derived targets. Declared mounts below invocation targets are left out | Daily interactive shell; `--detach` for a long-lived container |
 | `djinn enter` | Uses `docker exec -it <running-container> zsh` | Enters an already running Djinn container | Open a second shell while `djinn start` is still running |
 | `djinn serve` | Starts Claude Remote Control or the OpenCode web UI/API inside the running detached container | Uses the container's working directory, mounts and sign-ins | [Remote agent access](#remote-agent-servers), status, stop and OpenCode pairing |
 | `djinn run AGENT PROMPT` | Runs a [guest](#quickstart) headlessly with `docker compose run --rm -T`; removed after exit | Without `--mount` and without `--here`, mounts the current directory at `/home/dev/workspace`; `--here` keeps that mount when combined with repeatable `--mount` values. Declared mounts below invocation targets are left out | One-shot agent prompts |
@@ -1354,7 +1354,7 @@ Bind mounts are host paths that you can inspect and manage directly:
 | `${DJINN_CONFIG_ROOT}/opencode` | `/home/dev/.opencode` | OpenCode state |
 | `${DJINN_CONFIG_ROOT}/gh` | `/home/dev/.config/gh` | GitHub CLI state |
 | `${DJINN_CONFIG_ROOT}/age` | `/home/dev/.config/age` | age encryption identities (`keys.txt`) |
-| `${CODE_DIR}` | `/home/dev/projects` (`projects`) or `/home/dev/aios` (`aios`) | One configured workspace root; AIOS's `projects/` appears at `/home/dev/aios/projects` |
+| `${CODE_DIR}` | `/home/dev/projects` (`projects`) or `/home/dev/aimi` (`aimi`) | One configured workspace root; an aimi root's `projects/` appears at `/home/dev/aimi/projects` |
 | `${HOME}/.djinn/sessions` | `/home/dev/sessions` | Session workspaces |
 | Djinn-generated public SSH directory (starts only) | `/home/dev/.ssh:ro` | Declared Git aliases, public keys and host/signing trust |
 | Djinn Git agent export directory (starts only) | `/run/djinn-git-agent:ro` | Filtered SSH agent socket (`auth.sock`) |
@@ -1478,7 +1478,7 @@ the implicit `--here` of a default `djinn run`. Each
 directory is `/home/dev/workspace` with `--here`, otherwise the first mount target;
 `djinn start` without mounts passes no `--workdir`, so the Compose service default
 `working_dir: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}` applies: `/home/dev/projects`
-in projects mode or `/home/dev/aios` in aios mode.
+in projects mode or `/home/dev/aimi` in aimi mode.
 An invocation `--mount` target strictly inside `--here` or another `--mount`
 target is refused; choose a target outside the enclosing mount. This avoids Docker
 creating a root-owned mount-point directory inside the outer mount's host directory.

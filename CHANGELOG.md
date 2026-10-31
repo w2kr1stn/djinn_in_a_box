@@ -202,6 +202,12 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- **Breaking:** the workspace mode `aios` is renamed to `aimi`.
+  `general.workspace = "aimi"` mounts `general.code_dir` at `/home/dev/aimi`,
+  and `djinn start` and `djinn doctor` label it "aimi root". There is no alias:
+  a configuration that still says `aios` is refused (`Input should be 'aimi'
+  or 'projects'`), and `djinn config set` cannot load it either; set
+  `general.workspace = "aimi"` in `config.toml` by hand (#218).
 - Raise the default Claude Code version in the dev image to 2.1.304, the version the
   `claude-isolated` agent was measured with (#171).
 - `djinn agents --json` writes raw JSON with every field, including
