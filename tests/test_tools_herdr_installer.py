@@ -420,7 +420,8 @@ def test_directory_at_target_is_not_entered(installer_env: dict[str, str]) -> No
     result = run_command([str(SCRIPT)], env)
     assert result.returncode == 1
     assert result.stdout == ""
-    assert result.stderr.splitlines()[-1] == (
+    # GNU coreutils 9.7 appends the source path to this message; the prefix is stable.
+    assert result.stderr.splitlines()[-1].startswith(
         f"mv: cannot overwrite directory '{target}' with non-directory"
     )
     assert [path.name for path in target.iterdir()] == ["keep"]
