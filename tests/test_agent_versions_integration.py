@@ -22,7 +22,7 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
     project, env, calls = request.getfixturevalue("script_env")
     context = project / "assistant"
     context.mkdir()
-    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh"):
+    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh", "install-claude.sh"):
         (context / name).write_bytes((ROOT / "assistant" / name).read_bytes())
     with (project / "Dockerfile").open("a") as stream:
         stream.write("ARG DOCKER_VERSION=27.4.1\n")

@@ -1242,7 +1242,7 @@ class TestMountTargetCollisions:
         dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
         reserved = set(docker_mod._reserved_mount_targets(mock_app_config, DockerMode.NONE))
 
-        assert _assert_dockerfile_aliases_are_reserved(dockerfile, reserved) == 1
+        assert _assert_dockerfile_aliases_are_reserved(dockerfile, reserved) == 2
 
     def test_dockerfile_alias_guard_rejects_alias_of_reserved_descendant(
         self, mock_app_config: AppConfig
@@ -4361,3 +4361,231 @@ def test_egress_declared_volume_guard_and_positive_control(egress_compose):
     }})
     assert compose_run(safe, ContainerOptions(egress=plan), interactive=False).returncode == 0
     assert observed[-1][1]["services"]["dev"]["volumes"][0]["target"] == "/home/dev/input"
+
+
+class TestVerifiedBuildInstallers:
+    @pytest.mark.parametrize(
+        "tool,pin,target",
+        [
+            ("ohmyzsh", "OH_MY_ZSH_SHA256", ".oh-my-zsh/oh-my-zsh.sh"),
+            ("posh-linux-amd64", "OH_MY_POSH_SHA256", ".local/bin/oh-my-posh"),
+            ("fnm-linux.zip", "FNM_SHA256", ".local/share/fnm/fnm"),
+        ],
+    )
+    @pytest.mark.parametrize("corrupt", [False, True])
+    def test_pinned_run_under_dash(self, tmp_path, tool, pin, target, corrupt):
+        import hashlib
+        import zipfile
+
+        payload = b"fixture bytes, never executed\n"
+        archive = tmp_path / "payload"
+        if tool == "ohmyzsh":
+            with tarfile.open(archive, "w:gz") as tar:
+                member = tarfile.TarInfo("fixture/oh-my-zsh.sh")
+                member.size = len(payload)
+                tar.addfile(member, io.BytesIO(payload))
+        elif tool == "fnm-linux.zip":
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("fnm", payload)
+        else:
+            archive.write_bytes(payload)
+        checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+        home, bindir, scratch = (tmp_path / name for name in ("home", "bin", "scratch"))
+        for directory in (home, bindir, scratch):
+            directory.mkdir()
+        curl = bindir / "curl"
+        curl.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$calls"\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            '  case "$1" in\n'
+            '    --proto|--proto-redir) [ "$2" = "=https" ] || exit 2; shift 2;;\n'
+            "    -fsSL) shift;; -o) destination=$2; shift 2;;\n"
+            "    *) url=$1; shift;;\n"
+            "  esac\ndone\n"
+            'if [ "$url" != "$expected_url" ]; then\n'
+            '  echo "curl: (22) The requested URL returned error: 404" >&2; exit 22\n'
+            'fi\ncp "$payload" "$destination"\n'
+        )
+        curl.chmod(0o755)
+        pins = dict(
+            re.findall(
+                r"^ARG ((?:OH_MY_\w+|FNM_\w+))=(\S+)$",
+                TestDockerfileDnsGuard._dockerfile(),
+                re.M,
+            )
+        )
+        urls = {
+            "ohmyzsh": f"https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/{pins['OH_MY_ZSH_COMMIT']}",
+            "posh-linux-amd64": "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/"
+            f"v{pins['OH_MY_POSH_VERSION']}/posh-linux-amd64",
+            "fnm-linux.zip": f"https://github.com/Schniz/fnm/releases/download/v{pins['FNM_VERSION']}/fnm-linux.zip",
+        }
+        instructions = [run for run in TestDockerfileDnsGuard._run_instructions() if tool in run]
+        assert len(instructions) == 1
+        command = re.sub(r"^\s*RUN\s+", "", instructions[0])
+        calls = tmp_path / "calls"
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            env={
+                **os.environ,
+                **pins,
+                pin: "0" * 64 if corrupt else checksum,
+                "HOME": str(home),
+                "PATH": f"{bindir}:{os.environ['PATH']}",
+                "TMPDIR": str(scratch),
+                "payload": str(archive),
+                "calls": str(calls),
+                "expected_url": urls[tool],
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert calls.read_text().count("https://") == 1
+        assert "--proto =https --proto-redir =https" in calls.read_text()
+        assert not list(scratch.iterdir())
+        if corrupt:
+            assert result.returncode != 0, result.stdout
+            assert not (home / target).exists()
+            assert not (home / ".oh-my-zsh").exists()
+        else:
+            assert result.returncode == 0, result.stderr
+            assert (home / target).read_bytes() == payload
+            if tool != "ohmyzsh":
+                assert os.access(home / target, os.X_OK)
+
+    def test_pin_formats_and_verification_order(self):
+        dockerfile = TestDockerfileDnsGuard._dockerfile()
+        formats = {
+            "OH_MY_ZSH_COMMIT": r"[0-9a-f]{40}",
+            "OH_MY_ZSH_SHA256": r"[0-9a-f]{64}",
+            "OH_MY_POSH_VERSION": r"[0-9]+\.[0-9]+\.[0-9]+",
+            "OH_MY_POSH_SHA256": r"[0-9a-f]{64}",
+            "FNM_VERSION": r"[0-9]+\.[0-9]+\.[0-9]+",
+            "FNM_SHA256": r"[0-9a-f]{64}",
+        }
+        for name, pattern in formats.items():
+            values = re.findall(rf"^ARG {name}=(.*)$", dockerfile, re.M)
+            assert len(values) == 1 and re.fullmatch(pattern, values[0])
+        for tool, operation in [
+            ("ohmyzsh", "tar -xzf"),
+            ("posh-linux-amd64", "install -D"),
+            ("fnm-linux.zip", "unzip -q"),
+        ]:
+            (run,) = [i for i in TestDockerfileDnsGuard._run_instructions() if tool in i]
+            assert run.index("curl ") < run.index("sha256sum -c") < run.index(operation)
+            assert ";" not in run
+            assert dockerfile.index(run.split("https://")[1].split('"')[0]) < dockerfile.index(
+                "ARG CLAUDE_CODE_VERSION="
+            )
+
+    def test_claude_integration_and_update_policy(self):
+        dockerfile = TestDockerfileDnsGuard._dockerfile()
+        assert "ARG TARGETARCH" not in dockerfile
+        (run,) = [
+            i
+            for i in TestDockerfileDnsGuard._run_instructions()
+            if "sh /tmp/install-claude.sh" in i
+        ]
+        assert 'sh /tmp/install-claude.sh amd64 "$CLAUDE_CODE_VERSION" ' in run
+        assert '"$HOME/.local/share/claude/versions/$CLAUDE_CODE_VERSION"' in run
+        assert "&& mkdir -p ~/.local/bin" in run
+        assert (
+            "&& ln -sfn ~/.local/share/claude/versions/$CLAUDE_CODE_VERSION ~/.local/bin/claude"
+            in run
+        )
+        # dev removes the copy from the sticky /tmp; a root-owned copy would fail the build.
+        copy = "COPY --chown=dev:dev assistant/install-claude.sh /tmp/install-claude.sh"
+        assert copy in dockerfile
+        assert dockerfile.index("zstyle ':omz:update' mode disabled") < dockerfile.index(
+            "source $ZSH/oh-my-zsh.sh"
+        )
+        assert "themes.zip" not in dockerfile
+        assistant = (
+            Path(__file__).parents[1]
+            / "assistant/Dockerfile"
+        ).read_text()
+        packages = assistant.split("apt-get install", 1)[1].split("&&", 1)[0].split()
+        assert "gpg" in packages
+        assert "COPY install-claude.sh /tmp/install-claude.sh" in assistant
+        assert (
+            'sh /tmp/install-claude.sh "$TARGETARCH" "$AGENT_VERSION" /opt/djinn-agent/claude'
+            in assistant
+        )
+        assert 'esac && "$AGENT" --version' in assistant
+        assert not re.search(r"sha256sum -c[^;&\n]*;", assistant.replace("\\\n", " "))
+
+    @staticmethod
+    def _assert_no_remote_shell(text):
+        joined = text.replace("\\\n", " ")
+        assert not re.search(r"(?:curl|wget)[^\n]*\|\s*(?:sh|bash)\b", joined)
+        assert not re.search(r"(?:sh|bash)\s+-c\s+[^\n]*\$\(\s*(?:curl|wget)", joined)
+        assert not re.search(r"(?:sh|bash)\s+<\(\s*(?:curl|wget)", joined)
+        copied = set(
+            re.findall(r"^COPY\s+(?:--\S+\s+)*\S+\s+(/tmp/install-[\w-]+\.sh)\s*$", joined, re.M)
+        )
+        for script in re.findall(r"(?<![\w./-])(?:sh|bash)\s+(/\S+\.sh)\b", joined):
+            assert script in copied
+
+    @pytest.mark.parametrize("filename", ["Dockerfile", "assistant/Dockerfile"])
+    def test_no_remote_shell(self, filename):
+        self._assert_no_remote_shell(
+            (
+                Path(__file__).parents[1]
+                / filename
+            ).read_text()
+        )
+
+    @pytest.mark.parametrize(
+        "attack",
+        [
+            "RUN curl https://example.com/install | bash -s version",
+            'RUN sh -c "$(curl https://example.com/install)"',
+            "RUN bash <(curl https://example.com/install)",
+            "RUN curl https://example.com/install -o /tmp/install.sh; bash /tmp/install.sh",
+            "RUN sh /tmp/install-unknown.sh",
+        ],
+    )
+    def test_remote_shell_guard_detects_unsafe_forms(self, attack):
+        with pytest.raises(AssertionError):
+            self._assert_no_remote_shell(attack)
+
+    @pytest.mark.parametrize("failure", [False, True])
+    def test_claude_run_links_only_after_success(self, tmp_path, failure):
+        home = tmp_path / "home"
+        home.mkdir()
+        installer = tmp_path / "install-claude.sh"
+        installer.write_text(
+            "#!/bin/sh\n"
+            '[ "$1" = amd64 ] && [ "$2" = 2.1.999 ] || exit 2\n'
+            '[ "$3" = "$HOME/.local/share/claude/versions/2.1.999" ] || exit 2\n'
+            + (
+                "exit 1\n"
+                if failure
+                else 'mkdir -p "$(dirname "$3")" && printf "verified fixture" > "$3"\n'
+            )
+        )
+        (run,) = [
+            i
+            for i in TestDockerfileDnsGuard._run_instructions()
+            if "sh /tmp/install-claude.sh" in i
+        ]
+        command = re.sub(r"^\s*RUN\s+", "", run).replace("/tmp/install-claude.sh", str(installer))
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            env={**os.environ, "HOME": str(home), "CLAUDE_CODE_VERSION": "2.1.999"},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        launcher = home / ".local/bin/claude"
+        if failure:
+            assert result.returncode != 0
+            assert not launcher.is_symlink()
+            assert not launcher.exists()
+        else:
+            assert result.returncode == 0, result.stderr
+            assert launcher.is_symlink()
+            assert launcher.read_text() == "verified fixture"
