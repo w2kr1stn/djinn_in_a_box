@@ -73,7 +73,9 @@ def repository_roots(config: AppConfig) -> RepositoryScan:
                 (current / "HEAD").is_file() and (current / "objects").is_dir()
             ):
                 repositories.append(current)
-            children[:] = [c for c in children if c not in {".git", ".venv", "node_modules"}]
+            children[:] = [
+                c for c in children if c not in {".git", ".venv", "node_modules", ".stversions"}
+            ]
             if len(current.relative_to(root).parts) >= 4:
                 directories_not_scanned += len(children)
                 children.clear()
