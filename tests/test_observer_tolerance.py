@@ -644,6 +644,22 @@ def inproc(git_inputs, monkeypatch):
         return pair
 
     monkeypatch.setattr(host_runtime, "_serve_filter", serve)
+
+    real_stop = host_runtime.stop_owned_process
+
+    def stop_agent_in_real_time(pid, token):
+        # The real stop polls /proc with time.sleep, the fake clock here: each poll adds 0.05 s
+        # until the real process has died, so fake time would depend on the runner's load
+        # (#224). The harness's own agent is stopped and reaped in real time instead.
+        agent = harness.agent
+        if agent is None or pid != agent.pid:
+            real_stop(pid, token)
+            return
+        if host_runtime.process_token(pid) == token:
+            agent.terminate()
+            agent.wait(timeout=5)
+
+    monkeypatch.setattr(host_runtime, "stop_owned_process", stop_agent_in_real_time)
     saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         yield harness
@@ -2447,8 +2463,9 @@ def test_persistent_rebind_failure_is_spaced_capped_and_ends_in_e7(
     # Waiting is lock-free: between two attempts the observer enters its guard only for them.
     spent = [b - a for a, b in zip(gitted.guard_marks, gitted.guard_marks[1:], strict=False)]
     assert max(spent) <= 4, spent
-    # E7 comes when the capped 60 s wait (not 80 s) after the fifth attempt has passed.
-    assert 60 <= gitted.clock.now - times[-1] < 61
+    # E7 comes on the first observer tick (its 0.25 s wait step) after the capped 60 s wait
+    # (not 80 s) that follows the fifth attempt; the exit path adds no fake time.
+    assert 60 <= gitted.clock.now - times[-1] <= 60.25
 
 
 def test_two_second_descriptor_shortage_after_a_filter_death_is_survived(
