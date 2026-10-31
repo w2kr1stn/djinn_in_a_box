@@ -145,6 +145,80 @@ if [[ "$print_mode" == "true" ]]; then
     exit 0
 fi
 
+# Resolve each tool pin pair completely before touching either Dockerfile line.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+for tool in oh-my-posh fnm oh-my-zsh; do
+    case "$tool" in
+        oh-my-posh)
+            arg_name=OH_MY_POSH_VERSION
+            hash_name=OH_MY_POSH_SHA256
+            if release=$(curl --proto '=https' --proto-redir '=https' -fsSL \
+                    https://api.github.com/repos/JanDeDobbeleer/oh-my-posh/releases/latest) \
+                && tag=$(jq -er '.tag_name | select(type == "string" and test("\\Av[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' <<< "$release") \
+                && checksums=$(curl --proto '=https' --proto-redir '=https' -fsSL \
+                    "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/$tag/checksums.txt") \
+                && checksum=$(awk '$2 == "posh-linux-amd64" { count++; hash = $1; if (NF != 2) bad = 1 }
+                    END { if (count != 1 || bad) exit 1; print hash }' <<< "$checksums"); then
+                latest=${tag#v}
+            else
+                printf '%s: Failed to resolve pin pair; leaving both ARGs unchanged\n' "$tool" >&2
+                continue
+            fi
+            ;;
+        fnm)
+            arg_name=FNM_VERSION
+            hash_name=FNM_SHA256
+            if release=$(curl --proto '=https' --proto-redir '=https' -fsSL \
+                    https://api.github.com/repos/Schniz/fnm/releases/latest) \
+                && tag=$(jq -er '.tag_name | select(type == "string" and test("\\Av[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' <<< "$release") \
+                && checksum=$(jq -er '[.assets[] | select(.name == "fnm-linux.zip")]
+                    | select(length == 1) | .[0].digest
+                    | select(type == "string" and test("\\Asha256:[0-9a-f]{64}\\z"))
+                    | ltrimstr("sha256:")' <<< "$release"); then
+                latest=${tag#v}
+            else
+                printf '%s: Failed to resolve pin pair; leaving both ARGs unchanged\n' "$tool" >&2
+                continue
+            fi
+            ;;
+        oh-my-zsh)
+            arg_name=OH_MY_ZSH_COMMIT
+            hash_name=OH_MY_ZSH_SHA256
+            if release=$(curl --proto '=https' --proto-redir '=https' -fsSL \
+                    https://api.github.com/repos/ohmyzsh/ohmyzsh/commits/master) \
+                && latest=$(jq -er '.sha | select(type == "string" and test("\\A[0-9a-f]{40}\\z"))' <<< "$release") \
+                && curl --proto '=https' --proto-redir '=https' -fsSL \
+                    "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/$latest" -o "$scratch/source.tgz" \
+                && checksum=$(sha256sum "$scratch/source.tgz"); then
+                checksum=${checksum%% *}
+            else
+                printf '%s: Failed to resolve pin pair; leaving both ARGs unchanged\n' "$tool" >&2
+                continue
+            fi
+            ;;
+    esac
+    if ! [[ "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
+        printf '%s: Invalid checksum; leaving both ARGs unchanged\n' "$tool" >&2
+        continue
+    fi
+    if [[ $(grep -c "^ARG ${arg_name}=" "$DOCKERFILE" || true) != 1 \
+        || $(grep -c "^ARG ${hash_name}=" "$DOCKERFILE" || true) != 1 ]]; then
+        printf '%s: Expected exactly one canonical ARG for each pin; leaving both ARGs unchanged\n' "$tool" >&2
+        continue
+    fi
+    current=$(grep "^ARG ${arg_name}=" "$DOCKERFILE")
+    current_hash=$(grep "^ARG ${hash_name}=" "$DOCKERFILE")
+    if [[ "$current" != "ARG ${arg_name}=${latest}" || "$current_hash" != "ARG ${hash_name}=${checksum}" ]]; then
+        sed -i -e "s/^ARG ${arg_name}=.*/ARG ${arg_name}=${latest}/" \
+            -e "s/^ARG ${hash_name}=.*/ARG ${hash_name}=${checksum}/" "$DOCKERFILE"
+        printf '  %s: %s / %s\n' "$tool" "$latest" "$checksum"
+        updates_made=true
+    else
+        printf '  %s (up to date)\n' "$tool"
+    fi
+done
+
 echo ""
 
 if [[ "$updates_made" == "true" ]]; then
@@ -156,14 +230,14 @@ if [[ "$updates_made" == "true" ]]; then
     git diff --no-color "$DOCKERFILE" | head -30
     echo ""
     echo "Next steps:"
-    printf '  1. %bdjinn build%b   # Build the new defaults alone: move a local agent-versions.toml aside first; commit only after this succeeds\n' \
+    printf '  1. %bdjinn build%b   # Build the new agent defaults and tool pins alone: move a local agent-versions.toml aside first; commit only after this succeeds\n' \
         "$(color_start "$UI_COLOR_INFO")" \
         "$(color_reset)"
     printf '  2. %bdjinn start%b   # Start container\n' \
         "$(color_start "$UI_COLOR_INFO")" \
         "$(color_reset)"
 else
-    printf '%bAll CLI agents are already up to date.%b\n' \
+    printf '%bAll CLI agents and tool pins are already up to date.%b\n' \
         "$(color_start "$UI_COLOR_SUCCESS")" \
         "$(color_reset)"
 fi

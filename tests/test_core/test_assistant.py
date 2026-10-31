@@ -137,7 +137,10 @@ def installation(tmp_path, monkeypatch):
         "ARG OPENCODE_VERSION=1.18.34\nARG DOCKER_VERSION=27.4.1\n"
     )
     (project / "assistant").mkdir()
-    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh", "audit-briefing.md"):
+    for name in (
+        "Dockerfile", "entrypoint.sh", "install-opencode.sh", "install-claude.sh",
+        "audit-briefing.md",
+    ):
         (project / "assistant" / name).write_bytes((real / "assistant" / name).read_bytes())
     sock = socket.socket(socket.AF_UNIX)
     sock_path = tmp_path / "docker.sock"
@@ -553,12 +556,13 @@ def test_local_socket_and_platform(installation, monkeypatch):
     assert a.local_daemon() == (installation.socket, "linux/amd64")
 
 
-def test_opencode_installer_change_invalidates_assistant_image(installation):
+@pytest.mark.parametrize("agent", ["opencode", "claude"])
+def test_opencode_installer_change_invalidates_assistant_image(installation, agent):
     f = installation
-    first = a.ensure_image(f.project, "opencode", "linux/amd64", "default")
-    script = f.project / "assistant/install-opencode.sh"
+    first = a.ensure_image(f.project, agent, "linux/amd64", "default")
+    script = f.project / f"assistant/install-{agent}.sh"
     script.write_text(script.read_text() + "\n# changed installer\n")
-    second = a.ensure_image(f.project, "opencode", "linux/amd64", "default")
+    second = a.ensure_image(f.project, agent, "linux/amd64", "default")
     assert first != second
 
 

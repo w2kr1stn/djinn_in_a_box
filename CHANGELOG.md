@@ -135,6 +135,12 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Verify the pinned oh-my-zsh archive, oh-my-posh binary and fnm archive before
+  extraction or installation. Both dev and assistant images install Claude Code
+  only after checking its signed version manifest against a pinned release key
+  and verifying the binary checksum. Maintainers update the tool pin pairs with
+  `scripts/update-agents.sh`. Disable oh-my-zsh self-update and stop downloading
+  the unused oh-my-posh theme cache (#216).
 - Lint shell scripts in CI with ShellCheck 0.11 and `zsh -n` for zsh scripts,
   and audit locked dependencies with pip-audit. Update pytest to 9.0.3 and
   Pygments to 2.21.0 to fix PYSEC-2026-1845 and PYSEC-2026-2987 (#217).
