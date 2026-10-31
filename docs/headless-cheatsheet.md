@@ -163,7 +163,7 @@ mount target is the workdir. A target-free mount uses `/home/dev/mount/<basename
 
 The configured `general.code_dir` is always mounted as one workspace root:
 `general.workspace = "projects"` (default) selects `/home/dev/projects`, while
-`"aios"` selects `/home/dev/aios`. `--here` and the first user mount still decide
+`"aimi"` selects `/home/dev/aimi`. `--here` and the first user mount still decide
 the run's workdir. A user target cannot equal or contain the active workspace
 target; children and explicit mounts at the unused root remain valid.
 Targets at or below Djinn-managed roots are refused for both `:rw` and `:ro`,

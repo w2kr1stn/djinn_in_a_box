@@ -202,8 +202,8 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 `AppConfig` fields:
 
 - `code_dir: Path`: required host root for the selected workspace mode
-- `workspace: Literal["aios", "projects"]`: default `projects`; mounts the root
-  at `/home/dev/aios` or `/home/dev/projects`, respectively
+- `workspace: Literal["aimi", "projects"]`: default `projects`; mounts the root
+  at `/home/dev/aimi` or `/home/dev/projects`, respectively
 - `timezone: str`: IANA timezone, default `UTC`
 - `config_root: Path`: local credential/config bind-mount root, default
   `~/.djinn/config`
@@ -230,7 +230,7 @@ Shell UI consumers include `scripts/entrypoint.sh`, `scripts/mcp-register.sh`,
 
 `AppConfig.workspace_target` derives that fixed container path as a plain
 property, excluded from JSON and TOML. Djinn does not infer the mode from the
-host path or validate AIOS subdirectories.
+host path or validate subdirectories of an aimi root.
 
 `ResourceLimits` defaults are:
 
@@ -341,8 +341,8 @@ reason.
 - `config_sync()` exposed as `djinn config sync`
 
 `djinn init` is the entry point. It creates the app config directory, prompts
-for workspace mode (`aios` or `projects`, default `projects`), then the host root
-with its mode-specific container path and timezone. Suggested roots are `~/aios`
+for workspace mode (`aimi` or `projects`, default `projects`), then the host root
+with its mode-specific container path and timezone. Suggested roots are `~/aimi`
 or `~/projects`. It then uses progressive disclosure for
 advanced resource and shell settings. The simple path accepts suggested
 resources from `core/hostinfo.py`; advanced prompts allow explicit CPU, memory,
@@ -1119,8 +1119,8 @@ Common mounts include:
   the shared publisher
 - the read-only `./config/opencode` view at `/home/dev/.opencode/seed`
 - `${CODE_DIR}` to `${DJINN_WORKSPACE_TARGET:-/home/dev/projects}`: one workspace
-  root at `/home/dev/projects` or `/home/dev/aios`; AIOS's `projects/` is then at
-  `/home/dev/aios/projects`
+  root at `/home/dev/projects` or `/home/dev/aimi`; an aimi root's `projects/`
+  is then at `/home/dev/aimi/projects`
 - `${HOME}/.djinn/sessions` to `/home/dev/sessions`
 
 Both canonical views refuse writes with `EROFS`; only `config/claude` retains
@@ -2808,7 +2808,7 @@ Container startup:
 djinn start
   |
   +-- banner()
-  +-- Environment rule: Projects or AIOS root, workspace mode/target, Docker, Firewall, mounts, Shell, Audio
+  +-- Environment rule: Projects or aimi root, workspace mode/target, Docker, Firewall, mounts, Shell, Audio
   +-- Container rule
   v
 entrypoint.sh

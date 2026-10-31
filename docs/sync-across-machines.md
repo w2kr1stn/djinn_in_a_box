@@ -34,11 +34,11 @@ djinn config set general.workspace projects
 djinn config set general.code_dir /path/to/projects
 ```
 
-For an AIOS root (its `projects/` appears at `/home/dev/aios/projects`):
+For an aimi root (its `projects/` appears at `/home/dev/aimi/projects`):
 
 ```bash
-djinn config set general.workspace aios
-djinn config set general.code_dir /path/to/aios
+djinn config set general.workspace aimi
+djinn config set general.code_dir /path/to/aimi
 ```
 
 Both modes use one workspace bind and need no Compose edit. Djinn does not

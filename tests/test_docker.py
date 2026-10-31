@@ -889,7 +889,7 @@ class TestMountTargetCollisions:
 
         validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     @pytest.mark.parametrize("docker_mode", list(DockerMode))
     def test_workspace_mount_collisions_follow_mode(
         self,
@@ -901,7 +901,7 @@ class TestMountTargetCollisions:
         self._without_runtime_mounts(monkeypatch)
         config = AppConfig.model_validate({"code_dir": tmp_path, "workspace": workspace})
         active = Path("/home/dev") / workspace
-        inactive = Path("/home/dev/aios" if workspace == "projects" else "/home/dev/projects")
+        inactive = Path("/home/dev/aimi" if workspace == "projects" else "/home/dev/projects")
         for target in (str(active), f"{active}/../{workspace}", str(active.parent)):
             mounts = resolve_container_mounts((f"{tmp_path}:{target}",))
             with pytest.raises(MountCollisionError, match="conflicts with reserved mount"):
@@ -1182,7 +1182,7 @@ class TestMountTargetCollisions:
                 shell_args=[],
             )
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     def test_static_targets_match_the_dev_compose_volume_anchor(self, workspace: str) -> None:
         compose_lines = (Path(__file__).parents[1] / "docker-compose.yml").read_text().splitlines()
         anchor_start = compose_lines.index("x-common-volumes: &common-volumes")
@@ -1285,7 +1285,7 @@ class TestMountTargetCollisions:
         with pytest.raises(AssertionError, match="matched no symlink lines"):
             _assert_dockerfile_aliases_are_reserved("# no links\n", reserved)
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     def test_dev_service_keeps_its_compose_working_dir(self, workspace: str) -> None:
         """Without a mount no ``--workdir`` is passed, so this line decides where
         a plain ``djinn start`` lands. Deleting it would silently move every
@@ -1456,7 +1456,7 @@ class TestGetComposeFiles:
 class TestBuildComposeEnv:
     """Tests for docker compose host interpolation environment."""
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios", None])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi", None])
     def test_workspace_env_selects_compose_mount_and_cwd(
         self,
         tmp_path: Path,
@@ -1472,7 +1472,11 @@ class TestBuildComposeEnv:
         monkeypatch.setenv("DJINN_WORKSPACE_TARGET", "/stale/target")
         env = build_compose_env(config)
         host_env = docker_mod._compose_host_env(config)
-        expected_target = f"/home/dev/{workspace or 'projects'}"
+        expected_target = {
+            "projects": "/home/dev/projects",
+            "aimi": "/home/dev/aimi",
+            None: "/home/dev/projects",
+        }[workspace]
         expected_source = str(tmp_path if config is not None else Path.home())
         assert env["CODE_DIR"] == host_env["CODE_DIR"] == expected_source
         assert (

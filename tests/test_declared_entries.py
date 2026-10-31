@@ -141,8 +141,8 @@ def test_marker_guard(tmp_path, monkeypatch, case):
         ("/home/dev/.codex", "/home/dev/.codex", True),
         ("/home/dev", "/home/dev/.codex", True),
         ("/home/dev/.codex/worker", "/home/dev/.codex", False),
-        ("/home/dev/aios", "/home/dev/aios", True),
-        ("/home/dev/projects", "/home/dev/aios", False),
+        ("/home/dev/aimi", "/home/dev/aimi", True),
+        ("/home/dev/projects", "/home/dev/aimi", False),
         ("/home/dev/.codex/sessions", "/home/dev/.codex/sessions", True),
         ("/var/run/docker.sock", "/run/docker.sock", True),
         ("/home/dev/.config/sops/age/keys.txt", "/home/dev/.config/sops/age/keys.txt", True),
@@ -328,7 +328,7 @@ def test_literal_environment(tmp_path, monkeypatch, key):
     "case", ["zones", "socket", "sops", "shell", "active-workspace", "inactive-workspace"]
 )
 def test_declared_dynamic_reservations(tmp_path, monkeypatch, case):
-    config = AppConfig(code_dir=tmp_path, workspace="aios", config_root=tmp_path / "config")
+    config = AppConfig(code_dir=tmp_path, workspace="aimi", config_root=tmp_path / "config")
     docker.ensure_host_env(config)
     for name in (
         "get_shell_mount_args",
@@ -356,7 +356,7 @@ def test_declared_dynamic_reservations(tmp_path, monkeypatch, case):
         "socket": "/run/docker.sock",
         "sops": str(docker.SOPS_AGE_KEY_TARGET),
         "shell": "/home/dev/.zshrc.local",
-        "active-workspace": "/home/dev/aios",
+        "active-workspace": "/home/dev/aimi",
         "inactive-workspace": "/home/dev/projects",
     }[case]
     if case == "zones":
