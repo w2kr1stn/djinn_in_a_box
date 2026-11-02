@@ -14,6 +14,7 @@ COMPOSE_ENV_KEYS = frozenset(
         "TZ",
         "NO_COLOR",
         "DJINN_TERM_WIDTH",
+        "DJINN_WORKSPACE_TARGET",
         "UV_LINK_MODE",
         "CODEX_SQLITE_HOME",
         "LOCAL_ENDPOINT",
