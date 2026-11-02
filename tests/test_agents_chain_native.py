@@ -25,6 +25,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOK_SCRIPT = REPO_ROOT / "scripts" / "djinn-agents-chain.py"
 CODEX_CONFIG = REPO_ROOT / "scripts" / "codex-config.toml"
+SYSTEM_CODEX_CONFIG = Path("/etc/codex/config.toml")
 CLAUDE_SEED = REPO_ROOT / "templates" / "seed" / "config" / "claude" / "settings.json"
 
 CHAIN = ("MARKER-ROOT-A1", "MARKER-GROUP-B2", "MARKER-REPO-C3", "MARKER-SUB-D4")
@@ -355,6 +356,11 @@ def assert_once(payload: object, markers: tuple[str, ...] = CHAIN) -> None:
     assert counts(payload, markers) == dict.fromkeys(markers, 1)
 
 
+def system_hook_installed() -> bool:
+    """True inside a Djinn image, whose Codex system layer already registers the hook."""
+    return SYSTEM_CODEX_CONFIG.is_file() and HOOK_SCRIPT.name in SYSTEM_CODEX_CONFIG.read_text()
+
+
 def continuation(requests: list[Any], is_summary: Callable[[Any], bool]) -> Any:
     """Return the first model request after the compaction summary; it carries the summary."""
     summaries = [index for index, body in enumerate(requests) if is_summary(body)]
@@ -416,7 +422,9 @@ def test_codex_hook_adds_the_chain_once_at_start_and_after_compaction(
     assert installed == repo_hook
     codex_home = root / "home" / ".codex"
     codex_home.mkdir()
-    (codex_home / "config.toml").write_text(written)
+    # Codex runs the hooks of every config layer; a second registration would duplicate the chain.
+    if not system_hook_installed():
+        (codex_home / "config.toml").write_text(written)
     provider = (
         f'{{name="fake", base_url="{fake.url}/v1", wire_api="responses", env_key="DJINN_FAKE_KEY"}}'
     )

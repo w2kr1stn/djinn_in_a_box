@@ -629,7 +629,7 @@ an account or group level above a repository, often carry binding rules. Each to
   workspace root and the Git root at startup, after `/clear` and after a compaction. Resumed and forked sessions
   already carry them and get nothing new. The hook reads only those files, only inside the workspace root, and caps
   its output at 64 KiB; a file that does not fit is named instead of included. It runs without a hook-trust prompt,
-  and your own Codex configuration still applies.
+  and your own Codex hooks run alongside it.
 - **Claude Code** loads the whole chain itself, but by default one project `CLAUDE.md` anywhere on the path makes it
   skip every `AGENTS.md`. The seeded `config/claude/settings.json` therefore sets
   `pluginConfigs."agents-md@builtin".options.instructionFiles` to `"claude-md-and-agents-md"`, which loads

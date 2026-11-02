@@ -656,7 +656,7 @@ Measured with Claude Code 2.1.316, Codex 0.166.0 and OpenCode 2.2.5 against a re
 
 The hook is `scripts/djinn-agents-chain.py`, installed root-owned as `/usr/local/libexec/djinn-agents-chain.py`
 and registered by `scripts/codex-config.toml`, installed as `/etc/codex/config.toml`. That file is Codex's system
-configuration layer: its hooks run without a trust prompt and user configuration still applies. The enforced
+configuration layer: its hooks run without a trust prompt, and hooks from the user's layers run alongside them. The enforced
 `requirements.toml` layer is not used. The matcher is `startup|clear|compact`: a resumed or forked session keeps the
 earlier hook text, so firing again there would duplicate it. `additionalContextLimit` is 65536; without it Codex
 shortens hook context to about 10,000 characters.
@@ -674,7 +674,8 @@ size instead. The whole text is cut at 65,536 bytes on a character boundary.
 `tests/test_agents_chain.py` covers the script and the registration. `tests/test_agents_chain_native.py` runs the
 installed CLIs against an in-process recording endpoint in a disposable home with an allowlisted environment and
 asserts every chain file exactly once at start and after a forced compaction; each tool is skipped when its CLI is
-missing.
+missing. Inside a Djinn image, whose system layer already registers the hook, the Codex test relies on that
+registration instead of adding a second one.
 
 ## Config Root and Compose Environment Bridge
 
