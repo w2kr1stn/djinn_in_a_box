@@ -26,6 +26,12 @@ def _umask() -> Iterator[None]:
         os.umask(previous)
 
 
+class _OsView:
+    """os as contained_paths sees it; test patches never reach pytest or other modules."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
 
 def _assert_os_error(error: OSError, original: OSError, path: Path) -> None:
     assert type(error) is type(original)
@@ -1214,6 +1220,8 @@ def test_permission_repair_io_failures_propagate_and_close_descriptors(
             raise failure
         real_chmod(name, *args, **kwargs)
 
+    # Patch os only as contained_paths sees it: pytest itself calls os.fstat during the test (#228).
+    monkeypatch.setattr(paths, "os", _OsView())
     monkeypatch.setattr(paths, "open_root", open_root)
     monkeypatch.setattr(paths, "_open_child_directory", open_child)
     monkeypatch.setattr(paths.os, "open", open_entry)
@@ -1268,6 +1276,8 @@ def test_permission_repair_checks_both_identity_fields(
             return os.stat_result(fields)
         return info
 
+    # Patch os only as contained_paths sees it: pytest itself calls os.fstat during the test (#228).
+    monkeypatch.setattr(paths, "os", _OsView())
     monkeypatch.setattr(paths, "open_root", open_root)
     monkeypatch.setattr(paths.os, "open", open_entry)
     monkeypatch.setattr(paths.os, "fstat", fstat)
