@@ -627,9 +627,10 @@ an account or group level above a repository, often carry binding rules. Each to
 - **Codex** loads `AGENTS.md` only from the repository's Git root down. The dev image registers a `SessionStart`
   hook in Codex's system configuration (`/etc/codex/config.toml`) that adds the `AGENTS.md` files between the
   workspace root and the Git root at startup, after `/clear` and after a compaction. Resumed and forked sessions
-  already carry them and get nothing new. The hook reads only those files, only inside the workspace root, and caps
-  its output at 64 KiB; a file that does not fit is named instead of included. It runs without a hook-trust prompt,
-  and your own Codex hooks run alongside it.
+  already carry them and get nothing new. The hook is always active in the Djinn image and runs without a
+  hook-trust prompt; your own Codex hooks run alongside it. It only emits `AGENTS.md` files between the workspace
+  root and the Git root, reads nothing else, and caps its output at 64 KiB; a file that does not fit is named
+  instead of included.
 - **Claude Code** loads the whole chain itself, but by default one project `CLAUDE.md` anywhere on the path makes it
   skip every `AGENTS.md`. The seeded `config/claude/settings.json` therefore sets
   `pluginConfigs."agents-md@builtin".options.instructionFiles` to `"claude-md-and-agents-md"`, which loads
