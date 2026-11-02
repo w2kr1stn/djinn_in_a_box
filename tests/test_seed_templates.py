@@ -74,6 +74,14 @@ def test_claude_settings_json_is_minimal_and_safe() -> None:
         assert key not in raw
 
 
+def test_claude_settings_json_loads_agents_md_beside_claude_md() -> None:
+    settings_path = SEED_ROOT / "config" / "claude" / "settings.json"
+    parsed = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    options = parsed["pluginConfigs"]["agents-md@builtin"]["options"]
+    assert options == {"instructionFiles": "claude-md-and-agents-md"}
+
+
 def test_mcp_servers_json_is_empty_registry() -> None:
     registry: object = json.loads(
         (SEED_ROOT / "config" / "mcp-servers.json").read_text(encoding="utf-8")

@@ -46,6 +46,16 @@ def test_compose_common_environment_forwards_terminal_ui_env() -> None:
     assert common_env["DJINN_TERM_WIDTH"] == "${DJINN_TERM_WIDTH:-}"
 
 
+def test_compose_common_environment_exports_the_workspace_target() -> None:
+    compose_file = project_root() / "docker-compose.yml"
+    compose = yaml.safe_load(compose_file.read_text())
+
+    common_env = compose["x-common-environment"]
+    expected = "${DJINN_WORKSPACE_TARGET:-/home/dev/projects}"
+    assert common_env["DJINN_WORKSPACE_TARGET"] == expected
+    assert compose["services"]["dev"]["working_dir"] == expected
+
+
 def test_compose_dev_keeps_codex_sqlite_in_the_local_overlay() -> None:
     compose_file = project_root() / "docker-compose.yml"
     compose = yaml.safe_load(compose_file.read_text())
