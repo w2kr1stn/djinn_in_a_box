@@ -95,10 +95,36 @@ RUN chmod 0755 /usr/local/bin/djinn-egress-init
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
-# Tooling Setup
-RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-RUN mkdir -p ~/.local/bin && curl -fsSL https://ohmyposh.dev/install.sh | bash -s -- -d ~/.local/bin
-RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$HOME/.local/share/fnm" --skip-shell
+# Tool pins: maintainers bump with ./scripts/update-agents.sh, then build the
+# defaults alone once before committing, as for the agent defaults below.
+ARG OH_MY_ZSH_COMMIT=17a2b4c3a5855524ad4772a17ada0dc474e2fdf3
+ARG OH_MY_ZSH_SHA256=eb6f2788316ff75f9be60c00372da0da97d4bcab202d64a9229e1f6365166932
+ARG OH_MY_POSH_VERSION=31.9.1
+ARG OH_MY_POSH_SHA256=574074a4e84797180e0bda0d133da5f01fbda89ecdb450134c7e566b9a389212
+ARG FNM_VERSION=1.39.0
+ARG FNM_SHA256=7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224
+
+# Tooling Setup: check pinned bytes before extraction or installation.
+RUN scratch=$(mktemp -d) \
+    && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
+    && curl --proto '=https' --proto-redir '=https' -fsSL "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/$OH_MY_ZSH_COMMIT" -o "$scratch/source.tgz" \
+    && printf '%s  %s\n' "$OH_MY_ZSH_SHA256" "$scratch/source.tgz" | sha256sum -c - \
+    && mkdir -p ~/.oh-my-zsh \
+    && tar -xzf "$scratch/source.tgz" --strip-components=1 -C ~/.oh-my-zsh \
+    && rm -rf "$scratch"
+RUN scratch=$(mktemp -d) \
+    && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
+    && curl --proto '=https' --proto-redir '=https' -fsSL "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v$OH_MY_POSH_VERSION/posh-linux-amd64" -o "$scratch/oh-my-posh" \
+    && printf '%s  %s\n' "$OH_MY_POSH_SHA256" "$scratch/oh-my-posh" | sha256sum -c - \
+    && install -D -m 0755 "$scratch/oh-my-posh" ~/.local/bin/oh-my-posh \
+    && rm -rf "$scratch"
+RUN scratch=$(mktemp -d) \
+    && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
+    && curl --proto '=https' --proto-redir '=https' -fsSL "https://github.com/Schniz/fnm/releases/download/v$FNM_VERSION/fnm-linux.zip" -o "$scratch/fnm.zip" \
+    && printf '%s  %s\n' "$FNM_SHA256" "$scratch/fnm.zip" | sha256sum -c - \
+    && unzip -q "$scratch/fnm.zip" -d "$scratch/unpacked" \
+    && install -D -m 0755 "$scratch/unpacked/fnm" ~/.local/share/fnm/fnm \
+    && rm -rf "$scratch"
 
 ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
@@ -111,9 +137,13 @@ ARG CLAUDE_CODE_VERSION=2.1.304
 ARG CODEX_VERSION=0.160.0
 ARG OPENCODE_VERSION=2.1.1
 
-# Claude Code via native installer (no npm/Node.js dependency)
-# Installs to ~/.local/bin/claude (already in the image PATH)
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
+# Claude Code from a signed version manifest (native layout, no npm dependency).
+# dev owns the copy so the RUN below can remove it from the sticky /tmp.
+COPY --chown=dev:dev assistant/install-claude.sh /tmp/install-claude.sh
+RUN sh /tmp/install-claude.sh amd64 "$CLAUDE_CODE_VERSION" "$HOME/.local/share/claude/versions/$CLAUDE_CODE_VERSION" \
+    && mkdir -p ~/.local/bin \
+    && ln -sfn ~/.local/share/claude/versions/$CLAUDE_CODE_VERSION ~/.local/bin/claude \
+    && rm /tmp/install-claude.sh
 
 # Global NPM Packages (remaining agents + dev tools)
 # Retry config is inline (build-scoped, not a persistent ENV) so it is also
@@ -149,6 +179,7 @@ RUN cat > ~/.zshrc << 'EOF'
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
 plugins=(git zsh-autosuggestions docker)
+zstyle ':omz:update' mode disabled
 [[ -f $ZSH/oh-my-zsh.sh ]] && source $ZSH/oh-my-zsh.sh
 eval "$(fnm env --use-on-cd --shell zsh)"
 eval "$(uv generate-shell-completion zsh)"

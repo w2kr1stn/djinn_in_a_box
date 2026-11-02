@@ -1,9 +1,12 @@
 """Offline tests of the real Bash resolver and maintainer mode."""
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PINS = {"CLAUDE_CODE_VERSION": "2.1.300", "CODEX_VERSION": "0.161.0",
         "OPENCODE_VERSION": "2.0.25"}
+TOOL_PINS = {"OH_MY_ZSH_COMMIT": "a" * 40,
+             "OH_MY_ZSH_SHA256": hashlib.sha256(b"fixture archive bytes").hexdigest(),
+             "OH_MY_POSH_VERSION": "31.9.2", "OH_MY_POSH_SHA256": "b" * 64,
+             "FNM_VERSION": "1.39.1", "FNM_SHA256": "c" * 64}
+TOOL_DEFAULTS = {name: "1" * (40 if name.endswith("COMMIT") else 64)
+                 if not name.endswith("VERSION") else "1.0.0" for name in TOOL_PINS}
+
 NPM_FAILURE = (
     "npm error code EAI_AGAIN\n"
     "npm error syscall getaddrinfo\n"
@@ -32,6 +42,7 @@ def script_env(tmp_path):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
     (project / "Dockerfile").write_text(
         "ARG CLAUDE_CODE_VERSION=2.1.288\nARG CODEX_VERSION=0.160.0\nARG OPENCODE_VERSION=1.18.34\n"
+        + "".join(f"ARG {name}={value}\n" for name, value in TOOL_DEFAULTS.items())
     )
     (project / ".gitignore").write_text("config/\npackages.txt\ntools/\n")
     (project / "config").mkdir()
@@ -69,6 +80,47 @@ def script_env(tmp_path):
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "npm_calls": str(calls),
            "TERM": "dumb", "NO_COLOR": "1",
            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    curl_data = tmp_path / "curl-data.json"
+    curl_data.write_text(json.dumps({
+        "https://api.github.com/repos/JanDeDobbeleer/oh-my-posh/releases/latest":
+            json.dumps({"tag_name": "v31.9.2"}),
+        "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v31.9.2/checksums.txt":
+            "b" * 64 + "  posh-linux-amd64\n",
+        "https://api.github.com/repos/Schniz/fnm/releases/latest": json.dumps({
+            "tag_name": "v1.39.1",
+            "assets": [{"name": "fnm-linux.zip", "digest": "sha256:" + "c" * 64}]}),
+        "https://api.github.com/repos/ohmyzsh/ohmyzsh/commits/master":
+            json.dumps({"sha": "a" * 40}),
+        "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/" + "a" * 40: "fixture archive bytes",
+    }))
+    env.update(curl_data=str(curl_data), curl_calls=str(tmp_path / "curl-calls"))
+    curl = bindir / "curl"
+    curl.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['curl_calls'], 'a') as f: f.write(json.dumps(args) + '\\n')\n"
+        "for flag in ['--proto', '--proto-redir']:\n"
+        "    assert args[args.index(flag) + 1] == '=https'\n"
+        "url = next(a for a in args if a.startswith('https://'))\n"
+        "data = json.load(open(os.environ['curl_data']))\n"
+        "if url not in data:\n"
+        "    print('curl: (22) The requested URL returned error: 404', file=sys.stderr)\n"
+        "    sys.exit(22)\n"
+        "if data[url] is None:\n"
+        "    print('curl: (6) Could not resolve host: api.github.com', file=sys.stderr)\n"
+        "    sys.exit(6)\n"
+        "if '-o' in args: Path(args[args.index('-o') + 1]).write_text(data[url])\n"
+        "else: sys.stdout.write(data[url])\n"
+        "if os.environ.get('curl_failure') == url:\n"
+        "    print('curl: (22) The requested URL returned error: 500', file=sys.stderr)\n"
+        "    sys.exit(22)\n"
+    )
+    curl.chmod(0o755)
+    git = bindir / "git"
+    git.write_text('#!/bin/sh\nprintf "diff --git a/Dockerfile b/Dockerfile\\n"\n')
+    git.chmod(0o755)
     return project, env, calls
 
 
@@ -89,7 +141,7 @@ def test_print_outputs_exact_agent_set_without_writes(script_env):
     before = snapshot(project)
     forbidden_calls = Path(env["npm_calls"]).parent / "forbidden-calls"
     env["forbidden_calls"] = str(forbidden_calls)
-    for name in ("grep", "sed", "git"):
+    for name in ("grep", "sed", "git", "curl"):
         executable = Path(env["npm_calls"]).parent / "bin" / name
         executable.write_text(
             '#!/bin/bash\nprintf "%s\\n" "$0 $*" >> "$forbidden_calls"\nexit 1\n'
@@ -133,7 +185,7 @@ def test_print_failure_exits_nonzero_without_writes(script_env, failure):
         assert "npm: command not found" in result.stderr
     else:
         assert "Invalid version format" in result.stderr
-    assert all(re.fullmatch(r"[A-Z_]+=[0-9]+\.[0-9]+\.[0-9]+", line)
+    assert all(re.fullmatch(r"[A-Z0-9_]+=[0-9]+\.[0-9]+\.[0-9]+", line)
                for line in result.stdout.splitlines())
     assert snapshot(project) == before
 
@@ -163,7 +215,7 @@ def test_maintainer_mode_updates_temp_dockerfile(script_env):
     result = run_script(project, env)
     assert result.returncode == 0, result.stderr
     assert (project / "Dockerfile").read_text() == "".join(
-        f"ARG {arg}={value}\n" for arg, value in PINS.items()
+        f"ARG {arg}={value}\n" for arg, value in {**PINS, **TOOL_PINS}.items()
     )
     assert "Dockerfile updated!" in result.stdout
     assert "diff --git" in result.stdout
@@ -216,7 +268,7 @@ def test_print_preserves_redirected_output_and_diagnostics(script_env, redirect)
     assert log.count("npm notice New major version of npm available!") == 3
     if redirect == "combined":
         assert result.returncode == 0
-        assert {line for line in log.splitlines() if re.fullmatch(r"[A-Z_]+=[0-9.]+", line)} == {
+        assert {line for line in log.splitlines() if re.fullmatch(r"[A-Z0-9_]+=[0-9.]+", line)} == {
             f"{arg}={value}" for arg, value in PINS.items()
         }
     else:
@@ -226,3 +278,160 @@ def test_print_preserves_redirected_output_and_diagnostics(script_env, redirect)
             arg: value for arg, value in PINS.items() if arg != "CODEX_VERSION"
         }
     assert snapshot(project) == before
+
+
+def dockerfile_pins(project):
+    return dict(re.findall(r"^ARG ([A-Z0-9_]+)=(.*)$", (project / "Dockerfile").read_text(), re.M))
+
+
+@pytest.mark.parametrize("tool,problem", [
+    ("oh-my-posh", "newline"), ("oh-my-posh", "nul"),
+    ("oh-my-posh", "bad-tag"), ("oh-my-posh", "missing"), ("oh-my-posh", "duplicate"),
+    ("oh-my-posh", "bad-hash"), ("oh-my-posh", "extra-field"), ("oh-my-posh", "network"),
+    ("fnm", "newline"), ("fnm", "nul"),
+    ("fnm", "bad-tag"), ("fnm", "missing"), ("fnm", "duplicate"),
+    ("fnm", "digest-newline"),
+    ("fnm", "bad-hash"), ("fnm", "wrong-algorithm"), ("fnm", "null-digest"),
+    ("oh-my-zsh", "newline"), ("oh-my-zsh", "nul"),
+    ("oh-my-zsh", "bad-commit"), ("oh-my-zsh", "network"),
+    ("oh-my-zsh", "archive-failure"),
+])
+def test_failed_tool_pair_is_unchanged_while_other_pairs_update(script_env, tool, problem):
+    project, env, _ = script_env
+    datafile = Path(env["curl_data"])
+    data = json.loads(datafile.read_text())
+    apis = {"oh-my-posh": "https://api.github.com/repos/JanDeDobbeleer/oh-my-posh/releases/latest",
+            "fnm": "https://api.github.com/repos/Schniz/fnm/releases/latest",
+            "oh-my-zsh": "https://api.github.com/repos/ohmyzsh/ohmyzsh/commits/master"}
+    api = apis[tool]
+    release = json.loads(data[api])
+    if problem in {"newline", "nul"}:
+        field = "sha" if tool == "oh-my-zsh" else "tag_name"
+        release[field] += "\n" if problem == "newline" else "\x00"
+    elif problem == "bad-tag":
+        release["tag_name"] = "v1.2.3-beta"
+        if tool == "oh-my-posh":
+            url = ("https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/"
+                   "v1.2.3-beta/checksums.txt")
+            data[url] = "b" * 64 + "  posh-linux-amd64\n"
+    elif tool == "oh-my-posh" and problem != "network":
+        url = "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v31.9.2/checksums.txt"
+        good = data[url]
+        data[url] = {"missing": "b" * 64 + "  other-binary\n", "duplicate": good * 2,
+                     "bad-hash": "z" * 64 + "  posh-linux-amd64\n",
+                     "extra-field": good.strip() + " trailing\n"}[problem]
+    elif tool == "fnm":
+        asset = release["assets"][0]
+        if problem == "missing":
+            asset["name"] = "fnm-arm64.zip"
+        elif problem == "duplicate":
+            release["assets"].append(asset.copy())
+        else:
+            asset["digest"] = {"bad-hash": "sha256:" + "G" * 64,
+                               "wrong-algorithm": "sha512:" + "c" * 64,
+                               "null-digest": None,
+                               "digest-newline": "sha256:" + "c" * 64 + "\n"}[problem]
+    elif problem == "bad-commit":
+        release["sha"] = "a" * 39
+        url = "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/" + "a" * 39
+        data[url] = "fixture archive bytes"
+    data[api] = None if problem == "network" else json.dumps(release)
+    if problem == "archive-failure":
+        data.pop("https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/" + "a" * 40)
+    datafile.write_text(json.dumps(data))
+    before = dockerfile_pins(project)
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert f"{tool}:" in result.stderr
+    prefix = {"oh-my-posh": "OH_MY_POSH_", "fnm": "FNM_", "oh-my-zsh": "OH_MY_ZSH_"}[tool]
+    expected = {**PINS, **TOOL_PINS}
+    for name in TOOL_PINS:
+        if name.startswith(prefix):
+            expected[name] = before[name]
+    assert dockerfile_pins(project) == expected
+
+
+@pytest.mark.parametrize("partner", list(TOOL_PINS))
+@pytest.mark.parametrize("problem", ["missing", "duplicate", "noncanonical"])
+def test_pair_requires_one_canonical_line_for_each_partner(script_env, partner, problem):
+    project, env, _ = script_env
+    dockerfile = project / "Dockerfile"
+    original = dockerfile.read_text()
+    line = f"ARG {partner}={TOOL_DEFAULTS[partner]}\n"
+    replacement = {"missing": "", "duplicate": line * 2,
+                   "noncanonical": "  " + line}[problem]
+    dockerfile.write_text(original.replace(line, replacement))
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert "Expected exactly one canonical ARG" in result.stderr
+    prefix = partner.rsplit("_", 1)[0] + "_"
+    # For both the duplicated/missing line and its partner, preserve the exact bytes.
+    before_lines = [s for s in (original.replace(line, replacement)).splitlines(True)
+                    if prefix in s]
+    after_lines = [s for s in dockerfile.read_text().splitlines(True) if prefix in s]
+    assert after_lines == before_lines
+    for name, value in TOOL_PINS.items():
+        if not name.startswith(prefix):
+            assert f"ARG {name}={value}\n" in dockerfile.read_text()
+
+
+def test_tool_hash_change_at_same_version_updates_the_whole_pair(script_env):
+    project, env, _ = script_env
+    dockerfile = project / "Dockerfile"
+    for name in TOOL_PINS:
+        if name.endswith(("VERSION", "COMMIT")):
+            dockerfile.write_text(dockerfile.read_text().replace(
+                f"ARG {name}={TOOL_DEFAULTS[name]}", f"ARG {name}={TOOL_PINS[name]}"))
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert dockerfile_pins(project) == {**PINS, **TOOL_PINS}
+
+
+def test_each_pair_uses_one_sed_write_with_both_anchored_expressions(script_env):
+    project, env, _ = script_env
+    bindir = Path(env["npm_calls"]).parent / "bin"
+    sed = bindir / "sed"
+    env["sed_calls"] = str(bindir.parent / "sed-calls")
+    sed.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$sed_calls"\n'
+        f'exec {shutil.which("sed")} "$@"\n'
+    )
+    sed.chmod(0o755)
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    calls = Path(env["sed_calls"]).read_text().splitlines()
+    for prefix in ("OH_MY_POSH", "OH_MY_ZSH", "FNM"):
+        matching = [line for line in calls if f"s/^ARG {prefix}_" in line]
+        assert len(matching) == 1
+        assert f"ARG {prefix}_SHA256=" in matching[0]
+        assert f"ARG {prefix}_{'COMMIT' if prefix == 'OH_MY_ZSH' else 'VERSION'}=" in matching[0]
+        assert matching[0].count("-e s/^ARG ") == 2
+
+
+def test_tool_arg_names_match_real_dockerfile():
+    script = (ROOT / "scripts/update-agents.sh").read_text()
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    names = set(re.findall(r"(?:arg_name|hash_name)=((?:OH_MY_|FNM_)[A-Z0-9_]+)", script))
+    assert names == set(TOOL_PINS)
+    for name in names:
+        assert len(re.findall(rf"^ARG {name}=", dockerfile, re.M)) == 1
+
+
+@pytest.mark.parametrize("url,tool", [
+    ("https://api.github.com/repos/JanDeDobbeleer/oh-my-posh/releases/latest", "oh-my-posh"),
+    ("https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v31.9.2/checksums.txt",
+     "oh-my-posh"),
+    ("https://api.github.com/repos/Schniz/fnm/releases/latest", "fnm"),
+    ("https://api.github.com/repos/ohmyzsh/ohmyzsh/commits/master", "oh-my-zsh"),
+    ("https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/" + "a" * 40, "oh-my-zsh"),
+])
+def test_curl_error_with_valid_partial_output_keeps_pair(script_env, url, tool):
+    project, env, _ = script_env
+    env["curl_failure"] = url
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert f"{tool}: Failed to resolve pin pair" in result.stderr
+    prefix = {"oh-my-posh": "OH_MY_POSH_", "fnm": "FNM_", "oh-my-zsh": "OH_MY_ZSH_"}[tool]
+    for name, value in TOOL_DEFAULTS.items():
+        if name.startswith(prefix):
+            assert dockerfile_pins(project)[name] == value

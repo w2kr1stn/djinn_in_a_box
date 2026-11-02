@@ -1878,6 +1878,10 @@ cannot perform.
 audio clients, `notify-send`, D-Bus clients, optional packages from `packages.txt`, Docker CLI,
 Compose plugin, GitHub CLI, uv, a non-root `dev` user, zsh setup, Node via fnm,
 and the supported coding agent CLIs.
+The oh-my-zsh, oh-my-posh and fnm downloads are checked against paired Dockerfile
+pins before extraction or installation; both images use `assistant/install-claude.sh`
+to authenticate Claude's version manifest against its pinned primary release-key
+fingerprint and verify the binary checksum before installation.
 
 Runtime package delivery is added after the build-time `RUN apt-get` steps.
 The user-creation `RUN` adds
@@ -2407,7 +2411,7 @@ agent uses the shared effective version policy, independent of AppConfig
 recovery; `DOCKER_VERSION` stays an upstream-only Dockerfile pin.
 An invalid complete record aborts before image inspection/build even if the bad
 entry belongs to another agent. One content label covers the effective selected
-version, agent, Dockerfile/runtime bytes, host
+version, agent, Dockerfile/runtime and installer bytes, host
 platform/UID/GID and build network. First use or a changed label rebuilds via
 buildx; a failed build aborts. Launch uses the inspected immutable image ID.
 

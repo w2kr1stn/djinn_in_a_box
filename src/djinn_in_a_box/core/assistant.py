@@ -173,7 +173,7 @@ def ensure_image(project: Path, agent: AssistantAgent, platform: str, network: s
         [agent, version, docker_version, platform, network, os.getuid(), os.getgid()]
     )
     digest = hashlib.sha256(content.encode())
-    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh"):
+    for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh", "install-claude.sh"):
         digest.update((context / name).read_bytes())
     fingerprint = digest.hexdigest()
     image = inspect("image", ASSISTANT_IMAGE)
