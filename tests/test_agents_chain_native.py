@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import threading
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -355,6 +355,15 @@ def assert_once(payload: object, markers: tuple[str, ...] = CHAIN) -> None:
     assert counts(payload, markers) == dict.fromkeys(markers, 1)
 
 
+def continuation(requests: list[Any], is_summary: Callable[[Any], bool]) -> Any:
+    """Return the first model request after the compaction summary; it carries the summary."""
+    summaries = [index for index, body in enumerate(requests) if is_summary(body)]
+    assert summaries, "the CLI never compacted"
+    later = [body for body in requests[summaries[0] + 1 :] if "FAKE-SUMMARY" in json.dumps(body)]
+    assert later, "no model request continued after the compaction"
+    return later[0]
+
+
 # --- tests -------------------------------------------------------------------------------------
 
 
@@ -379,7 +388,8 @@ def test_child_env_drops_outer_profile_redirections(
 def test_codex_native_rule_stops_at_the_git_root(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CODEX_SQLITE_HOME", str(root / "outer" / "sqlite"))
+    for name in ("CODEX_SQLITE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"):
+        monkeypatch.setenv(name, str(root / "outer" / name.lower()))
     (root / "home" / ".codex").mkdir()
     out = run_cli(["codex", "debug", "prompt-input"], codex_env(root), work_dir(root))
     found = counts(out)
@@ -419,9 +429,10 @@ def test_codex_hook_adds_the_chain_once_at_start_and_after_compaction(
     ]  # fmt: skip
     run_cli(argv, codex_env(root), work_dir(root))
     requests = fake.requests("/responses")
-    assert any("CONTEXT CHECKPOINT COMPACTION" in json.dumps(body) for body in requests)
     assert_once(requests[0])
-    assert_once(requests[-1])
+    assert_once(
+        continuation(requests, lambda body: "CONTEXT CHECKPOINT COMPACTION" in json.dumps(body))
+    )
 
 
 def last_user_text(body: dict[str, Any]) -> str:
@@ -519,6 +530,5 @@ def test_opencode_loads_the_chain_natively_once_before_and_after_compaction(
         if "You name conversations"
         not in json.dumps([m for m in body["messages"] if m["role"] == "system"])
     ]
-    assert any(wants_summary(body) for body in requests)
     assert_once(requests[0])
-    assert_once(requests[-1])
+    assert_once(continuation(requests, wants_summary))
