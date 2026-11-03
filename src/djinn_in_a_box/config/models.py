@@ -198,7 +198,7 @@ class ServeConfig(BaseModel):
     """Host loopback port published for OpenCode; the container port stays fixed."""
 
 
-WorkspaceMode = Literal["aios", "projects"]
+WorkspaceMode = Literal["aimi", "projects"]
 AssistantAgent = Literal["claude", "codex", "opencode"]
 
 
@@ -223,7 +223,7 @@ class AppConfig(BaseModel):
     """Host workspace root selected by the workspace mode. Required."""
 
     workspace: WorkspaceMode = "projects"
-    """Select an AIOS root or a standalone projects directory."""
+    """Select an aimi root or a standalone projects directory."""
 
     timezone: str = "UTC"
     """Container timezone (TZ environment variable)."""

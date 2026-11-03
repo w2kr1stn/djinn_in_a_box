@@ -109,6 +109,15 @@ class TestLoadConfig:
         assert config.config_sync.source == "claude"
         assert config.serve.opencode_host_port == 49380
 
+    def test_rejects_old_workspace_mode(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(f'[general]\ncode_dir = "{tmp_path}"\nworkspace = "aios"\n')
+
+        with pytest.raises(ConfigValidationError) as exc_info:
+            load_config(config_file)
+
+        assert "workspace: Input should be 'aimi' or 'projects'" in str(exc_info.value)
+
     @pytest.mark.parametrize("port", ["1023", "65536", '"abc"'])
     def test_rejects_invalid_serve_port(self, valid_config_toml: Path, port: str) -> None:
         with valid_config_toml.open("a", encoding="utf-8") as config_file:
@@ -706,7 +715,7 @@ class TestSaveConfig:
 
     def test_saves_config_to_file(self, tmp_path: Path, sample_code_dir: Path) -> None:
         """Should save AppConfig to TOML file."""
-        config = AppConfig(code_dir=sample_code_dir, workspace="aios", timezone="UTC")
+        config = AppConfig(code_dir=sample_code_dir, workspace="aimi", timezone="UTC")
         output_path = tmp_path / "output.toml"
 
         save_config(config, output_path)
@@ -718,7 +727,7 @@ class TestSaveConfig:
         assert 'source = "claude"' in content
         assert "UTC" in content
         data = tomllib.loads(content)
-        assert data["general"]["workspace"] == "aios"
+        assert data["general"]["workspace"] == "aimi"
         assert "workspace" not in data
         assert "workspace_target" not in content
         assert load_config(output_path) == config
