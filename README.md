@@ -618,6 +618,31 @@ Compose Claude is manifestless and uses direct mounts, including `AGENTS.md`,
 together with the existing settings merge. The publisher never writes into the
 Compose Claude runtime root.
 
+### Workspace AGENTS.md chain
+
+In the dev container the workspace root is the mount target `/home/dev/<workspace>`; Compose also exports it as
+`DJINN_WORKSPACE_TARGET`. `AGENTS.md` files on the path from that root down to the working directory, for example at
+an account or group level above a repository, often carry binding rules. Each tool loads them differently:
+
+- **Codex** loads `AGENTS.md` only from the repository's Git root down. The dev image registers a `SessionStart`
+  hook in Codex's system configuration (`/etc/codex/config.toml`) that adds the `AGENTS.md` files between the
+  workspace root and the Git root at startup, after `/clear` and after a compaction. Resumed and forked sessions
+  already carry them and get nothing new. The hook is always active in the Djinn image and runs without a
+  hook-trust prompt; your own Codex hooks run alongside it. It only emits `AGENTS.md` files between the workspace
+  root and the Git root, reads nothing else, and caps its output at 64 KiB; a file that does not fit is named
+  instead of included.
+- **Claude Code** loads the whole chain itself, but by default one project `CLAUDE.md` anywhere on the path makes it
+  skip every `AGENTS.md`. The seeded `config/claude/settings.json` therefore sets
+  `pluginConfigs."agents-md@builtin".options.instructionFiles` to `"claude-md-and-agents-md"`, which loads
+  `AGENTS.md` beside `CLAUDE.md` and never loads an imported file twice. The setting is yours: change or remove it
+  in your workflow source, or override the value in `settings.local.json`.
+- **OpenCode** loads `AGENTS.md` from the working directory up to `$HOME`, which covers the whole chain in the
+  container; Djinn adds nothing.
+
+These rules were measured with Claude Code 2.1.316, Codex 0.166.0 and OpenCode 2.2.5.
+`tests/test_agents_chain_native.py` re-checks them against the installed CLIs; it runs in the dev container and is
+skipped where a CLI is missing.
+
 ## Doctor
 
 Run:
@@ -706,7 +731,7 @@ Only `djinn init` and `djinn doctor --fix` copy missing seed targets from
 | Seed source | Local target | Purpose |
 | --- | --- | --- |
 | `templates/seed/config/claude/AGENTS.md` | `config/claude/AGENTS.md` | neutral global instructions with the per-directory `.agents/` convention |
-| `templates/seed/config/claude/settings.json` | `config/claude/settings.json` | minimal Claude Code settings |
+| `templates/seed/config/claude/settings.json` | `config/claude/settings.json` | minimal Claude Code settings; loads `AGENTS.md` beside `CLAUDE.md` |
 | `templates/seed/config/claude/skills/` | `config/claude/skills/` | empty local skills directory |
 | `templates/seed/config/claude/commands/` | `config/claude/commands/` | empty local commands directory |
 | `templates/seed/config/claude/agents/` | `config/claude/agents/` | empty local Claude subagent directory |
@@ -1988,7 +2013,10 @@ local version replaces a default, run `djinn build`, and commit the bump only
 after that build succeeds. CI does not build the image.
 The script's `--print` mode resolves versions without editing files. After a
 Claude Code bump, also run `scripts/probe-claude-isolated.py`; see
-[Re-probing the isolation](#re-probing-the-isolation).
+[Re-probing the isolation](#re-probing-the-isolation). After any agent bump, run
+`uv run pytest -q tests/test_agents_chain_native.py` in the dev container; it
+fails when a measured instruction-loading rule changes (see
+[Workspace AGENTS.md chain](#workspace-agentsmd-chain)).
 
 ## Typical Workflows
 

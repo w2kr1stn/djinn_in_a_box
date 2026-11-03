@@ -1,0 +1,8 @@
+# Load workspace instructions via a hook; installed as /etc/codex/config.toml, Codex's system config layer.
+[[hooks.SessionStart]]
+matcher = "startup|clear|compact"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "python3 /usr/local/libexec/djinn-agents-chain.py"
+additionalContextLimit = 65536
