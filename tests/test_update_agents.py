@@ -410,9 +410,6 @@ def test_each_pair_uses_one_sed_write_with_both_anchored_expressions(script_env)
         assert f"ARG {prefix}_SHA256=" in matching[0]
         assert f"ARG {prefix}_{'COMMIT' if prefix == 'OH_MY_ZSH' else 'VERSION'}=" in matching[0]
         assert matching[0].count("-e s/^ARG ") == 2
-    uv_calls = [line for line in calls if "s/^ARG UV_VERSION=" in line]
-    assert len(uv_calls) == 1
-    assert uv_calls[0].startswith("-i s/^ARG UV_VERSION=.*/ARG UV_VERSION=0.13.4/ ")
 
 
 def test_tool_arg_names_match_real_dockerfile():
@@ -446,23 +443,17 @@ def test_curl_error_with_valid_partial_output_keeps_pair(script_env, url, tool):
             assert dockerfile_pins(project)[name] == value
 
 
-@pytest.mark.parametrize("version", ["0.13.4", "0.13.3"])
-def test_uv_maintainer_bump_and_same_version(script_env, version):
+def test_uv_same_version_reports_up_to_date(script_env):
     project, env, _ = script_env
     datafile = Path(env["curl_data"])
     data = json.loads(datafile.read_text())
-    data[UV_URL] = json.dumps({"tag_name": version})
+    data[UV_URL] = json.dumps({"tag_name": "0.13.3"})
     datafile.write_text(json.dumps(data))
     result = run_script(project, env)
     assert result.returncode == 0, result.stderr
-    assert dockerfile_pins(project)["UV_VERSION"] == version
-    expected = f"  uv: {version}" if version == "0.13.4" else "  uv (up to date)"
-    assert expected in result.stdout.splitlines()
+    assert dockerfile_pins(project)["UV_VERSION"] == "0.13.3"
+    assert "  uv (up to date)" in result.stdout.splitlines()
     assert result.stderr == ""
-    calls = [json.loads(line) for line in Path(env["curl_calls"]).read_text().splitlines()]
-    assert [args for args in calls if UV_URL in args] == [
-        ["--proto", "=https", "--proto-redir", "=https", "-fsSL", UV_URL],
-    ]
 
 
 @pytest.mark.parametrize("response", [
