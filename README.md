@@ -1606,7 +1606,8 @@ is a positive integer in seconds, defaults to 300, and requires `--wait`.
 The command polls status every second and prints the enrollment login link
 once when available. Without `--wait`, `on` returns after starting the helper.
 Exit codes are 0 when open, 1 if the window closes, the generation changes or
-status cannot be read, 124 on timeout, and 130 on Ctrl-C. Invalid options exit
+the status check itself fails, 124 on timeout, and 130 on Ctrl-C. Read errors
+reported while the window is still opening are retried; a timeout names the last one. Invalid options exit
 with 2. Timeout and Ctrl-C stop waiting and leave the window open; an observer
 gap is reported but does not prevent a successful open result. `--wait` confirms
 relay readiness; `djinn hostctl check [HOST]` remains the SSH proof and shows
