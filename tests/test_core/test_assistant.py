@@ -334,14 +334,21 @@ def test_docker_checksum_changes_fingerprint(installation, name):
 
 
 @pytest.mark.parametrize("pin", ("duplicate", "malformed", "missing"))
-@pytest.mark.parametrize("name", (
-    "CODEX_VERSION", "DOCKER_VERSION", "DOCKER_SHA256_AMD64", "DOCKER_SHA256_ARM64",
-))
+@pytest.mark.parametrize(
+    "name",
+    (
+        "CODEX_VERSION",
+        "DOCKER_VERSION",
+        "DOCKER_SHA256_AMD64",
+        "DOCKER_SHA256_ARM64",
+    ),
+)
 def test_invalid_pins_abort(installation, pin, name):
     f = installation
     path = f.project / "Dockerfile"
     default = next(
-        line.split("=", 1)[1] for line in path.read_text().splitlines()
+        line.split("=", 1)[1]
+        for line in path.read_text().splitlines()
         if line.startswith(f"ARG {name}=")
     )
     value = {

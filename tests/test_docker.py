@@ -4531,11 +4531,15 @@ class TestVerifiedBuildInstallers:
         from djinn_in_a_box.config.declarations import DJINN_ENV_KEYS
 
         assert {
-            "DOCKER_SHA256_AMD64", "DOCKER_SHA256_ARM64", "COMPOSE_SHA256", "GH_SHA256",
+            "DOCKER_SHA256_AMD64",
+            "DOCKER_SHA256_ARM64",
+            "COMPOSE_SHA256",
+            "GH_SHA256",
         } <= DJINN_ENV_KEYS
 
     @pytest.mark.parametrize(
-        "filename", ["Dockerfile", "assistant/Dockerfile", "assistant/install-claude.sh"],
+        "filename",
+        ["Dockerfile", "assistant/Dockerfile", "assistant/install-claude.sh"],
     )
     def test_verified_curl_flags(self, filename):
         text = (Path(__file__).parents[1] / filename).read_text()
