@@ -839,21 +839,31 @@ def test_runtime_publish_rechecks_native_only_input_after_delivery_view_load(
     assert (target.destination_root / RUNTIME_MANIFEST_NAME).read_bytes() == before_manifest
 
 
-def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) -> None:
+def _claude_hook_value(event, *, host=False):
+    filename = "security_reminder_hook.py" if event == "PreToolUse" else "ready_notify_hook.py"
+    command = f"python3 ~/.claude_seed/{filename}"
+    if host:
+        command = workflow_module._CLAUDE_HOOK_COMMANDS[command]
+    return [
+        {
+            "matcher": "Edit|Write" if event == "PreToolUse" else "",
+            "hooks": [{"type": "command", "command": command}],
+        }
+    ]
+
+
+@pytest.mark.parametrize("event", ["PreToolUse", "Stop"])
+@pytest.mark.parametrize("case", ["seed", "host", "extra", "unmapped"])
+def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path, event, case) -> None:
     _project, config_path, _runtime = _workspace(tmp_path)
     config = workflow_module.load_config(config_path)
+    seed = _claude_hook_value(event, host=case == "host")
+    if case == "extra":
+        seed.append({"matcher": "Read", "hooks": [{"type": "command", "command": "echo extra"}]})
+    if case == "unmapped":
+        seed[0]["hooks"][0]["command"] = "python3 ~/.claude_seed/custom.py"
     seed_value = json.dumps(
-        [
-            {
-                "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "python3 ~/.claude_seed/ready_notify_hook.py",
-                    }
-                ],
-            }
-        ],
+        seed,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -861,7 +871,7 @@ def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) ->
         "claude",
         (),
         (
-            CarrierFragment(PurePosixPath("settings.json"), ("hooks", "Stop"), seed_value),
+            CarrierFragment(PurePosixPath("settings.json"), ("hooks", event), seed_value),
             CarrierFragment(
                 PurePosixPath("settings.json"),
                 ("operator", "keep"),
@@ -876,8 +886,14 @@ def test_host_claude_profile_rewrites_only_managed_hook_paths(tmp_path: Path) ->
         view,
     )
 
+    if case == "unmapped":
+        assert bridged is None
+        return
     assert bridged is not None
-    assert b"~/.claude/ready_notify_hook.py" in bridged.fragments[0].value_json
+    expected = _claude_hook_value(event, host=True)
+    if case == "extra":
+        expected.append(seed[-1])
+    assert json.loads(bridged.fragments[0].value_json) == expected
     assert bridged.fragments[1] == view.fragments[1]
     assert CANONICAL_REMEDY == (
         "Author or edit the artifact natively in the target tool's view, "
@@ -943,13 +959,11 @@ def test_managed_hook_commands_never_sync_the_working_directory_project() -> Non
     # `uv run` would create a venv and build any Python project in the agent's cwd.
     from djinn_in_a_box.core import config_workflow
 
-    rewrites = config_workflow._CLAUDE_HOOK_REWRITES  # pyright: ignore[reportPrivateUsage]
+    rewrites = config_workflow._CLAUDE_HOOK_COMMANDS  # pyright: ignore[reportPrivateUsage]
     assert rewrites
-    for container_form, host_form in rewrites.values():
-        for raw in (container_form, host_form):
-            for entry in json.loads(raw):
-                for hook in entry["hooks"]:
-                    assert hook["command"].startswith("python3 "), hook["command"]
+    for container_form, host_form in rewrites.items():
+        for command in (container_form, host_form):
+            assert command.startswith("python3 "), command
 
 
 @pytest.fixture
@@ -964,11 +978,7 @@ def host_case(tmp_path):
     (source / "settings.json").write_bytes(
         workflow_module._canonical_json(
             {
-                "hooks": {
-                    "PreToolUse": json.loads(
-                        workflow_module._CLAUDE_HOOK_REWRITES[("hooks", "PreToolUse")][0]
-                    )
-                },
+                "hooks": {"PreToolUse": _claude_hook_value("PreToolUse")},
             }
         )
     )
@@ -1068,7 +1078,7 @@ def test_host_first_review_and_cached_confirmation(host_case, monkeypatch):
     assert (
         fragment.content_hash
         == hashlib.sha256(
-            workflow_module._CLAUDE_HOOK_REWRITES[("hooks", "PreToolUse")][1]
+            workflow_module._canonical_json(_claude_hook_value("PreToolUse", host=True))
         ).hexdigest()
     )
     record = workflow_module.HOST_WORKFLOW_TRUST_FILE
@@ -1920,9 +1930,7 @@ def test_host_printed_restore_actions_work_without_deleting_manifest(host_case, 
     retired.parent.mkdir()
     retired.write_text("---\nname: retired\ndescription: Old agent\n---\n\nRetire me.\n")
     settings = json.loads((source / "settings.json").read_bytes())
-    settings["hooks"]["Stop"] = json.loads(
-        workflow_module._CLAUDE_HOOK_REWRITES[("hooks", "Stop")][0]
-    )
+    settings["hooks"]["Stop"] = _claude_hook_value("Stop")
     (source / "settings.json").write_text(json.dumps(settings))
     assert _host_prepare(host_case, lambda review: True).success
     root = target.destination_root
@@ -1975,9 +1983,7 @@ def test_host_printed_restore_actions_work_without_deleting_manifest(host_case, 
             "restore the value of hooks.PreToolUse "
             "in config/claude/settings.json with ~/.claude/ in place of ~/.claude_seed/"
         )
-        personal["hooks"]["PreToolUse"] = json.loads(
-            workflow_module._CLAUDE_HOOK_REWRITES[("hooks", "PreToolUse")][1]
-        )
+        personal["hooks"]["PreToolUse"] = _claude_hook_value("PreToolUse", host=True)
         (root / "settings.json").write_text(json.dumps(personal))
     else:
         assert path is not None

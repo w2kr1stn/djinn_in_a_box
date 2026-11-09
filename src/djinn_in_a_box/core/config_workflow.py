@@ -68,64 +68,27 @@ def _canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-_CLAUDE_HOOK_REWRITES: dict[tuple[str, ...], tuple[bytes, bytes]] = {
-    ("hooks", "PreToolUse"): (
-        _canonical_json(
-            [
-                {
-                    "matcher": "Edit|Write",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "python3 ~/.claude_seed/security_reminder_hook.py",
-                        }
-                    ],
-                }
-            ]
-        ),
-        _canonical_json(
-            [
-                {
-                    "matcher": "Edit|Write",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "python3 ~/.claude/security_reminder_hook.py",
-                        }
-                    ],
-                }
-            ]
-        ),
+_CLAUDE_HOOK_EVENTS = frozenset({("hooks", "PreToolUse"), ("hooks", "Stop")})
+_CLAUDE_HOOK_COMMANDS = {
+    "python3 ~/.claude_seed/security_reminder_hook.py": (
+        "python3 ~/.claude/security_reminder_hook.py"
     ),
-    ("hooks", "Stop"): (
-        _canonical_json(
-            [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "python3 ~/.claude_seed/ready_notify_hook.py",
-                        }
-                    ],
-                }
-            ]
-        ),
-        _canonical_json(
-            [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "python3 ~/.claude/ready_notify_hook.py",
-                        }
-                    ],
-                }
-            ]
-        ),
-    ),
+    "python3 ~/.claude_seed/ready_notify_hook.py": "python3 ~/.claude/ready_notify_hook.py",
 }
+
+
+def _rewrite_claude_hook_commands(value_json: bytes) -> bytes | None:
+    def rewrite(value: object) -> object:
+        if isinstance(value, str):
+            return _CLAUDE_HOOK_COMMANDS.get(value, value)
+        if isinstance(value, list):
+            return [rewrite(item) for item in cast(list[object], value)]
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in cast(dict[str, object], value).items()}
+        return value
+
+    result = _canonical_json(rewrite(json.loads(value_json)))
+    return None if b".claude_seed/" in result else result
 
 
 @dataclass(frozen=True, slots=True)
@@ -896,12 +859,14 @@ def _delivery_view(
         return build_view
     fragments: list[CarrierFragment] = []
     for fragment in build_view.fragments:
-        replacement = _CLAUDE_HOOK_REWRITES.get(fragment.key_path)
-        if fragment.carrier_path.as_posix() == "settings.json" and replacement is not None:
-            if fragment.value_json == replacement[0]:
-                fragment = CarrierFragment(fragment.carrier_path, fragment.key_path, replacement[1])
-            elif fragment.value_json != replacement[1]:
+        if (
+            fragment.carrier_path.as_posix() == "settings.json"
+            and fragment.key_path in _CLAUDE_HOOK_EVENTS
+        ):
+            replacement = _rewrite_claude_hook_commands(fragment.value_json)
+            if replacement is None:
                 return None
+            fragment = CarrierFragment(fragment.carrier_path, fragment.key_path, replacement)
         fragments.append(fragment)
     bridge = PublishedFile(
         PurePosixPath("CLAUDE.md"),
@@ -1027,7 +992,7 @@ def _host_restore_action(
         if (item.path, item.key_path) not in fragments:
             return f"{label}: remove {key} from {root}/{path}"
         action = f"{label}: restore the value of {key} in config/{target.tool}/{path}"
-        if target.tool == "claude" and item.key_path in _CLAUDE_HOOK_REWRITES:
+        if target.tool == "claude" and item.key_path in _CLAUDE_HOOK_EVENTS:
             action += " with ~/.claude/ in place of ~/.claude_seed/"
         return action
     if item.path not in files:
