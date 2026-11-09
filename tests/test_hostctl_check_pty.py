@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -217,3 +218,61 @@ def test_check_ctrl_c_pty_owned_processes(make_terminal):
     assert b"host-a: check interrupted" in term.transcript
     assert not alive(info["pid"]) and not alive(info["proxy"])
     assert [p.name for p in term.root.iterdir() if p.name.startswith("check-")] == []
+
+
+def test_on_wait_then_open_under_script_pty(tmp_path):
+    calls = tmp_path / "supervisor-calls.json"
+    supervisor = tmp_path / "supervisor.py"
+    supervisor.write_text(f"""
+import json, sys
+from pathlib import Path
+calls = Path({str(calls)!r})
+seen = json.loads(calls.read_text()) if calls.exists() else []
+seen.append(sys.argv[1:])
+calls.write_text(json.dumps(seen))
+assert sys.argv[1:] == ["status", {GEN!r}]
+print(json.dumps({{"generation": {GEN!r}, "admission": len(seen) >= 2,
+                  "paused": False, "closed": False}}))
+""")
+    driver = tmp_path / "wait-driver.py"
+    driver.write_text(f"""
+import os, subprocess, sys
+from djinn_in_a_box.commands import hostctl as cli
+from djinn_in_a_box.config.models import AppConfig
+from djinn_in_a_box.core import hostctl, host_sealing
+assert all(os.isatty(fd) for fd in (0, 1, 2))
+cli.load_config = lambda: AppConfig(code_dir={str(tmp_path)!r})
+hostctl.open_window = lambda *a, **k: {GEN!r}
+host_sealing.inspect_assessment = lambda: host_sealing.Assessment(None)
+hostctl.inspect_helper = lambda: {{
+    "Id": {HELPER_ID!r}, "State": {{"Running": True}},
+    "Config": {{"Labels": {{hostctl.GENERATION_LABEL: {GEN!r}}}}},
+}}
+hostctl.read_window = lambda helper: {{"generation": {GEN!r}, "closed": False}}
+hostctl.node_status = lambda helper: {{
+    "BackendState": "NeedsLogin", "AuthURL": "https://example.invalid/login",
+}}
+hostctl.cached_trust = lambda: None
+def command(*args, **kwargs):
+    assert args[:3] == ("exec", {HELPER_ID!r}, hostctl.SUPERVISOR)
+    return subprocess.check_output(
+        [sys.executable, {str(supervisor)!r}, *args[3:]], text=True,
+    )
+hostctl.command = command
+cli.app(["on", "--wait", "--timeout", "5"], prog_name="hostctl")
+""")
+    command = shlex.join([sys.executable, "-I", str(driver)])
+    result = subprocess.run(
+        ["script", "-qec", command, "/dev/null"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=15,
+        env={**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "COLUMNS": "200"},
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("Waiting for the window to open (timeout 5 s) ...") == 1
+    assert result.stdout.count("Login on the host: https://example.invalid/login") == 1
+    assert "Observation: unavailable; journal/log gaps are unknown." in result.stdout
+    assert json.loads(calls.read_text()) == [["status", GEN], ["status", GEN]]

@@ -1600,6 +1600,18 @@ login link with `status` on the host terminal. Before the first opening, follow
 [enrollment and tailnet policy](SECURITY-MODEL.md#enrollment-and-tailnet-policy)
 for node setup, target configuration and the policy example.
 
+Use `djinn hostctl on --wait` to wait for this opening's generation to report
+open, or `djinn hostctl on --wait --timeout 60` for a shorter wait. The timeout
+is a positive integer in seconds, defaults to 300, and requires `--wait`.
+The command polls status every second and prints the enrollment login link
+once when available. Without `--wait`, `on` returns after starting the helper.
+Exit codes are 0 when open, 1 if the window closes, the generation changes or
+status cannot be read, 124 on timeout, and 130 on Ctrl-C. Invalid options exit
+with 2. Timeout and Ctrl-C stop waiting and leave the window open; an observer
+gap is reported but does not prevent a successful open result. `--wait` confirms
+relay readiness; `djinn hostctl check [HOST]` remains the SSH proof and shows
+any target approval link.
+
 Once `status` reports open, run `djinn hostctl check [HOST]` at the host terminal:
 omit `HOST` for all declared targets, or use `djinn hostctl check host-a` for one
 alias. It connects in declaration order as each target's configured user and
