@@ -6,13 +6,13 @@
 #   TOOLS_BIN  binary directory (default: $HOME/.cache/djinn-tools/bin)
 set -e
 
-VERSION=2.7.0
+version=2.7.0
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
 verify_binary() {
     local output
     [[ -x "$1" ]] && output=$("$1" --version </dev/null) \
-        && grep -Fxq "osv-scanner version: $VERSION" <<< "$output"
+        && grep -Fxq "osv-scanner version: $version" <<< "$output"
 }
 
 # The cache verifier must work offline, even on an unsupported architecture.
@@ -46,8 +46,8 @@ CURL_GUARDS=(--proto '=https' --tlsv1.2 --connect-timeout 10 --retry 4 --retry-d
 # Stage beside the target so every failed check preserves the existing binary.
 staged=$(mktemp "$INSTALL_DIR/.osv-scanner.XXXXXX")
 trap 'rm -f "$staged"' EXIT
-download_url="https://github.com/google/osv-scanner/releases/download/v${VERSION}/osv-scanner_linux_${arch}"
-echo "osv-scanner: Installing version $VERSION" >&2
+download_url="https://github.com/google/osv-scanner/releases/download/v${version}/osv-scanner_linux_${arch}"
+echo "osv-scanner: Installing version $version" >&2
 curl -fsSL "${CURL_GUARDS[@]}" "$download_url" -o "$staged"
 
 # Hash stdin so special characters in the cache path cannot escape the digest.
@@ -63,11 +63,11 @@ fi
 
 chmod 0755 "$staged"
 if ! verify_binary "$staged"; then
-    echo "osv-scanner: Invalid binary version (expected '$VERSION')" >&2
+    echo "osv-scanner: Invalid binary version (expected '$version')" >&2
     exit 1
 fi
 # -T refuses a directory at the target instead of moving the binary into it.
 mv -T "$staged" "$INSTALL_DIR/osv-scanner"
 trap - EXIT
 
-echo "osv-scanner version: $VERSION"
+echo "osv-scanner version: $version"
