@@ -134,6 +134,9 @@ RUN scratch=$(mktemp -d) \
 ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
 
+# In the image, so project virtual environments keep their interpreter across a container recreation.
+RUN uv python install 3.14
+
 # Upstream CLI agent defaults - maintainers bump with: ./scripts/update-agents.sh
 # djinn update records local versions; builds pass higher versions as ARG overrides.
 # After bumping any default, build once with the defaults alone (no local

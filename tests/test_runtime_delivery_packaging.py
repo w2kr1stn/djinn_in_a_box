@@ -42,6 +42,15 @@ def test_uv_image_pin():
     assert "astral-sh/uv:latest" not in (_ROOT / "Dockerfile").read_text()
 
 
+def test_image_installs_python_with_uv_as_dev():
+    instructions = _docker_instructions()
+    install = instructions.index("RUN uv python install 3.14")
+    assert instructions.index("COPY --from=uv /uv /uvx /usr/local/bin/") < install
+    assert [line for line in instructions[:install] if line.startswith("USER ")][-1] == (
+        "USER $USERNAME"
+    )
+
+
 def test_package_image_delivery():
     instructions = _docker_instructions()
     copies = {
