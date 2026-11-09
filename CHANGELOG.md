@@ -29,6 +29,7 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Host-mode Claude delivery keeps additional `PreToolUse` and `Stop` hook entries instead of refusing them (#239).
 - `djinn doctor`'s Git discovery skips Syncthing's version archive
   (`.stversions`), so archived copies of a repository's `.git` entry no longer
   produce a "configuration could not be inspected" warning (#215).

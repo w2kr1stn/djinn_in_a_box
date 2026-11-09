@@ -127,7 +127,11 @@ def test_host_hook_rewrite_mismatch_has_no_invented_item(case, monkeypatch):
         "claude",
         files=(),
         fragments=(
-            CarrierFragment(PurePosixPath("settings.json"), ("hooks", "PreToolUse"), b"[]"),
+            CarrierFragment(
+                PurePosixPath("settings.json"),
+                ("hooks", "PreToolUse"),
+                b'[{"hooks":[{"type":"command","command":"python3 ~/.claude_seed/custom.py"}]}]',
+            ),
         ),
         target_tool="claude",
     )
