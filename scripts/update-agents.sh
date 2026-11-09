@@ -219,6 +219,22 @@ for tool in oh-my-posh fnm oh-my-zsh; do
     fi
 done
 
+if release=$(curl --proto '=https' --proto-redir '=https' -fsSL \
+        https://api.github.com/repos/astral-sh/uv/releases/latest) \
+    && latest=$(jq -er '.tag_name | select(type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))' <<< "$release"); then
+    if [[ $(grep -c '^ARG UV_VERSION=' "$DOCKERFILE" || true) != 1 ]]; then
+        printf 'uv: Expected exactly one canonical ARG; leaving it unchanged\n' >&2
+    elif [[ $(grep '^ARG UV_VERSION=' "$DOCKERFILE") != "ARG UV_VERSION=${latest}" ]]; then
+        sed -i "s/^ARG UV_VERSION=.*/ARG UV_VERSION=${latest}/" "$DOCKERFILE"
+        printf '  uv: %s\n' "$latest"
+        updates_made=true
+    else
+        printf '  uv (up to date)\n'
+    fi
+else
+    printf 'uv: Failed to resolve version; leaving ARG unchanged\n' >&2
+fi
+
 echo ""
 
 if [[ "$updates_made" == "true" ]]; then

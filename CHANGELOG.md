@@ -215,6 +215,8 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- The dev image pins uv with `UV_VERSION` (0.13.3) instead of copying `latest`;
+  `scripts/update-agents.sh` bumps it with the other pins (#227).
 - Raise the default Claude Code version in the dev image to 2.1.304, the version the
   `claude-isolated` agent was measured with (#171).
 - `djinn agents --json` writes raw JSON with every field, including

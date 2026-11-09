@@ -96,6 +96,7 @@ DJINN_ENV_KEYS = frozenset(
         "OH_MY_POSH_SHA256",
         "FNM_VERSION",
         "FNM_SHA256",
+        "UV_VERSION",
         "GH_VERSION",
         "USERNAME",
         "USER_UID",

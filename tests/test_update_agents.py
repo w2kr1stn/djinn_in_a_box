@@ -20,6 +20,7 @@ TOOL_PINS = {"OH_MY_ZSH_COMMIT": "a" * 40,
              "FNM_VERSION": "1.39.1", "FNM_SHA256": "c" * 64}
 TOOL_DEFAULTS = {name: "1" * (40 if name.endswith("COMMIT") else 64)
                  if not name.endswith("VERSION") else "1.0.0" for name in TOOL_PINS}
+UV_URL = "https://api.github.com/repos/astral-sh/uv/releases/latest"
 
 NPM_FAILURE = (
     "npm error code EAI_AGAIN\n"
@@ -43,6 +44,7 @@ def script_env(tmp_path):
     (project / "Dockerfile").write_text(
         "ARG CLAUDE_CODE_VERSION=2.1.288\nARG CODEX_VERSION=0.160.0\nARG OPENCODE_VERSION=1.18.34\n"
         + "".join(f"ARG {name}={value}\n" for name, value in TOOL_DEFAULTS.items())
+        + "ARG UV_VERSION=0.13.3\n"
     )
     (project / ".gitignore").write_text("config/\npackages.txt\ntools/\n")
     (project / "config").mkdir()
@@ -82,6 +84,7 @@ def script_env(tmp_path):
            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     curl_data = tmp_path / "curl-data.json"
     curl_data.write_text(json.dumps({
+        UV_URL: json.dumps({"tag_name": "0.13.4"}),
         "https://api.github.com/repos/JanDeDobbeleer/oh-my-posh/releases/latest":
             json.dumps({"tag_name": "v31.9.2"}),
         "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v31.9.2/checksums.txt":
@@ -215,7 +218,8 @@ def test_maintainer_mode_updates_temp_dockerfile(script_env):
     result = run_script(project, env)
     assert result.returncode == 0, result.stderr
     assert (project / "Dockerfile").read_text() == "".join(
-        f"ARG {arg}={value}\n" for arg, value in {**PINS, **TOOL_PINS}.items()
+        f"ARG {arg}={value}\n"
+        for arg, value in {**PINS, **TOOL_PINS, "UV_VERSION": "0.13.4"}.items()
     )
     assert "Dockerfile updated!" in result.stdout
     assert "diff --git" in result.stdout
@@ -344,7 +348,7 @@ def test_failed_tool_pair_is_unchanged_while_other_pairs_update(script_env, tool
     assert result.returncode == 0, result.stderr
     assert f"{tool}:" in result.stderr
     prefix = {"oh-my-posh": "OH_MY_POSH_", "fnm": "FNM_", "oh-my-zsh": "OH_MY_ZSH_"}[tool]
-    expected = {**PINS, **TOOL_PINS}
+    expected = {**PINS, **TOOL_PINS, "UV_VERSION": "0.13.4"}
     for name in TOOL_PINS:
         if name.startswith(prefix):
             expected[name] = before[name]
@@ -384,7 +388,7 @@ def test_tool_hash_change_at_same_version_updates_the_whole_pair(script_env):
                 f"ARG {name}={TOOL_DEFAULTS[name]}", f"ARG {name}={TOOL_PINS[name]}"))
     result = run_script(project, env)
     assert result.returncode == 0, result.stderr
-    assert dockerfile_pins(project) == {**PINS, **TOOL_PINS}
+    assert dockerfile_pins(project) == {**PINS, **TOOL_PINS, "UV_VERSION": "0.13.4"}
 
 
 def test_each_pair_uses_one_sed_write_with_both_anchored_expressions(script_env):
@@ -406,13 +410,18 @@ def test_each_pair_uses_one_sed_write_with_both_anchored_expressions(script_env)
         assert f"ARG {prefix}_SHA256=" in matching[0]
         assert f"ARG {prefix}_{'COMMIT' if prefix == 'OH_MY_ZSH' else 'VERSION'}=" in matching[0]
         assert matching[0].count("-e s/^ARG ") == 2
+    uv_calls = [line for line in calls if "s/^ARG UV_VERSION=" in line]
+    assert len(uv_calls) == 1
+    assert uv_calls[0].startswith("-i s/^ARG UV_VERSION=.*/ARG UV_VERSION=0.13.4/ ")
 
 
 def test_tool_arg_names_match_real_dockerfile():
     script = (ROOT / "scripts/update-agents.sh").read_text()
     dockerfile = (ROOT / "Dockerfile").read_text()
-    names = set(re.findall(r"(?:arg_name|hash_name)=((?:OH_MY_|FNM_)[A-Z0-9_]+)", script))
-    assert names == set(TOOL_PINS)
+    names = set(re.findall(
+        r"(?:arg_name=|hash_name=|\^ARG )((?:OH_MY_|FNM_|UV_)[A-Z0-9_]+)", script,
+    ))
+    assert names == set(TOOL_PINS) | {"UV_VERSION"}
     for name in names:
         assert len(re.findall(rf"^ARG {name}=", dockerfile, re.M)) == 1
 
@@ -435,3 +444,80 @@ def test_curl_error_with_valid_partial_output_keeps_pair(script_env, url, tool):
     for name, value in TOOL_DEFAULTS.items():
         if name.startswith(prefix):
             assert dockerfile_pins(project)[name] == value
+
+
+@pytest.mark.parametrize("version", ["0.13.4", "0.13.3"])
+def test_uv_maintainer_bump_and_same_version(script_env, version):
+    project, env, _ = script_env
+    datafile = Path(env["curl_data"])
+    data = json.loads(datafile.read_text())
+    data[UV_URL] = json.dumps({"tag_name": version})
+    datafile.write_text(json.dumps(data))
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert dockerfile_pins(project)["UV_VERSION"] == version
+    expected = f"  uv: {version}" if version == "0.13.4" else "  uv (up to date)"
+    assert expected in result.stdout.splitlines()
+    assert result.stderr == ""
+    calls = [json.loads(line) for line in Path(env["curl_calls"]).read_text().splitlines()]
+    assert [args for args in calls if UV_URL in args] == [
+        ["--proto", "=https", "--proto-redir", "=https", "-fsSL", UV_URL],
+    ]
+
+
+@pytest.mark.parametrize("response", [
+    {"tag_name": "v0.13.4"}, {"tag_name": "0.13"}, {"tag_name": "0.13.4\n"},
+    {"tag_name": "0.13.4\x00"}, {"tag_name": 13}, {},
+    "invalid JSON", None,
+])
+def test_uv_invalid_release_leaves_arg_unchanged(script_env, response):
+    project, env, _ = script_env
+    datafile = Path(env["curl_data"])
+    data = json.loads(datafile.read_text())
+    data[UV_URL] = json.dumps(response) if isinstance(response, dict) else response
+    datafile.write_text(json.dumps(data))
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert "uv: Failed to resolve version; leaving ARG unchanged" in result.stderr.splitlines()
+    assert dockerfile_pins(project) == {**PINS, **TOOL_PINS, "UV_VERSION": "0.13.3"}
+
+
+@pytest.mark.parametrize("problem", ["missing", "duplicate", "noncanonical"])
+def test_uv_requires_one_canonical_arg(script_env, problem):
+    project, env, _ = script_env
+    dockerfile = project / "Dockerfile"
+    line = "ARG UV_VERSION=0.13.3\n"
+    replacement = {"missing": "", "duplicate": line * 2, "noncanonical": "  " + line}[problem]
+    dockerfile.write_text(dockerfile.read_text().replace(line, replacement))
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert (
+        "uv: Expected exactly one canonical ARG; leaving it unchanged" in result.stderr.splitlines()
+    )
+    assert [s for s in dockerfile.read_text().splitlines(True) if "UV_VERSION" in s] == (
+        replacement.splitlines(True)
+    )
+    for name, value in {**PINS, **TOOL_PINS}.items():
+        assert dockerfile_pins(project)[name] == value
+
+
+def test_uv_failed_curl_with_valid_output_leaves_arg_unchanged(script_env):
+    project, env, _ = script_env
+    env["curl_failure"] = UV_URL
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert "uv: Failed to resolve version; leaving ARG unchanged" in result.stderr.splitlines()
+    assert dockerfile_pins(project)["UV_VERSION"] == "0.13.3"
+
+
+def test_uv_bump_alone_marks_dockerfile_updated(script_env):
+    project, env, _ = script_env
+    dockerfile = project / "Dockerfile"
+    dockerfile.write_text("".join(
+        f"ARG {name}={value}\n"
+        for name, value in {**PINS, **TOOL_PINS, "UV_VERSION": "0.13.3"}.items()
+    ))
+    result = run_script(project, env)
+    assert result.returncode == 0, result.stderr
+    assert "Dockerfile updated!" in result.stdout
+    assert dockerfile_pins(project)["UV_VERSION"] == "0.13.4"
