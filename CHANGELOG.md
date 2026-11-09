@@ -136,6 +136,10 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- The image builds verify the Docker CLI, Compose and GitHub CLI downloads
+  against pinned checksums before installing them, like Buildx already did.
+  Every verified build download retries transient network failures and is
+  checked again after the final attempt (#231).
 - Verify the pinned oh-my-zsh archive, oh-my-posh binary and fnm archive before
   extraction or installation. Both dev and assistant images install Claude Code
   only after checking its signed version manifest against a pinned release key

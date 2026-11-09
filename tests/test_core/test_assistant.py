@@ -135,6 +135,7 @@ def installation(tmp_path, monkeypatch):
     (project / "Dockerfile").write_text(
         "ARG CLAUDE_CODE_VERSION=2.1.288\nARG CODEX_VERSION=0.160.0\n"
         "ARG OPENCODE_VERSION=1.18.34\nARG DOCKER_VERSION=27.4.1\n"
+        f"ARG DOCKER_SHA256_AMD64={'a' * 64}\nARG DOCKER_SHA256_ARM64={'b' * 64}\n"
     )
     (project / "assistant").mkdir()
     for name in (
@@ -314,23 +315,42 @@ def test_build_flags_and_pins(installation, network):
     assert "--load" in argv and argv[argv.index("--platform") + 1] == "linux/amd64"
     assert "AGENT=opencode" in argv and "AGENT_VERSION=1.18.34" in argv
     assert "DOCKER_VERSION=27.4.1" in argv
+    for name, value in (("DOCKER_SHA256_AMD64", "a" * 64), ("DOCKER_SHA256_ARM64", "b" * 64)):
+        assert argv[argv.index(f"{name}={value}") - 1] == "--build-arg"
     assert ("--allow" in argv) == (network == "host")
     assert argv[-1] == str(f.project / "assistant")
 
 
+@pytest.mark.parametrize("name", ["DOCKER_SHA256_AMD64", "DOCKER_SHA256_ARM64"])
+def test_docker_checksum_changes_fingerprint(installation, name):
+    f = installation
+    a.ensure_image(f.project, "claude", "linux/amd64", "default")
+    fingerprint = a.label(f.docker.image, a.CONTENT_LABEL)
+    path = f.project / "Dockerfile"
+    old = "a" * 64 if name.endswith("AMD64") else "b" * 64
+    path.write_text(path.read_text().replace(f"ARG {name}={old}", f"ARG {name}={'c' * 64}"))
+    a.ensure_image(f.project, "claude", "linux/amd64", "default")
+    assert a.label(f.docker.image, a.CONTENT_LABEL) != fingerprint
+
+
 @pytest.mark.parametrize("pin", ("duplicate", "malformed", "missing"))
-@pytest.mark.parametrize("name", ("CODEX_VERSION", "DOCKER_VERSION"))
+@pytest.mark.parametrize("name", (
+    "CODEX_VERSION", "DOCKER_VERSION", "DOCKER_SHA256_AMD64", "DOCKER_SHA256_ARM64",
+))
 def test_invalid_pins_abort(installation, pin, name):
     f = installation
     path = f.project / "Dockerfile"
-    default = "0.160.0" if name == "CODEX_VERSION" else "27.4.1"
+    default = next(
+        line.split("=", 1)[1] for line in path.read_text().splitlines()
+        if line.startswith(f"ARG {name}=")
+    )
     value = {
         "duplicate": path.read_text() + f"ARG {name}={default}\n",
         "malformed": path.read_text().replace(default, "latest"),
         "missing": path.read_text().replace(f"ARG {name}", f"# ARG {name}"),
     }[pin]
     path.write_text(value)
-    with pytest.raises(a.AssistantError, match="numeric x.y.z ARG") as exc:
+    with pytest.raises(a.AssistantError, match=f"ARG {name}") as exc:
         a.ensure_image(f.project, "codex", "linux/amd64", "default")
     assert str(path) in str(exc.value) and name in str(exc.value)
     assert f.docker.calls == []

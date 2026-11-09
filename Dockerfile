@@ -45,23 +45,36 @@ RUN if [ -f /tmp/packages.txt ]; then \
 # -----------------------------------------------------------------------------
 # Docker CLI only (no daemon). Access depends on --docker or --docker-direct flags at runtime.
 # -----------------------------------------------------------------------------
+# Docker CLI: no publisher checksum, computed from the archive; ARM64 serves the assistant image.
+# Compose: the release's per-asset .sha256; gh: gh_<version>_checksums.txt.
+# Buildx: the release's checksums.txt.
+# Change a version and its checksum together; update-agents.sh does not bump these pins.
 ARG DOCKER_VERSION=27.4.1
+ARG DOCKER_SHA256_AMD64=9dc39fa726db525f22bd6861308a09f6c31a14de3e512ba1576a329b833798f5
+ARG DOCKER_SHA256_ARM64=4c3a49213419cac4abf4c12b601490d37b0768dcd1bc87c4a8be88a07900f774
 ARG COMPOSE_VERSION=2.32.4
+ARG COMPOSE_SHA256=ed1917fb54db184192ea9d0717bcd59e3662ea79db48bff36d3475516c480a6b
 ARG BUILDX_VERSION=0.37.2
 ARG BUILDX_SHA256=982ca20490b45ed1ec8d99795974d3d874a358f75938c9c237305010e6b7e548
 
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" \
-    | tar xz --strip-components=1 -C /usr/local/bin docker/docker \
-    && chmod +x /usr/local/bin/docker
+RUN scratch=$(mktemp -d) \
+    && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" -o "$scratch/docker.tgz" \
+    && printf '%s  %s\n' "$DOCKER_SHA256_AMD64" "$scratch/docker.tgz" | sha256sum -c - \
+    && tar xzf "$scratch/docker.tgz" --strip-components=1 -C /usr/local/bin docker/docker \
+    && chmod +x /usr/local/bin/docker \
+    && rm -rf "$scratch"
 
 # Docker Compose Plugin
-RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
-       -o /usr/local/lib/docker/cli-plugins/docker-compose \
-    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+RUN scratch=$(mktemp -d) \
+    && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-x86_64" -o "$scratch/docker-compose" \
+    && printf '%s  %s\n' "$COMPOSE_SHA256" "$scratch/docker-compose" | sha256sum -c - \
+    && install -D -m 0755 "$scratch/docker-compose" /usr/local/lib/docker/cli-plugins/docker-compose \
+    && rm -rf "$scratch"
 
 # Docker Buildx Plugin (verified before installation; no legacy builder fallback)
-RUN curl -fsSL "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-amd64" \
+RUN curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-amd64" \
        -o /tmp/docker-buildx \
     && echo "${BUILDX_SHA256}  /tmp/docker-buildx" | sha256sum -c - \
     && install -m 0755 /tmp/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx \
@@ -71,10 +84,15 @@ RUN curl -fsSL "https://github.com/docker/buildx/releases/download/v${BUILDX_VER
 # GitHub CLI Installation
 # -----------------------------------------------------------------------------
 ARG GH_VERSION=2.85.0
+ARG GH_SHA256=5dcc4e282b9c22c0d31c217805976448c966cfc56c20157c78385a8a62c93cf0
 
-RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
-    | tar xz --strip-components=2 -C /usr/local/bin gh_${GH_VERSION}_linux_amd64/bin/gh \
-    && chmod +x /usr/local/bin/gh
+RUN scratch=$(mktemp -d) \
+    && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o "$scratch/gh.tar.gz" \
+    && printf '%s  %s\n' "$GH_SHA256" "$scratch/gh.tar.gz" | sha256sum -c - \
+    && tar xzf "$scratch/gh.tar.gz" --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh" \
+    && chmod +x /usr/local/bin/gh \
+    && rm -rf "$scratch"
 
 # Install uv (Python)
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -112,20 +130,20 @@ ARG FNM_SHA256=7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224
 # Tooling Setup: check pinned bytes before extraction or installation.
 RUN scratch=$(mktemp -d) \
     && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
-    && curl --proto '=https' --proto-redir '=https' -fsSL "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/$OH_MY_ZSH_COMMIT" -o "$scratch/source.tgz" \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/$OH_MY_ZSH_COMMIT" -o "$scratch/source.tgz" \
     && printf '%s  %s\n' "$OH_MY_ZSH_SHA256" "$scratch/source.tgz" | sha256sum -c - \
     && mkdir -p ~/.oh-my-zsh \
     && tar -xzf "$scratch/source.tgz" --strip-components=1 -C ~/.oh-my-zsh \
     && rm -rf "$scratch"
 RUN scratch=$(mktemp -d) \
     && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
-    && curl --proto '=https' --proto-redir '=https' -fsSL "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v$OH_MY_POSH_VERSION/posh-linux-amd64" -o "$scratch/oh-my-posh" \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v$OH_MY_POSH_VERSION/posh-linux-amd64" -o "$scratch/oh-my-posh" \
     && printf '%s  %s\n' "$OH_MY_POSH_SHA256" "$scratch/oh-my-posh" | sha256sum -c - \
     && install -D -m 0755 "$scratch/oh-my-posh" ~/.local/bin/oh-my-posh \
     && rm -rf "$scratch"
 RUN scratch=$(mktemp -d) \
     && trap 'rm -rf "$scratch"' EXIT HUP INT TERM \
-    && curl --proto '=https' --proto-redir '=https' -fsSL "https://github.com/Schniz/fnm/releases/download/v$FNM_VERSION/fnm-linux.zip" -o "$scratch/fnm.zip" \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://github.com/Schniz/fnm/releases/download/v$FNM_VERSION/fnm-linux.zip" -o "$scratch/fnm.zip" \
     && printf '%s  %s\n' "$FNM_SHA256" "$scratch/fnm.zip" | sha256sum -c - \
     && unzip -q "$scratch/fnm.zip" -d "$scratch/unpacked" \
     && install -D -m 0755 "$scratch/unpacked/fnm" ~/.local/share/fnm/fnm \

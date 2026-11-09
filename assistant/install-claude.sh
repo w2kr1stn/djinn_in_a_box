@@ -23,9 +23,9 @@ GNUPGHOME="$scratch/gnupg"
 export GNUPGHOME
 mkdir -m 0700 "$GNUPGHOME"
 
-curl --proto '=https' --proto-redir '=https' -fsSL "$base/keys/claude-code.asc" -o "$scratch/key.asc"
-curl --proto '=https' --proto-redir '=https' -fsSL "$base/claude-code-releases/$version/manifest.json" -o "$scratch/manifest.json"
-curl --proto '=https' --proto-redir '=https' -fsSL "$base/claude-code-releases/$version/manifest.json.sig" -o "$scratch/manifest.json.sig"
+curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "$base/keys/claude-code.asc" -o "$scratch/key.asc"
+curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "$base/claude-code-releases/$version/manifest.json" -o "$scratch/manifest.json"
+curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "$base/claude-code-releases/$version/manifest.json.sig" -o "$scratch/manifest.json.sig"
 gpg --batch --no-autostart --import "$scratch/key.asc"
 gpg --batch --no-autostart --status-fd 1 --verify "$scratch/manifest.json.sig" "$scratch/manifest.json" > "$scratch/status"
 if ! awk -v fingerprint="$fingerprint" '
@@ -39,6 +39,6 @@ if ! awk -v fingerprint="$fingerprint" '
 fi
 checksum=$(jq -er --arg v "$version" --arg p "$platform" 'select(.version == $v) | .platforms[$p].checksum | select(type == "string" and length == 64)' "$scratch/manifest.json")
 printf '%s\n' "$checksum" | grep -Eq '^[0-9a-f]{64}$'
-curl --proto '=https' --proto-redir '=https' -fsSL "$base/claude-code-releases/$version/$platform/claude" -o "$scratch/claude"
+curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "$base/claude-code-releases/$version/$platform/claude" -o "$scratch/claude"
 printf '%s  %s\n' "$checksum" "$scratch/claude" | sha256sum -c -
 install -D -m 0755 "$scratch/claude" "$destination"

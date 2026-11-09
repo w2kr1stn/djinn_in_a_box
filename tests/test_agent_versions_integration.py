@@ -26,6 +26,7 @@ def test_update_clean_checkout_and_versions_reach_both_builders(
         (context / name).write_bytes((ROOT / "assistant" / name).read_bytes())
     with (project / "Dockerfile").open("a") as stream:
         stream.write("ARG DOCKER_VERSION=27.4.1\n")
+        stream.write(f"ARG DOCKER_SHA256_AMD64={'a' * 64}\nARG DOCKER_SHA256_ARM64={'b' * 64}\n")
     for name in ("docker-compose.yml", "docker-compose.desktop.yml"):
         (project / name).write_bytes((ROOT / name).read_bytes())
     git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}

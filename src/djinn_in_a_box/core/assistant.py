@@ -24,6 +24,7 @@ from djinn_in_a_box.core import hostctl
 from djinn_in_a_box.core import opencode_credentials as credentials
 from djinn_in_a_box.core.agent_versions import (
     AgentVersionError,
+    checksum_pin,
     effective_version,
     load_versions,
     version_pin,
@@ -166,11 +167,23 @@ def ensure_image(project: Path, agent: AssistantAgent, platform: str, network: s
         versions = load_versions()
         version = effective_version(project, PIN_NAMES[agent], versions)
         docker_version = version_pin(project, "DOCKER_VERSION")
+        docker_sha256_amd64 = checksum_pin(project, "DOCKER_SHA256_AMD64")
+        docker_sha256_arm64 = checksum_pin(project, "DOCKER_SHA256_ARM64")
     except AgentVersionError as exc:
         raise AssistantError(str(exc)) from exc
     context = project / "assistant"
     content = json.dumps(
-        [agent, version, docker_version, platform, network, os.getuid(), os.getgid()]
+        [
+            agent,
+            version,
+            docker_version,
+            docker_sha256_amd64,
+            docker_sha256_arm64,
+            platform,
+            network,
+            os.getuid(),
+            os.getgid(),
+        ]
     )
     digest = hashlib.sha256(content.encode())
     for name in ("Dockerfile", "entrypoint.sh", "install-opencode.sh", "install-claude.sh"):
@@ -201,6 +214,10 @@ def ensure_image(project: Path, agent: AssistantAgent, platform: str, network: s
             f"AGENT_VERSION={version}",
             "--build-arg",
             f"DOCKER_VERSION={docker_version}",
+            "--build-arg",
+            f"DOCKER_SHA256_AMD64={docker_sha256_amd64}",
+            "--build-arg",
+            f"DOCKER_SHA256_ARM64={docker_sha256_arm64}",
             "--build-arg",
             f"USER_UID={os.getuid()}",
             "--build-arg",

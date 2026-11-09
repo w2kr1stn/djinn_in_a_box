@@ -4365,24 +4365,42 @@ def test_egress_declared_volume_guard_and_positive_control(egress_compose):
 
 class TestVerifiedBuildInstallers:
     @pytest.mark.parametrize(
-        "tool,pin,target",
+        "tool,pin,target,arch",
         [
-            ("ohmyzsh", "OH_MY_ZSH_SHA256", ".oh-my-zsh/oh-my-zsh.sh"),
-            ("posh-linux-amd64", "OH_MY_POSH_SHA256", ".local/bin/oh-my-posh"),
-            ("fnm-linux.zip", "FNM_SHA256", ".local/share/fnm/fnm"),
+            ("ohmyzsh", "OH_MY_ZSH_SHA256", ".oh-my-zsh/oh-my-zsh.sh", None),
+            ("posh-linux-amd64", "OH_MY_POSH_SHA256", ".local/bin/oh-my-posh", None),
+            ("fnm-linux.zip", "FNM_SHA256", ".local/share/fnm/fnm", None),
+            ("download.docker.com", "DOCKER_SHA256_AMD64", "bin/docker", None),
+            ("docker-compose-linux-x86_64", "COMPOSE_SHA256", "plugins/docker-compose", None),
+            ("gh_${GH_VERSION}", "GH_SHA256", "bin/gh", None),
+            ("download.docker.com", "DOCKER_SHA256_AMD64", "bin/docker", "amd64"),
+            ("download.docker.com", "DOCKER_SHA256_ARM64", "bin/docker", "arm64"),
         ],
     )
     @pytest.mark.parametrize("corrupt", [False, True])
-    def test_pinned_run_under_dash(self, tmp_path, tool, pin, target, corrupt):
+    def test_pinned_run_under_dash(self, tmp_path, tool, pin, target, arch, corrupt):
         import hashlib
         import zipfile
 
+        pins = dict(
+            re.findall(
+                r"^ARG ((?:OH_MY|FNM|DOCKER|COMPOSE|GH)_\w+)=(\S+)$",
+                TestDockerfileDnsGuard._dockerfile(),
+                re.M,
+            )
+        )
         payload = b"fixture bytes, never executed\n"
         archive = tmp_path / "payload"
-        if tool == "ohmyzsh":
+        if tool in ("ohmyzsh", "download.docker.com", "gh_${GH_VERSION}"):
+            member_name = {
+                "ohmyzsh": "fixture/oh-my-zsh.sh",
+                "download.docker.com": "docker/docker",
+                "gh_${GH_VERSION}": f"gh_{pins['GH_VERSION']}_linux_amd64/bin/gh",
+            }[tool]
             with tarfile.open(archive, "w:gz") as tar:
-                member = tarfile.TarInfo("fixture/oh-my-zsh.sh")
+                member = tarfile.TarInfo(member_name)
                 member.size = len(payload)
+                member.mode = 0o755 if arch else 0o644
                 tar.addfile(member, io.BytesIO(payload))
         elif tool == "fnm-linux.zip":
             with zipfile.ZipFile(archive, "w") as zipped:
@@ -4393,12 +4411,14 @@ class TestVerifiedBuildInstallers:
         home, bindir, scratch = (tmp_path / name for name in ("home", "bin", "scratch"))
         for directory in (home, bindir, scratch):
             directory.mkdir()
+        (home / "bin").mkdir()
         curl = bindir / "curl"
         curl.write_text(
             '#!/bin/sh\nprintf "%s\\n" "$*" >> "$calls"\n'
             'while [ "$#" -gt 0 ]; do\n'
             '  case "$1" in\n'
             '    --proto|--proto-redir) [ "$2" = "=https" ] || exit 2; shift 2;;\n'
+            "    --retry|--retry-delay) shift 2;; --retry-all-errors) shift;;\n"
             "    -fsSL) shift;; -o) destination=$2; shift 2;;\n"
             "    *) url=$1; shift;;\n"
             "  esac\ndone\n"
@@ -4407,22 +4427,41 @@ class TestVerifiedBuildInstallers:
             'fi\ncp "$payload" "$destination"\n'
         )
         curl.chmod(0o755)
-        pins = dict(
-            re.findall(
-                r"^ARG ((?:OH_MY_\w+|FNM_\w+))=(\S+)$",
-                TestDockerfileDnsGuard._dockerfile(),
-                re.M,
-            )
-        )
         urls = {
             "ohmyzsh": f"https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/{pins['OH_MY_ZSH_COMMIT']}",
             "posh-linux-amd64": "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/"
             f"v{pins['OH_MY_POSH_VERSION']}/posh-linux-amd64",
             "fnm-linux.zip": f"https://github.com/Schniz/fnm/releases/download/v{pins['FNM_VERSION']}/fnm-linux.zip",
+            "download.docker.com": "https://download.docker.com/linux/static/stable/"
+            f"{'aarch64' if arch == 'arm64' else 'x86_64'}/docker-{pins['DOCKER_VERSION']}.tgz",
+            "docker-compose-linux-x86_64": "https://github.com/docker/compose/releases/download/"
+            f"v{pins['COMPOSE_VERSION']}/docker-compose-linux-x86_64",
+            "gh_${GH_VERSION}": "https://github.com/cli/cli/releases/download/"
+            f"v{pins['GH_VERSION']}/gh_{pins['GH_VERSION']}_linux_amd64.tar.gz",
         }
-        instructions = [run for run in TestDockerfileDnsGuard._run_instructions() if tool in run]
+        instructions = TestDockerfileDnsGuard._run_instructions()
+        if arch:
+            assistant = (Path(__file__).parents[1] / "assistant/Dockerfile").read_text()
+            instructions = assistant.replace("\\\n", " ").splitlines()
+        instructions = [run for run in instructions if tool in run and run.startswith("RUN ")]
         assert len(instructions) == 1
         command = re.sub(r"^\s*RUN\s+", "", instructions[0])
+        replacements = {}
+        if tool in ("download.docker.com", "gh_${GH_VERSION}"):
+            replacements = {
+                "-C /usr/local/bin": f'-C "{home / "bin"}"',
+                f"/usr/local/bin/{Path(target).name}": f'"{home / target}"',
+            }
+            if arch:
+                command = command.replace("/tmp/docker.tgz", f'"{tmp_path / "docker.tgz"}"')
+                replacements.pop("/usr/local/bin/docker")
+        elif tool == "docker-compose-linux-x86_64":
+            replacements = {
+                "/usr/local/lib/docker/cli-plugins/docker-compose": f'"{home / target}"',
+            }
+        for source, destination in replacements.items():
+            assert command.count(source) == 1
+            command = command.replace(source, destination)
         calls = tmp_path / "calls"
         result = subprocess.run(
             ["/bin/sh", "-c", command],
@@ -4430,6 +4469,7 @@ class TestVerifiedBuildInstallers:
                 **os.environ,
                 **pins,
                 pin: "0" * 64 if corrupt else checksum,
+                "TARGETARCH": arch or "amd64",
                 "HOME": str(home),
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "TMPDIR": str(scratch),
@@ -4464,6 +4504,10 @@ class TestVerifiedBuildInstallers:
             "OH_MY_POSH_SHA256": r"[0-9a-f]{64}",
             "FNM_VERSION": r"[0-9]+\.[0-9]+\.[0-9]+",
             "FNM_SHA256": r"[0-9a-f]{64}",
+            "DOCKER_SHA256_AMD64": r"[0-9a-f]{64}",
+            "DOCKER_SHA256_ARM64": r"[0-9a-f]{64}",
+            "COMPOSE_SHA256": r"[0-9a-f]{64}",
+            "GH_SHA256": r"[0-9a-f]{64}",
         }
         for name, pattern in formats.items():
             values = re.findall(rf"^ARG {name}=(.*)$", dockerfile, re.M)
@@ -4472,6 +4516,9 @@ class TestVerifiedBuildInstallers:
             ("ohmyzsh", "tar -xzf"),
             ("posh-linux-amd64", "install -D"),
             ("fnm-linux.zip", "unzip -q"),
+            ("download.docker.com", "tar xzf"),
+            ("docker-compose-linux-x86_64", "install -D"),
+            ("gh_${GH_VERSION}", "tar xzf"),
         ]:
             (run,) = [i for i in TestDockerfileDnsGuard._run_instructions() if tool in i]
             assert run.index("curl ") < run.index("sha256sum -c") < run.index(operation)
@@ -4479,6 +4526,28 @@ class TestVerifiedBuildInstallers:
             assert dockerfile.index(run.split("https://")[1].split('"')[0]) < dockerfile.index(
                 "ARG CLAUDE_CODE_VERSION="
             )
+
+    def test_checksum_names_are_guarded(self):
+        from djinn_in_a_box.config.declarations import DJINN_ENV_KEYS
+
+        assert {
+            "DOCKER_SHA256_AMD64", "DOCKER_SHA256_ARM64", "COMPOSE_SHA256", "GH_SHA256",
+        } <= DJINN_ENV_KEYS
+
+    @pytest.mark.parametrize(
+        "filename", ["Dockerfile", "assistant/Dockerfile", "assistant/install-claude.sh"],
+    )
+    def test_verified_curl_flags(self, filename):
+        text = (Path(__file__).parents[1] / filename).read_text()
+        if filename == "assistant/Dockerfile":
+            text = text.split("ARG AGENT\n", 1)[0]
+        lines = [line for line in text.splitlines() if re.search(r"\bcurl\s+-", line)]
+        assert lines
+        for line in lines:
+            assert (
+                "curl --proto '=https' --proto-redir '=https' --retry 3 "
+                "--retry-all-errors --retry-delay 5 -fsSL "
+            ) in line
 
     def test_claude_integration_and_update_policy(self):
         dockerfile = TestDockerfileDnsGuard._dockerfile()
