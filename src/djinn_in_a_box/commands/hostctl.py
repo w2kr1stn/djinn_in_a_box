@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn, cast
 
@@ -23,6 +24,60 @@ def _failure(exc: Exception) -> NoReturn:
     raise typer.Exit(1)
 
 
+def _wait_for_window(generation: str, timeout: int) -> int:
+    console.print(Text(f"Waiting for the window to open (timeout {timeout} s) ..."))
+    deadline = time.monotonic() + timeout
+    login_shown = False
+    last_error: str | None = None
+    try:
+        while time.monotonic() < deadline:
+            value = hostctl.snapshot()
+            raw_window = value.get("window")
+            window = cast(dict[str, Any], raw_window) if isinstance(raw_window, dict) else {}
+            if value.get("state") == "closed" or window.get("closed") is True:
+                console.print("Stopped waiting: the window is closed.")
+                return 1
+            if value.get("generation") != generation:
+                console.print("Stopped waiting: the window generation changed.")
+                return 1
+            last_error = None
+            for key in ("window_error", "node_error", "relay_error"):
+                if key in value:
+                    last_error = " ".join(str(value[key]).splitlines())
+            node = value.get("node")
+            if isinstance(node, dict) and not login_shown:
+                node = cast(dict[str, Any], node)
+                if node.get("AuthURL"):
+                    console.print(Text(f"Login on the host: {node['AuthURL']}"))
+                    login_shown = True
+            if value.get("state") == "open":
+                observation = value.get("observation")
+                if not observation or value.get("observation_gap"):
+                    console.print("Observation: unavailable; journal/log gaps are unknown.")
+                elif observation.get("error"):
+                    console.print(Text(f"Observation gap: {observation['error']}"))
+                return 0
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(1, remaining))
+    except KeyboardInterrupt:
+        console.print("Stopped waiting; the window stays open.")
+        return 130
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        reason = " ".join(str(exc).splitlines())
+        console.print(Text(f"Stopped waiting: status read failed: {reason}"))
+        return 1
+    if last_error is not None:
+        console.print(Text(f"Last status error: {last_error}"))
+    console.print(
+        Text(
+            f"Timed out after {timeout} s waiting for the window; it stays open. "
+            "See `djinn hostctl status`."
+        )
+    )
+    return 124
+
+
 @app.command("on")
 @handle_config_errors
 def on(
@@ -30,10 +85,19 @@ def on(
         str | None, typer.Option("--for", help="Positive <n>m or <n>h; maximum 24h")
     ] = None,
     allow_unsealed: Annotated[bool, typer.Option("--allow-unsealed")] = False,
+    wait: Annotated[bool, typer.Option("--wait", help="Wait until the window is open")] = False,
+    timeout: Annotated[
+        int | None,
+        typer.Option(
+            "--timeout", min=1, help="Wait timeout in seconds (requires --wait; default 300)"
+        ),
+    ] = None,
 ) -> None:
+    if timeout is not None and not wait:
+        raise typer.BadParameter("requires --wait", param_hint="--timeout")
     config = load_config()
     try:
-        hostctl.open_window(config, duration, allow_unsealed=allow_unsealed)
+        generation = hostctl.open_window(config, duration, allow_unsealed=allow_unsealed)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
         _failure(exc)
     console.print(
@@ -50,6 +114,8 @@ def on(
         console.print(
             "Sealing override recorded; dev host authority makes the window an operating aid only."
         )
+    if wait:
+        raise typer.Exit(_wait_for_window(generation, 300 if timeout is None else timeout))
 
 
 @app.command("off")

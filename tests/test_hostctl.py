@@ -6,6 +6,7 @@ import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -165,6 +166,191 @@ def test_on_network_before_helper_and_login_charged(inputs, fake_transitions, du
     with pytest.raises(hostctl.HostctlError, match="already open.*limit"):
         hostctl.open_window(inputs)
     assert len([c for c in fake_transitions["calls"] if c[0] == "run"]) == 1
+
+
+@pytest.fixture
+def waiting_cli(inputs, fake_transitions, monkeypatch):
+    clock = SimpleNamespace(now=0.0, sleeps=[], polls=[], snapshots=[{"state": "opening"}])
+    monkeypatch.setattr(cli, "load_config", lambda: inputs)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock.now)
+
+    def assert_unlocked():
+        assert not getattr(hostctl._held, "active", False)
+        with hostctl.control_guard(timeout=0):
+            pass
+
+    def snapshot():
+        assert_unlocked()
+        clock.polls.append(clock.now)
+        value = clock.snapshots[0]
+        if len(clock.snapshots) > 1:
+            clock.snapshots.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return {"generation": hostctl.generation(fake_transitions["helper"]), **value}
+
+    def sleep(seconds):
+        assert_unlocked()
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    def refuse_close(*args, **kwargs):
+        pytest.fail("waiting must not close the window")
+
+    monkeypatch.setattr(hostctl, "snapshot", snapshot)
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    monkeypatch.setattr(hostctl, "close_window", refuse_close)
+    monkeypatch.setattr(hostctl, "stop_helper_locked", refuse_close)
+    return clock
+
+
+def test_on_wait_delayed_admission_login_once_and_unlocked(waiting_cli, fake_transitions):
+    url = "https://example.invalid/login/[owner]"
+    waiting_cli.snapshots = [
+        {"state": "opening"},
+        {"state": "opening", "node": {"AuthURL": url}},
+        {"state": "opening", "node": {"AuthURL": "https://example.invalid/another"}},
+        {"state": "open", "observation_gap": True},
+    ]
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait", "--timeout", "5"])
+    assert result.exit_code == 0, result.output
+    start = "Waiting for the window to open (timeout 5 s) ..."
+    login = f"Login on the host: {url}"
+    assert result.output.count(start) == result.output.count("Login on the host:") == 1
+    assert login in result.output and "/another" not in result.output
+    assert result.output.index(start) < result.output.index(login)
+    assert "Observation: unavailable; journal/log gaps are unknown." in result.output
+    assert waiting_cli.polls == [0, 1, 2, 3]
+    assert waiting_cli.sleeps == [1, 1, 1]
+    assert fake_transitions["helper"]["State"]["Running"]
+
+
+@pytest.mark.parametrize("timeout", [None, 2])
+def test_on_wait_timeout_keeps_window_open(waiting_cli, fake_transitions, timeout):
+    args = ["hostctl", "on", "--wait"]
+    if timeout is not None:
+        args.extend(["--timeout", str(timeout)])
+    seconds = 300 if timeout is None else timeout
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 124, result.output
+    assert f"Waiting for the window to open (timeout {seconds} s) ..." in result.output
+    assert (
+        f"Timed out after {seconds} s waiting for the window; it stays open. "
+        "See `djinn hostctl status`."
+    ) in result.output
+    assert waiting_cli.now == seconds
+    assert waiting_cli.polls == list(range(seconds))
+    assert waiting_cli.sleeps == [1] * seconds
+    assert fake_transitions["helper"]["State"]["Running"]
+    assert "Last status error:" not in result.output
+
+
+@pytest.mark.parametrize("interrupt_at", ["read", "sleep"])
+def test_on_wait_ctrl_c_keeps_window_open(waiting_cli, fake_transitions, monkeypatch, interrupt_at):
+    if interrupt_at == "read":
+        waiting_cli.snapshots = [KeyboardInterrupt()]
+    else:
+
+        def interrupt(_seconds):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli.time, "sleep", interrupt)
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait"])
+    assert result.exit_code == 130, result.output
+    assert "Stopped waiting; the window stays open." in result.output
+    assert fake_transitions["helper"]["State"]["Running"]
+
+
+@pytest.mark.parametrize(
+    "terminal,reason",
+    [
+        ({"state": "closed"}, "the window is closed"),
+        ({"state": "opening", "window": {"closed": True}}, "the window is closed"),
+        ({"state": "open", "generation": "generation-b"}, "the window generation changed"),
+    ],
+)
+def test_on_wait_closed_or_replaced(waiting_cli, terminal, reason):
+    waiting_cli.snapshots = [{"state": "opening"}, terminal]
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait"])
+    assert result.exit_code == 1, result.output
+    assert f"Stopped waiting: {reason}." in result.output
+    assert waiting_cli.polls == [0, 1]
+
+
+def test_on_wait_status_errors_are_transient(waiting_cli):
+    waiting_cli.snapshots = [
+        {"state": "opening", "relay_error": "relay starting"},
+        {"state": "opening", "node_error": "node starting"},
+        {"state": "open"},
+    ]
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait"])
+    assert result.exit_code == 0, result.output
+    assert waiting_cli.polls == [0, 1, 2]
+    assert waiting_cli.sleeps == [1, 1]
+    assert "Last status error:" not in result.output
+
+
+@pytest.mark.parametrize("error_key", ["window_error", "node_error", "relay_error"])
+def test_on_wait_status_error_timeout_reports_last_error(waiting_cli, error_key):
+    waiting_cli.snapshots = [
+        {"state": "opening", error_key: "first error"},
+        {"state": "opening", error_key: "cannot\nread"},
+    ]
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait", "--timeout", "3"])
+    assert result.exit_code == 124, result.output
+    assert "Last status error: cannot read" in result.output.splitlines()
+    assert result.output.count("Last status error:") == 1
+    assert "first error" not in result.output
+    assert "Timed out after 3 s waiting for the window" in result.output
+    assert waiting_cli.polls == [0, 1, 2]
+    assert waiting_cli.sleeps == [1, 1, 1]
+
+
+def test_on_wait_status_failure_is_one_line(waiting_cli):
+    waiting_cli.snapshots = [OSError("cannot\nread")]
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait"])
+    assert result.exit_code == 1, result.output
+    assert result.output.splitlines()[-1] == "Stopped waiting: status read failed: cannot read"
+    assert waiting_cli.polls == [0]
+
+
+@pytest.mark.parametrize(
+    "observation,expected",
+    [
+        ({"observation_gap": True}, "Observation: unavailable; journal/log gaps are unknown."),
+        ({"observation": {"error": "recording paused"}}, "Observation gap: recording paused"),
+        ({"observation": {"time": 1}}, None),
+    ],
+)
+def test_on_wait_open_observation_gap_is_diagnostic(waiting_cli, observation, expected):
+    waiting_cli.snapshots = [{"state": "open", **observation}]
+    result = CliRunner().invoke(app, ["hostctl", "on", "--wait"])
+    assert result.exit_code == 0, result.output
+    if expected:
+        assert expected in result.output
+    else:
+        assert "Observation" not in result.output
+    assert waiting_cli.sleeps == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--timeout", "5"],
+        ["--wait", "--timeout", "0"],
+        ["--wait", "--timeout", "-1"],
+        ["--wait", "--timeout", "1.5"],
+    ],
+)
+def test_on_wait_invalid_timeout_is_usage_error(monkeypatch, args):
+    def refuse_start(*args, **kwargs):
+        pytest.fail("invalid options must be rejected before loading config or starting")
+
+    monkeypatch.setattr(cli, "load_config", refuse_start)
+    monkeypatch.setattr(hostctl, "open_window", refuse_start)
+    result = CliRunner().invoke(app, ["hostctl", "on", *args])
+    assert result.exit_code == 2, result.output
+    assert "--timeout" in result.output
 
 
 @pytest.mark.parametrize("failure", ["create", "inspect"])
