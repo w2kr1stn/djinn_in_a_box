@@ -48,6 +48,15 @@ def test_sign_in_token_hosts_match_bundled_clis() -> None:
     assert "console.anthropic.com" not in domains
 
 
+def test_github_release_assets_allowed_beside_code_hosts() -> None:
+    source = FIREWALL.read_text(encoding="utf-8")
+    array = re.search(r"(?ms)^ALLOWED_DOMAINS=\((.*?)^\)", source)
+    assert array is not None
+    code_hosts = array.group(1).split("# Code hosting", 1)[1].split("#", 1)[0]
+    assert '"release-assets.githubusercontent.com"' in code_hosts
+    assert default_domains().count("release-assets.githubusercontent.com") == 1
+
+
 # ---------------------------------------------------------------------------
 # Allowlist mode (`--allow`) and the unchanged default mode
 # ---------------------------------------------------------------------------
@@ -659,6 +668,7 @@ EXPECTED_DEFAULT_DOMAINS = [
     "github.com",
     "api.github.com",
     "raw.githubusercontent.com",
+    "release-assets.githubusercontent.com",
     "nodejs.org",
     "fnm.vercel.app",
     "astral.sh",
