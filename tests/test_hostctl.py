@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -350,7 +351,8 @@ def test_on_wait_invalid_timeout_is_usage_error(monkeypatch, args):
     monkeypatch.setattr(hostctl, "open_window", refuse_start)
     result = CliRunner().invoke(app, ["hostctl", "on", *args])
     assert result.exit_code == 2, result.output
-    assert "--timeout" in result.output
+    # CI forces colour in Typer usage errors; compare the plain text.
+    assert "--timeout" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
 
 
 @pytest.mark.parametrize("failure", ["create", "inspect"])
