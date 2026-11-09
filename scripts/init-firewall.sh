@@ -235,6 +235,7 @@ ALLOWED_DOMAINS=(
     "github.com"
     "api.github.com"
     "raw.githubusercontent.com"
+    "release-assets.githubusercontent.com"
     
     # Node/fnm
     "nodejs.org"

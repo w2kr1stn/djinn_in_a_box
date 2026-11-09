@@ -659,6 +659,7 @@ EXPECTED_DEFAULT_DOMAINS = [
     "github.com",
     "api.github.com",
     "raw.githubusercontent.com",
+    "release-assets.githubusercontent.com",
     "nodejs.org",
     "fnm.vercel.app",
     "astral.sh",
