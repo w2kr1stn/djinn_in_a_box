@@ -841,9 +841,7 @@ def test_runtime_publish_rechecks_native_only_input_after_delivery_view_load(
 
 def _claude_hook_value(event, *, host=False):
     filename = "security_reminder_hook.py" if event == "PreToolUse" else "ready_notify_hook.py"
-    command = f"python3 ~/.claude_seed/{filename}"
-    if host:
-        command = workflow_module._CLAUDE_HOOK_COMMANDS[command]
+    command = f"python3 ~/.claude/{filename}" if host else f"python3 ~/.claude_seed/{filename}"
     return [
         {
             "matcher": "Edit|Write" if event == "PreToolUse" else "",
