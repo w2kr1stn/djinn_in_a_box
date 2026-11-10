@@ -6,6 +6,7 @@ All models use Pydantic v2 with strict typing and TOML-compatible serialization.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from pathlib import Path
 from typing import Annotated, Literal
@@ -245,6 +246,25 @@ class AppConfig(BaseModel):
     outside ``config_root`` when that root is mirrored across machines: a private
     key belongs to one machine. Existence is checked at start, not here.
     """
+
+    denied_paths: tuple[str, ...] = ()
+    """Normalized absolute path prefixes refused by agent tool hooks."""
+
+    @field_validator("denied_paths", mode="after")
+    @classmethod
+    def validate_denied_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for entry in value:
+            if (
+                not entry.startswith("/")
+                or entry.startswith("//")
+                or "\x00" in entry
+                or posixpath.normpath(entry) != entry
+                or entry == "/"
+            ):
+                raise ValueError(
+                    f"denied_paths entry {entry!r} must be a normalized absolute path other than /"
+                )
+        return value
 
     resources: ResourceLimits = Field(default_factory=ResourceLimits)
     """Docker resource limits and reservations."""

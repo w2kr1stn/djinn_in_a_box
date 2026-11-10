@@ -773,6 +773,7 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
     parse time (NOT container ``-e`` env). The two ``${...:?}``-guarded vars
     (CODE_DIR, DJINN_CONFIG_ROOT) are always rendered so compose never hard-fails.
     DJINN_WORKSPACE_TARGET selects both the workspace mount target and its cwd.
+    DJINN_DENIED_PATHS transports configured path prefixes as a JSON list.
 
     ``config=None`` → best-effort guarded vars and the default projects target,
     for teardown / by-name operations (down/stop/rm act by project/container name).
@@ -788,6 +789,7 @@ def build_compose_env(config: AppConfig | None) -> dict[str, str]:
         env = {
             "CODE_DIR": str(config.code_dir),
             "DJINN_WORKSPACE_TARGET": str(config.workspace_target),
+            "DJINN_DENIED_PATHS": json.dumps(list(config.denied_paths)),
             "DJINN_CONFIG_ROOT": str(get_config_root(config)),
             "TZ": config.timezone,
             "CPU_LIMIT": str(config.resources.cpu_limit),

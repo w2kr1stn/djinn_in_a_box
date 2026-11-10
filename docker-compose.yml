@@ -62,6 +62,8 @@ x-common-environment: &common-environment
   DJINN_TERM_WIDTH: ${DJINN_TERM_WIDTH:-}
   # Workspace root inside the container; the Codex AGENTS.md chain hook reads it.
   DJINN_WORKSPACE_TARGET: ${DJINN_WORKSPACE_TARGET:-/home/dev/projects}
+  # Denied path prefixes as a JSON list; the agents' path guard hook reads it.
+  DJINN_DENIED_PATHS: '${DJINN_DENIED_PATHS:-[]}'
   UV_LINK_MODE: copy
   # Host-local LLM endpoint (e.g. Ollama on the host)
   LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://host.docker.internal:11434/v1}

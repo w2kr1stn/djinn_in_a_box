@@ -6,3 +6,10 @@ matcher = "startup|clear|compact"
 type = "command"
 command = "python3 /usr/local/libexec/djinn-agents-chain.py"
 additionalContextLimit = 65536
+
+# Refuse tool calls on Djinn's denied paths (DJINN_DENIED_PATHS).
+[[hooks.PreToolUse]]
+matcher = "Bash|apply_patch|view_image"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 /usr/local/libexec/djinn-path-guard.py"

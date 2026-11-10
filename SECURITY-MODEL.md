@@ -15,6 +15,15 @@ new SSH access and cuts relay connections; it cannot undo remote changes or stop
 detached jobs already launched on a target. See [usage](README.md#host-control-windows)
 and [implementation](IMPLEMENTATION.md#hostctl-helper).
 
+## Denied paths inside the container
+
+Optional `[general].denied_paths` adds a tool-hook guard against accidental access inside dev and guest containers.
+Claude Code's file/search/shell tools and Codex's shell, patch and image tools refuse configured paths and their
+home-relative equivalents. Image-owned managed settings and Codex requirements keep the hooks enabled.
+This is slip protection, not an isolation boundary: OpenCode, MCP tools, broad shell searches such as
+`rg <pattern> ~` and deliberate evasion are outside its scope. See [configuration and limits](README.md#denied-paths)
+and the [hook contract](IMPLEMENTATION.md#denied-path-tool-guard).
+
 ## Runtime package installs
 
 As `dev`, `/usr/local/bin/apt-get` is a shim that elevates `update` and supported

@@ -1,0 +1,3 @@
+# Keep Djinn's system hooks enabled in the container.
+[features]
+hooks = true

@@ -265,6 +265,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
 
     # Transform AppConfig to TOML structure: [general] wraps top-level fields
     data = config.model_dump(mode="json", exclude_none=True)
+    denied_paths = data.pop("denied_paths")
     for name, mount in config.mounts.items():
         if isinstance(mount, BindDeclaration) and not mount.read_only:
             data["mounts"][name].pop("read_only")
@@ -274,6 +275,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
             "workspace": data.pop("workspace"),
             "timezone": data.pop("timezone"),
             "config_root": data.pop("config_root"),
+            **({"denied_paths": denied_paths} if denied_paths else {}),
             **({"shared_root": data.pop("shared_root")} if "shared_root" in data else {}),
             **({"local_root": data.pop("local_root")} if "local_root" in data else {}),
             **(

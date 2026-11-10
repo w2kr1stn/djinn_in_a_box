@@ -657,9 +657,9 @@ Measured with Claude Code 2.1.316, Codex 0.166.0 and OpenCode 2.2.5 against a re
 The hook is `scripts/djinn-agents-chain.py`, installed root-owned as `/usr/local/libexec/djinn-agents-chain.py`
 and registered by `scripts/codex-config.toml`, installed as `/etc/codex/config.toml`. That file is Codex's system
 configuration layer: its hooks run without a trust prompt. Codex runs the `SessionStart` hooks of every layer, so
-hooks from the user's layers run alongside it and cannot replace it. Only turning Codex hooks off entirely
-(`[features] hooks = false` in the user's configuration) disables it.
-The enforced `requirements.toml` layer is not used. The matcher is `startup|clear|compact`: a resumed or forked session keeps the
+hooks from the user's layers run alongside it and cannot replace it. The image's `/etc/codex/requirements.toml`
+enforces `[features] hooks = true`, including when the user's configuration disables hooks.
+The matcher is `startup|clear|compact`: a resumed or forked session keeps the
 earlier hook text, so firing again there would duplicate it. `additionalContextLimit` is 65536; without it Codex
 shortens hook context to about 10,000 characters.
 
@@ -678,6 +678,21 @@ installed CLIs against an in-process recording endpoint in a disposable home wit
 asserts every chain file exactly once at start and after a forced compaction; each tool is skipped when its CLI is
 missing. Inside a Djinn image, whose system layer already registers the hook, the Codex test relies on that
 registration instead of adding a second one.
+
+### Denied-path tool guard
+
+`[general].denied_paths` travels through Compose as the JSON array `DJINN_DENIED_PATHS` to dev and guest runs.
+The stdlib-only `scripts/djinn-path-guard.py` runs as `python3 /usr/local/libexec/djinn-path-guard.py`.
+It reads stdin to EOF before checking `tool_name`, `tool_input` and absolute `cwd`; an empty list is a silent no-op.
+File arguments and patch headers resolve against `cwd` and `HOME` through `realpath`; Grep/Glob also check ancestors.
+`Bash` checks literal entry forms at word starts and path-segment ends. Refusals emit `hookSpecificOutput` JSON
+with `hookEventName = PreToolUse`, `permissionDecision = deny` and a reason, then exit 0.
+With a non-empty list, invalid configuration, invalid payloads and unexpected exceptions fail closed the same way;
+an unhandled crash would let the tool run. This does not parse shell execution or prevent deliberate evasion.
+The root-owned image layers are `scripts/claude-managed-settings.json` → `/etc/claude-code/managed-settings.json`,
+`scripts/codex-config.toml` → `/etc/codex/config.toml` and `scripts/codex-requirements.toml` → `/etc/codex/requirements.toml`
+(0644); the guard itself is 0755. Claude's managed hook and Codex's required hooks resist user-level disabling.
+`tests/test_path_guard.py` checks tool behavior, configuration transport and registration/COPY consistency.
 
 ## Config Root and Compose Environment Bridge
 

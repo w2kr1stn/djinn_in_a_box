@@ -628,8 +628,8 @@ an account or group level above a repository, often carry binding rules. Each to
   hook in Codex's system configuration (`/etc/codex/config.toml`) that adds the `AGENTS.md` files between the
   workspace root and the Git root at startup, after `/clear` and after a compaction. Resumed and forked sessions
   already carry them and get nothing new. The hook runs without a hook-trust prompt; your own Codex hooks run
-  alongside it and cannot replace it, and only turning Codex hooks off entirely (`[features] hooks = false`) disables
-  it. It only emits `AGENTS.md` files between the workspace root and the Git root, reads nothing else, and caps its
+  alongside it and cannot replace it. The image's `requirements.toml` enforces `[features] hooks = true`.
+  It only emits `AGENTS.md` files between the workspace root and the Git root, reads nothing else, and caps its
   output at 64 KiB; a file that does not fit is named instead of included.
 - **Claude Code** loads the whole chain itself, but by default one project `CLAUDE.md` anywhere on the path makes it
   skip every `AGENTS.md`. The seeded `config/claude/settings.json` therefore sets
@@ -642,6 +642,24 @@ an account or group level above a repository, often carry binding rules. Each to
 These rules were measured with Claude Code 2.1.316, Codex 0.166.0 and OpenCode 2.2.5.
 `tests/test_agents_chain_native.py` re-checks them against the installed CLIs; it runs in the dev container and is
 skipped where a CLI is missing.
+
+### Denied paths
+
+In `config.toml`, configure normalized absolute paths under `[general]` (default: empty):
+
+```toml
+[general]
+denied_paths = ["/srv/private"]
+```
+
+Each entry blocks itself and the same path below the agent's home: `/srv/private` and `~/srv/private`.
+In dev sessions and `djinn run` guests, Claude Code refuses `Read`, `Edit`, `Write`, `NotebookEdit`, `Grep`,
+`Glob` and `Bash`; Codex refuses shell calls (`Bash` in hooks), `apply_patch` and `view_image`.
+File paths are resolved through symlinks; Grep/Glob also refuse search roots above a denied path.
+Shell checks match literal paths, including `~`, `$HOME` and `${HOME}` forms, at path-segment boundaries.
+This protects against slips only: OpenCode and MCP tools are not covered, broad shell searches such as
+`rg <pattern> ~` are not detected, and deliberate evasion remains possible. Empty configuration changes nothing.
+Codex hooks are enforced in the container by `/etc/codex/requirements.toml`, even if user settings disable them.
 
 ## Doctor
 
