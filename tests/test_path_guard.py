@@ -1,6 +1,7 @@
 """Verify the path guard contract with isolated subprocesses and configuration."""
 
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -82,6 +83,25 @@ def payload(cwd: Path, tool: str = "Read", **args: object) -> dict:
 @pytest.mark.parametrize("stdin", [b"invalid", b"\xff", b"x" * (2 << 20)])
 def test_empty_configuration_is_silent(configured: str | None, stdin: bytes) -> None:
     output(invoke("relative", configured, stdin))
+
+
+@pytest.mark.parametrize("configured", [None, "", "[]"])
+def test_empty_configuration_drains_stdin(configured: str | None) -> None:
+    env = {} if configured is None else {"DJINN_DENIED_PATHS": configured}
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, b"invalid")
+        os.close(writer)
+        writer = -1
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)], env=env, stdin=reader, capture_output=True
+        )
+        output(result)
+        assert os.read(reader, 1) == b""
+    finally:
+        os.close(reader)
+        if writer != -1:
+            os.close(writer)
 
 
 @pytest.mark.parametrize(("tool", "key"), TOOLS)
@@ -401,10 +421,12 @@ def test_shell_literals_and_entries(paths: tuple[Path, Path, Path], matched: boo
 
 
 @pytest.mark.parametrize("header", ["Add File", "Update File", "Delete File", "Move to"])
+@pytest.mark.parametrize("indent", ["", " "])
 @pytest.mark.parametrize(
     "form",
     [
         "{entry}/x",
+        "{entry}/x ",
         "../blocked/x",
         "~{entry}/x",
         "$HOME{entry}/x",
@@ -413,11 +435,13 @@ def test_shell_literals_and_entries(paths: tuple[Path, Path, Path], matched: boo
         "alias/x",
     ],
 )
-def test_patch_headers(paths: tuple[Path, Path, Path], header: str, form: str) -> None:
+def test_patch_headers(paths: tuple[Path, Path, Path], header: str, form: str, indent: str) -> None:
     home, denied, cwd = paths
     (cwd / "alias").symlink_to(denied, target_is_directory=True)
     path = form.format(entry=denied, home=home)
-    patch = f"*** Begin Patch\n*** {header}: {path}\n*** End Patch"
+    denied = denied / "x"
+    body = {"Add File": "+x\n", "Update File": "@@\n-x\n+x\n"}.get(header, "")
+    patch = f"*** Begin Patch\n{indent}*** {header}: {path}\n{body}*** End Patch"
     output(
         invoke(home, json.dumps([str(denied)]), payload(cwd, "apply_patch", command=patch)),
         refusal(denied),
@@ -444,7 +468,6 @@ def test_patch_multiple_files(paths: tuple[Path, Path, Path], blocked_first: boo
     [
         "",
         "+{entry}/x",
-        " *** Add File: {entry}/x",
         "*** Add File: safe.txt",
         "*** Update File: {entry}x",
     ],

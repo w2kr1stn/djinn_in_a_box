@@ -75,7 +75,7 @@ def check(payload: object, entries: list[str], home: str) -> None:
         if tool == "apply_patch":
             roots = [
                 resolve(line[len(header) :], cwd, home)
-                for line in command.splitlines()
+                for line in map(str.strip, command.splitlines())
                 for header in patch_headers
                 if line.startswith(header)
             ]
