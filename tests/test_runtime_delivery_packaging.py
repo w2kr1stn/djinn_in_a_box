@@ -30,6 +30,27 @@ def _docker_instructions():
     ]
 
 
+def test_uv_image_pin():
+    instructions = _docker_instructions()
+    pins = [line for line in instructions if line.startswith("ARG UV_VERSION=")]
+    assert len(pins) == 1
+    assert re.fullmatch(r"ARG UV_VERSION=[0-9]+\.[0-9]+\.[0-9]+", pins[0])
+    first_from = next(i for i, line in enumerate(instructions) if line.startswith("FROM "))
+    assert instructions.index(pins[0]) < first_from
+    assert instructions[first_from] == "FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv"
+    assert "COPY --from=uv /uv /uvx /usr/local/bin/" in instructions
+    assert "astral-sh/uv:latest" not in (_ROOT / "Dockerfile").read_text()
+
+
+def test_image_installs_python_with_uv_as_dev():
+    instructions = _docker_instructions()
+    install = instructions.index("RUN uv python install 3.14")
+    assert instructions.index("COPY --from=uv /uv /uvx /usr/local/bin/") < install
+    assert [line for line in instructions[:install] if line.startswith("USER ")][-1] == (
+        "USER $USERNAME"
+    )
+
+
 def test_package_image_delivery():
     instructions = _docker_instructions()
     copies = {

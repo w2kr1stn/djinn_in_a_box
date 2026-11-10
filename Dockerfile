@@ -3,6 +3,11 @@
 # Minimal base with: fnm (Node), uv (Python), Claude Code, Codex, OpenCode
 # + Docker CLI for container management (optionally enabled)
 # =============================================================================
+# uv pin: maintainers bump it with ./scripts/update-agents.sh. Declared before the first FROM so the uv
+# stage can use it.
+ARG UV_VERSION=0.13.3
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -72,7 +77,7 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_$
     && chmod +x /usr/local/bin/gh
 
 # Install uv (Python)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 # Create non-root user
 ARG USERNAME=dev
@@ -128,6 +133,9 @@ RUN scratch=$(mktemp -d) \
 
 ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
 RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
+
+# In the image, so project virtual environments keep their interpreter across a container recreation.
+RUN uv python install 3.14
 
 # Upstream CLI agent defaults - maintainers bump with: ./scripts/update-agents.sh
 # djinn update records local versions; builds pass higher versions as ARG overrides.
