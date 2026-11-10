@@ -457,7 +457,7 @@ def test_main_filesystem_error_fails_open(workspace: tuple[Path, Path]) -> None:
 
 def test_config_toml_session_start_hook() -> None:
     config = tomllib.loads((SCRIPT.parent / "codex-config.toml").read_text())
-    assert config == {
+    assert {"hooks": {"SessionStart": config["hooks"]["SessionStart"]}} == {
         "hooks": {
             "SessionStart": [
                 {

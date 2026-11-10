@@ -23,6 +23,7 @@ TOOLS = [
     ("NotebookEdit", "notebook_path"),
     ("Grep", "path"),
     ("Glob", "path"),
+    ("view_image", "path"),
 ]
 INVALID_ENTRIES = ["relative", "/", "/a/../b", "//a", "/a/", "/a/./b", "/a//b", "/a\x00b", ""]
 
@@ -112,13 +113,17 @@ def test_tool_path_keys(paths: tuple[Path, Path, Path], tool: str, key: str, blo
         "${HOME}",
     ],
 )
-def test_resolution(paths: tuple[Path, Path, Path], form: str) -> None:
+@pytest.mark.parametrize("tool", ["Read", "view_image"])
+def test_resolution(paths: tuple[Path, Path, Path], form: str, tool: str) -> None:
     home, denied, cwd = paths
     (cwd / "alias").symlink_to(denied, target_is_directory=True)
     if form in ("~", "~/x", "$HOME", "${HOME}"):
         denied = home
     path = form.format(entry=denied, home=home) if "entry}" in form else form
-    output(invoke(home, json.dumps([str(denied)]), payload(cwd, file_path=path)), refusal(denied))
+    key = "path" if tool == "view_image" else "file_path"
+    output(
+        invoke(home, json.dumps([str(denied)]), payload(cwd, tool, **{key: path})), refusal(denied)
+    )
 
 
 def test_configured_symlink_and_segment_boundary(paths: tuple[Path, Path, Path]) -> None:
@@ -168,9 +173,7 @@ def test_glob_without_denied_prefix(paths: tuple[Path, Path, Path], pattern: str
     output(invoke(home, json.dumps([str(denied)]), payload(cwd, "Glob", pattern=pattern)))
 
 
-@pytest.mark.parametrize(
-    "tool", ["Bash", "apply_patch", "view_image", "mcp__files__read", "Unknown"]
-)
+@pytest.mark.parametrize("tool", ["mcp__files__read", "Unknown"])
 def test_other_tools_pass(paths: tuple[Path, Path, Path], tool: str) -> None:
     home, denied, cwd = paths
     output(invoke(home, json.dumps([str(denied)]), payload(cwd, tool, path=str(denied))))
@@ -221,7 +224,11 @@ def test_required_payload_keys(paths: tuple[Path, Path, Path], key: str, value: 
     output(invoke(home, json.dumps([str(denied)]), data), failure("invalid payload"))
 
 
-@pytest.mark.parametrize(("tool", "key"), TOOLS + [("Glob", "pattern"), ("Grep", "pattern")])
+@pytest.mark.parametrize(
+    ("tool", "key"),
+    TOOLS
+    + [("Glob", "pattern"), ("Grep", "pattern"), ("Bash", "command"), ("apply_patch", "command")],
+)
 @pytest.mark.parametrize("value", [None, 7, []])
 def test_invalid_path_keys(
     paths: tuple[Path, Path, Path], tool: str, key: str, value: object
@@ -233,11 +240,13 @@ def test_invalid_path_keys(
     )
 
 
-@pytest.mark.parametrize(("tool", "key"), TOOLS[:4])
+@pytest.mark.parametrize(
+    ("tool", "key"), TOOLS[:4] + TOOLS[6:] + [("Bash", "command"), ("apply_patch", "command")]
+)
 def test_missing_file_key(paths: tuple[Path, Path, Path], tool: str, key: str) -> None:
     home, denied, cwd = paths
     output(
-        invoke(home, json.dumps([str(denied)]), payload(cwd, tool, path=str(cwd))),
+        invoke(home, json.dumps([str(denied)]), payload(cwd, tool)),
         failure("invalid payload"),
     )
 
@@ -328,3 +337,144 @@ def test_compose_and_managed_registration() -> None:
         "install -d -o root -g root -m 0755 /var/lib/djinn-packages /etc/codex /etc/claude-code\n"
     )
     assert dockerfile.index(setup) < dockerfile.index("USER $USERNAME\n")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls ~{entry}",
+        "cat {entry}/x",
+        'cat "$HOME{entry}/x"',
+        "cat ${{HOME}}{entry}/x",
+        "cat {home}{entry}/x",
+        "tool --dir={entry}",
+        "true|{entry}/x",
+        "true;{entry}/x",
+        "true&&{entry}/x",
+        "({entry}/x)",
+        "cat '{entry}'",
+        'cat "{entry}/x"',
+        "cat `{entry}`",
+        "{entry}",
+        "{entry};true",
+        "cat\n{entry}\t",
+    ],
+)
+def test_shell_denied(paths: tuple[Path, Path, Path], command: str) -> None:
+    home, denied, cwd = paths
+    command = command.format(entry=denied, home=home)
+    output(
+        invoke(home, json.dumps([str(denied)]), payload(cwd, "Bash", command=command)),
+        refusal(denied),
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -n blocked {cwd}/file",
+        "ls {cwd}",
+        "cat {entry}x",
+        "cat {entry}.bak",
+        "cat /x{entry}",
+        "rg pattern ~",
+        "",
+    ],
+)
+def test_shell_allowed(paths: tuple[Path, Path, Path], command: str) -> None:
+    home, denied, cwd = paths
+    command = command.format(entry=denied, cwd=cwd)
+    output(invoke(home, json.dumps([str(denied)]), payload(cwd, "Bash", command=command)))
+
+
+@pytest.mark.parametrize("matched", [False, True])
+def test_shell_literals_and_entries(paths: tuple[Path, Path, Path], matched: bool) -> None:
+    home, denied, cwd = paths
+    entry = str(denied / "[ab].*")
+    command = "cat " + (entry if matched else str(denied / "a.txt"))
+    output(
+        invoke(
+            home, json.dumps([str(cwd / "other"), entry]), payload(cwd, "Bash", command=command)
+        ),
+        refusal(entry) if matched else None,
+    )
+
+
+@pytest.mark.parametrize("header", ["Add File", "Update File", "Delete File", "Move to"])
+@pytest.mark.parametrize(
+    "form",
+    [
+        "{entry}/x",
+        "../blocked/x",
+        "~{entry}/x",
+        "$HOME{entry}/x",
+        "${{HOME}}{entry}/x",
+        "{home}{entry}/x",
+        "alias/x",
+    ],
+)
+def test_patch_headers(paths: tuple[Path, Path, Path], header: str, form: str) -> None:
+    home, denied, cwd = paths
+    (cwd / "alias").symlink_to(denied, target_is_directory=True)
+    path = form.format(entry=denied, home=home)
+    patch = f"*** Begin Patch\n*** {header}: {path}\n*** End Patch"
+    output(
+        invoke(home, json.dumps([str(denied)]), payload(cwd, "apply_patch", command=patch)),
+        refusal(denied),
+    )
+
+
+@pytest.mark.parametrize("blocked_first", [False, True])
+def test_patch_multiple_files(paths: tuple[Path, Path, Path], blocked_first: bool) -> None:
+    home, denied, cwd = paths
+    targets = [denied / "x", cwd / "x"] if blocked_first else [cwd / "x", denied / "x"]
+    patch = (
+        "*** Begin Patch\n"
+        + "".join(f"*** Add File: {path}\n+x\n" for path in targets)
+        + "*** End Patch"
+    )
+    output(
+        invoke(home, json.dumps([str(denied)]), payload(cwd, "apply_patch", command=patch)),
+        refusal(denied),
+    )
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "",
+        "+{entry}/x",
+        " *** Add File: {entry}/x",
+        "*** Add File: safe.txt",
+        "*** Update File: {entry}x",
+    ],
+)
+def test_patch_without_denied_header(paths: tuple[Path, Path, Path], patch: str) -> None:
+    home, denied, cwd = paths
+    output(
+        invoke(
+            home,
+            json.dumps([str(denied)]),
+            payload(cwd, "apply_patch", command=patch.format(entry=denied)),
+        )
+    )
+
+
+def test_codex_registration_and_requirements() -> None:
+    settings = tomllib.loads((SCRIPT.parent / "codex-config.toml").read_text())
+    claude = json.loads((SCRIPT.parent / "claude-managed-settings.json").read_text())
+    command = claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert settings["hooks"]["PreToolUse"] == [
+        {
+            "matcher": "Bash|apply_patch|view_image",
+            "hooks": [{"type": "command", "command": command}],
+        }
+    ]
+    requirements = tomllib.loads((SCRIPT.parent / "codex-requirements.toml").read_text())
+    assert requirements == {"features": {"hooks": True}}
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert f"COPY --chmod=755 scripts/djinn-path-guard.py {command.split()[1]}\n" in dockerfile
+    assert (
+        "COPY --chmod=644 scripts/codex-config.toml /etc/codex/config.toml\n"
+        "COPY --chmod=644 scripts/codex-requirements.toml /etc/codex/requirements.toml\n"
+    ) in dockerfile

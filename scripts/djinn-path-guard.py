@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse Claude file tool calls touching configured denied path prefixes."""
+"""Refuse Claude Code and Codex tool calls touching configured denied path prefixes."""
 
 import json
 import os
@@ -10,6 +10,10 @@ import sys
 denied_variable = "DJINN_DENIED_PATHS"
 file_keys = dict.fromkeys(("Read", "Edit", "Write"), "file_path")
 file_keys["NotebookEdit"] = "notebook_path"
+file_keys["view_image"] = "path"
+patch_headers = ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
+shell_start = r"(?:^|[\s;&|()<>'\"`=])"
+shell_end = r"(?=$|[/\s;&|()<>'\"`])"
 
 
 class GuardError(ValueError):
@@ -60,12 +64,26 @@ def check(payload: object, entries: list[str], home: str) -> None:
     ):
         raise GuardError("invalid payload")
     search = tool in ("Grep", "Glob")
-    if tool not in file_keys and not search:
+    if tool not in file_keys and not search and tool not in ("Bash", "apply_patch"):
         return
-    path = args.get("path", cwd) if search else args.get(file_keys[tool])
-    if not isinstance(path, str):
-        raise GuardError("invalid payload")
-    roots = [resolve(path, cwd, home)]
+    command = ""
+    roots = []
+    if tool in ("Bash", "apply_patch"):
+        command = args.get("command")
+        if not isinstance(command, str):
+            raise GuardError("invalid payload")
+        if tool == "apply_patch":
+            roots = [
+                resolve(line[len(header) :], cwd, home)
+                for line in command.splitlines()
+                for header in patch_headers
+                if line.startswith(header)
+            ]
+    else:
+        path = args.get("path", cwd) if search else args.get(file_keys[tool])
+        if not isinstance(path, str):
+            raise GuardError("invalid payload")
+        roots = [resolve(path, cwd, home)]
     if search:
         pattern = args.get("pattern", "")
         if not isinstance(pattern, str):
@@ -75,8 +93,17 @@ def check(payload: object, entries: list[str], home: str) -> None:
         if "/" in prefix:
             roots.append(resolve(prefix[: prefix.rfind("/") + 1], roots[0], home))
     for entry in entries:
+        shell_hit = False
+        if tool == "Bash":
+            forms = (entry, "~" + entry, "$HOME" + entry, "${HOME}" + entry, home + entry)
+            regex = (
+                shell_start + "(?:" + "|".join(re.escape(form) for form in forms) + ")" + shell_end
+            )
+            shell_hit = re.search(regex, command) is not None
         for denied in (os.path.realpath(entry), os.path.realpath(home + entry)):
-            if any(under(root, denied) or (search and under(denied, root)) for root in roots):
+            if shell_hit or any(
+                under(root, denied) or (search and under(denied, root)) for root in roots
+            ):
                 refuse(
                     f"Access to {entry} is denied by Djinn's denied_paths. "
                     "Reading or changing it needs the operator's explicit instruction "

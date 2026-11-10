@@ -248,6 +248,7 @@ COPY --chmod=755 scripts/djinn-apt-root.sh /usr/local/libexec/djinn-apt-root
 COPY --chmod=755 scripts/djinn-agents-chain.py /usr/local/libexec/djinn-agents-chain.py
 COPY --chmod=755 scripts/djinn-path-guard.py /usr/local/libexec/djinn-path-guard.py
 COPY --chmod=644 scripts/codex-config.toml /etc/codex/config.toml
+COPY --chmod=644 scripts/codex-requirements.toml /etc/codex/requirements.toml
 COPY --chmod=644 scripts/claude-managed-settings.json /etc/claude-code/managed-settings.json
 COPY --chown=dev:dev scripts/settings-copy.py /home/dev/settings-copy.py
 COPY --chown=dev:dev scripts/codex-daemon-policy.py /home/dev/codex-daemon-policy.py

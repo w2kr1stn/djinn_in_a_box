@@ -14,6 +14,8 @@ Versioning before and after the first stable release.
   after `/clear` and after a compaction. The seeded Claude Code settings load `AGENTS.md` beside `CLAUDE.md`
   (`instructionFiles = "claude-md-and-agents-md"`). Compose exports `DJINN_WORKSPACE_TARGET` into the container
   (#229).
+- Optional `[general].denied_paths` refuses accidental Claude Code and Codex tool access to configured paths
+  inside dev and guest containers, with managed Claude hooks and enforced Codex hooks (#233).
 - `djinn run --allow HOST[/PREFIX][:PORT]` (repeatable) gives one headless run
   exactly the listed outbound destinations and refuses everything else at once.
   Names are resolved once on the host and pinned; the run has no DNS. A root step
