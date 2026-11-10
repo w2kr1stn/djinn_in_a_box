@@ -219,6 +219,9 @@ Versioning before and after the first stable release.
   `scripts/update-agents.sh` bumps it with the other pins. Python 3.14 is installed
   into the image, so existing virtual environments keep working after the container
   is recreated (#227).
+- The dev image's default Node now follows one major line (`NODE_MAJOR`, currently 26)
+  instead of the newest LTS at build time; rebuilding that layer, for example with
+  `djinn build --no-cache`, picks up the latest patch release (#241).
 - Raise the default Claude Code version in the dev image to 2.1.304, the version the
   `claude-isolated` agent was measured with (#171).
 - `djinn agents --json` writes raw JSON with every field, including

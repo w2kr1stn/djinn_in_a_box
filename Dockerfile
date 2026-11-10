@@ -132,7 +132,8 @@ RUN scratch=$(mktemp -d) \
     && rm -rf "$scratch"
 
 ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.local/share/fnm:$PATH"
-RUN eval "$(fnm env)" && fnm install --lts && fnm default lts-latest
+ARG NODE_MAJOR=26
+RUN eval "$(fnm env)" && fnm install "$NODE_MAJOR" && fnm default "$NODE_MAJOR"
 
 # In the image, so project virtual environments keep their interpreter across a container recreation.
 RUN uv python install 3.14

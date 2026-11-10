@@ -42,6 +42,16 @@ def test_uv_image_pin():
     assert "astral-sh/uv:latest" not in (_ROOT / "Dockerfile").read_text()
 
 
+def test_node_default_follows_one_major_line():
+    instructions = _docker_instructions()
+    pins = [line for line in instructions if re.fullmatch(r"ARG NODE_MAJOR=[0-9]+", line)]
+    assert len(pins) == 1
+    run = 'RUN eval "$(fnm env)" && fnm install "$NODE_MAJOR" && fnm default "$NODE_MAJOR"'
+    assert run in instructions
+    assert instructions.index(pins[0]) < instructions.index(run)
+    assert "lts-latest" not in (_ROOT / "Dockerfile").read_text()
+
+
 def test_image_installs_python_with_uv_as_dev():
     instructions = _docker_instructions()
     install = instructions.index("RUN uv python install 3.14")
