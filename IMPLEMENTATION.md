@@ -657,7 +657,8 @@ Measured with Claude Code 2.1.316, Codex 0.166.0 and OpenCode 2.2.5 against a re
 The hook is `scripts/djinn-agents-chain.py`, installed root-owned as `/usr/local/libexec/djinn-agents-chain.py`
 and registered by `scripts/codex-config.toml`, installed as `/etc/codex/config.toml`. That file is Codex's system
 configuration layer: its hooks run without a trust prompt. Codex runs the `SessionStart` hooks of every layer, so
-hooks from the user's layers run alongside it and cannot switch it off: the hook is always active in the Djinn image.
+hooks from the user's layers run alongside it and cannot replace it. Only turning Codex hooks off entirely
+(`[features] hooks = false` in the user's configuration) disables it.
 The enforced `requirements.toml` layer is not used. The matcher is `startup|clear|compact`: a resumed or forked session keeps the
 earlier hook text, so firing again there would duplicate it. `additionalContextLimit` is 65536; without it Codex
 shortens hook context to about 10,000 characters.
