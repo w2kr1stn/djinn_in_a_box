@@ -108,7 +108,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && echo "$USERNAME ALL=(root) NOPASSWD: /usr/local/libexec/djinn-apt-root" > /etc/sudoers.d/djinn-apt \
     && chmod 0440 /etc/sudoers.d/djinn-apt \
     && visudo -cf /etc/sudoers.d/djinn-apt \
-    && install -d -o root -g root -m 0755 /var/lib/djinn-packages
+    && install -d -o root -g root -m 0755 /var/lib/djinn-packages /etc/codex
 
 COPY scripts/init-firewall.sh /usr/local/bin/init-firewall.sh
 RUN chmod +x /usr/local/bin/init-firewall.sh
