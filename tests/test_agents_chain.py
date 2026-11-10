@@ -477,14 +477,19 @@ def test_config_toml_session_start_hook() -> None:
 
 def test_dockerfile_copy_lines_and_command_destination() -> None:
     dockerfile = (SCRIPT.parents[1] / "Dockerfile").read_text()
-    directory_setup = "install -d -o root -g root -m 0755 /var/lib/djinn-packages /etc/codex\n"
+    directory_setup = (
+        "install -d -o root -g root -m 0755 /var/lib/djinn-packages /etc/codex /etc/claude-code\n"
+    )
     assert dockerfile.index(directory_setup) < dockerfile.index("USER $USERNAME\n")
     anchor = "COPY --chmod=755 scripts/djinn-apt-root.sh /usr/local/libexec/djinn-apt-root\n"
     script_copy = (
         "COPY --chmod=755 scripts/djinn-agents-chain.py /usr/local/libexec/djinn-agents-chain.py\n"
     )
+    guard_copy = (
+        "COPY --chmod=755 scripts/djinn-path-guard.py /usr/local/libexec/djinn-path-guard.py\n"
+    )
     config_copy = "COPY --chmod=644 scripts/codex-config.toml /etc/codex/config.toml\n"
-    assert anchor + script_copy + config_copy in dockerfile
+    assert anchor + script_copy + guard_copy + config_copy in dockerfile
     config = tomllib.loads((SCRIPT.parent / "codex-config.toml").read_text())
     command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command.split() == ["python3", script_copy.split()[-1]]

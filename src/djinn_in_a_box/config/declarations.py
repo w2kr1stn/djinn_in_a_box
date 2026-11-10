@@ -15,6 +15,7 @@ COMPOSE_ENV_KEYS = frozenset(
         "NO_COLOR",
         "DJINN_TERM_WIDTH",
         "DJINN_WORKSPACE_TARGET",
+        "DJINN_DENIED_PATHS",
         "UV_LINK_MODE",
         "CODEX_SQLITE_HOME",
         "LOCAL_ENDPOINT",
@@ -34,6 +35,7 @@ DJINN_ENV_KEYS = frozenset(
     [
         "CODE_DIR",
         "DJINN_WORKSPACE_TARGET",
+        "DJINN_DENIED_PATHS",
         "DJINN_CONFIG_ROOT",
         "CPU_LIMIT",
         "MEMORY_LIMIT",
