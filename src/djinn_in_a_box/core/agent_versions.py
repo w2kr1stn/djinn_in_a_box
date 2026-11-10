@@ -29,7 +29,17 @@ def numeric_version(value: str) -> tuple[int, int, int]:
 
 
 def version_pin(project: Path, name: str) -> str:
-    """Read exactly one canonical numeric ARG from the upstream Dockerfile.
+    """Read exactly one canonical numeric ARG from the upstream Dockerfile."""
+    return _dockerfile_pin(project, name, r"[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def checksum_pin(project: Path, name: str) -> str:
+    """Read exactly one canonical SHA-256 ARG from the upstream Dockerfile."""
+    return _dockerfile_pin(project, name, r"[0-9a-f]{64}")
+
+
+def _dockerfile_pin(project: Path, name: str, pattern: str) -> str:
+    """Read one canonical ARG matching the requested pin format.
 
     Non-canonical declarations count toward uniqueness and are rejected.
     Declarations split over a backslash continuation are not detected; the
@@ -46,12 +56,13 @@ def version_pin(project: Path, name: str) -> str:
         re.MULTILINE,
     )
     match = (
-        re.fullmatch(rf"ARG {re.escape(name)}=([0-9]+\.[0-9]+\.[0-9]+)[ \t]*", declarations[0])
+        re.fullmatch(rf"ARG {re.escape(name)}=({pattern})[ \t]*", declarations[0])
         if len(declarations) == 1
         else None
     )
     if match is None:
-        raise AgentVersionError(f"{dockerfile}: expected one numeric x.y.z ARG {name}")
+        kind = "checksum" if pattern == r"[0-9a-f]{64}" else "numeric x.y.z"
+        raise AgentVersionError(f"{dockerfile}: expected one {kind} ARG {name}")
     return match[1]
 
 

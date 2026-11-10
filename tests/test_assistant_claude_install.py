@@ -1,14 +1,17 @@
 """Offline checks of the signed native Claude installer and its trust boundary."""
 
 import hashlib
+import http.server
 import json
 import os
 import re
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -227,6 +230,115 @@ def installer(tmp_path, signing_keys):
         script=script,
         tmp_path=tmp_path,
     )
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_real_curl_retries_truncated_https(tmp_path, signing_keys, corrupt):
+    key = signing_keys[0]
+    payload = b"verified binary fixture, never executed\n" * 4096
+    version = "2.1.999"
+    release = f"/claude-code-releases/{version}"
+    binary_path = f"{release}/linux-x64/claude"
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "platforms": {"linux-x64": {"checksum": hashlib.sha256(payload).hexdigest()}},
+            }
+        )
+    )
+    signature = tmp_path / "manifest.json.sig"
+    gpg(key.home, "--detach-sign", "--output", str(signature), str(manifest))
+    assets = {
+        "/keys/claude-code.asc": key.public,
+        f"{release}/manifest.json": manifest.read_bytes(),
+        f"{release}/manifest.json.sig": signature.read_bytes(),
+        binary_path: payload,
+    }
+    certificate = tmp_path / "certificate.pem"
+    private_key = tmp_path / "private-key.pem"
+    subprocess.run(
+        shlex.split(
+            "openssl req -x509 -newkey rsa:2048 -nodes -days 1 "
+            "-subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1"
+        )
+        + ["-keyout", str(private_key), "-out", str(certificate)],
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            body = assets[self.path]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.path == binary_path:
+                if requests.count(binary_path) == 1:
+                    body = body[: len(body) // 2]
+                elif corrupt:
+                    body = b"x" * len(body)
+            self.wfile.write(body)
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, format, *args):
+            pass
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate, private_key)
+    # GPG's Unix socket path needs a shorter TMPDIR than pytest's nested test path.
+    with (
+        tempfile.TemporaryDirectory(prefix="dj231-", dir="/tmp") as temp_dir,
+        http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server,
+    ):
+        scratch = Path(temp_dir)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            original = SCRIPT.read_text()
+            base = "base=https://downloads.claude.ai"
+            fingerprint = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+            script = tmp_path / "installer.sh"
+            script.write_text(
+                original.replace(base, f"base=https://127.0.0.1:{server.server_port}").replace(
+                    fingerprint, key.fingerprint
+                )
+            )
+            destination = tmp_path / "installed/claude"
+            result = subprocess.run(
+                ["/bin/sh", str(script), "amd64", version, str(destination)],
+                env={
+                    **os.environ,
+                    "CURL_CA_BUNDLE": str(certificate),
+                    "TMPDIR": str(scratch),
+                    "NO_PROXY": "127.0.0.1",
+                    "no_proxy": "127.0.0.1",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=40,
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not list(scratch.iterdir())
+    assert requests.count(binary_path) == 2, result.stderr
+    if corrupt:
+        assert result.returncode != 0, result.stdout
+        assert not destination.exists()
+        assert "FAILED" in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert destination.read_bytes() == payload
+        assert os.access(destination, os.X_OK)
 
 
 def assert_refused(installer, result):

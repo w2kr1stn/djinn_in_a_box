@@ -6,8 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG TARGETARCH
 ARG DOCKER_VERSION
-RUN case "$TARGETARCH" in amd64) arch=x86_64;; arm64) arch=aarch64;; *) exit 1;; esac \
-    && curl -fsSL "https://download.docker.com/linux/static/stable/$arch/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
+ARG DOCKER_SHA256_AMD64
+ARG DOCKER_SHA256_ARM64
+RUN case "$TARGETARCH" in amd64) arch=x86_64 checksum=$DOCKER_SHA256_AMD64;; arm64) arch=aarch64 checksum=$DOCKER_SHA256_ARM64;; *) exit 1;; esac \
+    && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "https://download.docker.com/linux/static/stable/$arch/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
+    && printf '%s  %s\n' "$checksum" /tmp/docker.tgz | sha256sum -c - \
     && tar xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
     && rm /tmp/docker.tgz
 
