@@ -82,6 +82,8 @@ stores, and local command choices remain outside the published source.
 │   ├── mcp-register.sh
 │   ├── init-firewall.sh
 │   ├── check-build-dns.sh
+│   ├── codex-config.toml     # Codex system config, installed as /etc/codex/config.toml
+│   ├── djinn-agents-chain.py # Codex SessionStart hook for the workspace AGENTS.md chain
 │   ├── probe-claude-isolated.py  # maintainer re-probe of the claude-isolated agent
 │   └── update-agents.sh      # read-only discovery or maintainer default bumps
 ├── tools/
@@ -641,6 +643,41 @@ Credentials, auth, history, caches, themes, UI policy, MCP, arbitrary plugins,
 `PostToolUse`, status-line configuration, and unlisted settings never enter the
 managed set. The only non-portable-artifact remedy is: “Author or edit the
 artifact natively in the target tool's view, or make the source form portable.”
+
+### Workspace AGENTS.md chain
+
+Measured with Claude Code 2.1.316, Codex 0.166.0 and OpenCode 2.2.5 against a recording model endpoint:
+
+| Tool | Native rule | Djinn's addition |
+| --- | --- | --- |
+| Codex | `AGENTS.md` from the project root (nearest ancestor with `.git`, else the working directory) down; reloaded after compaction | `SessionStart` hook from the image |
+| Claude Code | every ancestor `AGENTS.md`, reloaded after compaction; with the default `claude-md-or-agents-md` none at all once a project `CLAUDE.md` is on the path | seed default `claude-md-and-agents-md` |
+| OpenCode | find-up from the working directory to `$HOME` when `$HOME` contains it, otherwise to the project root; part of the system prompt, so it survives compaction | none |
+
+The hook is `scripts/djinn-agents-chain.py`, installed root-owned as `/usr/local/libexec/djinn-agents-chain.py`
+and registered by `scripts/codex-config.toml`, installed as `/etc/codex/config.toml`. That file is Codex's system
+configuration layer: its hooks run without a trust prompt. Codex runs the `SessionStart` hooks of every layer, so
+hooks from the user's layers run alongside it and cannot replace it. Only turning Codex hooks off entirely
+(`[features] hooks = false` in the user's configuration) disables it.
+The enforced `requirements.toml` layer is not used. The matcher is `startup|clear|compact`: a resumed or forked session keeps the
+earlier hook text, so firing again there would duplicate it. `additionalContextLimit` is 65536; without it Codex
+shortens hook context to about 10,000 characters.
+
+The script is stdlib-only and fails open: on an input, decoding or file error it writes one
+`djinn-agents-chain:` line to stderr, prints no context and exits 0. It reads `cwd` from the hook payload and the
+workspace root from `DJINN_WORKSPACE_TARGET`, which Compose sets in `x-common-environment`; both are resolved with
+`realpath`. The project root mirrors Codex's default `project_root_markers = [".git"]` with an existence check only.
+The chain is the workspace root and every directory below it that is a strict ancestor of the project root; a project
+root at or above the workspace root yields nothing. An `AGENTS.md` qualifies when it is a regular file whose resolved
+path stays inside the workspace root. Files are included whole, top-down, while the encoded text stays within 61,440
+bytes, checked by size before reading and by encoded length after reading; a file that does not fit is named with its
+size instead. The whole text is cut at 65,536 bytes on a character boundary.
+
+`tests/test_agents_chain.py` covers the script and the registration. `tests/test_agents_chain_native.py` runs the
+installed CLIs against an in-process recording endpoint in a disposable home with an allowlisted environment and
+asserts every chain file exactly once at start and after a forced compaction; each tool is skipped when its CLI is
+missing. Inside a Djinn image, whose system layer already registers the hook, the Codex test relies on that
+registration instead of adding a second one.
 
 ## Config Root and Compose Environment Bridge
 
