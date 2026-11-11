@@ -131,7 +131,7 @@ class TestAppConfig:
         with pytest.raises(ValidationError, match="code_dir is not a directory"):
             AppConfig(code_dir=file_path)
 
-    @pytest.mark.parametrize("workspace", [None, "projects", "aios"])
+    @pytest.mark.parametrize("workspace", [None, "projects", "aimi"])
     def test_nested_model_from_dict(self, tmp_path: Path, workspace: str | None) -> None:
         """Test creating AppConfig from nested dictionary (TOML-like)."""
         data = {

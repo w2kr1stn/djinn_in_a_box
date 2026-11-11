@@ -130,6 +130,30 @@ class TestDjinnVersion:
         assert "\n" in result.stdout
 
 
+@pytest.mark.usefixtures("quiet_doctor", "mock_home")
+def test_doctor_labels_aimi_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.text import Text
+
+    from djinn_in_a_box.commands import doctor as doctor_mod
+
+    aimi_root = tmp_path / "aimi"
+    aimi_root.mkdir()
+    config = AppConfig(code_dir=aimi_root, workspace="aimi", config_root=tmp_path / "config")
+    config_file = tmp_path / "config.toml"
+    save_config_file(config, config_file)
+    monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
+    monkeypatch.setattr(doctor_mod, "CONFIG_FILE", config_file)
+    monkeypatch.setattr("djinn_in_a_box.config.zones.ZONES_FILE", tmp_path / "zones.toml")
+    rendered_text = MagicMock(wraps=Text)
+    monkeypatch.setattr(doctor_mod, "Text", rendered_text)
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code in {0, 1}, result.output
+    assert "aimi root" in result.output
+    rendered_text.assert_any_call(str(aimi_root), style="path")
+
+
 class TestInitCommand:
     """Tests for the init command."""
 
@@ -175,7 +199,7 @@ class TestInitCommand:
         assert stat.S_ISREG(instructions.lstat().st_mode)
         assert instructions.read_text() == content
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios", None])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi", None])
     def test_init_creates_config_file(
         self,
         tmp_path: Path,
@@ -195,13 +219,13 @@ class TestInitCommand:
             "djinn_in_a_box.commands.config.save_config",
             lambda config: save_config_file(config, config_file),
         )
-        result = runner.invoke(app, ["init"], input=f"AIOS\n{workspace or ''}\n\nUTC\nn\n")
+        result = runner.invoke(app, ["init"], input=f"AIMI\n{workspace or ''}\n\nUTC\nn\n")
 
         assert result.exit_code == 0
         assert config_file.exists()
         combined = result.stdout + result.output
-        assert "'AIOS' is not one of" in combined
-        root_label = "AIOS root" if selected == "aios" else "Projects directory"
+        assert "'AIMI' is not one of" in combined
+        root_label = "aimi root" if selected == "aimi" else "Projects directory"
         assert f"{root_label} (mounted as /home/dev/{selected})" in combined
         assert f"[{projects_dir}]" in combined
         assert combined.index("Workspace mode") < combined.index(root_label)
@@ -221,8 +245,8 @@ class TestInitCommand:
         config_file = config_dir / "config.toml"
         _patch_init_dependencies(monkeypatch, config_dir, config_file)
 
-        aios_root = tmp_path / "aios"
-        aios_root.mkdir()
+        aimi_root = tmp_path / "aimi"
+        aimi_root.mkdir()
         monkeypatch.setattr(
             "djinn_in_a_box.commands.config.save_config",
             lambda config: save_config_file(config, config_file),
@@ -231,15 +255,16 @@ class TestInitCommand:
         result = runner.invoke(
             app,
             ["init"],
-            input=f"AIOS\nx\naios\n{aios_root}\nUTC\nn\n",
+            input=f"AIMI\nx\naios\naimi\n{aimi_root}\nUTC\nn\n",
         )
 
         assert result.exit_code == 0, result.output
         combined = result.stdout + result.output
-        assert combined.count("Workspace mode (aios/projects)") >= 3
-        assert "'AIOS' is not one of: aios, projects." in combined
-        assert "'x' is not one of: aios, projects." in combined
-        assert load_config_file(config_file).workspace == "aios"
+        assert combined.count("Workspace mode (aimi/projects)") >= 4
+        assert "'AIMI' is not one of: aimi, projects." in combined
+        assert "'x' is not one of: aimi, projects." in combined
+        assert "'aios' is not one of: aimi, projects." in combined
+        assert load_config_file(config_file).workspace == "aimi"
 
     def test_init_force_overwrites(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / ".config" / "djinn_in_a_box"
@@ -319,7 +344,7 @@ class TestInitCommand:
         assert result.exit_code == 0
         assert nonexistent.exists()
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     def test_init_project_dir_create_error_exits_cleanly(
         self,
         tmp_path: Path,
@@ -337,7 +362,7 @@ class TestInitCommand:
 
         assert result.exit_code == 1
         combined = result.stdout + result.output
-        root_label = "AIOS root" if workspace == "aios" else "Projects directory"
+        root_label = "aimi root" if workspace == "aimi" else "Projects directory"
         assert f"Failed to create {root_label}" in combined
         assert "writable" in combined
         assert "Traceback" not in combined
@@ -372,7 +397,7 @@ class TestInitCommand:
 class TestConfigShowCommand:
     """Tests for the config show command."""
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     def test_config_show_displays_values(
         self,
         tmp_path: Path,
@@ -405,7 +430,7 @@ class TestConfigShowCommand:
         assert "ConfigSync" in unwrapped
         assert "claude" in unwrapped
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     def test_config_show_json_output(
         self,
         tmp_path: Path,
@@ -459,7 +484,7 @@ class TestConfigSetCommand:
     """Tests for the config set command."""
 
     @pytest.mark.parametrize(
-        "value", ["projects", "aios", "both", "", "AIOS", "PROJECTS", " aios "]
+        "value", ["projects", "aimi", "aios", "both", "", "AIMI", "PROJECTS", " aimi "]
     )
     def test_config_set_workspace_round_trip_and_rejection(
         self,
@@ -471,7 +496,7 @@ class TestConfigSetCommand:
         config = AppConfig.model_validate(
             {
                 "code_dir": tmp_path,
-                "workspace": "aios",
+                "workspace": "aimi",
                 "resources": {"cpu_limit": 6, "memory_limit": "8G"},
                 "shell": {"skip_mounts": True},
                 "config_sync": {"source": "codex"},
@@ -482,9 +507,10 @@ class TestConfigSetCommand:
         original = config_file.read_bytes()
         monkeypatch.setattr("djinn_in_a_box.config.loader.CONFIG_FILE", config_file)
         result = runner.invoke(app, ["config", "set", "general.workspace", value])
-        if value not in {"projects", "aios"}:
+        if value not in {"projects", "aimi"}:
             assert result.exit_code == 1, result.output
             assert "Traceback" not in result.output
+            assert "'aimi'" in "".join(result.output.split())
             assert config_file.read_bytes() == original
             return
 
@@ -635,7 +661,7 @@ class TestConfigSetCommand:
         assert "Traceback" not in result.output
         assert config_file.read_bytes() == original
 
-    @pytest.mark.parametrize("workspace", ["projects", "aios"])
+    @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     def test_config_set_code_dir_requires_existing_directory(
         self,
         tmp_path: Path,
@@ -657,7 +683,7 @@ class TestConfigSetCommand:
 
         assert result.exit_code == 1
         combined = result.stdout + result.output
-        root_label = "AIOS root" if workspace == "aios" else "Projects directory"
+        root_label = "aimi root" if workspace == "aimi" else "Projects directory"
         assert f"{root_label} does not exist" in combined
         assert "mkdir -p" in combined
         assert str(missing) in combined

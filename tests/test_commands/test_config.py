@@ -46,11 +46,11 @@ class TestBuildNetworkKey:
         carry over reverts to its default without a word — and the next build
         would fail exactly the way this setting exists to prevent.
         """
-        config = AppConfig(code_dir=tmp_path, workspace="aios", build=BuildConfig(network="host"))
+        config = AppConfig(code_dir=tmp_path, workspace="aimi", build=BuildConfig(network="host"))
         after = _set_config_value(config, "general.timezone", "Europe/Berlin")
         assert after.timezone == "Europe/Berlin"
         assert after.build.network == "host"
-        assert after.workspace == "aios"
+        assert after.workspace == "aimi"
 
 
 class TestServePortKey:
@@ -112,7 +112,7 @@ def test_every_scalar_set_preserves_declarations(tmp_path, key):
 
     values = {
         "general.code_dir": str(tmp_path),
-        "general.workspace": "aios",
+        "general.workspace": "aimi",
         "general.timezone": "Europe/Berlin",
         "general.config_root": str(tmp_path / "root"),
         "general.shared_root": str(tmp_path / "shared"),
