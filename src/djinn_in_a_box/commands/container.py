@@ -307,7 +307,7 @@ def start(
     banner()
     rule("Environment")
 
-    root_label = "AIOS root" if config.workspace == "aios" else "Projects"
+    root_label = "aimi root" if config.workspace == "aimi" else "Projects"
     status_line(root_label, str(config.code_dir), value_style="path")
     status_line("Workspace", f"{config.workspace} ({config.workspace_target})")
 

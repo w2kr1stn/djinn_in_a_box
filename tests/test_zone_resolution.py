@@ -241,7 +241,7 @@ def _compose_nested_bind_targets(workspace: str = "projects") -> dict[tuple[str,
     return nested
 
 
-@pytest.mark.parametrize("workspace", ["projects", "aios"])
+@pytest.mark.parametrize("workspace", ["projects", "aimi"])
 def test_nested_bind_target_definitions_match_compose_sources_and_kinds(workspace: str) -> None:
     defined = {
         (agent, target.relative_to(agent_root)): docker_mod._COMPOSE_DEV_MOUNT_TARGETS[target]

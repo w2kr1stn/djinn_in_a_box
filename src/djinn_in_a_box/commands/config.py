@@ -167,12 +167,12 @@ def init_config(
 
     workspace_modes = get_args(WorkspaceMode)
     while True:
-        answer = typer.prompt("Workspace mode (aios/projects)", default="projects")
+        answer = typer.prompt("Workspace mode (aimi/projects)", default="projects")
         if answer in workspace_modes:
             workspace = cast(WorkspaceMode, answer)
             break
         error(f"{answer!r} is not one of: {', '.join(workspace_modes)}.")
-    root_label = "AIOS root" if workspace == "aios" else "Projects directory"
+    root_label = "aimi root" if workspace == "aimi" else "Projects directory"
     code_dir = typer.prompt(
         f"{root_label} (mounted as /home/dev/{workspace})",
         default=str(Path.home() / workspace),
@@ -394,7 +394,7 @@ def _set_config_value(config: AppConfig, key: str, value: str) -> AppConfig:
     if key == "general.code_dir":
         code_dir = Path(value).expanduser()
         if not code_dir.is_dir():
-            root_label = "AIOS root" if config.workspace == "aios" else "Projects directory"
+            root_label = "aimi root" if config.workspace == "aimi" else "Projects directory"
             error(f"{root_label} does not exist or is not a directory: {code_dir}")
             warning(f"Create it first: mkdir -p {code_dir}")
             warning("Or run `djinn init` to create it interactively.")

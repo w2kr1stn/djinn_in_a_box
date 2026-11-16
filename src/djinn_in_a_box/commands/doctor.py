@@ -1355,7 +1355,7 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
 
     if config is not None:
         code_ok = config.code_dir.is_dir()
-        root_label = "AIOS root" if config.workspace == "aios" else "Projects dir"
+        root_label = "aimi root" if config.workspace == "aimi" else "Projects dir"
         checks.append(
             Check(
                 root_label,
@@ -1654,7 +1654,7 @@ def doctor(
         glyph = _GLYPH[check.status]
         detail = (
             Text(check.detail, style="path")
-            if check.name in {"Projects dir", "AIOS root", "Config root"}
+            if check.name in {"Projects dir", "aimi root", "Config root"}
             else Text(check.detail)
         )
         table.add_row(
