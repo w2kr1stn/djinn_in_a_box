@@ -661,6 +661,13 @@ This protects against slips only: OpenCode and MCP tools are not covered, broad 
 `rg <pattern> ~` are not detected, and deliberate evasion remains possible. Empty configuration changes nothing.
 Codex hooks are enforced in the container by `/etc/codex/requirements.toml`, even if user settings disable them.
 
+With an open hostctl window, `djinn-path-names HOST USER PATH [DEPTH]` lists only names and metadata:
+`HOST` must occur in `~/.ssh/tailnet_config`, `USER` is the target user, `PATH` must be normalized,
+absolute and equal to or below a denied entry, and `DEPTH` is 0–5 (default 1).
+For example: `djinn-path-names testhost alice /srv/private 2`.
+Each output line is `TYPE SIZE MODIFICATION_TIME PATH` (`find -printf '%y %s %T+ %p\n'`);
+file contents stay blocked. Invalid input exits 2; otherwise the exit status is SSH's.
+
 ## Doctor
 
 Run:

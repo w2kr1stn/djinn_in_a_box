@@ -489,7 +489,8 @@ def test_dockerfile_copy_lines_and_command_destination() -> None:
         "COPY --chmod=755 scripts/djinn-path-guard.py /usr/local/libexec/djinn-path-guard.py\n"
     )
     config_copy = "COPY --chmod=644 scripts/codex-config.toml /etc/codex/config.toml\n"
-    assert anchor + script_copy + guard_copy + config_copy in dockerfile
+    names_copy = "COPY --chmod=755 scripts/djinn-path-names.py /usr/local/bin/djinn-path-names\n"
+    assert anchor + script_copy + guard_copy + names_copy + config_copy in dockerfile
     config = tomllib.loads((SCRIPT.parent / "codex-config.toml").read_text())
     command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command.split() == ["python3", script_copy.split()[-1]]

@@ -23,6 +23,7 @@ home-relative equivalents. Image-owned managed settings and Codex requirements k
 This is slip protection, not an isolation boundary: OpenCode, MCP tools, broad shell searches such as
 `rg <pattern> ~` and deliberate evasion are outside its scope. See [configuration and limits](README.md#denied-paths)
 and the [hook contract](IMPLEMENTATION.md#denied-path-tool-guard).
+`djinn-path-names` makes names and metadata below denied paths visible through hostctl; file contents stay blocked.
 
 ## Runtime package installs
 

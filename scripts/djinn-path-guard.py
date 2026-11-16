@@ -52,6 +52,12 @@ def under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def names_command(command: str) -> bool:
+    return command.strip().split()[:1] == ["djinn-path-names"] and not any(
+        char in command for char in "\n\r;&|<>()$`\\"
+    )
+
+
 def check(payload: object, entries: list[str], home: str) -> None:
     if not isinstance(payload, dict):
         raise GuardError("invalid payload")
@@ -72,6 +78,8 @@ def check(payload: object, entries: list[str], home: str) -> None:
         command = args.get("command")
         if not isinstance(command, str):
             raise GuardError("invalid payload")
+        if tool == "Bash" and names_command(command):
+            return
         if tool == "apply_patch":
             roots = [
                 resolve(line[len(header) :], cwd, home)
