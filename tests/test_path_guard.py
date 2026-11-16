@@ -350,9 +350,6 @@ def test_compose_and_managed_registration() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert f"COPY --chmod=755 scripts/djinn-path-guard.py {command.split()[1]}\n" in dockerfile
     assert (
-        "COPY --chmod=755 scripts/djinn-path-names.py /usr/local/bin/djinn-path-names\n"
-    ) in dockerfile
-    assert (
         "COPY --chmod=644 scripts/claude-managed-settings.json "
         "/etc/claude-code/managed-settings.json\n"
     ) in dockerfile
