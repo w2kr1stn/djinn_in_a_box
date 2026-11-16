@@ -360,6 +360,35 @@ def test_compose_and_managed_registration() -> None:
 
 
 @pytest.mark.parametrize(
+    ("tool", "command", "allowed"),
+    [
+        ("Bash", " \tdjinn-path-names testhost alice /srv/private \t", True),
+        ("Bash", "djinn-path-names testhost alice '/srv/private/a b' 3", True),
+        *[
+            ("Bash", f"djinn-path-names testhost alice /srv/private {char}", False)
+            for char in "\n\r;&|<>()$`\\"
+        ],
+        *[
+            ("Bash", f"{word} testhost alice /srv/private", False)
+            for word in (
+                "sudo djinn-path-names",
+                "/usr/local/bin/djinn-path-names",
+                "djinn-path-namesx",
+            )
+        ],
+        ("Read", "/srv/private", False),
+    ],
+)
+def test_names_exception(paths: tuple[Path, Path, Path], tool, command, allowed) -> None:
+    home, _, cwd = paths
+    args = {"command" if tool == "Bash" else "file_path": command}
+    output(
+        invoke(home, '["/srv/private"]', payload(cwd, tool, **args)),
+        None if allowed else refusal("/srv/private"),
+    )
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "ls ~{entry}",

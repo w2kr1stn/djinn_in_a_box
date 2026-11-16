@@ -694,6 +694,14 @@ The root-owned image layers are `scripts/claude-managed-settings.json` → `/etc
 (0644); the guard itself is 0755. Claude's managed hook and Codex's required hooks resist user-level disabling.
 `tests/test_path_guard.py` checks tool behavior, configuration transport and registration/COPY consistency.
 
+The root-owned 0755 `djinn-path-names HOST USER PATH [DEPTH]` validates exact `Host (\S+)` lines in
+`~/.ssh/tailnet_config`, user `[a-z_][a-z0-9_-]{0,31}`, normalized absolute control-free paths equal to
+or below a `DJINN_DENIED_PATHS` entry, and depth 0–5 (default 1). Invalid input exits 2 with one stderr line.
+It uses `os.execvp` with `['ssh', HOST, REMOTE]`; REMOTE is `cd /tmp && sudo -n -u USER find -- PATH
+-maxdepth DEPTH -printf '%y %s %T+ %p\n'`, with PATH quoted by `shlex.quote`; SSH needs an open hostctl window.
+The Bash guard permits the exact first whitespace-separated word `djinn-path-names` only when the entire
+command contains no newline, carriage return, `; & | < > ( ) $`, backtick or backslash; other tools stay guarded.
+
 ## Config Root and Compose Environment Bridge
 
 `AppConfig.config_root` is the configuration root source of truth for
