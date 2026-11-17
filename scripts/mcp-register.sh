@@ -255,7 +255,7 @@ register_mcp_servers() {
         host=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
 
         # Warn only: registration should survive peers that come up later.
-        if ! curl -s --connect-timeout 2 "$url" >/dev/null 2>&1; then
+        if ! curl -s --connect-timeout 2 --max-time 5 "$url" >/dev/null 2>&1; then
             ui_warn "${server}: not reachable (${host})"
         fi
 

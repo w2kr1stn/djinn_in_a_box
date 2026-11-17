@@ -6,7 +6,10 @@ import json
 import os
 import shlex
 import shutil
+import socketserver
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -72,7 +75,42 @@ def run_register(
         capture_output=True,
         env=env,
         text=True,
+        timeout=20,
     )
+
+
+def test_stalled_endpoint_probe_is_bounded(tmp_path: Path) -> None:
+    real_curl = shutil.which("curl")
+    assert real_curl is not None
+    stopped = threading.Event()
+
+    class StalledEndpoint(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            stopped.wait()
+
+    with socketserver.TCPServer(("127.0.0.1", 0), StalledEndpoint) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+        started = time.monotonic()
+        try:
+            result = run_register(
+                tmp_path,
+                {"stalled": {"transport": "streamable-http", "url": url}},
+                bin_scripts={
+                    "curl": f'#!/bin/sh\nexec {shlex.quote(real_curl)} --noproxy "*" "$@"\n',
+                    **dict.fromkeys(("claude", "codex", "opencode"), "#!/bin/sh\nexit 0\n"),
+                },
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            stopped.set()
+            server.shutdown()
+            thread.join()
+
+    assert result.returncode == 0, result.stderr
+    assert "stalled: not reachable" in result.stderr
+    assert elapsed < 8
 
 
 def test_registers_each_canonical_server_individually(tmp_path: Path) -> None:
