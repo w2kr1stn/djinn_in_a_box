@@ -148,6 +148,31 @@ _COMPOSE_DEV_MOUNT_TARGETS: dict[Path, Literal["directory", "file"]] = {
     Path("/home/dev/.config/mcp-servers.json"): "file",
     Path("/home/dev/sessions"): "directory",
 }
+_COMPOSE_VOLUME_TARGETS: Final = frozenset(
+    {
+        Path("/home/dev/.local/share/opencode"),
+        Path("/var/lib/djinn-packages"),
+        Path("/home/dev/.cache/uv"),
+        Path("/home/dev/.cache/djinn-tools"),
+        Path("/home/dev/.vscode-server"),
+        Path("/home/dev/workspaces"),
+    }
+)
+
+
+def _enclosing_host_bind(target: Path, config: AppConfig | None) -> Path | None:
+    roots = {
+        root
+        for root, kind in _COMPOSE_DEV_MOUNT_TARGETS.items()
+        if kind == "directory" and root not in _COMPOSE_VOLUME_TARGETS
+    }
+    if config is not None:
+        roots.add(config.workspace_target)
+    return max(
+        (root for root in roots if target != root and target.is_relative_to(root)),
+        key=lambda root: len(root.parts),
+        default=None,
+    )
 
 
 def repo_owned_submount_targets(agent_root: Path) -> tuple[Path, ...]:
@@ -1239,6 +1264,13 @@ def validate_container_mounts(
                     f"(conflict path: {display_target})"
                 )
                 raise MountCollisionError(msg)
+        if (root := _enclosing_host_bind(mount_target, config)) is not None:
+            msg = (
+                f"Mount {mount.source} -> {mount_target} is inside host bind {root}; Docker "
+                "would create the mount point as a root-owned directory in that bind's host "
+                f"directory; choose a target outside {root}"
+            )
+            raise MountCollisionError(msg)
         for outer in normalized_mounts[:index]:
             if mount_target.is_relative_to(outer.target):
                 msg = (
@@ -1494,6 +1526,13 @@ def resolve_declared_entries(
                         "mounts", name, f"target '{target}' conflicts with {owner} at '{other}'"
                     )
                 break
+        if not errors.get(f"mounts.{name}") and (root := _enclosing_host_bind(target, config)):
+            errors[f"mounts.{name}"] = declaration_error(
+                "mounts",
+                name,
+                f"target '{target}' is inside host bind '{root}'; Docker would create a "
+                "root-owned mount point in that bind's host directory",
+            )
     check_execution_input = _execution_input_check()
     for mount in resolved:
         if mount.kind != "bind" or mount.read_only or errors.get(f"mounts.{mount.name}"):

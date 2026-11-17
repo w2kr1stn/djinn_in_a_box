@@ -140,7 +140,7 @@ def test_marker_guard(tmp_path, monkeypatch, case):
     [
         ("/home/dev/.codex", "/home/dev/.codex", True),
         ("/home/dev", "/home/dev/.codex", True),
-        ("/home/dev/.codex/worker", "/home/dev/.codex", False),
+        ("/home/dev/.codex/worker", "/home/dev/.codex", True),
         ("/home/dev/aimi", "/home/dev/aimi", True),
         ("/home/dev/projects", "/home/dev/aimi", False),
         ("/home/dev/.codex/sessions", "/home/dev/.codex/sessions", True),
@@ -164,9 +164,65 @@ def test_declared_target_matrix(tmp_path, target, reserved, fails):
     assert bool(error) is fails
     if fails:
         assert "worker" in error
-        assert "conflict" in error or "not allowed" in error
+        assert any(cause in error for cause in ("conflict", "not allowed", "inside host bind"))
     else:
         result.require_valid()
+
+
+@pytest.mark.parametrize(
+    ("target", "root"),
+    [
+        ("/home/dev/.claude/extra", "/home/dev/.claude"),
+        ("/home/dev/projects/x", "/home/dev/projects"),
+        ("/home/dev/.codex/x", "/home/dev/.codex"),
+        ("/home/dev/.config/claude/x", "/home/dev/.claude"),
+        ("/home/dev/aimi/x", None),
+        ("/home/dev/.local/share/opencode/x", None),
+        ("/home/dev/mount/x", None),
+        ("/home/dev/workspace/x", None),
+    ],
+)
+def test_host_bind_children(tmp_path, target, root):
+    result = resolve(tmp_path, {"worker": {"volume": True, "target": target, "backup": "none"}})
+    mounts = docker.resolve_container_mounts((f"{tmp_path}:{target}",))
+    if root:
+        normalized = mounts[0].target
+        assert result.diagnostics[0].error == (
+            f"Declared mount 'worker': target '{normalized}' is inside host bind '{root}'; "
+            "Docker would create a root-owned mount point in that bind's host directory."
+        )
+        with pytest.raises(docker.MountCollisionError) as exc:
+            docker.validate_container_mounts(
+                mounts, AppConfig(code_dir=tmp_path), docker.DockerMode.NONE
+            )
+        assert str(exc.value) == (
+            f"Mount {tmp_path} -> {normalized} is inside host bind {root}; Docker would create "
+            "the mount point as a root-owned directory in that bind's host directory; "
+            f"choose a target outside {root}"
+        )
+    else:
+        result.require_valid()
+        docker.validate_container_mounts(
+            mounts, AppConfig(code_dir=tmp_path), docker.DockerMode.NONE
+        )
+
+
+@pytest.mark.parametrize("child", [False, True])
+def test_declared_nested_host_bind_equality_precedes_children(tmp_path, child):
+    root = Path("/home/dev/.claude/skills")
+    target = root / "x" if child else root
+    result = resolve(
+        tmp_path,
+        {"worker": {"volume": True, "target": str(target), "backup": "none"}},
+        targets=list(docker._COMPOSE_DEV_MOUNT_TARGETS),
+    )
+    expected = (
+        f"is inside host bind '{root}'; Docker would create a root-owned mount point "
+        "in that bind's host directory"
+        if child
+        else f"conflicts with built-in mount at '{root}'"
+    )
+    assert result.diagnostics[0].error == f"Declared mount 'worker': target '{target}' {expected}."
 
 
 @pytest.mark.parametrize("root", docker.MANAGED_TARGET_ROOTS, ids=str)

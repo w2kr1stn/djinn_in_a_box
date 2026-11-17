@@ -1424,8 +1424,8 @@ The same module owns the repeatable user-mount contract:
   invocation mount strictly inside an earlier invocation bind (`--here` or
   `--mount`) is also refused, naming both mounts, Docker's creation of root-owned
   mount-point directories inside the outer host directory, and the remedy of choosing a
-  target outside it. Children of other occupied targets remain valid except at
-  or below the shared `MANAGED_TARGET_ROOTS`. Assigned
+  target outside it. Children of built-in host binds and the active workspace
+  are also refused; other children remain valid except at or below `MANAGED_TARGET_ROOTS`. Assigned
   zone targets are reserved like other occupied targets. The managed-root set
   includes the five recursively repaired roots, the reserved root-owned package root
   `/var/lib/djinn-packages`, managed SSH targets, desktop
@@ -1548,8 +1548,10 @@ can race a disappearing drive; there is no mount-liveness protocol.
 Targets use the existing canonicalizer and `_reserved_mount_targets`, with the
 union of all Docker modes for declarations in start, run and doctor. Equality and
 declared ancestors of built-in/reserved/zone/active-workspace/invocation targets
-are refused; declared pairs cannot nest. Children otherwise remain allowed,
-except at or below `MANAGED_TARGET_ROOTS`, the same set used by invocation mounts.
+are refused; declared pairs cannot nest. Declarations and invocation mounts also
+refuse host-bind children, preventing root-owned mount points in host directories.
+Named-volume, `/home/dev/mount` and inactive-workspace children remain allowed, except
+at or below `MANAGED_TARGET_ROOTS`, the same set used by invocation mounts.
 Its five recursively repaired roots come from `MANAGED_VOLUME_REPAIR_TARGETS`,
 checked against the unchanged entrypoint repair list; the remaining roots are
 the reserved `/var/lib/djinn-packages` (no dev ownership repair), managed SSH targets, desktop directories and the agent-Docker endpoint. The
