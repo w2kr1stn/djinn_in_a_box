@@ -28,8 +28,8 @@ RUN set -eu && mkdir -p /opt/djinn-agent \
         case "$TARGETARCH" in amd64) arch=x86_64;; arm64) arch=aarch64;; esac \
         && asset="codex-package-$arch-unknown-linux-musl.tar.gz" \
         && base="https://github.com/openai/codex/releases/download/rust-v$AGENT_VERSION" \
-        && curl -fsSL "$base/$asset" -o "/tmp/$asset" \
-        && curl -fsSL "$base/codex-package_SHA256SUMS" -o /tmp/checksums \
+        && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "$base/$asset" -o "/tmp/$asset" \
+        && curl --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors --retry-delay 5 -fsSL "$base/codex-package_SHA256SUMS" -o /tmp/checksums \
         && cd /tmp && rg "  $asset\$" checksums > selected-checksum \
         && sha256sum -c selected-checksum \
         && tar xzf "$asset" -C /opt/djinn-agent \

@@ -4543,12 +4543,15 @@ class TestVerifiedBuildInstallers:
 
     @pytest.mark.parametrize(
         "filename",
-        ["Dockerfile", "assistant/Dockerfile", "assistant/install-claude.sh"],
+        [
+            "Dockerfile",
+            "assistant/Dockerfile",
+            "assistant/install-claude.sh",
+            "assistant/install-opencode.sh",
+        ],
     )
     def test_verified_curl_flags(self, filename):
         text = (Path(__file__).parents[1] / filename).read_text()
-        if filename == "assistant/Dockerfile":
-            text = text.split("ARG AGENT\n", 1)[0]
         lines = [line for line in text.splitlines() if re.search(r"\bcurl\s+-", line)]
         assert lines
         for line in lines:
