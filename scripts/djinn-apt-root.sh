@@ -6,6 +6,7 @@ apt_bin='/usr/bin/apt-get'
 cache_bin='/usr/bin/apt-cache'
 flock_bin='/usr/bin/flock'
 grep_bin='/usr/bin/grep'
+sleep_bin='/usr/bin/sleep'
 lock_path='/run/djinn-apt-root.lock'
 lock_wait='300'
 list_dir='/var/lib/djinn-packages'
@@ -18,6 +19,8 @@ max_warnings='5'
 max_bytes='1048576'
 check_budget='60'
 update_timeout='300'
+update_attempts='3'
+update_pause='10'
 stat_bin='/usr/bin/stat'
 mktemp_bin='/usr/bin/mktemp'
 mv_bin='/usr/bin/mv'
@@ -31,9 +34,9 @@ timeout_bin='/usr/bin/timeout'
 date_bin='/usr/bin/date'
 rm_bin='/usr/bin/rm'
 tail_bin='/usr/bin/tail'
-readonly id_bin env_bin apt_bin cache_bin flock_bin grep_bin lock_path lock_wait
+readonly id_bin env_bin apt_bin cache_bin flock_bin grep_bin sleep_bin lock_path lock_wait
 readonly list_dir list_path root_uid work_template max_name max_names max_warnings max_bytes
-readonly check_budget update_timeout stat_bin mktemp_bin mv_bin chmod_bin sync_bin head_bin
+readonly check_budget update_timeout update_attempts update_pause stat_bin mktemp_bin mv_bin chmod_bin sync_bin head_bin
 readonly tr_bin awk_bin dpkg_bin timeout_bin date_bin rm_bin tail_bin
 LC_ALL=C
 export LC_ALL
@@ -308,16 +311,29 @@ replay_packages() {
     done
     if [ "$#" -eq 0 ]; then info "$total recorded, all installed"; return; fi
     info "installing $# of $total"
-    if run_clean "$timeout_bin" "$update_timeout" "$apt_bin" -qq update </dev/null > "$work_dir/output" 2>&1; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in W:*|E:*) warn "$line" ;; esac
-        done < "$work_dir/output"
-    else
-        result=$?
-        if [ "$result" -eq 124 ]; then warn "Package list update timed out after $update_timeout s; replay skipped."
-        else warn_failure update "$result"; fi
-        return
-    fi
+    update_attempt=1
+    while :; do
+        if run_clean "$timeout_bin" "$update_timeout" "$apt_bin" -qq update </dev/null > "$work_dir/output" 2>&1; then
+            if run_clean "$grep_bin" -q '^W: Failed to fetch' "$work_dir/output"; then
+                if [ "$update_attempt" -eq "$update_attempts" ]; then
+                    warn 'Package list update failed (network not ready?); replay skipped. Rerun later with /home/dev/package-replay.sh.'
+                    return
+                fi
+                run_clean "$sleep_bin" "$update_pause"
+                update_attempt=$((update_attempt + 1))
+                continue
+            fi
+            while IFS= read -r line || [ -n "$line" ]; do
+                case "$line" in W:*|E:*) warn "$line" ;; esac
+            done < "$work_dir/output"
+        else
+            result=$?
+            if [ "$result" -eq 124 ]; then warn "Package list update timed out after $update_timeout s; replay skipped."
+            else warn_failure update "$result"; fi
+            return
+        fi
+        break
+    done
     # Update has its own limit; restart the budget before the cache checks.
     start_budget || return
     for name do
