@@ -38,6 +38,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- `djinn run codex --write` works again: Codex removed `--full-auto`, and its own sandbox cannot start inside the
+  container, so the built-in codex `write_flags` value in `djinn agents --json` changes to
+  `--dangerously-bypass-approvals-and-sandbox`. The container is the boundary, as in Claude's write mode (#255).
 - Declared and `--mount` targets below built-in host binds or the active workspace are now refused, preventing root-owned mount points in host directories (#208).
 - Built-in `claude`, `codex` and `opencode` commands pass prompts after `--`, so
   prompts starting with `-` work. Their `prompt_template` values in

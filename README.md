@@ -852,7 +852,7 @@ Djinn has four built-in agent definitions:
 | Agent name | Binary | Default headless mode | Notes |
 | --- | --- | --- | --- |
 | `claude` | `claude` | `claude -p` | read-only uses `--permission-mode plan`; write mode uses `--dangerously-skip-permissions` |
-| `codex` | `codex` | `codex exec` | write mode uses `--full-auto` |
+| `codex` | `codex` | `codex exec` | read-only uses `--sandbox read-only`, in which Codex cannot run shell commands inside the container; write mode uses `--dangerously-bypass-approvals-and-sandbox` |
 | `opencode` | `opencode` | `opencode run` | read-only uses `--agent plan`; model flag is `-m` |
 | `claude-isolated` | `claude` | `claude -p --no-session-persistence` | Claude Code without user or project context; see [Minimal-context Claude agent](#minimal-context-claude-agent) |
 
