@@ -1956,6 +1956,8 @@ To discard retained post-mortem records when uninstalling, delete
 MCP support is optional. The base compose file mounts the local
 `config/mcp-servers.json` registry into the container, and the entrypoint
 registers enabled entries for supported agents at startup.
+Each endpoint probe gives up after at most 5 seconds; an endpoint that does not
+answer in time is reported as not reachable, and registration continues.
 
 ## Suite Mode
 
