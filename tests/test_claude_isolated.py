@@ -61,7 +61,7 @@ def test_existing_builtins_are_unchanged() -> None:
             "json_flags": ["--output-format", "json"],
             "model_flag": "--model",
             "default_model": None,
-            "prompt_template": '"$AGENT_PROMPT"',
+            "prompt_template": '-- "$AGENT_PROMPT"',
         },
         "codex": {
             "binary": "codex",
@@ -72,7 +72,7 @@ def test_existing_builtins_are_unchanged() -> None:
             "json_flags": ["--json"],
             "model_flag": "--model",
             "default_model": None,
-            "prompt_template": '"$AGENT_PROMPT"',
+            "prompt_template": '-- "$AGENT_PROMPT"',
         },
         "opencode": {
             "binary": "opencode",
@@ -83,7 +83,7 @@ def test_existing_builtins_are_unchanged() -> None:
             "json_flags": ["--format", "json"],
             "model_flag": "-m",
             "default_model": None,
-            "prompt_template": '"$AGENT_PROMPT"',
+            "prompt_template": '-- "$AGENT_PROMPT"',
         },
     }
 

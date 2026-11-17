@@ -38,6 +38,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Built-in `claude`, `codex` and `opencode` commands pass prompts after `--`, so
+  prompts starting with `-` work. Their `prompt_template` values in
+  `djinn agents --json` change to `-- "$AGENT_PROMPT"` (#182).
 - Bound each MCP endpoint probe to 5 seconds so stalled servers cannot block startup (#191).
 - The start-up package replay retries the package list update up to three times when a fetch
   fails (for example while DNS is not ready yet) and otherwise says so in one warning that names

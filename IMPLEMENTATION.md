@@ -2600,6 +2600,9 @@ command string from `AgentConfig`. It appends the prompt template, which expands
 `$AGENT_PROMPT` inside the container. An explicit `model` takes precedence;
 otherwise the command uses `AgentConfig.default_model` when configured.
 
+All built-in agents use `prompt_template='-- "$AGENT_PROMPT"'`; the `AgentConfig`
+default for user-defined agents remains `'"$AGENT_PROMPT"'`.
+
 `run()` refuses `--docker` with exit 1 before loading config or preparing workflow;
 [the diagnostic](README.md#docker-access-modes) names the supported alternatives.
 It then loads app config and calls `validate_managed_bind_sources()` immediately
