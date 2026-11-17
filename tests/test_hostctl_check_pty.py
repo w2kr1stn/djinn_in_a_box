@@ -76,7 +76,7 @@ except KeyboardInterrupt:
 
 
 class Terminal:
-    def __init__(self, tmp_path: Path, mode: str) -> None:
+    def __init__(self, tmp_path: Path, mode: str, driver: Path | None = None) -> None:
         self.state = tmp_path / "state"
         self.out = tmp_path / "fake-ssh.json"
         bindir = tmp_path / "bin"
@@ -84,8 +84,9 @@ class Terminal:
         fake = bindir / "ssh"
         fake.write_text(FAKE_SSH.format(python=sys.executable, banner=BANNER))
         fake.chmod(0o755)
-        driver = tmp_path / "driver.py"
-        driver.write_text(DRIVER.format(helper_id=HELPER_ID, gen=GEN))
+        if driver is None:
+            driver = tmp_path / "driver.py"
+            driver.write_text(DRIVER.format(helper_id=HELPER_ID, gen=GEN))
         env = {
             **os.environ,
             "XDG_STATE_HOME": str(self.state),
@@ -168,8 +169,8 @@ def make_terminal(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     made = []
 
-    def build(mode: str) -> Terminal:
-        value = Terminal(tmp_path, mode)
+    def build(mode: str, driver: Path | None = None) -> Terminal:
+        value = Terminal(tmp_path, mode, driver)
         made.append(value)
         return value
 
@@ -220,7 +221,7 @@ def test_check_ctrl_c_pty_owned_processes(make_terminal):
     assert [p.name for p in term.root.iterdir() if p.name.startswith("check-")] == []
 
 
-def test_on_wait_then_open_under_script_pty(tmp_path):
+def write_wait_driver(tmp_path: Path, mode: str, timeout: int) -> tuple[Path, Path]:
     calls = tmp_path / "supervisor-calls.json"
     supervisor = tmp_path / "supervisor.py"
     supervisor.write_text(f"""
@@ -230,25 +231,36 @@ calls = Path({str(calls)!r})
 seen = json.loads(calls.read_text()) if calls.exists() else []
 seen.append(sys.argv[1:])
 calls.write_text(json.dumps(seen))
-assert sys.argv[1:] == ["status", {GEN!r}]
-print(json.dumps({{"generation": {GEN!r}, "admission": len(seen) >= 2,
-                  "paused": False, "closed": False}}))
+gen = "f" * 32 if {mode!r} == "replaced" and len(seen) >= 2 else {GEN!r}
+assert sys.argv[1:] == ["status", gen]
+print(json.dumps({{"generation": gen, "admission": {mode!r} == "open" and len(seen) >= 2,
+                  "paused": False, "closed": {mode!r} == "closed" and len(seen) >= 2}}))
 """)
     driver = tmp_path / "wait-driver.py"
     driver.write_text(f"""
 import os, subprocess, sys
+from pathlib import Path
 from djinn_in_a_box.commands import hostctl as cli
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import hostctl, host_sealing
 assert all(os.isatty(fd) for fd in (0, 1, 2))
 cli.load_config = lambda: AppConfig(code_dir={str(tmp_path)!r})
 hostctl.open_window = lambda *a, **k: {GEN!r}
+close_calls = Path({str(tmp_path / "close-calls")!r})
+close_calls.write_text("")
+def record_close(*args, **kwargs):
+    close_calls.write_text(close_calls.read_text() + "close\\n")
+hostctl.close_window = hostctl.stop_helper_locked = record_close
+def generation():
+    return "f" * 32 if {mode!r} == "replaced" and Path({str(calls)!r}).exists() else {GEN!r}
 host_sealing.inspect_assessment = lambda: host_sealing.Assessment(None)
 hostctl.inspect_helper = lambda: {{
     "Id": {HELPER_ID!r}, "State": {{"Running": True}},
-    "Config": {{"Labels": {{hostctl.GENERATION_LABEL: {GEN!r}}}}},
+    "Config": {{"Labels": {{hostctl.GENERATION_LABEL: generation()}}}},
 }}
-hostctl.read_window = lambda helper: {{"generation": {GEN!r}, "closed": False}}
+hostctl.read_window = lambda helper: {{
+    "generation": generation(), "closed": {mode!r} == "closed" and Path({str(calls)!r}).exists(),
+}}
 hostctl.node_status = lambda helper: {{
     "BackendState": "NeedsLogin", "AuthURL": "https://example.invalid/login",
 }}
@@ -259,8 +271,29 @@ def command(*args, **kwargs):
         [sys.executable, {str(supervisor)!r}, *args[3:]], text=True,
     )
 hostctl.command = command
-cli.app(["on", "--wait", "--timeout", "5"], prog_name="hostctl")
+cli.app(["on", "--wait", "--timeout", {str(timeout)!r}], prog_name="hostctl")
 """)
+    return supervisor, driver
+
+
+@pytest.mark.parametrize(
+    "mode,timeout,code,message",
+    [
+        ("open", 5, 0, "Observation: unavailable; journal/log gaps are unknown."),
+        (
+            "pending",
+            1,
+            124,
+            "Timed out after 1 s waiting for the window; it stays open. "
+            "See `djinn hostctl status`.",
+        ),
+        ("closed", 5, 1, "Stopped waiting: the window is closed."),
+        ("replaced", 5, 1, "Stopped waiting: the window generation changed."),
+    ],
+    ids=("open", "timeout", "closed", "replaced"),
+)
+def test_on_wait_outcomes_under_script_pty(tmp_path, mode, timeout, code, message):
+    _, driver = write_wait_driver(tmp_path, mode, timeout)
     command = shlex.join([sys.executable, "-I", str(driver)])
     result = subprocess.run(
         ["script", "-qec", command, "/dev/null"],
@@ -271,8 +304,27 @@ cli.app(["on", "--wait", "--timeout", "5"], prog_name="hostctl")
         env={**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "COLUMNS": "200"},
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("Waiting for the window to open (timeout 5 s) ...") == 1
+    assert result.returncode == code, result.stdout + result.stderr
+    assert result.stdout.count(f"Waiting for the window to open (timeout {timeout} s) ...") == 1
     assert result.stdout.count("Login on the host: https://example.invalid/login") == 1
-    assert "Observation: unavailable; journal/log gaps are unknown." in result.stdout
-    assert json.loads(calls.read_text()) == [["status", GEN], ["status", GEN]]
+    assert message in result.stdout
+    assert (tmp_path / "close-calls").read_text() == ""
+    calls = [["status", GEN]]
+    if mode != "pending":
+        calls.append(["status", "f" * 32 if mode == "replaced" else GEN])
+    assert json.loads((tmp_path / "supervisor-calls.json").read_text()) == calls
+
+
+def test_on_wait_ctrl_c_pty_keeps_window_open(tmp_path, make_terminal):
+    _, driver = write_wait_driver(tmp_path, "pending", 5)
+    term = make_terminal("wait", driver)
+    start = b"Waiting for the window to open (timeout 5 s) ..."
+    assert term.wait_for(
+        lambda: start in term.transcript
+        and b"Login on the host: https://example.invalid/login" in term.transcript
+    ), term.transcript
+    os.write(term.master, b"\x03")
+    term.pump(20)
+    assert term.process.wait(10) == 130, term.transcript
+    assert b"Stopped waiting; the window stays open." in term.transcript
+    assert (tmp_path / "close-calls").read_text() == ""
