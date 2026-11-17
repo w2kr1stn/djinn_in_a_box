@@ -168,6 +168,8 @@ if role in ("apt", "cache", "dpkg"):
     event(role, env=dict(os.environ), stdin=sys.stdin.read(), umask=f"{current_umask:04o}")
 else:
     event(role)
+if role == "sleep":
+    sys.exit(0)
 if role == "cache":
     time.sleep(config.get("cache_delay", 0))
     output = config.get("cache", {}).get(args[-1], args[-1] + "\n")
@@ -186,6 +188,9 @@ if role == "apt" and config.get("barrier"):
         time.sleep(0.01)
     event("apt_end")
 stage = "install" if "install" in args else "update"
+if role == "apt" and stage == "update" and config.get("update_stderr_sequence"):
+    config["update_stderr"] = config["update_stderr_sequence"].pop(0)
+    Path(config_path).write_text(json.dumps(config))
 time.sleep(config.get(stage + "_delay", 0))
 sys.stdout.write(config.get(stage + "_stdout", config.get("stdout", "")))
 sys.stderr.write(config.get(stage + "_stderr", config.get("stderr", "")))
@@ -201,7 +206,7 @@ class FakeTools:
         self.log = directory / "events.jsonl"
         self.nul = directory / "sudo.argv"
         self.configure()
-        for role in ("id", "apt", "cache", "dpkg", "sudo"):
+        for role in ("id", "apt", "cache", "dpkg", "sudo", "sleep"):
             executable(
                 directory / role,
                 "#!/usr/bin/python3\n"
@@ -250,6 +255,7 @@ class HelperHarness:
             ("env_bin", "/usr/bin/env", "/usr/bin/env"),
             ("flock_bin", "/usr/bin/flock", "/usr/bin/flock"),
             ("grep_bin", "/usr/bin/grep", "/usr/bin/grep"),
+            ("sleep_bin", "/usr/bin/sleep", directory / "sleep"),
             ("lock_path", "/run/djinn-apt-root.lock", self.lock),
             ("lock_wait", "300", "0.3"),
         ):
@@ -1177,20 +1183,48 @@ FETCH_WARNINGS = (
 )
 
 
-@pytest.mark.parametrize("output", [FETCH_WARNINGS, "Reading package lists...\n"])
+@pytest.mark.parametrize("failures", [0, 1])
+def test_replay_retries_failed_fetch_then_installs(tmp_path, failures):
+    replay = HelperHarness(tmp_path)
+    replay.list.write_text("jq\ncurl\n")
+    replay.tools.configure(update_stderr_sequence=[FETCH_WARNINGS] * failures + [""])
+    result = replay.run()
+    assert result.returncode == 0 and result.stderr == ""
+    assert result.stdout == "I\tinstalling 2 of 2\n"
+    assert [event["argv"] for event in replay.tools.events("apt")] == [
+        *([["-qq", "update"]] * (failures + 1)),
+        ["-qq", *INSTALL, "jq", "curl"],
+    ]
+    assert [event["argv"] for event in replay.tools.events("sleep")] == [["10"]] * failures
+
+
+def test_replay_failed_fetch_exhausted_skips_package_checks(tmp_path):
+    replay = HelperHarness(tmp_path)
+    replay.list.write_text("jq\n")
+    replay.tools.configure(update_stderr=FETCH_WARNINGS)
+    result = replay.run()
+    warning = (
+        "Package list update failed (network not ready?); replay skipped. "
+        "Rerun later with /home/dev/package-replay.sh."
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    assert result.stdout.splitlines() == ["I\tinstalling 1 of 1", "W\t" + warning]
+    assert "Unknown package" not in result.stdout
+    assert replay.tools.events("cache") == []
+    assert [event["argv"] for event in replay.tools.events("apt")] == [["-qq", "update"]] * 3
+    assert [event["argv"] for event in replay.tools.events("sleep")] == [["10"]] * 2
+
+
+@pytest.mark.parametrize("output", [FETCH_WARNINGS.split("\n", 1)[1], "Reading package lists...\n"])
 def test_replay_surfaces_update_warnings(tmp_path, output):
-    # Measured live: apt-get update without network exits 0 and only prints W: lines.
     replay = HelperHarness(tmp_path)
     replay.list.write_text("jq\n")
     replay.tools.configure(update_status=0, update_stderr=output)
     result = replay.run()
     assert result.returncode == 0 and result.stderr == ""
-    reported = "W: Failed to fetch" in result.stdout
-    assert reported == (output == FETCH_WARNINGS)
-    if reported:
-        assert "W: Failed to fetch http://deb.debian.org" in result.stdout
-        assert "W: Some index files failed to download." in result.stdout
-        assert "W\tE: An index was rejected." in result.stdout
+    for line in output.splitlines():
+        if line.startswith(("W:", "E:")):
+            assert "W\t" + line + "\n" in result.stdout
     assert "Reading package lists" not in result.stdout
 
 
