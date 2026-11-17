@@ -149,6 +149,8 @@ Versioning before and after the first stable release.
   against pinned checksums before installing them, like Buildx already did.
   Every verified build download retries transient network failures and is
   checked again after the final attempt (#231).
+- Apply the same HTTPS-only and retry flags to Codex and OpenCode assistant
+  downloads, and extend the static guard to cover every agent download (#250).
 - Verify the pinned oh-my-zsh archive, oh-my-posh binary and fnm archive before
   extraction or installation. Both dev and assistant images install Claude Code
   only after checking its signed version manifest against a pinned release key
