@@ -38,6 +38,9 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- The start-up package replay retries the package list update up to three times when a fetch
+  fails (for example while DNS is not ready yet) and otherwise says so in one warning that names
+  `/home/dev/package-replay.sh`, instead of reporting every recorded package as unknown (#249).
 - Host-mode Claude delivery keeps additional `PreToolUse` and `Stop` hook entries instead of refusing them (#239).
 - `djinn doctor`'s Git discovery skips Syncthing's version archive
   (`.stversions`), so archived copies of a repository's `.git` entry no longer
