@@ -881,13 +881,16 @@ class TestMountTargetCollisions:
         with pytest.raises(MountCollisionError, match=r"conflict path: /home/dev/\.claude"):
             validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
 
-    def test_allows_child_of_compose_target(
+    def test_rejects_child_of_host_bind(
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
         mount = ContainerMount(tmp_path, Path("/home/dev/projects/scratch"))
 
-        validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
+        with pytest.raises(
+            MountCollisionError, match=f"inside host bind {mock_app_config.workspace_target}"
+        ):
+            validate_container_mounts((mount,), mock_app_config, DockerMode.NONE)
 
     @pytest.mark.parametrize("workspace", ["projects", "aimi"])
     @pytest.mark.parametrize("docker_mode", list(DockerMode))
@@ -907,7 +910,13 @@ class TestMountTargetCollisions:
             with pytest.raises(MountCollisionError, match="conflicts with reserved mount"):
                 validate_container_mounts(mounts, config, docker_mode)
 
-        for target in (active / "child", inactive, inactive / "child"):
+        with pytest.raises(MountCollisionError, match=f"inside host bind {active}"):
+            validate_container_mounts(
+                (ContainerMount(tmp_path, active / "child"),),
+                config,
+                docker_mode,
+            )
+        for target in (inactive, inactive / "child"):
             mounts = resolve_container_mounts((f"{tmp_path}:{target}",))
             validate_container_mounts(mounts, config, docker_mode)
         monkeypatch.chdir(tmp_path)
@@ -985,14 +994,15 @@ class TestMountTargetCollisions:
         ):
             validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
 
-    def test_allows_unoccupied_child_of_image_claude_alias(
+    def test_rejects_unoccupied_child_of_image_claude_alias(
         self, mock_app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._without_runtime_mounts(monkeypatch)
         mounts = resolve_container_mounts((f"{tmp_path}:/home/dev/.config/claude/custom",))
 
         assert mounts[0].target == Path("/home/dev/.claude/custom")
-        validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
+        with pytest.raises(MountCollisionError, match=r"inside host bind /home/dev/\.claude"):
+            validate_container_mounts(mounts, mock_app_config, DockerMode.NONE)
 
     @pytest.mark.parametrize(
         "target",
@@ -2164,7 +2174,7 @@ class TestComposeRun:
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
-    def test_emits_canonical_alias_target(
+    def test_rejects_canonical_alias_target_inside_host_bind(
         self,
         mock_run: MagicMock,
         mock_root: MagicMock,
@@ -2179,11 +2189,9 @@ class TestComposeRun:
             mounts=(ContainerMount(tmp_path, Path("/home/dev/.config/claude/custom")),)
         )
 
-        compose_run(mock_app_config, options, command="echo", interactive=False)
-
-        cmd = mock_run.call_args.args[0]
-        assert f"{tmp_path}:/home/dev/.claude/custom" in cmd
-        assert cmd[cmd.index("--workdir") + 1] == "/home/dev/.claude/custom"
+        with pytest.raises(MountCollisionError, match=r"inside host bind /home/dev/\.claude"):
+            compose_run(mock_app_config, options, command="echo", interactive=False)
+        mock_run.assert_not_called()
 
     @patch("djinn_in_a_box.core.docker.get_project_root")
     @patch("djinn_in_a_box.core.docker.subprocess.run")
@@ -3305,6 +3313,10 @@ def test_nested_invocation_mounts_refused(
             mounts[::-1] if reverse else mounts, mock_app_config, DockerMode.NONE,
         )
     message = str(exc.value)
+    if docker_mod._normalize_mount_target(outer).is_relative_to(Path("/home/dev/.claude")):
+        assert "inside host bind /home/dev/.claude;" in message
+        assert "root-owned directory" in message
+        return
     assert str(tmp_path / "outer") in message and str(tmp_path / "inner") in message
     assert str(docker_mod._normalize_mount_target(outer)) in message
     assert str(docker_mod._normalize_mount_target(inner)) in message

@@ -1542,8 +1542,8 @@ is refused if its source overlaps a host execution input. For `--mount`, append
 `:ro` or remove it. For `--here`, start from a directory outside the input or use
 `--mount SRC:ro`. `djinn doctor` reports affected `[mounts.*]` declarations as
 FAIL rows; it cannot check invocation `--mount` or `--here` binds.
-User mounts cannot equal or contain the active workspace target; children remain
-valid. The unused root is available for explicit user mounts. Djinn creates only
+User mounts cannot equal, contain or lie below the active workspace target.
+The unused root is available for explicit user mounts. Djinn creates only
 the selected workspace bind. Targets at or below a Djinn-managed root are refused
 for both `:rw` and `:ro`, following the shared rule for declared mounts below.
 `djinn run` without `--mount` and without `--here` keeps its implicit `--here`
@@ -1584,8 +1584,11 @@ create missing mount-point directories as root inside the outer bind's host
 directory. This applies to `run`, interactive `start` and `start --detach`.
 `--mount <dir>` without `--here` keeps declarations below `/home/dev/workspace`,
 but leaves out declarations below that `--mount`'s chosen or derived target.
-Children of built-in, reserved and zone targets are allowed, with one exception
-shared with invocation `--mount`: neither may sit
+Declared and `--mount` targets cannot lie below host binds: `/home/dev/.claude`,
+`/home/dev/.codex`, `/home/dev/.opencode`, `/home/dev/.config/gh`, `/home/dev/.config/age`,
+`/home/dev/.claude_seed`, `/home/dev/.djinn-canonical`, `/home/dev/sessions`, or the active workspace target.
+Docker would create root-owned mount points in their host directories. Children of named-volume
+targets, `/home/dev/mount`, the inactive root and other reserved targets remain allowed, except
 at or below the Djinn-managed roots `/home/dev/.cache/uv`, `/home/dev/.cache/djinn-tools`,
 `/home/dev/.local/share/fnm`, `/home/dev/.vscode-server` or `/home/dev/workspaces`.
 Their existing recursive ownership repair remains in place. The root-owned

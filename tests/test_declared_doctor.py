@@ -10,7 +10,9 @@ from djinn_in_a_box.core import docker
 from djinn_in_a_box.core.exceptions import ConfigValidationError
 
 
-@pytest.mark.parametrize("case", ["runtime", "schema", "optional-context", "syntax", "mode"])
+@pytest.mark.parametrize(
+    "case", ["runtime", "schema", "optional-context", "syntax", "mode", "host-bind"]
+)
 def test_one_row_per_declaration(tmp_path, monkeypatch, case):
     path = tmp_path / "config.toml"
     path.write_text(f'''[general]
@@ -34,6 +36,12 @@ CDP_HOST="literal"
 ''')
     if case == "schema":
         path.write_text(path.read_text() + 'DOCKER_HOST="reserved"\nBAD=123\n')
+    elif case == "host-bind":
+        path.write_text(
+            path.read_text()
+            .replace(str(tmp_path / "missing"), str(tmp_path))
+            .replace('target="/archive"', 'target="/home/dev/.claude/extra"')
+        )
     elif case == "mode":
         path.write_text(path.read_text().replace(
             'target="/archive"', 'target="/archive"\nread_only="true"',
@@ -96,7 +104,13 @@ CDP_HOST="literal"
         assert entries["mounts.archive"].status is doctor_module.Status.FAIL
         assert (
             "archive" in entries["mounts.archive"].detail
-            and ("value must be a boolean" if case == "mode" else "does not exist")
+            and (
+                "inside host bind '/home/dev/.claude'"
+                if case == "host-bind"
+                else "value must be a boolean"
+                if case == "mode"
+                else "does not exist"
+            )
             in entries["mounts.archive"].detail
         )
         assert entries["mounts.worker"].status is doctor_module.Status.PASS
