@@ -856,6 +856,9 @@ Djinn has four built-in agent definitions:
 | `opencode` | `opencode` | `opencode run` | read-only uses `--agent plan`; model flag is `-m` |
 | `claude-isolated` | `claude` | `claude -p --no-session-persistence` | Claude Code without user or project context; see [Minimal-context Claude agent](#minimal-context-claude-agent) |
 
+All built-in headless commands end with `-- "$AGENT_PROMPT"`, so prompts that
+start with `-` are passed as prompts.
+
 List the effective definitions:
 
 ```sh

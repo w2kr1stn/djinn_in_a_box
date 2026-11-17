@@ -219,6 +219,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         write_flags=["--dangerously-skip-permissions"],
         json_flags=["--output-format", "json"],
         model_flag="--model",
+        prompt_template='-- "$AGENT_PROMPT"',
     ),
     "codex": AgentConfig(
         binary="codex",
@@ -228,6 +229,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         write_flags=["--full-auto"],
         json_flags=["--json"],
         model_flag="--model",
+        prompt_template='-- "$AGENT_PROMPT"',
     ),
     "opencode": AgentConfig(
         binary="opencode",
@@ -236,6 +238,7 @@ DEFAULT_AGENTS: Final[dict[str, AgentConfig]] = {
         read_only_flags=["--agent", "plan"],
         json_flags=["--format", "json"],
         model_flag="-m",
+        prompt_template='-- "$AGENT_PROMPT"',
     ),
     "claude-isolated": AgentConfig(
         binary="claude",
