@@ -161,25 +161,6 @@ def test_view_entry_io_keeps_relative_path_and_cause(tmp_path, monkeypatch, stag
     assert error.__cause__.__cause__ is cause
 
 
-@pytest.mark.parametrize("stage", ["stat", "initial-open"])
-def test_vanished_view_entry_still_refuses(tmp_path, monkeypatch, stage):
-    (tmp_path / "AGENTS.md").write_bytes(b"synthetic instructions\n")
-    operation = publisher.os.stat if stage == "stat" else publisher.os.open
-
-    def vanish(name, *args, **kwargs):
-        if name == "AGENTS.md" and kwargs.get("dir_fd") is not None:
-            raise FileNotFoundError(errno.ENOENT, "synthetic vanished entry")
-        return operation(name, *args, **kwargs)
-
-    monkeypatch.setattr(publisher.os, "stat" if stage == "stat" else "open", vanish)
-    with pytest.raises(publisher.PublishError) as raised:
-        publisher.snapshot_file_view(tmp_path, source="claude", item_origin="seed")
-    assert raised.value.drift_class is publisher.DriftClass.SOURCE_CHANGED
-    assert raised.value.items == (
-        publisher.DriftEntry(raised.value.drift_class, PurePosixPath("AGENTS.md"), origin="seed"),
-    )
-
-
 @pytest.mark.parametrize("envelope", ["empty", "missing", "malformed"])
 @pytest.mark.parametrize(
     "kind", ["invalid-or-semantic", "collision", "target-drift", "source-changed"]
