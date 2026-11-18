@@ -2437,8 +2437,7 @@ def test_protected_host_roots_cover_private_state_and_run_inputs(ground, monkeyp
     monkeypatch.setattr(post_mortem, "records_root", records_root)
     storage_calls = []
 
-    def storage(*, timeout, strict):
-        assert strict
+    def storage(*, timeout):
         storage_calls.append(timeout)
         return ground.paths["data"], ground.backing
 

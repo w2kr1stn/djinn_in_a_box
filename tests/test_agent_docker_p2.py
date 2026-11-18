@@ -595,7 +595,7 @@ def test_open_window_observer_closes_on_companion_drift(managed, monkeypatch, dr
     hostctl.save_private(
         "opening.json", {"generation": "gen-a", "dev_id": m.dev["Id"], "agent": agent}
     )
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: helper)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda: helper)
     monkeypatch.setattr(hostctl, "node_status", lambda h: {"BackendState": "Running"})
     monkeypatch.setattr(hostctl, "prepare_trust", lambda *a: trust())
     monkeypatch.setattr(hostctl, "admit_locked", lambda *a, **k: None)

@@ -125,7 +125,7 @@ def command(*args: str, timeout: float = 5) -> str:
     return result.stdout
 
 
-def inspect_helper(*, strict: bool = False) -> dict[str, Any] | None:
+def inspect_helper() -> dict[str, Any] | None:
     from djinn_in_a_box.core.host_runtime import inspect_object
 
     value = inspect_object(HELPER_NAME, DOCKER_EXECUTABLE, missing="container")
@@ -718,7 +718,7 @@ def stop_and_verify(
         if not strict:
             raise
         # A timed-out stop may have taken effect. Only a verified outcome closes it.
-        current = inspect_helper(strict=True) if strict else inspect_helper()
+        current = inspect_helper()
         if (
             current is None or current["Id"] != identity or generation(current) != gen
         ):
@@ -726,7 +726,7 @@ def stop_and_verify(
         if current["State"]["Running"]:
             raise
         return current
-    current = inspect_helper(strict=True) if strict else inspect_helper()
+    current = inspect_helper()
     if current is None or current["Id"] != identity or generation(current) != gen:
         return None
     if current["State"]["Running"]:

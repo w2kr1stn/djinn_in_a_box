@@ -83,14 +83,21 @@ def window(tmp_path, monkeypatch):
     root = hostctl.state_root()
     hostctl.save_private("opening.json", {"generation": "generation-a", "dev_id": None})
     state = SimpleNamespace(
-        helper=value, root=root, stops=[], probes=[], signals={}, admitted=False, commands=[],
-        clock=0.0, sleeps=[], strict=0, inspections=0, journal_waits=[],
+        helper=value,
+        root=root,
+        stops=[],
+        signals={},
+        admitted=False,
+        commands=[],
+        clock=0.0,
+        sleeps=[],
+        journal_waits=[],
     )
 
-    def inspect(*, strict=False):
-        state.inspections += 1
-        state.strict += strict
-        state.probes.append(strict)
+    # Closure masks termination before its first inspection and throughout its retries.
+    state.closing = lambda: state.signals.get(signal.SIGTERM) == signal.SIG_IGN
+
+    def inspect():
         return state.helper
 
     def command(*args, **kwargs):
@@ -204,11 +211,14 @@ def test_every_exit_closes_under_long_control_hold(window, monkeypatch, path):
                 if path == "two-signals":
                     assert window.signals[signal.SIGHUP] == signal.SIG_IGN
 
-    def inspect(*, strict=False):
-        if strict:
+    closure_states = []
+
+    def inspect():
+        if holder is not None and window.clock >= 2:
+            closure_states.append(window.helper["State"]["Running"])
             assert all(window.signals[s] == signal.SIG_IGN for s in
                        (signal.SIGTERM, signal.SIGINT, signal.SIGHUP))
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     monkeypatch.setattr(host_runtime, "inspect_dev", tick)
     monkeypatch.setattr(host_runtime.time, "sleep", next_round)
@@ -261,7 +271,7 @@ def test_every_exit_closes_under_long_control_hold(window, monkeypatch, path):
         assert_control_lock_held(window.root / "control.lock")
         assert rows[-1]["helper_id"] == "helper-a"
         assert_control_lock_held(window.root / "control.lock")
-        assert window.strict >= 2
+        assert closure_states == [True, False]
         assert_control_lock_held(window.root / "control.lock")
         assert 2 <= window.clock < 3
         assert_control_lock_held(window.root / "control.lock")
@@ -323,8 +333,8 @@ def test_publication_skips_keep_checks_and_catch_up(window, monkeypatch):
 
 @pytest.mark.parametrize("foreign", ["id", "generation", "absent", "stopped"])
 def test_final_probe_never_stops_a_foreign_helper(window, monkeypatch, foreign):
-    def inspect(*, strict=False):
-        if strict:
+    def inspect():
+        if window.closing():
             if foreign == "absent":
                 return None
             if foreign == "stopped":
@@ -333,7 +343,7 @@ def test_final_probe_never_stops_a_foreign_helper(window, monkeypatch, foreign):
                 window.helper["Id"] = "helper-b"
             else:
                 window.helper["Config"]["Labels"][hostctl.GENERATION_LABEL] = "generation-b"
-        return window.inspect(strict=strict)
+        return window.inspect()
     monkeypatch.setattr(hostctl, "inspect_helper", inspect)
     window.run()
     assert not window.stops
@@ -387,15 +397,20 @@ def test_hour_of_failed_stops_keeps_journal_and_queue_bounded(window, monkeypatc
     probe = {"after_stop": False, "flip": False}
     ticks = iter(range(10**6))
 
-    def inspect(*, strict=False):
+    def inspect():
         # "alternate": every other closure probe is unknown; the others reach a failing stop.
-        if mode == "alternate" and strict and window.clock < hour and not probe["after_stop"]:
+        if (
+            mode == "alternate"
+            and window.closing()
+            and window.clock < hour
+            and not probe["after_stop"]
+        ):
             probe["flip"] = not probe["flip"]
             if probe["flip"]:
                 failures.append("inspection-unknown")
                 raise host_runtime.GitSSHError("inspection unknown")
         probe["after_stop"] = False
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def command(*args, **kwargs):
         if args[0] == "stop" and window.clock < hour:
@@ -442,12 +457,12 @@ def test_hour_of_failed_stops_keeps_journal_and_queue_bounded(window, monkeypatc
 def test_failure_reason_change_folds_into_the_running_row(window, monkeypatch):
     unknown = 0
 
-    def inspect(*, strict=False):
+    def inspect():
         nonlocal unknown
-        if strict and unknown < 3:
+        if window.closing() and unknown < 3:
             unknown += 1
             raise host_runtime.GitSSHError("inspection unknown")
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     stops = 0
 
@@ -491,24 +506,19 @@ def test_refreshed_row_is_not_repeated_at_closure(window, monkeypatch):
 
 
 @pytest.mark.parametrize("probe", ["initial", "after-stop", "failed-stop"])
-def test_positive_absence_only_and_all_closure_probes_strict(window, monkeypatch, probe):
-    strict_calls = 0
+def test_unknown_inspection_at_each_closure_probe_is_retried(window, monkeypatch, probe):
+    closure_calls = 0
     commands = 0
 
-    def inspect(*, strict=False):
-        nonlocal strict_calls
-        if strict:
-            strict_calls += 1
-        # Broad absence would return None for a missing daemon socket.
-        if ((probe == "initial" and strict_calls == 1)
-                or (probe != "initial" and commands == 1)):
-            if not strict:
-                return None
-            if probe == "initial" or strict_calls == 2:
+    def inspect():
+        nonlocal closure_calls
+        if window.closing():
+            closure_calls += 1
+            if closure_calls == (1 if probe == "initial" else 2):
                 raise host_runtime.GitSSHError(
                     "Cannot connect to the Docker daemon: connect: no such file or directory"
                 )
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def command(*args, **kwargs):
         nonlocal commands
@@ -524,7 +534,7 @@ def test_positive_absence_only_and_all_closure_probes_strict(window, monkeypatch
     assert window.rows()[0]["reason"] == (
         "inspection-unknown" if probe == "initial" else "stop-unverified"
     )
-    assert strict_calls >= 3
+    assert closure_calls >= 3
     assert not window.helper["State"]["Running"]
 
 
@@ -542,8 +552,8 @@ def test_shared_stop_verification_contract(window, monkeypatch, strict, after):
     inspected = []
     stopped = False
 
-    def inspect(**kwargs):
-        inspected.append(kwargs)
+    def inspect():
+        inspected.append(stopped)
         return (None if after is None else after_value) if stopped else before
 
     def command(*args, **kwargs):
@@ -564,14 +574,14 @@ def test_shared_stop_verification_contract(window, monkeypatch, strict, after):
         else:
             outcome = hostctl.stop_and_verify("helper-a", "generation-a", strict=True)
             assert outcome is (after_value if after == "stopped" else None)
-        assert inspected == [{"strict": True}]
+        assert inspected == [True]
     else:
         with pytest.raises(hostctl.HostctlError, match=(
             "changed during teardown" if after in (None, "foreign", "foreign-generation") else
             "termination" if after == "running" else "logs failed"
         )):
             hostctl.stop_helper_locked()
-        assert inspected == [{}, {}]
+        assert inspected == [False, True]
 
 
 def test_guarded_closure_ignores_post_stop_diagnostic_failure(window, monkeypatch):
@@ -841,9 +851,9 @@ def test_strict_absence_uses_exact_engine_wording(monkeypatch):
 
     monkeypatch.setattr(host_runtime.subprocess, "run", run)
     with pytest.raises(host_runtime.GitSSHError):
-        hostctl.inspect_helper(strict=True)
+        hostctl.inspect_helper()
     message = "Error response from daemon: No such container: helper-a"
-    assert hostctl.inspect_helper(strict=True) is None
+    assert hostctl.inspect_helper() is None
 
 
 def test_doctor_tail_is_bounded(window, monkeypatch):
@@ -1118,12 +1128,12 @@ def test_control_journal_preserves_blocking_default(window, monkeypatch):
 def test_unknown_closure_inspection_retries(window, monkeypatch, failure):
     called = False
 
-    def inspect(*, strict=False):
+    def inspect():
         nonlocal called
-        if strict and not called:
+        if window.closing() and not called:
             called = True
             raise failure("unknown")
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     monkeypatch.setattr(hostctl, "inspect_helper", inspect)
     window.run()
@@ -1173,7 +1183,7 @@ def test_real_signals_during_long_control_hold(tmp_path, signum):
     script = """import json, pathlib, sys, types
 from djinn_in_a_box.core import host_runtime, hostctl
 store = pathlib.Path(sys.argv[1])
-def inspect(*, strict=False):
+def inspect():
     return json.loads(store.read_text())
 def command(*args, **kwargs):
     assert args == ('stop', '-t', '3', 'helper-a')
@@ -1271,8 +1281,8 @@ def test_unlocked_probe_already_closed_uses_closed_event(window, monkeypatch, fo
         with guard(timeout=timeout):
             yield
 
-    def inspect(*, strict=False):
-        if strict:
+    def inspect():
+        if window.closing():
             if foreign == "absent":
                 return None
             if foreign == "id":
@@ -1281,7 +1291,7 @@ def test_unlocked_probe_already_closed_uses_closed_event(window, monkeypatch, fo
                 window.helper["Config"]["Labels"][hostctl.GENERATION_LABEL] = "generation-b"
             else:
                 window.helper["State"]["Running"] = False
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     monkeypatch.setattr(hostctl, "control_guard", busy)
     monkeypatch.setattr(hostctl, "inspect_helper", inspect)
@@ -1315,15 +1325,16 @@ def test_reconcile_error_after_guarded_stop_does_not_report_failed_stop(window, 
 
 def test_guarded_stop_attempt_keeps_marker_after_unknown_verification(window, monkeypatch):
     window.helper["State"]["StartedAt"] = "2026-10-21T12:00:00Z"
-    strict_calls = 0
+    closure_calls = 0
     markers = []
 
-    def inspect(*, strict=False):
-        nonlocal strict_calls
-        strict_calls += strict
-        if strict_calls == 2:
+    def inspect():
+        nonlocal closure_calls
+        if window.closing():
+            closure_calls += 1
+        if closure_calls == 2:
             raise host_runtime.GitSSHError("Docker inspection failed")
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def command(*args, **kwargs):
         window.command(*args, **kwargs)
@@ -1398,7 +1409,7 @@ def test_guarded_closure_reconciles_real_expiry_after_stop(window, monkeypatch, 
         return window.command(*args, **kwargs)
 
     monkeypatch.setattr(hostctl, "command", command)
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: copy.deepcopy(window.helper))
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda: copy.deepcopy(window.helper))
     monkeypatch.setattr(hostctl, "reconcile", reconcile)
     window.run()
     assert len(reconciled) == 1
@@ -1465,8 +1476,8 @@ def test_guarded_reconcile_failure_is_logged_once_without_retry(
 def test_guarded_reconcile_requires_pinned_stopped_helper(window, monkeypatch, foreign):
     reconciled = []
 
-    def inspect(*, strict=False):
-        if strict and foreign != "removed-after-stop":
+    def inspect():
+        if window.closing() and foreign != "removed-after-stop":
             if foreign == "absent":
                 return None
             window.helper["State"]["Running"] = False
@@ -1474,7 +1485,7 @@ def test_guarded_reconcile_requires_pinned_stopped_helper(window, monkeypatch, f
                 window.helper["Id"] = "helper-b"
             else:
                 window.helper["Config"]["Labels"][hostctl.GENERATION_LABEL] = "generation-b"
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def command(*args, **kwargs):
         result = window.command(*args, **kwargs)
@@ -1939,8 +1950,8 @@ def trace(frame, event, arg):
             == 'close_helper()'):
         deliver(signum)
     return trace
-def inspect(*, strict=False):
-    if strict:
+def inspect():
+    if closing:
         assert all(signal.getsignal(sig) == signal.SIG_IGN for sig in
                    (signal.SIGTERM, signal.SIGINT, signal.SIGHUP))
         if boundary == 'during-closure' and not sent:
@@ -1960,11 +1971,11 @@ def command(*args, **kwargs):
     return ''
 def gap(*args):
     global closing
+    closing = True
     if boundary == 'second-signal':
         if not sent:
             deliver(signum)
         return None
-    closing = True
     raise host_runtime.GitSSHError('ordinary observation gap')
 def sleep(seconds):
     clock[0] += seconds
@@ -2080,7 +2091,7 @@ def test_recovered_journal_allows_reconcile_and_clean(window, monkeypatch, wait,
     removed = []
     marker = window.root / "observed-expiry.json"
 
-    def inspect(**kwargs):
+    def inspect():
         return None if removed else copy.deepcopy(helper)
 
     def command(*args, **kwargs):
@@ -2127,7 +2138,7 @@ def test_guard_descriptor_close_preserves_verified_outcome(
     original_close = hostctl.os.close
     closure_fd = None
     injected = False
-    extra_probes = []
+    extra_probes = 0
     vanished = False
     foreign = copy.deepcopy(window.helper)
     if outcome == "other-id":
@@ -2135,13 +2146,13 @@ def test_guard_descriptor_close_preserves_verified_outcome(
     elif outcome == "other-generation":
         foreign["Config"]["Labels"][hostctl.GENERATION_LABEL] = "generation-b"
 
-    def inspect(*, strict=False):
-        nonlocal closure_fd
+    def inspect():
+        nonlocal closure_fd, extra_probes
         if injected:
-            extra_probes.append(strict)
+            extra_probes += 1
             if unknown:
                 raise host_runtime.GitSSHError("daemon unavailable after verified closure")
-        if strict:
+        if window.closing():
             closure_fd = hostctl.held_control_descriptor()
             if outcome in ("found-stopped", "absent", "other-id", "other-generation"):
                 window.helper["State"]["Running"] = False
@@ -2149,7 +2160,7 @@ def test_guard_descriptor_close_preserves_verified_outcome(
                 return foreign
             if outcome == "absent" or vanished:
                 return None
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def command(*args, **kwargs):
         nonlocal vanished
@@ -2194,11 +2205,11 @@ def test_post_verification_errors_keep_original_publication_budget(window, monke
     failures = []
     waits = []
 
-    def inspect(*, strict=False):
+    def inspect():
         nonlocal closure_fd
-        if strict:
+        if window.closing():
             closure_fd = hostctl.held_control_descriptor()
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def command(*args, **kwargs):
         result = window.command(*args, **kwargs)
@@ -2258,12 +2269,12 @@ def test_guard_release_error_before_verification_remains_retryable(window, monke
     closure_fd = None
     injected = False
 
-    def inspect(*, strict=False):
+    def inspect():
         nonlocal closure_fd
-        if strict and not injected:
+        if window.closing() and not injected:
             closure_fd = hostctl.held_control_descriptor()
             raise host_runtime.GitSSHError("inspection unknown before any stop")
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     def close(fd):
         nonlocal injected
@@ -2287,12 +2298,12 @@ def test_guard_release_error_before_verification_remains_retryable(window, monke
 def test_pre_verification_base_exception_keeps_existing_propagation(window, monkeypatch, failure):
     delivered = False
 
-    def inspect(*, strict=False):
+    def inspect():
         nonlocal delivered
-        if strict and not delivered:
+        if window.closing() and not delivered:
             delivered = True
             raise failure("fatal inspection failure")
-        return window.inspect(strict=strict)
+        return window.inspect()
 
     monkeypatch.setattr(hostctl, "inspect_helper", inspect)
     with pytest.raises(failure):

@@ -2783,7 +2783,7 @@ def _guest_direct_check() -> None:
     """Check the window under the same transition guard used by hostctl."""
     try:
         with hostctl.control_guard():
-            helper = hostctl.inspect_helper(strict=True)
+            helper = hostctl.inspect_helper()
             if helper is not None and helper["State"]["Running"]:
                 raise RunRefusedError(
                     "close the hostctl window (`djinn hostctl off`) or run without --docker-direct"

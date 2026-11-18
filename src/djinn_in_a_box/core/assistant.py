@@ -100,7 +100,8 @@ def inspect(resource: InspectResource, name: str) -> dict[str, Any] | None:
         ):
             raise ValueError("expected one Docker object")
         obj = cast(dict[str, Any], value[0])
-        if not isinstance(obj.get("Id"), str) or not isinstance(obj.get("Config"), dict):
+        identity = obj.get("Id")
+        if not isinstance(identity, str) or not identity or not isinstance(obj.get("Config"), dict):
             raise ValueError("missing Docker identity/config")
         labels: Any = obj["Config"].get("Labels")
         if labels is not None and not isinstance(labels, dict):

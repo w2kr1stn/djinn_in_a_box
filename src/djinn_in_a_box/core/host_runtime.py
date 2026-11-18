@@ -1394,7 +1394,7 @@ def observe_hostctl(
                             if remaining > 0:
                                 time.sleep(min(0.1, remaining))
                                 continue
-                        fresh = hostctl.inspect_helper(strict=True)
+                        fresh = hostctl.inspect_helper()
                         if (
                             fresh is not None
                             and fresh["Id"] == helper_id

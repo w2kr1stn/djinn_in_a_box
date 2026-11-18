@@ -42,7 +42,7 @@ def boundary(mock_app_config, tmp_path, monkeypatch):
     data, backing = tmp_path / "docker-data", tmp_path / "helper-backing"
     data.mkdir()
     backing.mkdir()
-    monkeypatch.setattr(host_sealing, "docker_storage_roots", lambda **kw: (data, backing))
+    monkeypatch.setattr(host_sealing, "docker_storage_roots", lambda *, timeout=5: (data, backing))
     key = home / "key"
     key.touch()
     mock_app_config.git.identities["guest-test"] = GitIdentity(
@@ -195,7 +195,9 @@ def test_storage_roots_are_lexical_below_unreadable_parent(boundary, tmp_path, m
     parent.mkdir()
     data = parent / "data"
     data.mkdir()
-    monkeypatch.setattr(host_sealing, "docker_storage_roots", lambda **kw: (data, data / "volume"))
+    monkeypatch.setattr(
+        host_sealing, "docker_storage_roots", lambda *, timeout=5: (data, data / "volume")
+    )
     parent.chmod(0)
     try:
         check = check_source(boundary, boundary.config.code_dir)
@@ -276,7 +278,7 @@ def test_guest_storage_inspection_requires_exact_volume_absence(fake_owner, tmp_
         with pytest.raises(docker.RunRefusedError, match="cannot verify .*; refusing"):
             docker._guest_source_check(config, docker.ContainerOptions())(backing, Path("/review"))
     else:
-        assert host_sealing.docker_storage_roots(strict=True) == (data, data)
+        assert host_sealing.docker_storage_roots() == (data, data)
         assert docker._guest_source_check(config, docker.ContainerOptions())(
             config.code_dir, Path("/review")
         ) == config.code_dir
@@ -969,8 +971,7 @@ def test_direct_helper_state_and_guard(compose_guest, monkeypatch, running):
         finally:
             held = False
 
-    def inspect(*, strict):
-        assert strict
+    def inspect():
         assert held, "helper inspection must hold control_guard"
         return None if running is None else {"State": {"Running": running}}
 

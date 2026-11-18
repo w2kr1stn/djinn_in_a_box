@@ -412,7 +412,7 @@ def private_state_paths() -> dict[str, Path]:
     }
 
 
-def docker_storage_roots(*, timeout: float = 5, strict: bool = False) -> tuple[Path, Path]:
+def docker_storage_roots(*, timeout: float = 5) -> tuple[Path, Path]:
     """Return Docker's data root and the helper volume's backing storage."""
     info = json.loads(hostctl.command("info", "--format", "{{json .}}", timeout=timeout))
     data_root = canonical(info["DockerRootDir"])
@@ -430,7 +430,7 @@ def protected_host_roots(
     identities: Iterable[Path] = (), *, timeout: float = 30
 ) -> dict[str, Path]:
     """Broad host-path protection for runs, including all runtime deliveries."""
-    data_root, backing = docker_storage_roots(timeout=timeout, strict=True)
+    data_root, backing = docker_storage_roots(timeout=timeout)
     return {
         "host runtime": host_runtime.runtime_root(),
         **_private_state_roots(),

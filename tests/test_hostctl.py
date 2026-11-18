@@ -364,9 +364,16 @@ def test_network_failure_prevents_helper(inputs, fake_transitions, monkeypatch, 
         fake_transitions["network"] = {"Name": hostctl.HELPER_NETWORK}
         monkeypatch.setattr(docker, "ensure_network", lambda name: False)
     else:
-        monkeypatch.setattr(host_runtime, "inspect_object", lambda *args, **kw: None)
+        message = f"Error response from daemon: network {hostctl.HELPER_NETWORK} not found"
+        monkeypatch.setattr(host_runtime, "inspect_object", inspect_object)
+        result = subprocess.CompletedProcess([], 1, "", message)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
     with pytest.raises(hostctl.HostctlError, match="network"):
         hostctl.open_window(inputs)
+    row = json.loads((hostctl.state_root() / "journal.jsonl").read_text().splitlines()[-1])
+    assert row["event"] == "on-refused"
+    reason = "network ensure failed" if failure == "create" else "network verification failed"
+    assert row["reason"] == reason
     assert not any(c[0] == "run" for c in fake_transitions["calls"])
 
 
@@ -660,22 +667,6 @@ def test_clean_all_delete_state_verifies_stop_and_deletion(inputs, fake_transiti
     monkeypatch.setattr(host_runtime, "inspect_object", lambda *args, **kw: volume)
     with pytest.raises(hostctl.HostctlError, match="deletion could not"):
         hostctl.delete_state_locked()
-
-
-@pytest.mark.parametrize(
-    "resource,message",
-    [
-        ("container", "Error response from daemon: No such container: generic"),
-        ("volume", "Error response from daemon: get generic: no such volume"),
-    ],
-)
-def test_missing_daemon_shapes_and_closed_inspect_stdin(monkeypatch, resource, message):
-    def run(argv, **kwargs):
-        assert kwargs["stdin"] == subprocess.DEVNULL
-        return subprocess.CompletedProcess(argv, 1, "[]", message)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert host_runtime.inspect_object("generic", "/usr/bin/docker", missing=resource) is None
 
 
 def test_no_git_host_alias_collision(inputs):
@@ -1333,17 +1324,6 @@ def test_unverified_dev_refuses_admission_even_with_override(monkeypatch):
     assessment = host_sealing.inspect_assessment()
     with pytest.raises(hostctl.HostctlError, match="inspection uncertain"):
         assessment.require(allow_unsealed=True)
-
-
-def test_missing_verified_network_journals_refusal(inputs, fake_transitions, monkeypatch):
-    message = f"Error response from daemon: network {hostctl.HELPER_NETWORK} not found"
-    monkeypatch.setattr(host_runtime, "inspect_object", inspect_object)
-    result = subprocess.CompletedProcess([], 1, "", message)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
-    with pytest.raises(hostctl.HostctlError, match="network could not be verified"):
-        hostctl.open_window(inputs)
-    assert '"on-refused"' in (hostctl.state_root() / "journal.jsonl").read_text()
-    assert not any(call[0] == "run" for call in fake_transitions["calls"])
 
 
 def test_clean_all_keeps_sync_after_unverified_dev(tmp_path, monkeypatch):

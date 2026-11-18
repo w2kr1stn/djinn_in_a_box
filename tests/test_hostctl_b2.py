@@ -324,7 +324,7 @@ def observer_setup(tmp_path, monkeypatch):
         )
         monkeypatch.setattr(hostctl, "HELPER_NAME", "helper-a")
         monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", "/bin/docker")
-        monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: value)
+        monkeypatch.setattr(hostctl, "inspect_helper", lambda: value)
         monkeypatch.setattr(hostctl, "node_status", lambda helper: status())
         monkeypatch.setattr(host_runtime, "inspect_dev", lambda *args: None)
 
