@@ -40,7 +40,7 @@ from djinn_in_a_box.core.docker import (
     get_config_root,
     is_background_process_group,
 )
-from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE, InspectResource, resource_absent
 from djinn_in_a_box.core.exceptions import (
     ConfigNotFoundError,
     ConfigValidationError,
@@ -84,10 +84,10 @@ def capture(*args: str) -> str:
     return result.stdout
 
 
-def inspect(resource: str, name: str) -> dict[str, Any] | None:
+def inspect(resource: InspectResource, name: str) -> dict[str, Any] | None:
     result = _run_captured([DOCKER_EXECUTABLE, resource, "inspect", name], timeout=10)
     if not result.success:
-        if f"No such {resource}: {name}" in result.stderr:
+        if resource_absent(result.stderr, resource, name):
             capture("info")
             return None
         raise AssistantError(result.stderr.strip() or "Docker inspection failed")
@@ -100,7 +100,8 @@ def inspect(resource: str, name: str) -> dict[str, Any] | None:
         ):
             raise ValueError("expected one Docker object")
         obj = cast(dict[str, Any], value[0])
-        if not isinstance(obj.get("Id"), str) or not isinstance(obj.get("Config"), dict):
+        identity = obj.get("Id")
+        if not isinstance(identity, str) or not identity or not isinstance(obj.get("Config"), dict):
             raise ValueError("missing Docker identity/config")
         labels: Any = obj["Config"].get("Labels")
         if labels is not None and not isinstance(labels, dict):

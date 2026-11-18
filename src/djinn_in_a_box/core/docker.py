@@ -61,7 +61,7 @@ from djinn_in_a_box.core.contained_paths import (
     ensure_empty_file,
     secure_root,
 )
-from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE, InspectResource, resource_absent
 from djinn_in_a_box.core.egress import EgressPlan
 from djinn_in_a_box.core.exceptions import (
     DeclarationSpecificationError,
@@ -425,20 +425,11 @@ class RunResult:
         return self.returncode == 0
 
 
-def _docker_inspect(resource: str, name: str) -> bool:
+def _docker_inspect(resource: InspectResource, name: str) -> bool:
     try:
-        result = subprocess.run(
-            [DOCKER_EXECUTABLE, resource, "inspect", name],
-            capture_output=True,
-            text=True,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        warning("Docker is not installed")
-        return False
-    return result.returncode == 0
+        return host_runtime.inspect_object(name, DOCKER_EXECUTABLE, missing=resource) is not None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitSSHError(f"Docker {resource} inspection failed") from exc
 
 
 def _run_captured(
@@ -752,8 +743,12 @@ def delete_network(name: str) -> bool:
 
 
 def ensure_network(name: str = DJINN_NETWORK) -> bool:
-    if _docker_inspect("network", name):
-        return True
+    try:
+        if network_exists(name):
+            return True
+    except GitSSHError as exc:
+        warning(str(exc))
+        return False
     result = _run_captured([DOCKER_EXECUTABLE, "network", "create", name], timeout=5)
     if not result.success:
         detail = result.stderr.strip() or f"exit code {result.returncode}"
@@ -1741,8 +1736,9 @@ def _service_inspect(service: str, deadline: float | None = None) -> dict[str, A
         return None
     if len(ids) != 1:
         raise RuntimeError(f"ambiguous {service} ownership")
-    return host_runtime.inspect_object(ids[0], DOCKER_EXECUTABLE,
-                                       timeout=_operation_timeout(deadline, 5))
+    return host_runtime.inspect_object(
+        ids[0], DOCKER_EXECUTABLE, missing="container", timeout=_operation_timeout(deadline, 5)
+    )
 
 
 def _helper_evidence(
@@ -1787,8 +1783,9 @@ def _downstream_probe(
     owner: host_runtime.GitRuntime,
     deadline: float | None = None,
 ) -> None:
-    image = host_runtime.inspect_object(_WORKFLOW_IMAGE, DOCKER_EXECUTABLE, "image",
-                                        timeout=_operation_timeout(deadline, 5))
+    image = host_runtime.inspect_object(
+        _WORKFLOW_IMAGE, DOCKER_EXECUTABLE, missing="image", timeout=_operation_timeout(deadline, 5)
+    )
     if image is None:
         raise RuntimeError("dev image is missing")
     name = f"djinn-desktop-probe-{owner.generation}-{endpoint.channel}"
@@ -1855,7 +1852,7 @@ def _downstream_probe(
         if not result.success:
             raise RuntimeError(result.stderr or "downstream credentials probe failed")
     finally:
-        actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE)
+        actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, missing="container")
         if actual is not None:
             labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
             if labels.get(host_runtime.GENERATION_LABEL) == owner.generation:
@@ -1961,7 +1958,7 @@ def inspect_agent_endpoint(
     try:
         if dev is None:
             dev = host_runtime.inspect_object(
-                name or _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE
+                name or _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE, missing="container"
             )
             if dev is not None and dev["State"]["Running"] is False:
                 dev = None
@@ -1977,10 +1974,16 @@ def inspect_agent_endpoint(
             state["resources"]["agent-docker"], state["generation"], DOCKER_EXECUTABLE
         )
         objects = [
-            host_runtime.inspect_object(manifest["image"], DOCKER_EXECUTABLE, "image"),
-            host_runtime.inspect_object(manifest["endpoint_volume"], DOCKER_EXECUTABLE, "volume"),
-            host_runtime.inspect_object(manifest["cache_volume"], DOCKER_EXECUTABLE, "volume"),
-            host_runtime.inspect_object(manifest["network_id"], DOCKER_EXECUTABLE, "network"),
+            host_runtime.inspect_object(manifest["image"], DOCKER_EXECUTABLE, missing="image"),
+            host_runtime.inspect_object(
+                manifest["endpoint_volume"], DOCKER_EXECUTABLE, missing="volume"
+            ),
+            host_runtime.inspect_object(
+                manifest["cache_volume"], DOCKER_EXECUTABLE, missing="volume"
+            ),
+            host_runtime.inspect_object(
+                manifest["network_id"], DOCKER_EXECUTABLE, missing="network"
+            ),
         ]
         if companion is None or any(obj is None for obj in objects):
             raise ValueError("recorded agent Docker resource absent")
@@ -2063,7 +2066,7 @@ def _agent_firewall(
     }
     if (
         host_runtime.inspect_object(
-            name, owner.docker_path, timeout=_operation_timeout(deadline, 5)
+            name, owner.docker_path, missing="container", timeout=_operation_timeout(deadline, 5)
         )
         is not None
     ):
@@ -2095,7 +2098,7 @@ def _agent_firewall(
         [*args, manifest["dev_image_id"], "-ec", command], timeout=_operation_timeout(deadline, 10)
     )
     actual = host_runtime.inspect_object(
-        name, owner.docker_path, timeout=_operation_timeout(deadline, 5)
+        name, owner.docker_path, missing="container", timeout=_operation_timeout(deadline, 5)
     )
     if actual is not None:
         owner.register(service, actual)
@@ -2153,12 +2156,12 @@ def _prepare_agent_docker(
         raise RuntimeError("Agent Docker requires a functioning host observer")
     if _service_inspect("agent-docker") is not None:
         raise RuntimeError("Existing agent Docker has no invocation ownership; clean from the host")
-    image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image")
+    image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, missing="image")
     if image is None:
         pull = _run_captured([DOCKER_EXECUTABLE, "pull", agent_docker.IMAGE], timeout=120)
         if not pull.success:
             raise RuntimeError(pull.stderr or "Pinned agent Docker image pull failed")
-        image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image")
+        image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, missing="image")
     digest = agent_docker.IMAGE.split("@", 1)[1]
     if image is None or not any(r.endswith("@" + digest) for r in image.get("RepoDigests", [])):
         raise RuntimeError("Pinned agent Docker image digest is unverified")
@@ -2170,11 +2173,11 @@ def _prepare_agent_docker(
         "agent-docker-data", {"name": agent_docker.CACHE}
     )
     cache = str(cache_definition["name"])
-    volume = host_runtime.inspect_object(cache, DOCKER_EXECUTABLE, "volume")
+    volume = host_runtime.inspect_object(cache, DOCKER_EXECUTABLE, missing="volume")
     if volume is not None and (volume["Driver"] != "local" or volume.get("Options")):
         raise RuntimeError("Agent Docker cache must use the plain local volume driver")
     endpoint = agent_docker.ENDPOINT_PREFIX + owner.generation
-    if host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, "volume") is not None:
+    if host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, missing="volume") is not None:
         raise RuntimeError("Agent Docker endpoint already exists")
     labels = {
         host_runtime.GENERATION_LABEL: owner.generation,
@@ -2189,7 +2192,7 @@ def _prepare_agent_docker(
     owner.register_volume(endpoint)
     if not result.success:
         raise RuntimeError(result.stderr or "Endpoint volume creation failed")
-    volume = host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, "volume")
+    volume = host_runtime.inspect_object(endpoint, DOCKER_EXECUTABLE, missing="volume")
     if (
         volume is None
         or volume["Driver"] != "local"
@@ -2232,7 +2235,9 @@ def _prepare_agent_docker(
         delivery = json.loads(resolved.stdout)
         spec = delivery["services"]["agent-docker"]
         dev_spec = delivery["services"]["dev"]
-        dev_image = host_runtime.inspect_object(dev_spec["image"], DOCKER_EXECUTABLE, "image")
+        dev_image = host_runtime.inspect_object(
+            dev_spec["image"], DOCKER_EXECUTABLE, missing="image"
+        )
         if dev_image is None:
             raise RuntimeError("Dev image missing; run djinn build")
         expected = [
@@ -2249,7 +2254,7 @@ def _prepare_agent_docker(
             for m in spec["volumes"]
         ]
         network_name = delivery["networks"]["djinn-network"]["name"]
-        network = host_runtime.inspect_object(network_name, DOCKER_EXECUTABLE, "network")
+        network = host_runtime.inspect_object(network_name, DOCKER_EXECUTABLE, missing="network")
         if network is None:
             raise RuntimeError("Agent Docker network unavailable")
         environment = dict(item.split("=", 1) for item in image["Config"]["Env"])
@@ -2413,16 +2418,24 @@ def _prepare_companions(
                 raise RuntimeError("desktop helpers require host UID 1000; unsupported credentials")
             if owner.observer is None or owner.observer.poll() is not None:
                 raise RuntimeError("host observer unavailable")
-            image = host_runtime.inspect_object(desktop.HELPER_IMAGE, DOCKER_EXECUTABLE, "image",
-                timeout=_operation_timeout(deadline, 5))
+            image = host_runtime.inspect_object(
+                desktop.HELPER_IMAGE,
+                DOCKER_EXECUTABLE,
+                missing="image",
+                timeout=_operation_timeout(deadline, 5),
+            )
             if image is None:
                 raise RuntimeError("helper image missing; run djinn build")
             if _service_inspect(endpoint.service, deadline) is not None:
                 raise RuntimeError(
                     "existing helper has no invocation ownership; clean from the host"
                 )
-            volume = host_runtime.inspect_object(endpoint.volume, DOCKER_EXECUTABLE, "volume",
-                timeout=_operation_timeout(deadline, 5))
+            volume = host_runtime.inspect_object(
+                endpoint.volume,
+                DOCKER_EXECUTABLE,
+                missing="volume",
+                timeout=_operation_timeout(deadline, 5),
+            )
             if volume is not None:
                 raise RuntimeError(
                     "existing desktop volume has no invocation ownership; clean from the host"
@@ -2459,8 +2472,12 @@ def _prepare_companions(
             if not result.success or actual is None:
                 raise RuntimeError(result.stderr or "helper creation failed")
             while True:
-                actual = host_runtime.inspect_object(str(actual["Id"]), DOCKER_EXECUTABLE,
-                                                     timeout=_operation_timeout(deadline, 5))
+                actual = host_runtime.inspect_object(
+                    str(actual["Id"]),
+                    DOCKER_EXECUTABLE,
+                    missing="container",
+                    timeout=_operation_timeout(deadline, 5),
+                )
                 if actual is None or not actual.get("State", {}).get("Running"):
                     raise RuntimeError("helper is not running")
                 health = actual["State"].get("Health", {}).get("Status")
@@ -2537,9 +2554,11 @@ def inspect_running_desktop(
         dev = (
             dev_inspect
             if dev_inspect is not None
-            else host_runtime.inspect_object(dev_id, DOCKER_EXECUTABLE)
+            else host_runtime.inspect_object(dev_id, DOCKER_EXECUTABLE, missing="container")
         )
-        image = host_runtime.inspect_object(desktop.HELPER_IMAGE, DOCKER_EXECUTABLE, "image")
+        image = host_runtime.inspect_object(
+            desktop.HELPER_IMAGE, DOCKER_EXECUTABLE, missing="image"
+        )
         for endpoint in endpoints:
             actual = _service_inspect(endpoint.service)
             helpers[endpoint.service] = actual
@@ -2713,7 +2732,9 @@ def _guest_source_check(
                     if name not in allowed_volumes:
                         raise RunRefusedError(f"unsupported run volume {name}; refusing")
                     volume = host_runtime.inspect_object(
-                        name, DOCKER_EXECUTABLE, "volume", missing="no such volume",
+                        name,
+                        DOCKER_EXECUTABLE,
+                        missing="volume",
                     )
                     if volume is not None:
                         device = host_sealing.volume_bind_source({
@@ -2762,7 +2783,7 @@ def _guest_direct_check() -> None:
     """Check the window under the same transition guard used by hostctl."""
     try:
         with hostctl.control_guard():
-            helper = hostctl.inspect_helper(strict=True)
+            helper = hostctl.inspect_helper()
             if helper is not None and helper["State"]["Running"]:
                 raise RunRefusedError(
                     "close the hostctl window (`djinn hostctl off`) or run without --docker-direct"
@@ -2840,7 +2861,10 @@ def _remove_run(identifier: str, grace: int) -> bool:
             for timeout in (5, 15):
                 try:
                     actual = host_runtime.inspect_object(
-                        target, DOCKER_EXECUTABLE, timeout=timeout, missing="No such container",
+                        target,
+                        DOCKER_EXECUTABLE,
+                        timeout=timeout,
+                        missing="container",
                     )
                     break
                 except Exception as exc:
@@ -2880,9 +2904,14 @@ def _remove_run(identifier: str, grace: int) -> bool:
                     return True
                 warnings.append(f"Could not stop {target}: {exc}")
             try:
-                if host_runtime.inspect_object(
-                    docker_id, DOCKER_EXECUTABLE, missing="No such container",
-                ) is None:
+                if (
+                    host_runtime.inspect_object(
+                        docker_id,
+                        DOCKER_EXECUTABLE,
+                        missing="container",
+                    )
+                    is None
+                ):
                     return True
             except Exception as exc:
                 warnings.append(f"Could not re-inspect {target}: {exc}")
@@ -3390,7 +3419,7 @@ def planned_dev_inspection(
         }
         if row["type"] == "volume":
             name = delivery["volumes"][source]["name"]
-            actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, "volume")
+            actual = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, missing="volume")
             definition = delivery["volumes"][source]
             mount.update(
                 Name=name,
@@ -3419,7 +3448,7 @@ def planned_dev_inspection(
     networks = {}
     for name in service.get("networks", {}):
         network_name = delivery["networks"][name]["name"]
-        network = host_runtime.inspect_object(network_name, DOCKER_EXECUTABLE, "network")
+        network = host_runtime.inspect_object(network_name, DOCKER_EXECUTABLE, missing="network")
         if network is None:
             raise ValueError("planned network unavailable")
         networks[network_name] = {"NetworkID": network["Id"]}
@@ -3502,7 +3531,7 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         record, state["generation"], DOCKER_EXECUTABLE
                     )
                 for name in state.get("volumes", []):
-                    volume = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, "volume")
+                    volume = host_runtime.inspect_object(name, DOCKER_EXECUTABLE, missing="volume")
                     labels: dict[str, Any] = (volume.get("Labels") or {}) if volume else {}
                     if volume and labels.get(host_runtime.GENERATION_LABEL) != state["generation"]:
                         return RunResult(
@@ -3531,7 +3560,7 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                 post_mortem.notify_failure("inspect")
                 with suppress(Exception):
                     dev = host_runtime.inspect_object(
-                        _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE
+                        _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE, missing="container"
                     )
                     dev_labels: dict[str, Any] = (
                         (dev.get("Config", {}).get("Labels") or {}) if dev else {}
@@ -3587,7 +3616,9 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         1, stderr="unknown project resources; preserving resources"
                     )
             hostctl.stop_helper_locked(remove=True)
-            actual = host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
+            actual = host_runtime.inspect_object(
+                _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE, missing="container"
+            )
             if actual is not None:
                 labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
                 if labels.get("com.docker.compose.project") != COMPOSE_PROJECT:
@@ -3616,7 +3647,9 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                         )
                     return result
                 if (
-                    host_runtime.inspect_object(_SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE)
+                    host_runtime.inspect_object(
+                        _SERVICE_CONTAINER_NAMES["dev"], DOCKER_EXECUTABLE, missing="container"
+                    )
                     is not None
                 ):
                     return RunResult(1, stderr="dev termination could not be verified")
@@ -3627,7 +3660,10 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                 for identity in compose_targets:
                     try:
                         observed = host_runtime.inspect_object(
-                            identity, DOCKER_EXECUTABLE, timeout=5,
+                            identity,
+                            DOCKER_EXECUTABLE,
+                            missing="container",
+                            timeout=5,
                         )
                         if (
                             observed is not None
@@ -3653,8 +3689,9 @@ def compose_down(config: AppConfig | None = None) -> RunResult:
                 return result
             network_name = f"{COMPOSE_PROJECT}_default"
             network = host_runtime.inspect_object(
-                network_name, DOCKER_EXECUTABLE, "network",
-                missing=f"network {network_name} not found",
+                network_name,
+                DOCKER_EXECUTABLE,
+                missing="network",
             )
             if network is not None:
                 network_labels: dict[str, Any] = network.get("Labels") or {}
@@ -3914,7 +3951,7 @@ def workflow_image_compatible(
     if result.returncode != 0:
         return (
             WorkflowImageCompatibility.MISSING
-            if _docker_daemon_reachable()
+            if resource_absent(result.stderr, "image", image) and _docker_daemon_reachable()
             else WorkflowImageCompatibility.UNKNOWN
         )
     return (

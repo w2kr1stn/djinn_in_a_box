@@ -443,11 +443,14 @@ def test_daemon_failure_not_missing_image(installation):
     assert not any(argv[1] == "buildx" for argv, _ in installation.docker.calls)
 
 
-def test_malformed_inspect_refused(installation, monkeypatch):
+@pytest.mark.parametrize(
+    "stdout", ['[{"Config":null}]', '[{"Id":"","Config":{}}]'], ids=["missing-id", "empty-id"]
+)
+def test_malformed_inspect_refused(installation, monkeypatch, stdout):
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, '[{"Config":null}]', ""),
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout, ""),
     )
     with pytest.raises(a.AssistantError, match="Invalid Docker"):
         a.inspect("image", "fixture")
@@ -1193,3 +1196,14 @@ def test_stop_container_tolerates_a_missing_container(installation, monkeypatch)
     monkeypatch.setattr(subprocess, "run", broken)
     with pytest.raises(a.AssistantError, match="permission denied"):
         a.stop_container("x")
+
+
+def test_inspect_rejects_missing_sibling_image(monkeypatch):
+    def run(argv, **kwargs):
+        if argv[1] == "info":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 1, "", "Error: No such image: test:latest-old")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(a.AssistantError, match="No such image"):
+        a.inspect("image", "test:latest")

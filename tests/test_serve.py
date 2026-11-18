@@ -101,6 +101,7 @@ def host(monkeypatch, tmp_path):
         network={"Name": "djinn-network", "Driver": "bridge", "Options": {}},
         network_rc=0,
         volume={
+            "Name": "djinn-opencode-data",
             "Driver": "local",
             "Options": None,
             "Mountpoint": "/var/lib/docker/volumes/djinn-opencode-data/_data",
@@ -227,6 +228,7 @@ def test_fresh_cli_import_does_not_import_container_helper():
             "UNKNOWN",
         ),
         (RunResult(124, stderr="Docker operation timed out"), "UNKNOWN"),
+        (RunResult(1, stderr="Error: No such container: djinn-other"), "UNKNOWN"),
         (RunResult(127, stderr="Command not found: docker"), "UNKNOWN"),
         (RunResult(0, ""), "UNKNOWN"),
         (RunResult(0, "{broken"), "UNKNOWN"),

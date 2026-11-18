@@ -53,6 +53,7 @@ from djinn_in_a_box.core.docker import (
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.lock_holders import describe_holders
 from djinn_in_a_box.core.paths import BACKUPS_DIR, get_project_root
+from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 # "cache" excluded: uv-cache/tools-cache/vscode-server are large and rebuildable
 DEFAULT_CATEGORIES: list[str] = ["credentials", "repo-dotfiles", "data"]
@@ -214,7 +215,11 @@ def backup(
 
     config = load_config()
     selected = categories or DEFAULT_CATEGORIES
-    volumes, sync_paths = _collect_items(selected, config)
+    try:
+        volumes, sync_paths = _collect_items(selected, config)
+    except GitSSHError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from None
     builtins = {name for names in VOLUME_CATEGORIES.values() for name in names}
 
     if not volumes and not sync_paths:

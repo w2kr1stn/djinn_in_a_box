@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from djinn_in_a_box.core import agent_docker, post_mortem
 from djinn_in_a_box.core.console import warning
-from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE
+from djinn_in_a_box.core.docker_cli import DOCKER_EXECUTABLE, InspectResource, resource_absent
 from djinn_in_a_box.core.git_agent import AgentFilter, agent_keys, start_agent, stop_agent
 from djinn_in_a_box.core.lock_holders import describe_holders
 from djinn_in_a_box.core.ssh_delivery import (
@@ -126,23 +126,15 @@ def stop_owned_process(pid: int, token: str) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
-class _DefaultMissing(str):
-    """Distinguish the legacy default from an explicitly supplied substring."""
-
-
-_DEFAULT_MISSING = _DefaultMissing("no such")
-
-
 def inspect_object(
     name: str,
     docker_path: str = DOCKER_EXECUTABLE,
-    resource: str = "container",
     *,
+    missing: InspectResource,
     timeout: float = 5,
-    missing: str = _DEFAULT_MISSING,
 ) -> dict[str, Any] | None:
     result = subprocess.run(
-        [docker_path, resource, "inspect", name],
+        [docker_path, missing, "inspect", name],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -151,21 +143,27 @@ def inspect_object(
         stdin=subprocess.DEVNULL,
     )
     if result.returncode:
-        stderr = result.stderr.lower() if missing is _DEFAULT_MISSING else result.stderr
-        if missing in stderr:
+        if resource_absent(result.stderr, missing, name):
             return None
         raise GitSSHError("Docker inspection failed; runtime ownership is unknown")
     try:
-        value = json.loads(result.stdout)[0]
+        objects: Any = json.loads(result.stdout)
+        if not isinstance(objects, list) or len(cast(list[Any], objects)) != 1:
+            raise ValueError("expected one Docker object")
+        value = cast(list[Any], objects)[0]
         if not isinstance(value, dict):
             raise ValueError("not an object")
-        return cast(dict[str, Any], value)
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        obj = cast(dict[str, Any], value)
+        identity = obj.get("Name" if missing == "volume" else "Id")
+        if not isinstance(identity, str) or not identity:
+            raise ValueError("missing Docker identity")
+        return obj
+    except ValueError as exc:
         raise GitSSHError("invalid Docker inspection for runtime observation") from exc
 
 
 def inspect_dev(name: str, docker_path: str | None = None) -> tuple[str, bool, str] | None:
-    data = inspect_object(name, docker_path or DOCKER_EXECUTABLE)
+    data = inspect_object(name, docker_path or DOCKER_EXECUTABLE, missing="container")
     if data is None:
         return None
     try:
@@ -235,7 +233,7 @@ def save_state(root: Path, state: dict[str, Any]) -> None:
 def inspect_owned_resource(
     record: dict[str, Any], generation: str, docker_path: str, *, timeout: float = 5
 ) -> dict[str, Any] | None:
-    actual = inspect_object(record["id"], docker_path, timeout=timeout)
+    actual = inspect_object(record["id"], docker_path, missing="container", timeout=timeout)
     if actual is None:
         return None
     labels: dict[str, Any] = actual.get("Config", {}).get("Labels") or {}
@@ -315,7 +313,7 @@ def cleanup_owned(
     for record in state.get("resources", {}).values():
         inspect_owned_resource(record, generation, docker_path)
     for name in state.get("volumes", []):
-        volume = inspect_object(name, docker_path, "volume")
+        volume = inspect_object(name, docker_path, missing="volume")
         labels: dict[str, Any] = (volume.get("Labels") or {}) if volume else {}
         if volume and labels.get(GENERATION_LABEL) != generation:
             raise GitSSHError(f"runtime volume ownership changed: {name}")
@@ -348,7 +346,7 @@ def cleanup_owned(
         dev = None
         if actual[1]:
             with contextlib.suppress(Exception):
-                inspected = inspect_object(actual[0], docker_path)
+                inspected = inspect_object(actual[0], docker_path, missing="container")
                 if inspected is not None and inspected.get("Id") == actual[0]:
                     dev = inspected
         _teardown_container(docker_path, dev, "rm", "-f", actual[0], root=records_root)
@@ -375,7 +373,7 @@ def cleanup_owned(
                 docker_path, resource, "rm", "-f", record["id"], root=records_root
             )
     for name in state.get("volumes", []):
-        volume = inspect_object(name, docker_path, "volume")
+        volume = inspect_object(name, docker_path, missing="volume")
         if volume is None:
             continue
         labels: dict[str, Any] = volume.get("Labels") or {}
@@ -398,7 +396,7 @@ def cleanup_owned(
 
 def remove_runtime_volume(name: str, docker_path: str) -> None:
     """Under the guard, remove only a project-owned volume with no consumers."""
-    volume = inspect_object(name, docker_path, "volume")
+    volume = inspect_object(name, docker_path, missing="volume")
     if volume is None:
         return
     labels: dict[str, Any] = volume.get("Labels") or {}
@@ -555,7 +553,7 @@ class GitRuntime:
     def register_volume(self, name: str, *, timeout: float = 5) -> None:
         assert self.root is not None
         state = read_state(self.root)
-        actual = inspect_object(name, self.docker_path, "volume", timeout=timeout)
+        actual = inspect_object(name, self.docker_path, missing="volume", timeout=timeout)
         if state is None or state["generation"] != self.generation:
             raise GitSSHError("runtime generation changed")
         if actual is None:
@@ -572,7 +570,7 @@ class GitRuntime:
         state = read_state(self.root)
         if state is None or state["generation"] != self.generation or name not in state["volumes"]:
             return
-        volume = inspect_object(name, self.docker_path, "volume")
+        volume = inspect_object(name, self.docker_path, missing="volume")
         if volume is not None:
             labels: dict[str, Any] = volume.get("Labels") or {}
             if labels.get(GENERATION_LABEL) != self.generation:
@@ -1078,7 +1076,9 @@ def observe(root: Path, lock_fd: int, docker_path: str, records_root: Path) -> N
                                             try:
                                                 dev = None
                                                 with contextlib.suppress(Exception):
-                                                    inspected = inspect_object(dev_id, docker_path)
+                                                    inspected = inspect_object(
+                                                        dev_id, docker_path, missing="container"
+                                                    )
                                                     if (
                                                         inspected is not None
                                                         and inspected.get("Id") == dev_id
@@ -1394,7 +1394,7 @@ def observe_hostctl(
                             if remaining > 0:
                                 time.sleep(min(0.1, remaining))
                                 continue
-                        fresh = hostctl.inspect_helper(strict=True)
+                        fresh = hostctl.inspect_helper()
                         if (
                             fresh is not None
                             and fresh["Id"] == helper_id
