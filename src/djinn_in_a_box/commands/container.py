@@ -99,6 +99,7 @@ from djinn_in_a_box.core.exceptions import (
     RuntimeMountSpecificationError,
 )
 from djinn_in_a_box.core.paths import get_project_root
+from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 
 def _sync_build_files(config: AppConfig | None = None) -> None:
@@ -125,7 +126,12 @@ def _sync_build_files(config: AppConfig | None = None) -> None:
 
 
 def _pull_agent_docker_image_if_missing() -> None:
-    if host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, "image") is not None:
+    try:
+        image = host_runtime.inspect_object(agent_docker.IMAGE, DOCKER_EXECUTABLE, missing="image")
+    except (RuntimeMountSpecificationError, OSError, subprocess.SubprocessError) as exc:
+        error(str(exc))
+        raise typer.Exit(1) from None
+    if image is not None:
         return
 
     info("Pulling the pinned agent Docker image...")
@@ -571,7 +577,11 @@ def status() -> None:
 
     # Volumes
     rule("Volumes")
-    volume_entries = _list_existing_volumes(config)
+    try:
+        volume_entries = _list_existing_volumes(config)
+    except RuntimeMountSpecificationError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from None
     if volume_entries:
         _print_resource_table("Djinn Volumes", "Volume", volume_entries)
     else:
@@ -683,7 +693,11 @@ def _with_control_guard(func: Callable[P, R]) -> Callable[P, R]:
             except (hostctl.HostctlError, OSError) as exc:
                 error(str(exc))
                 raise typer.Exit(1) from exc
-            return func(*args, **kwargs)
+            try:
+                return func(*args, **kwargs)
+            except GitSSHError as exc:
+                error(str(exc))
+                raise typer.Exit(1) from None
 
     return wrapper
 

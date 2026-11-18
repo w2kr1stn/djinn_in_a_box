@@ -447,12 +447,16 @@ def test_cleanup_rejects_foreign_identity(guest, capsys, field):
                "service": "com.docker.compose.service"}[field]
         obj["Config"]["Labels"][key] = "foreign"
     write_json(objects, {identifier if field == "docker-id" else NAME: obj})
-    assert docker._remove_run(identifier, 10)
+    malformed = field in {"empty-id", "null-id"}
+    assert docker._remove_run(identifier, 10) is (not malformed)
     assert not any(c[0] in {"stop", "rm"} for c in calls(log))
     assert json.loads(objects.read_text())
     message = capsys.readouterr().err
-    assert "Skipping" in message
-    assert "check it, then remove it or run `djinn clean`" in message
+    if malformed:
+        assert "may still exist" in message and "invalid Docker inspection" in message
+    else:
+        assert "Skipping" in message
+        assert "check it, then remove it or run `djinn clean`" in message
 
 
 @pytest.mark.parametrize("message", ["[/var/lib/docker]", "[bold]boom"])
@@ -716,9 +720,12 @@ def test_fake_storage_roots_and_filters(guest):
     info = subprocess.run([str(binary), "info", "--format", "{{json .}}"],
                           capture_output=True, text=True, check=True)
     assert json.loads(info.stdout)["DockerRootDir"].endswith("docker-data")
-    write_json(objects, {"volume": {"Id": "volume-id", "Mountpoint": "/backing"}})
-    assert host_runtime.inspect_object("volume", str(binary), "volume")["Mountpoint"] == "/backing"
-    assert host_runtime.inspect_object("absent", str(binary), "volume") is None
+    write_json(objects, {"volume": {"Name": "volume", "Mountpoint": "/backing"}})
+    assert (
+        host_runtime.inspect_object("volume", str(binary), missing="volume")["Mountpoint"]
+        == "/backing"
+    )
+    assert host_runtime.inspect_object("absent", str(binary), missing="volume") is None
     unlabelled, foreign = run_object(), run_object()
     unlabelled["Id"] = "unlabelled-id"
     unlabelled["Config"]["Labels"].pop(host_runtime.RUN_LABEL)

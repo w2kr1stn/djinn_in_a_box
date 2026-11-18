@@ -244,8 +244,8 @@ def test_guest_helper_inspection_requires_exact_container_absence(fake_owner, me
             },
         })
         behavior(fake_owner, errors={f"container inspect {hostctl.HELPER_NAME}": message})
-        # Other callers retain the legacy broad, case-insensitive absence classifier.
-        assert hostctl.inspect_helper() is None
+        with pytest.raises(host_runtime.GitSSHError, match="ownership is unknown"):
+            hostctl.inspect_helper()
         with pytest.raises(docker.RunRefusedError, match="cannot verify hostctl helper.*refusing"):
             docker._guest_direct_check()
         assert json.loads(objects.read_text())[hostctl.HELPER_NAME]["State"]["Running"]
@@ -271,7 +271,8 @@ def test_guest_storage_inspection_requires_exact_volume_absence(fake_owner, tmp_
         backing.mkdir()
         write_json(objects, {hostctl.HOSTCTL_STATE_VOLUME: {"Mountpoint": str(backing)}})
         behavior(fake_owner, errors={f"volume inspect {hostctl.HOSTCTL_STATE_VOLUME}": message})
-        assert host_sealing.docker_storage_roots() == (data, data)
+        with pytest.raises(host_runtime.GitSSHError, match="ownership is unknown"):
+            host_sealing.docker_storage_roots()
         with pytest.raises(docker.RunRefusedError, match="cannot verify .*; refusing"):
             docker._guest_source_check(config, docker.ContainerOptions())(backing, Path("/review"))
     else:

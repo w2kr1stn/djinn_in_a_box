@@ -128,10 +128,7 @@ def command(*args: str, timeout: float = 5) -> str:
 def inspect_helper(*, strict: bool = False) -> dict[str, Any] | None:
     from djinn_in_a_box.core.host_runtime import inspect_object
 
-    value = (
-        inspect_object(HELPER_NAME, DOCKER_EXECUTABLE, missing="No such container")
-        if strict else inspect_object(HELPER_NAME, DOCKER_EXECUTABLE)
-    )
+    value = inspect_object(HELPER_NAME, DOCKER_EXECUTABLE, missing="container")
     if value is not None:
         labels: dict[str, Any] = value.get("Config", {}).get("Labels") or {}
         if not labels.get(GENERATION_LABEL):
@@ -417,7 +414,7 @@ def verify_agent(dev_id: str | None, expected: dict[str, str] | None) -> None:
 
     if expected is None:
         return
-    actual = host_runtime.inspect_object(str(dev_id), DOCKER_EXECUTABLE)
+    actual = host_runtime.inspect_object(str(dev_id), DOCKER_EXECUTABLE, missing="container")
     if actual is None:
         raise HostctlError("dev disappeared during companion verification")
     current = docker.inspect_agent_endpoint(actual)
@@ -611,7 +608,10 @@ def open_window(
         if not docker.ensure_network(HELPER_NETWORK):
             journal("on-refused", reason="network ensure failed")
             raise HostctlError("Could not ensure the helper network")
-        if host_runtime.inspect_object(HELPER_NETWORK, DOCKER_EXECUTABLE, "network") is None:
+        if (
+            host_runtime.inspect_object(HELPER_NETWORK, DOCKER_EXECUTABLE, missing="network")
+            is None
+        ):
             journal("on-refused", reason="network verification failed")
             raise HostctlError("Helper network could not be verified")
         gen = uuid.uuid4().hex
@@ -1083,9 +1083,9 @@ def delete_state_locked() -> None:
     from djinn_in_a_box.core.host_runtime import inspect_object
 
     stop_helper_locked(remove=True)
-    if inspect_object(HOSTCTL_STATE_VOLUME, DOCKER_EXECUTABLE, "volume") is not None:
+    if inspect_object(HOSTCTL_STATE_VOLUME, DOCKER_EXECUTABLE, missing="volume") is not None:
         command("volume", "rm", HOSTCTL_STATE_VOLUME)
-        if inspect_object(HOSTCTL_STATE_VOLUME, DOCKER_EXECUTABLE, "volume") is not None:
+        if inspect_object(HOSTCTL_STATE_VOLUME, DOCKER_EXECUTABLE, missing="volume") is not None:
             raise HostctlError("Protected state deletion could not be verified")
 
 

@@ -387,12 +387,12 @@ def test_creator_delivery_and_degradation(creator, outcome, mode, tmp_path, monk
         monkeypatch.setattr(desktop, "HELPER_SECONDS", 1.5)
     polls = []
 
-    def actual(name, path, resource="container", **kwargs):
-        if name == "djinn-hostctl" and resource == "container":
+    def actual(name, path, *, missing, **kwargs):
+        if name == "djinn-hostctl" and missing == "container":
             return None
-        if resource == "volume":
+        if missing == "volume":
             return None
-        if resource == "image":
+        if missing == "image":
             return None if outcome == "missing-image" else image
         found = next(obj for obj in services.values() if obj["Id"] == name)
         if found is helper:
@@ -597,8 +597,8 @@ def test_downstream_probe_uses_supported_compose_run_flags(tmp_path, monkeypatch
     monkeypatch.setattr(
         host_runtime,
         "inspect_object",
-        lambda name, path, resource="container", **kwargs: (
-            {"Id": "sha256:dev"} if resource == "image" else None
+        lambda name, path, *, missing, **kwargs: (
+            {"Id": "sha256:dev"} if missing == "image" else None
         ),
     )
     monkeypatch.setattr(
@@ -630,8 +630,8 @@ def test_downstream_probe_declares_the_helper_volume(tmp_path, monkeypatch):
     monkeypatch.setattr(
         host_runtime,
         "inspect_object",
-        lambda name, path, resource="container", **kwargs: (
-            {"Id": "sha256:dev"} if resource == "image" else None
+        lambda name, path, *, missing, **kwargs: (
+            {"Id": "sha256:dev"} if missing == "image" else None
         ),
     )
     monkeypatch.setattr(docker, "_run_compose", run)
@@ -737,10 +737,10 @@ def test_fallback_records_before_rm(
     monkeypatch.setattr(docker, "_run_compose", lambda *a, **kw: docker.RunResult(0))
     inspected = []
 
-    def inspect(name, path, resource="container", **kwargs):
-        if resource == "image":
+    def inspect(name, path, *, missing, **kwargs):
+        if missing == "image":
             return image
-        if resource == "volume":
+        if missing == "volume":
             return None
         if outcome == "unclear" and inspected:
             raise RuntimeError("inspection unavailable")

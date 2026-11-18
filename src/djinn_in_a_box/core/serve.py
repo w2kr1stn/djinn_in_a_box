@@ -28,6 +28,7 @@ from djinn_in_a_box.core.docker import (
     resolve_zone_roots,
     service_container_name,
 )
+from djinn_in_a_box.core.docker_cli import resource_absent
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
 from djinn_in_a_box.core.host_runtime import private_directory
 from djinn_in_a_box.core.host_sealing import volume_bind_source
@@ -93,6 +94,7 @@ class ContainerInfo:
 
 def detect_container(*, timeout: float = 10) -> ContainerInfo:
     """Inspect once; a Docker failure must never masquerade as an absent container."""
+    name = service_container_name("dev")
     try:
         result = _run_captured(
             [
@@ -100,7 +102,7 @@ def detect_container(*, timeout: float = 10) -> ContainerInfo:
                 "inspect",
                 "--type",
                 "container",
-                service_container_name("dev"),
+                name,
                 "--format",
                 "{{json .}}",
             ],
@@ -109,7 +111,7 @@ def detect_container(*, timeout: float = 10) -> ContainerInfo:
         if not result.success:
             state = (
                 ContainerState.ABSENT
-                if "No such container" in result.stderr
+                if resource_absent(result.stderr, "container", name)
                 else ContainerState.UNKNOWN
             )
             return ContainerInfo(state)

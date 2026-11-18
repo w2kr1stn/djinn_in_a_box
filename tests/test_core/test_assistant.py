@@ -1193,3 +1193,14 @@ def test_stop_container_tolerates_a_missing_container(installation, monkeypatch)
     monkeypatch.setattr(subprocess, "run", broken)
     with pytest.raises(a.AssistantError, match="permission denied"):
         a.stop_container("x")
+
+
+def test_inspect_rejects_missing_sibling_image(monkeypatch):
+    def run(argv, **kwargs):
+        if argv[1] == "info":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 1, "", "Error: No such image: test:latest-old")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(a.AssistantError, match="No such image"):
+        a.inspect("image", "test:latest")

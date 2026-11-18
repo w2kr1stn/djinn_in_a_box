@@ -729,7 +729,7 @@ def test_doctor_clear_precedence(window, monkeypatch, outcome, daemon):
         journal("relay-close-failed", generation="generation-a", attempt=1)
 
     def inspect(*args, **kwargs):
-        assert kwargs["missing"] == "No such container"
+        assert kwargs["missing"] == "container"
         if outcome == "absent":
             return None
         if outcome == "daemon-socket":

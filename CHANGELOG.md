@@ -38,6 +38,7 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Docker inspection failures now preserve unknown resources during host control, startup and cleanup (#189).
 - `djinn run codex --write` works again: Codex removed `--full-auto`, and its own sandbox cannot start inside the
   container, so the built-in codex `write_flags` value in `djinn agents --json` changes to
   `--dangerously-bypass-approvals-and-sandbox`. The container is the boundary, as in Claude's write mode (#255).

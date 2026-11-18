@@ -1383,7 +1383,9 @@ class TestWorkflowImageCompatibility:
         self, run: MagicMock
     ) -> None:
         run.side_effect = (
-            MagicMock(returncode=1, stdout=""),
+            MagicMock(
+                returncode=1, stdout="", stderr="Error: No such image: djinn-in-a-box:latest"
+            ),
             MagicMock(returncode=0, stdout=""),
         )
 
@@ -1395,10 +1397,20 @@ class TestWorkflowImageCompatibility:
         self, run: MagicMock
     ) -> None:
         run.side_effect = (
-            MagicMock(returncode=1, stdout=""),
+            MagicMock(
+                returncode=1, stdout="", stderr="Error: No such image: djinn-in-a-box:latest"
+            ),
             MagicMock(returncode=1, stdout=""),
         )
 
+        assert workflow_image_compatible() is WorkflowImageCompatibility.UNKNOWN
+
+    @patch("djinn_in_a_box.core.docker.subprocess.run")
+    def test_storage_failure_is_unknown_even_with_a_reachable_daemon(self, run):
+        run.side_effect = (
+            subprocess.CompletedProcess([], 1, "", "open metadata: no such file or directory"),
+            subprocess.CompletedProcess([], 0, "", ""),
+        )
         assert workflow_image_compatible() is WorkflowImageCompatibility.UNKNOWN
 
     @patch("djinn_in_a_box.core.docker.subprocess.run")

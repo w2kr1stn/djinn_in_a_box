@@ -364,7 +364,9 @@ def volume_bind_source(mount: dict[str, Any]) -> str | None:
     if "PlannedVolume" in mount:
         volume = mount["PlannedVolume"]
     else:
-        volume = host_runtime.inspect_object(mount["Name"], hostctl.DOCKER_EXECUTABLE, "volume")
+        volume = host_runtime.inspect_object(
+            mount["Name"], hostctl.DOCKER_EXECUTABLE, missing="volume"
+        )
     if not isinstance(volume, dict):
         raise ValueError(f"volume storage provenance unknown: {mount['Name']}")
     volume = cast(dict[str, Any], volume)
@@ -415,8 +417,10 @@ def docker_storage_roots(*, timeout: float = 5, strict: bool = False) -> tuple[P
     info = json.loads(hostctl.command("info", "--format", "{{json .}}", timeout=timeout))
     data_root = canonical(info["DockerRootDir"])
     volume = host_runtime.inspect_object(
-        hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume", timeout=timeout,
-        **({"missing": "no such volume"} if strict else {}),
+        hostctl.HOSTCTL_STATE_VOLUME,
+        hostctl.DOCKER_EXECUTABLE,
+        missing="volume",
+        timeout=timeout,
     )
     backing = canonical(volume["Mountpoint"]) if volume is not None else data_root
     return data_root, backing
@@ -691,7 +695,7 @@ def assess(actual: dict[str, Any] | None, *, planned_generation: str | None = No
         socket_paths = {str(path) for path in sockets} | {"/var/run/docker.sock"}
         for other_id in hostctl.command("ps", "-q").split():
             other = host_runtime.inspect_object(
-                other_id, hostctl.DOCKER_EXECUTABLE, missing="No such container"
+                other_id, hostctl.DOCKER_EXECUTABLE, missing="container"
             )
             if other is None:
                 continue
@@ -788,7 +792,9 @@ def inspect_assessment(name: str | None = None) -> Assessment:
 
     try:
         actual = host_runtime.inspect_object(
-            name or docker.service_container_name("dev"), hostctl.DOCKER_EXECUTABLE
+            name or docker.service_container_name("dev"),
+            hostctl.DOCKER_EXECUTABLE,
+            missing="container",
         )
         if actual is not None and actual.get("State", {}).get("Running") is False:
             return Assessment(None)
@@ -852,9 +858,15 @@ def run_probe(dev_id: str, trust: dict[str, Any], *, timeout: float = 30) -> lis
         return [{**row, "namespace": dev_id} for row in cast(list[dict[str, str]], output)]
     finally:
         # Also runs for KeyboardInterrupt and killed/timed-out docker clients.
-        if host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE) is not None:
+        if (
+            host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE, missing="container")
+            is not None
+        ):
             hostctl.command("rm", "-f", name)
-        if host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE) is not None:
+        if (
+            host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE, missing="container")
+            is not None
+        ):
             raise hostctl.HostctlError("probe cleanup could not be verified")
 
 

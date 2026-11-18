@@ -2356,7 +2356,7 @@ def test_peer_inspection_skips_only_vanished_containers(
         subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", stderr)
     )
     result = sealing.assess(dev())
-    assert calls == [{"missing": "No such container"}]
+    assert calls == [{"missing": "container"}]
     assert not result.causes
     if vanished:
         assert result.state == "sealed" and not result.errors
@@ -2391,8 +2391,8 @@ def test_docker_storage_roots_and_timeout(ground, monkeypatch, volume_present, t
         ("info", ("info", "--format", "{{json .}}"), expected_timeout),
         (
             "volume",
-            (hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE, "volume"),
-            expected_timeout,
+            (hostctl.HOSTCTL_STATE_VOLUME, hostctl.DOCKER_EXECUTABLE),
+            {**expected_timeout, "missing": "volume"},
         ),
     ]
 
