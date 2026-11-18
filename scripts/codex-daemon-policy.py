@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
+from typing import cast
 
 VERSION_TIMEOUT = 30
 UPDATE_TIMEOUT = 300
@@ -61,7 +62,7 @@ def read_object(path: Path) -> dict[str, object]:
     )
     if not isinstance(value, dict):
         raise ValueError(f"{path}: expected a JSON object")
-    return value
+    return cast(dict[str, object], value)
 
 
 def admit_directory(path: Path) -> bool:
@@ -95,6 +96,7 @@ def updater_off(home: Path) -> None:
     updater = document.setdefault("updater", {})
     if not isinstance(updater, dict):
         raise ValueError(f"{settings}: updater must be an object")
+    updater = cast(dict[str, object], updater)
     if updater.get("autoUpdateEnabled") is False:
         return
     updater["autoUpdateEnabled"] = False

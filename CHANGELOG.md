@@ -241,6 +241,8 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- Report each unclassified startup environment name with its file, line and how to fix it.
+  Include the Python helper scripts in CI's strict type check (#192).
 - The dev image pins uv with `UV_VERSION` (0.13.3) instead of copying `latest`;
   `scripts/update-agents.sh` bumps it with the other pins. Python 3.14 is installed
   into the image, so existing virtual environments keep working after the container
