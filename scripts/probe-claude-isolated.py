@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from djinn_in_a_box.config.defaults import DEFAULT_AGENTS
 from djinn_in_a_box.core.agent_runner import build_agent_command
@@ -195,6 +195,7 @@ def run_command(
 
 
 def parse_events(output: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    events: list[object]
     try:
         events = [json.loads(output)]
     except json.JSONDecodeError:
@@ -204,10 +205,12 @@ def parse_events(output: str) -> tuple[dict[str, Any], dict[str, Any]]:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    init, result = {}, {}
+    init: dict[str, object] = {}
+    result: dict[str, object] = {}
     for event in events:
         if not isinstance(event, dict):
             continue
+        event = cast(dict[str, object], event)
         if event.get("type") == "system" and event.get("subtype") == "init":
             init = event
         if event.get("type") == "result":
@@ -229,7 +232,7 @@ def observe(
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Observation({}, {}, error=f"run failed ({type(exc).__name__})")
     init, result = parse_events(completed.stdout)
-    found = frozenset(p.name for p in markers.iterdir()) if markers else frozenset()
+    found: frozenset[str] = frozenset(p.name for p in markers.iterdir()) if markers else frozenset()
     expected_status = completed.returncode == (0 if authenticated else unauthenticated_exit)
     if not result:
         error = "no result event"
@@ -240,18 +243,19 @@ def observe(
     return Observation(init, result, found, error)
 
 
-def names(value: Any) -> set[str]:
+def names(value: object) -> set[str]:
     if not isinstance(value, list):
         return set()
-    return {
-        item.get("name") if isinstance(item, dict) else item
-        for item in value
-        if isinstance(item, str) or isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
+    result: set[str] = set()
+    for item in cast(list[object], value):
+        name = cast(dict[str, object], item).get("name") if isinstance(item, dict) else item
+        if isinstance(name, str):
+            result.add(name)
+    return result
 
 
 def evaluate_phase_one(control: Observation, preset: Observation) -> list[str]:
-    lines = []
+    lines: list[str] = []
     for label, run in (("control", control), ("isolation", preset)):
         if run.error:
             lines.append(f"FAIL {label} evidence: {run.error}")
@@ -345,7 +349,7 @@ def answer_json(result: dict[str, Any]) -> dict[str, Any]:
         answer, _end = json.JSONDecoder().raw_decode(text[start:])
     except json.JSONDecodeError:
         return {}
-    return answer if isinstance(answer, dict) else {}
+    return cast(dict[str, object], answer) if isinstance(answer, dict) else {}
 
 
 def evaluate_phase_two(run: Observation, label: str, field: str, expected: bool) -> list[str]:
@@ -366,7 +370,7 @@ def check_artifacts(cwd: Path, session_id: Any, env: dict[str, str], label: str)
     # Claude names the project after the resolved working directory.
     slug = re.sub(r"[^A-Za-z0-9]", "-", str(cwd.resolve()))
     paths = [root / "projects" / slug]
-    lines = []
+    lines: list[str] = []
     if isinstance(session_id, str) and session_id and Path(session_id).name == session_id:
         paths.append(root / "session-env" / session_id)
     else:
@@ -466,7 +470,7 @@ def phase_two() -> list[str]:
                 False,
             ),
         ]
-        lines = []
+        lines: list[str] = []
         for label, cwd, argv, child_env, field, expected in runs:
             run = observe(argv, cwd, child_env)
             lines.extend(evaluate_phase_two(run, label, field, expected))

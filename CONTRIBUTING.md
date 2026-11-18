@@ -30,7 +30,7 @@ Run these checks before opening a pull request:
 
 ```sh
 uv run ruff check src/ tests/
-uv run pyright src/
+uv run pyright src/ scripts/*.py
 uv run pytest -q
 uvx bandit -r src/ --severity-level medium --confidence-level medium
 (cd helper/hostctl && go test ./... && CGO_ENABLED=0 go build ./...)

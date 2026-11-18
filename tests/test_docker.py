@@ -3804,38 +3804,24 @@ def test_compose_reservations_match(tmp_path, monkeypatch, compose_yaml_loader):
     } <= RESERVED_ENVIRONMENT.keys()
 
 
-def test_startup_environment_class_guard():
-    import re
-
+def _check_startup_environment_classes(root: Path) -> None:
     from djinn_in_a_box.config.declarations import RESERVED_ENVIRONMENT
 
-    root = Path(__file__).resolve().parents[1]
     paths = [
         root / "Dockerfile",
         *(root / "scripts").rglob("*"),
         *(root / "tools").rglob("*"),
         *(root / "helpers").rglob("*"),
     ]
-    assigned = set()
     pattern = (
         r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*=(?!=)|\bexport\s+([A-Z_][A-Z0-9_]*)|"
         r"\$\{([A-Z_][A-Z0-9_]*):-|^(?:ENV|ARG)\s+([A-Z_][A-Z0-9_]*)"
     )
-    assert re.findall(pattern, "FILENAME == ARGV[1]") == []
-    assert re.findall(pattern, "ASSIGNED=value")[0][0] == "ASSIGNED"
-    for path in paths:
-        if path.is_file() and "__pycache__" not in path.parts:
-            # Comments are not executable assignments; heredoc content is included.
-            text = "\n".join(
-                line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")
-            )
-            assigned.update(
-                next(part for part in match if part) for match in re.findall(pattern, text, re.M)
-            )
     # These names are local script/Python constants, never caller environment.
     exceptions = {
         # The wrapper sets dev identity post-drop, overrides config and never reads it.
-        "USER", "LOGNAME",
+        "USER",
+        "LOGNAME",
         "_OUTPUT_LIB_DEFAULT",
         "_MCP_REGISTER_DIR",
         "_OUTPUT_LIB",
@@ -3850,7 +3836,49 @@ def test_startup_environment_class_guard():
         "UPDATE_TIMEOUT",
         "VERSION_TIMEOUT",
     }
-    assert assigned - RESERVED_ENVIRONMENT.keys() - exceptions == set()
+    classified = RESERVED_ENVIRONMENT.keys() | exceptions
+    findings = []
+    for path in sorted(paths):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        # Blank comment lines preserve source positions. Heredoc content stays in the scan.
+        text = "\n".join(
+            "" if line.lstrip().startswith("#") else line for line in path.read_text().split("\n")
+        )
+        for match in re.finditer(pattern, text, re.M):
+            name = match[match.lastindex]
+            if name not in classified:
+                line = text.count("\n", 0, match.start(match.lastindex)) + 1
+                findings.append(f"{path.relative_to(root)}:{line}: {name}")
+    if findings:
+        pytest.fail(
+            "Unclassified startup environment names. Add environment names to "
+            "DJINN_ENV_KEYS or rename non-environment constants.\n" + "\n".join(findings),
+            pytrace=False,
+        )
+
+
+def test_startup_environment_class_guard() -> None:
+    _check_startup_environment_classes(Path(__file__).resolve().parents[1])
+
+
+def test_startup_environment_class_guard_reports_each_location(tmp_path: Path) -> None:
+    (tmp_path / "Dockerfile").write_text("ENV NEW_SETTING value\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "example.py").write_text(
+        "# IGNORE_ME = 1\nHOME = ''\nFLOOR = 0\nFILENAME == ARGV[1]\nNEW_SETTING = 2\n"
+        "# A form feed does not start a new source line.\n\fNEW_PYTHON = 1\n"
+    )
+
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _check_startup_environment_classes(tmp_path)
+
+    message, *locations = str(failure.value).splitlines()
+    assert "DJINN_ENV_KEYS" in message
+    assert "rename non-environment constants" in message
+    assert locations[:2] == ["Dockerfile:1: NEW_SETTING", "scripts/example.py:5: NEW_SETTING"]
+    assert locations[2:] == ["scripts/example.py:7: NEW_PYTHON"]
 
 
 def test_captured_runs_never_read_the_terminal(monkeypatch):

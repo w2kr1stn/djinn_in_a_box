@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 
 def repair_targets(encoded: str) -> None:
@@ -20,10 +21,10 @@ def repair_targets(encoded: str) -> None:
         ) from exc
     if not isinstance(targets, list) or any(
         not isinstance(target, str) or not Path(target).is_absolute() or "\x00" in target
-        for target in targets
+        for target in cast(list[object], targets)
     ):
         raise ValueError("DJINN_DECLARED_VOLUME_TARGETS must be a JSON array of absolute paths")
-    for target in targets:
+    for target in cast(list[str], targets):
         root = Path(target)
         if root.is_symlink() or not root.is_dir():
             raise ValueError(f"Declared volume root '{target}' must be a directory, not a symlink")
