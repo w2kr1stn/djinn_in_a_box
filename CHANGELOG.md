@@ -242,6 +242,8 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- The tailnet policy example limits TCP 22 on tagged targets to the hostctl
+  helper's tailnet IPv4 (#143).
 - Report each unclassified startup environment name with its file, line and how to fix it.
   Include the Python helper scripts in CI's strict type check (#192).
 - The dev image pins uv with `UV_VERSION` (0.13.3) instead of copying `latest`;
