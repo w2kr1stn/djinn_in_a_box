@@ -7,7 +7,8 @@ import os
 import re
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -421,13 +422,25 @@ def _audit_locked(project_root: Path, source: ConfigSyncSource) -> ConfigSyncAud
     return ConfigSyncAudit(source, manifest_source, tuple(_deduplicate(filtered)))
 
 
+@contextmanager
+def _preserve_snapshot_source_change() -> Iterator[None]:
+    """Preserve the snapshot's classification without widening fingerprint errors."""
+    try:
+        yield
+    except PublishError as error:
+        if error.drift_class is DriftClass.SOURCE_CHANGED:
+            raise _BuildError(error.drift_class) from error
+        raise
+
+
 def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
     source_root = project_root / "config" / source
     if source_root.is_symlink() or not source_root.is_dir():
         raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
     residue = runtime_residue_prefixes(source)
     try:
-        read = snapshot_file_view(source_root, source=source, residue_prefixes=residue)
+        with _preserve_snapshot_source_change():
+            read = snapshot_file_view(source_root, source=source, residue_prefixes=residue)
         before = read.source_fingerprint
         if before is None:
             raise _BuildError(DriftClass.INVALID_OR_SEMANTIC)
@@ -451,7 +464,9 @@ def _snapshot_build(project_root: Path, source: ConfigSyncSource) -> _Build:
             # Built from the bytes just read and fingerprinted, never by copying
             # the live tree, which the container can rewrite and relink.
             _write_snapshot(snapshot_root, read.files)
-            if _fingerprint(source_root, residue) != before:
+            with _preserve_snapshot_source_change():
+                current = _fingerprint(source_root, residue)
+            if current != before:
                 raise _BuildError(DriftClass.SOURCE_CHANGED)
             build = _build_views(
                 snapshot_root,

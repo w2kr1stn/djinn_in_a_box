@@ -174,10 +174,10 @@ def test_vanished_view_entry_still_refuses(tmp_path, monkeypatch, stage):
     monkeypatch.setattr(publisher.os, "stat" if stage == "stat" else "open", vanish)
     with pytest.raises(publisher.PublishError) as raised:
         publisher.snapshot_file_view(tmp_path, source="claude", item_origin="seed")
-    assert raised.value.drift_class is publisher.DriftClass.INVALID_OR_SEMANTIC
-    assert raised.value.items == (publisher.DriftEntry(
-        publisher.DriftClass.INVALID_OR_SEMANTIC, PurePosixPath("AGENTS.md"), origin="seed"
-    ),)
+    assert raised.value.drift_class is publisher.DriftClass.SOURCE_CHANGED
+    assert raised.value.items == (
+        publisher.DriftEntry(raised.value.drift_class, PurePosixPath("AGENTS.md"), origin="seed"),
+    )
 
 
 @pytest.mark.parametrize("envelope", ["empty", "missing", "malformed"])
