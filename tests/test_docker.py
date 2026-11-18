@@ -3831,7 +3831,7 @@ def _check_startup_environment_classes(root: Path) -> None:
             continue
         # Blank comment lines preserve source positions. Heredoc content stays in the scan.
         text = "\n".join(
-            "" if line.lstrip().startswith("#") else line for line in path.read_text().splitlines()
+            "" if line.lstrip().startswith("#") else line for line in path.read_text().split("\n")
         )
         for match in re.finditer(pattern, text, re.M):
             name = match[match.lastindex]
@@ -3856,6 +3856,7 @@ def test_startup_environment_class_guard_reports_each_location(tmp_path: Path) -
     scripts.mkdir()
     (scripts / "example.py").write_text(
         "# IGNORE_ME = 1\nHOME = ''\nFLOOR = 0\nFILENAME == ARGV[1]\nNEW_SETTING = 2\n"
+        "# A form feed does not start a new source line.\n\fNEW_PYTHON = 1\n"
     )
 
     with pytest.raises(pytest.fail.Exception) as failure:
@@ -3864,7 +3865,8 @@ def test_startup_environment_class_guard_reports_each_location(tmp_path: Path) -
     message, *locations = str(failure.value).splitlines()
     assert "DJINN_ENV_KEYS" in message
     assert "rename non-environment constants" in message
-    assert locations == ["Dockerfile:1: NEW_SETTING", "scripts/example.py:5: NEW_SETTING"]
+    assert locations[:2] == ["Dockerfile:1: NEW_SETTING", "scripts/example.py:5: NEW_SETTING"]
+    assert locations[2:] == ["scripts/example.py:7: NEW_PYTHON"]
 
 
 def test_captured_runs_never_read_the_terminal(monkeypatch):
