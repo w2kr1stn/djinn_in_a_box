@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from djinn_in_a_box.cli.djinn import app
 from djinn_in_a_box.commands.agent import build_agent_command
+from djinn_in_a_box.config.defaults import DEFAULT_AGENTS
 from djinn_in_a_box.config.loader import load_agents
 from djinn_in_a_box.config.models import AgentConfig, AppConfig
 from djinn_in_a_box.core.agent_runner import UnknownAgentError
@@ -72,6 +73,12 @@ class TestBuildAgentCommand:
         # Read-only flags should NOT be present
         assert "--permission-mode" not in cmd
         assert "plan" not in cmd
+
+    def test_builtin_codex_write_mode(self) -> None:
+        cmd = build_agent_command(DEFAULT_AGENTS["codex"], write=True)
+
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "--full-auto" not in cmd
 
     def test_with_model_override(self, claude_config: AgentConfig) -> None:
         """Test command generation with model override."""

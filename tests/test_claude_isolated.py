@@ -68,7 +68,7 @@ def test_existing_builtins_are_unchanged() -> None:
             "description": "OpenAI Codex CLI",
             "headless_flags": ["exec"],
             "read_only_flags": ["--sandbox", "read-only"],
-            "write_flags": ["--full-auto"],
+            "write_flags": ["--dangerously-bypass-approvals-and-sandbox"],
             "json_flags": ["--json"],
             "model_flag": "--model",
             "default_model": None,
