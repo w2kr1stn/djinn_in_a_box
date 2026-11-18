@@ -872,7 +872,7 @@ to allow a connection. The [network grant](https://tailscale.com/docs/reference/
 selects the helper by its `hosts` alias. The [SSH rule](https://tailscale.com/docs/reference/syntax/policy-file#tailscale-ssh)
 keeps `check`, the account as source and the declared OS user as the login.
 SSH sources have no IP or host alias selector. Tag only intended targets and
-keep the helper untagged so it can use [`check`](https://tailscale.com/docs/features/tailscale-ssh#limitations).
+keep the helper untagged so it can use [`check`](https://tailscale.com/docs/features/tailscale-ssh#order-of-evaluation).
 For targets with a tailnet IPv4, Djinn's relay prefers that address and connects
 from the helper's tailnet IPv4.
 
@@ -885,8 +885,9 @@ connection can log `upstream-refused`.
 
 Review [overlapping grants and ACLs](https://tailscale.com/docs/features/access-control/grants/grants-explained)
 for broader access to the targets and exclude TCP 22 from those rules.
-Use [port ranges](https://tailscale.com/docs/reference/syntax/grants#network-layer-capabilities)
-such as `tcp:1-21` and `tcp:23-65535` in grants to keep other TCP ports available.
+For grants that allow all TCP ports (`*` or `tcp:*`), replace the TCP allowance
+with [port ranges](https://tailscale.com/docs/reference/syntax/grants#network-layer-capabilities) `tcp:1-21`
+and `tcp:23-65535`, and omit `tcp:22` from grants that list individual ports.
 Use [policy `tests`](https://tailscale.com/docs/reference/syntax/policy-file#tests) to verify
 that the helper can reach a target on TCP 22 and another owner device is denied
 there but can reach a legitimate TCP port. Tailscale rejects policy updates
