@@ -59,6 +59,8 @@ args = sys.argv[1:]
 with pathlib.Path({str(calls)!r}).open('a') as stream:
     stream.write(json.dumps({{'args': args, 'pid': os.getpid()}}) + '\\n')
 if args[:2] == ['container', 'inspect']:
+    if behavior.get('inspect_block'):
+        signal.pause()
     time.sleep(behavior.get('inspect_delay', 0))
     if behavior.get('inspect_error'):
         print('daemon secret [red]do-not-print', file=sys.stderr)
@@ -74,6 +76,9 @@ if args[:2] == ['container', 'inspect']:
 elif args[0] == 'logs':
     if behavior.get('ignore_term'):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if behavior.get('logs_block'):
+        (objects.parent / 'logs-ready').touch()
+        signal.pause()
     time.sleep(behavior.get('logs_delay', 0))
     if behavior.get('huge'):
         for _ in range(behavior['huge']):
@@ -280,8 +285,7 @@ def held_lock(root, tmp_path):
 fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
 fcntl.flock(fd, fcntl.LOCK_EX)
 pathlib.Path(sys.argv[2]).touch()
-end = time.monotonic() + 8
-while not pathlib.Path(sys.argv[3]).exists() and time.monotonic() < end:
+while not pathlib.Path(sys.argv[3]).exists():
     time.sleep(.01)
 os.close(fd)
 """
@@ -292,11 +296,11 @@ os.close(fd)
         stderr=subprocess.PIPE,
     )
     try:
-        end = time.monotonic() + 3
+        end = time.monotonic() + 15
         while not ready.exists() and time.monotonic() < end:
             time.sleep(0.01)
         assert ready.exists()
-        yield
+        yield child
     finally:
         release.touch()
         _, stderr = child.communicate(timeout=3)
@@ -304,7 +308,6 @@ os.close(fd)
 
 
 def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, tmp_path):
-    monkeypatch.setattr(pm, "RECORD_SECONDS", 1.2)
     inventory(fake_docker, dev=evidence)
     root = pm.records_root(create=True)
     attempts = []
@@ -315,10 +318,9 @@ def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, tmp_
         return original(fd, operation)
 
     monkeypatch.setattr(pm.fcntl, "flock", counted)
-    with held_lock(root, tmp_path):
-        started = time.monotonic()
+    with held_lock(root, tmp_path) as holder:
         pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED, blocking=False)
-        assert time.monotonic() - started < 0.35
+        assert holder.poll() is None
     assert attempts == [pm.fcntl.LOCK_EX | pm.fcntl.LOCK_NB]
     assert not (root / "provenance.json").exists()
 
@@ -326,10 +328,12 @@ def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, tmp_
 def test_lock_wait_bounded(fake_docker, evidence, monkeypatch, tmp_path, capsys):
     inventory(fake_docker, dev=evidence)
     monkeypatch.setattr(pm, "RECORD_SECONDS", 0.2)
-    with held_lock(pm.records_root(create=True), tmp_path):
-        started = time.monotonic()
+    sleeps = []
+    clock = SimpleNamespace(monotonic=lambda: sum(sleeps), sleep=sleeps.append)
+    monkeypatch.setattr(pm, "time", clock)
+    with held_lock(pm.records_root(create=True), tmp_path) as holder:
         assert capture(fake_docker) is None
-        assert time.monotonic() - started < 0.8
+        assert holder.poll() is None and sum(sleeps) == pytest.approx(0.2)
     assert "Post-mortem record failed (lock)" in capsys.readouterr().err
     assert admitted() == []
 
@@ -622,12 +626,31 @@ def test_huge_line_binary_ring_is_bounded(fake_docker, evidence, monkeypatch):
     assert all(child.poll() is not None for child in children)
 
 
+@pytest.fixture
+def log_waits(fake_docker, monkeypatch):
+    waits = []
+    ready = fake_docker.objects.with_name("logs-ready")
+    select = pm.selectors.DefaultSelector.select
+
+    def expire_ready_child(selector, timeout):
+        end = time.monotonic() + 15
+        while not ready.exists():
+            assert time.monotonic() < end, "logs child never started waiting"
+            time.sleep(0.01)
+        waits.append(timeout)
+        return select(selector, 0)
+
+    monkeypatch.setattr(pm, "time", SimpleNamespace(monotonic=lambda: sum(waits)))
+    monkeypatch.setattr(pm.selectors.DefaultSelector, "select", expire_ready_child)
+    return waits
+
+
 @pytest.mark.parametrize("ignore_term", [False, True])
 def test_deadline_writes_incomplete_and_reaps_own_child(
-    fake_docker, evidence, monkeypatch, ignore_term
+    fake_docker, evidence, monkeypatch, ignore_term, log_waits
 ):
     inventory(fake_docker, dev=evidence)
-    behavior(fake_docker, logs_delay=2, ignore_term=ignore_term)
+    behavior(fake_docker, logs_block=True, ignore_term=ignore_term)
     monkeypatch.setattr(pm, "RECORD_SECONDS", 0.3)
     terminations = []
     original_terminate = subprocess.Popen.terminate
@@ -637,9 +660,8 @@ def test_deadline_writes_incomplete_and_reaps_own_child(
         return original_terminate(child)
 
     monkeypatch.setattr(subprocess.Popen, "terminate", terminated)
-    started = time.monotonic()
     data = document(capture(fake_docker))
-    assert time.monotonic() - started < 0.8
+    assert log_waits == [pytest.approx(0.2)]
     assert data["incomplete"] == "deadline"
     assert data["subjects"][0]["errors"]["log_tail"] == "deadline"
     pid = next(c["pid"] for c in daemon_calls(fake_docker) if c["args"][0] == "logs")
@@ -663,12 +685,12 @@ def test_inspect_timeouts_and_partial_record(fake_docker, evidence, monkeypatch)
     assert data["errors"] == {"candidate:0": "inspect"}
     assert all(0 < timeout <= 5 for timeout in timeouts)
     assert len(data["subjects"]) == 1
-    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.02)
-    behavior(fake_docker, inspect_delay=0.5)
+    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.5)
+    behavior(fake_docker, inspect_block=True)
     observed = {"state": "absent", "expected_id": "x", "actual_id": None}
     data = document(capture(fake_docker, observed=observed))
     assert data["incomplete"] == "deadline"
-    assert 0 < timeouts[-1] <= 0.02
+    assert 0 < timeouts[-1] <= 0.5
 
 
 @pytest.mark.parametrize("layout", ["systemd", "cgroupfs", "missing", "invalid", "unreadable"])
@@ -858,21 +880,18 @@ def test_marker_reinspect_budget(fake_docker, evidence, monkeypatch):
     monkeypatch.setattr(host_runtime, "inspect_object", inspected)
     pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)
     assert timeouts == [5]
-    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.1)
-    behavior(fake_docker, inspect_delay=0.5)
-    started = time.monotonic()
+    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.5)
+    behavior(fake_docker, inspect_block=True)
     pm.mark_terminated(fake_docker.binary, "a" * 64, STARTED)
-    assert time.monotonic() - started < 0.5
-    assert 0 < timeouts[-1] <= 0.1
+    assert 0 < timeouts[-1] <= 0.5
     assert "a" * 64 not in pm._markers(pm.records_root(create=False))
 
 
-def test_docker_logs_individual_five_second_budget(fake_docker, evidence):
+def test_docker_logs_individual_five_second_budget(fake_docker, evidence, log_waits):
     inventory(fake_docker, dev=evidence)
-    behavior(fake_docker, logs_delay=6)
-    started = time.monotonic()
+    behavior(fake_docker, logs_block=True)
     data = document(capture(fake_docker))
-    assert time.monotonic() - started < 5.6
+    assert log_waits == [pytest.approx(4.9)]
     assert data["subjects"][0]["errors"]["log_tail"] == "logs"
 
 

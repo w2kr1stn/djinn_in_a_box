@@ -31,6 +31,7 @@ Test hooks (environment, all ``FAKE_*``; counted per call, 1-based, in ``<state>
   FAKE_NO_AUTOSELECT=1     removing the active credential leaves its integration without active
   FAKE_STDIN_STALL=1       import reads 10000 bytes of stdin, then stalls for 60 seconds
   FAKE_SLEEP_AT=k          call k sleeps 60 seconds before its effect (timeout tests)
+  FAKE_STALL_READY        signal either stall at this file and wait for termination
   FAKE_UNLINK_DB=1         export prints [] and removes the database file (a vanished database)
   FAKE_HUGE_EXPORT=1       export prints more than 16 MiB (size bound tests)
   FAKE_STDERR_FILE         the text of this file is written to stderr, and to stdout on failures
@@ -44,6 +45,7 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 
 CONTROL = "FAKE_"
 
@@ -178,10 +180,18 @@ def do_export(state: dict, path: str) -> None:
         os.unlink(path)
 
 
+def stall() -> None:
+    if marker := os.environ.get("FAKE_STALL_READY"):
+        Path(marker).touch()
+        signal.pause()
+    else:
+        time.sleep(60)
+
+
 def do_import(state: dict, path: str) -> None:
     if os.environ.get("FAKE_STDIN_STALL"):
-        os.read(0, 10000)
-        time.sleep(60)
+        assert os.read(0, 10000)
+        stall()
     incoming = json.loads(sys.stdin.read())
     flags = " ".join(f"{item['id']}={bool(item.get('active'))}" for item in incoming)
     log(f"fakeinfo import-active {flags}")
@@ -269,7 +279,7 @@ def main() -> int:
         sys.stdout.write(noise)
         return 1
     if hook("FAKE_SLEEP_AT", number):
-        time.sleep(60)
+        stall()
     if hook("FAKE_KILL_BEFORE", number):
         kill_parent()
         return 1

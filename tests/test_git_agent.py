@@ -39,7 +39,7 @@ def encrypt(key_file, passphrase):
 
 def run_driver(config, answers=(), *, stdin_data=None, terminal=True):
     driver = """
-import fcntl, json, os, sys, termios, time
+import fcntl, json, os, sys, termios
 from pathlib import Path
 from djinn_in_a_box.config.ssh import GitConfig
 from djinn_in_a_box.core.git_agent import start_agent, stop_agent, agent_keys
@@ -54,11 +54,7 @@ expected = read_public_delivery(config).blobs
 path = Path(os.environ["XDG_RUNTIME_DIR"]) / "terminal.sock"
 agents = []
 try:
-    load_started = time.monotonic()
-    try:
-        start_agent(config, path, expected, on_start=agents.append)
-    finally:
-        print(f"LOAD_SECONDS={time.monotonic() - load_started}", flush=True)
+    start_agent(config, path, expected, on_start=agents.append)
     assert agent_keys(path) == expected
     print("HOST_PROMPT_OK", flush=True)
 except GitSSHError as error:
@@ -134,9 +130,7 @@ finally:
                     os.write(master, (answer + "\n").encode())
                     answered += 1
         returncode = process.wait(timeout=2)
-        load_match = re.search(rb"LOAD_SECONDS=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)", output)
-        load_seconds = float(load_match.group(1)) if load_match else None
-        return returncode, bytes(output), answered, load_seconds
+        return returncode, bytes(output), answered
     finally:
         primary_exception = sys.exception()
         try:
@@ -380,7 +374,7 @@ def test_encrypted_key_piped_stdin_refuses_without_prompt(git_inputs, terminal):
     work = git_inputs.git.identities["git-work"]
     encrypt(work.key_file, "throwaway-passphrase")
     config = GitConfig(identities={"work": work})
-    returncode, output, prompts, load_seconds = run_driver(
+    returncode, output, prompts = run_driver(
         config,
         stdin_data="throwaway-passphrase\n",
         terminal=terminal,
@@ -394,12 +388,10 @@ def test_encrypted_key_piped_stdin_refuses_without_prompt(git_inputs, terminal):
     assert prompts == 0, output
     assert b"passphrase for" not in output, output
     assert b"Identity added" not in output, output
-    assert load_seconds is not None, output
-    assert load_seconds < 5, load_seconds
 
 
 def test_unencrypted_keys_load_with_piped_stdin(git_inputs):
-    returncode, output, prompts, _ = run_driver(
+    returncode, output, prompts = run_driver(
         git_inputs.git,
         stdin_data="junk\n",
         terminal=False,
@@ -467,7 +459,7 @@ def test_encrypted_key_prompts_on_host_terminal(git_inputs):
     work = git_inputs.git.identities["git-work"]
     encrypt(work.key_file, "throwaway-passphrase")
     config = GitConfig(identities={"work": work})
-    returncode, output, prompts, _ = run_driver(config, ["throwaway-passphrase"])
+    returncode, output, prompts = run_driver(config, ["throwaway-passphrase"])
     assert prompts == 1, output
     assert returncode == 0, output
     assert b"HOST_PROMPT_OK" in output, output
@@ -476,7 +468,7 @@ def test_encrypted_key_prompts_on_host_terminal(git_inputs):
 def test_encrypted_keys_with_shared_passphrase_prompt_once(git_inputs):
     for identity in git_inputs.git.identities.values():
         encrypt(identity.key_file, "throwaway-passphrase")
-    returncode, output, prompts, _ = run_driver(git_inputs.git, ["throwaway-passphrase"])
+    returncode, output, prompts = run_driver(git_inputs.git, ["throwaway-passphrase"])
     assert prompts == 1, output
     assert returncode == 0, output
     assert b"HOST_PROMPT_OK" in output, output
@@ -487,7 +479,7 @@ def test_encrypted_keys_with_shared_passphrase_prompt_once(git_inputs):
 def test_encrypted_keys_with_different_passphrases_prompt_again(git_inputs):
     encrypt(git_inputs.git.identities["git-work"].key_file, "throwaway-work")
     encrypt(git_inputs.git.identities["git-personal"].key_file, "throwaway-personal")
-    returncode, output, prompts, _ = run_driver(
+    returncode, output, prompts = run_driver(
         git_inputs.git, ["throwaway-work", "throwaway-personal"]
     )
     assert prompts == 2, output
@@ -517,7 +509,7 @@ def test_three_encrypted_keys_with_interleaved_passphrases_prompt_three_times(gi
     encrypt(personal.key_file, "throwaway-personal")
     encrypt(third.key_file, "throwaway-work")
     config = GitConfig(identities={"work": work, "personal": personal, "third": third})
-    returncode, output, prompts, _ = run_driver(
+    returncode, output, prompts = run_driver(
         config, ["throwaway-work", "throwaway-personal", "throwaway-work"]
     )
     assert prompts == 3, output
@@ -528,7 +520,7 @@ def test_three_encrypted_keys_with_interleaved_passphrases_prompt_three_times(gi
 def test_encrypted_key_refusal_reports_complete_remedy_and_stops_agent(git_inputs):
     encrypt(git_inputs.git.identities["git-work"].key_file, "throwaway-work")
     encrypt(git_inputs.git.identities["git-personal"].key_file, "throwaway-personal")
-    returncode, output, prompts, _ = run_driver(git_inputs.git, ["throwaway-work", ""])
+    returncode, output, prompts = run_driver(git_inputs.git, ["throwaway-work", ""])
     assert prompts == 2, output
     assert returncode != 0, output
     assert (

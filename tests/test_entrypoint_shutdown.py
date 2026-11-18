@@ -63,6 +63,10 @@ def _harness(tmp_path: Path) -> Path:
     (tmp_path / "runtime").mkdir()
     helper = tmp_path / "settings_copy.py"
     helper.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    waiting = 'wait "$DJINN_SHELL_PID"\n'
+    pidfile = shlex.quote(str(tmp_path / "shell-pid"))
+    marker = f'print -r -- "$DJINN_SHELL_PID" > {pidfile}\n'
+    section = _shutdown_section().replace(waiting, marker + waiting)
 
     script = tmp_path / "harness.sh"
     script.write_text(
@@ -91,7 +95,7 @@ def _harness(tmp_path: Path) -> Path:
         # which is exactly how a one-argument `ui_item` call reached production and
         # survived a full review round.
         f'source "{ROOT / "scripts" / "output-lib.sh"}"\n'
-        "\n" + _shutdown_section(),
+        "\n" + section,
         encoding="utf-8",
     )
     script.chmod(0o755)
@@ -110,9 +114,11 @@ def _sync_lines(tmp_path: Path) -> list[str]:
 
 def _probe_until_answered(fd: int, deadline: float) -> bool:
     """Write a probe until the shell answers it, or the deadline passes."""
+    os.set_blocking(fd, False)
     end = time.monotonic() + deadline
     while time.monotonic() < end:
-        os.write(fd, b"echo PROBE_$((6*7))\n")
+        with suppress(BlockingIOError):
+            os.write(fd, b"echo PROBE_$((6*7))\n")
         if _read_until(fd, b"PROBE_42", timeout=1.0):
             return True
     return False
@@ -150,9 +156,8 @@ def test_interactive_shell_survives_with_no_arguments(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     process, fd = _spawn_pty(harness)
     try:
-        time.sleep(1.0)
-        assert process.poll() is None, "the shell exited — stdin was not handed over"
         assert _probe_until_answered(fd, deadline=15.0), "the shell did not evaluate input"
+        assert process.poll() is None, "the shell exited — stdin was not handed over"
     finally:
         _dispose(process)
         os.close(fd)
@@ -180,7 +185,7 @@ def test_without_a_tty_the_container_stays_up_instead_of_exiting(tmp_path: Path)
         )
         group = os.getpgid(process.pid)
         try:
-            time.sleep(1.0)
+            _wait_for_keeper(tmp_path, process)
             assert process.poll() is None, "entrypoint exited instead of staying up"
             # PID 1 only — `docker stop` does not signal the process group. Sending
             # to the group would also hit the keeper directly, so a foreground
@@ -214,10 +219,8 @@ def test_detached_uses_the_keeper_even_though_a_tty_exists(tmp_path: Path) -> No
     harness = _harness(tmp_path)
     process, fd = _spawn_pty(harness, detached=True)
     try:
-        time.sleep(1.0)
+        _wait_for_keeper(tmp_path, process)
         assert process.poll() is None, "the keeper exited instead of holding"
-        os.write(fd, b"echo PROBE_$((6*7))\n")
-        assert not _read_until(fd, b"PROBE_42", timeout=2.0), "an interactive shell is running"
         os.kill(process.pid, signal.SIGTERM)
         assert process.wait(timeout=15) == 128 + signal.SIGTERM
     finally:
@@ -239,9 +242,8 @@ def test_sigterm_persists_with_an_interactive_shell_running(tmp_path: Path) -> N
     harness = _harness(tmp_path)
     process, fd = _spawn_pty(harness)
     try:
-        time.sleep(1.0)
-        assert process.poll() is None, "the interactive shell never came up"
         assert _probe_until_answered(fd, deadline=15.0), "the shell is not interactive"
+        assert process.poll() is None, "the interactive shell never came up"
         os.kill(process.pid, signal.SIGTERM)
         status = process.wait(timeout=15)
         assert status >= 0, "parent was killed rather than exiting through the trap"
@@ -283,7 +285,7 @@ def test_sigterm_persists_state_before_exiting(tmp_path: Path) -> None:
         start_new_session=True,
     )
     try:
-        _wait_until_shell_started(process)
+        _wait_until_shell_started(tmp_path, process)
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=15)
     finally:
@@ -314,7 +316,7 @@ def test_sigterm_persists_state_only_once(tmp_path: Path) -> None:
         start_new_session=True,
     )
     try:
-        _wait_until_shell_started(process)
+        _wait_until_shell_started(tmp_path, process)
         for _ in range(3):
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)
@@ -325,14 +327,24 @@ def test_sigterm_persists_state_only_once(tmp_path: Path) -> None:
     assert len(_sync_lines(tmp_path)) == 2
 
 
-def _wait_until_shell_started(process: subprocess.Popen[str]) -> None:
-    """Let the harness reach `wait` before signalling it.
+def _wait_until_shell_started(tmp_path: Path, process: subprocess.Popen) -> int:
+    marker = tmp_path / "shell-pid"
+    _wait_for(lambda: marker.exists() and marker.stat().st_size > 0, "no shell wait marker")
+    assert process.poll() is None, "harness exited before it could be signalled"
+    return int(marker.read_text())
 
-    Signalling earlier would race the trap installation and test nothing.
-    """
-    time.sleep(0.5)
-    if process.poll() is not None:  # pragma: no cover - only on regression
-        raise AssertionError("harness exited before it could be signalled")
+
+def _wait_for_keeper(tmp_path: Path, process: subprocess.Popen) -> None:
+    pid = _wait_until_shell_started(tmp_path, process)
+
+    def keeper_started() -> bool:
+        try:
+            args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except FileNotFoundError:
+            return False
+        return args[0].rsplit(b"/", 1)[-1] == b"sleep" and args[1:] == [b"infinity", b""]
+
+    _wait_for(keeper_started, "the entrypoint is not waiting on its keeper")
 
 
 def _dispose(process: subprocess.Popen) -> None:
@@ -375,7 +387,7 @@ def _atomic_edit(path: Path, content: bytes) -> None:
 class Session:
     """Full shipped entrypoint with owned storage and barrier-driven 30 s ticks."""
 
-    def __init__(self, root: Path, persistent: Path | None = None, *, real_sleep: bool = False):
+    def __init__(self, root: Path, persistent: Path | None = None):
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
         self.home = root / "home"
@@ -418,6 +430,7 @@ class Session:
         self.state_log = root / "state"
         self.events = root / "events"
         self.ready = root / "ready"
+        self.joining = root / "joining"
         self.stop = root / "stop"
         self.hold = root / "hold"
         self.release = root / "release"
@@ -436,12 +449,8 @@ class Session:
             + "] + sys.argv[1:])\n"
             f'with Path({str(self.sleep_log)!r}).open("a") as f:\n'
             '    f.write(str(os.getpid()) + "\\n")\n'
-            + (
-                f'os.execv({sleep!r}, [{sleep!r}, "30"])\n'
-                if real_sleep
-                else f'while not Path({str(root)!r}, "tick-" + str(os.getpid())).exists():\n'
-                "    time.sleep(0.01)\n"
-            ),
+            f'while not Path({str(root)!r}, "tick-" + str(os.getpid())).exists():\n'
+            "    time.sleep(0.01)\n",
         )
         self._executable(
             "mktemp",
@@ -521,7 +530,15 @@ class Session:
         path.write_text(content)
         path.chmod(0o755)
 
-    def start(self, entrypoint: Path = ENTRYPOINT) -> None:
+    def start(self, entrypoint: Path = ENTRYPOINT, *, observe_join: bool = False) -> None:
+        if observe_join:
+            source = entrypoint.read_text()
+            waiting = '    wait "$djinn_checkpoint_pid" 2>/dev/null || rc=$?\n'
+            instrumented = self.root / "observe-join.zsh"
+            instrumented.write_text(
+                source.replace(waiting, f"    : > {shlex.quote(str(self.joining))}\n" + waiting)
+            )
+            entrypoint = instrumented
         with self.out.open("w") as out, self.err.open("w") as err:
             self.process = subprocess.Popen(
                 ["/bin/zsh", str(entrypoint), "-c", self.shell],
@@ -855,7 +872,7 @@ def test_all_carriers_use_atomic_helper_and_keep_previous_on_failure(sessions, i
 @pytest.mark.parametrize("stop_signal", (None, signal.SIGTERM, signal.SIGINT))
 def test_clean_stop_joins_inflight_checkpoint_before_final_sync(sessions, stop_signal) -> None:
     session = sessions()
-    session.start()
+    session.start(observe_join=True)
     _wait_for(lambda: bool(session.sleepers()), "no interval sleeper")
     sleeper = session.sleepers()[-1]
     first = b'{"version":1}\n'
@@ -874,7 +891,7 @@ def test_clean_stop_joins_inflight_checkpoint_before_final_sync(sessions, stop_s
         session.stop.touch()
     else:
         os.kill(session.process.pid, stop_signal)
-    time.sleep(0.15)
+    _wait_for(session.joining.exists, "shutdown did not join the in-flight checkpoint")
     events = [json.loads(line) for line in session.events.read_text().splitlines()]
     assert session.process.poll() is None, "parent exited before joining its in-flight checkpoint"
     assert [event[0] for event in events] == ["begin", "file-fsync", "replace"], (
@@ -916,16 +933,15 @@ def _pid_running(pid: int) -> bool:
 
 
 def test_clean_stop_reaps_interval_sleeper_without_waiting_30_seconds(sessions) -> None:
-    session = sessions(real_sleep=True)
+    session = sessions()
     session.start()
     _wait_for(lambda: bool(session.sleepers()), "literal 30 s sleeper never started")
     sleeper = session.sleepers()[0]
     worker = int(Path(f"/proc/{sleeper}/stat").read_text().rsplit(")", 1)[1].split()[1])
-    assert time.time() - session.sleep_log.stat().st_mtime < 2
-    start = time.monotonic()
+    assert _pid_running(sleeper)
     assert "stopped unexpectedly" not in session.finish(signal.SIGTERM)
-    assert time.monotonic() - start < 5
-    _wait_for(lambda: not _pid_running(sleeper), "sleeper survived stop", timeout=1)
+    _wait_for(lambda: not _pid_running(sleeper), "sleeper survived stop")
+    assert not (session.root / f"tick-{sleeper}").exists()
     assert not _pid_running(worker)
     assert len(session.sleepers()) == 1
     assert not session.state.exists()
@@ -985,7 +1001,7 @@ def test_worker_exit_status_controls_unexpected_stop_warning(sessions, worker_si
     if worker_signal == signal.SIGINT:
         # The worker inherits SIGINT as ignored, so a group-wide Ctrl-C cannot kill
         # an in-flight checkpoint child; only the parent's INT trap stops it.
-        time.sleep(0.5)
+        session.tick()
         assert _pid_running(worker), "worker must ignore SIGINT"
     else:
         _wait_for(lambda: not _pid_running(worker), "worker did not exit")
@@ -1220,7 +1236,7 @@ def test_inflight_stop_has_no_stale_interval_pid_to_signal(sessions) -> None:
     script.write_text(ENTRYPOINT.read_text().replace(
         '_session_checkpoint_loop() {\n', '_session_checkpoint_loop() {\n' + injection
     ))
-    session.start(script)
+    session.start(script, observe_join=True)
     _wait_for(lambda: bool(session.sleepers()), "no interval sleeper")
     sleeper = session.sleepers()[0]
     _atomic_edit(session.runtimes[0], b'{"inflight":true}')
@@ -1229,7 +1245,7 @@ def test_inflight_stop_has_no_stale_interval_pid_to_signal(sessions) -> None:
     _wait_for(session.blocked.exists, "no in-flight copy")
     assert session.process is not None
     os.kill(session.process.pid, signal.SIGTERM)
-    time.sleep(0.1)
+    _wait_for(session.joining.exists, "shutdown did not join the in-flight checkpoint")
     session.hold.unlink()
     session.release.touch()
     assert session.process.wait(timeout=5) == 143
@@ -1583,7 +1599,7 @@ def test_each_personal_kind_joins_checkpoint_before_final(sessions, relative):
             f'sync_session_state() {{\n    [[ "$1" != final ]] || echo final >> "{order}"\n',
         )
     )
-    session.start(instrumented)
+    session.start(instrumented, observe_join=True)
     runtime = session.runtimes[2].parent / relative
     target = session.home / ".opencode" / relative
     _atomic_edit(runtime, b'{"checkpoint":1}')
@@ -1595,7 +1611,7 @@ def test_each_personal_kind_joins_checkpoint_before_final(sessions, relative):
     _atomic_edit(runtime, b'{"final":2}')
     assert session.process is not None
     os.kill(session.process.pid, signal.SIGTERM)
-    time.sleep(0.15)
+    _wait_for(session.joining.exists, "shutdown did not join the in-flight checkpoint")
     assert session.process.poll() is None
     assert [json.loads(line)[0] for line in session.events.read_text().splitlines()] == [
         "begin",

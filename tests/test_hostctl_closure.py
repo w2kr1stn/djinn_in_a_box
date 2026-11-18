@@ -649,17 +649,31 @@ def test_unlocked_retry_reacquires_guard(window, monkeypatch):
 
 def test_journal_bounded_and_blocking_default(tmp_path, monkeypatch):
     """H6: an acknowledged real holder controls both acquisition modes."""
+    from test_restore_lock_holders import flock_holder
+
     root = hostctl.state_root()
-    holder = hold(root / "journal.lock", 0.7)
-    started = REAL_MONOTONIC()
-    try:
+    lock = root / "journal.lock"
+    lock.touch(mode=0o600)
+    sleeps = []
+    original_flock = fcntl.flock
+    journal = root / "journal.jsonl"
+
+    def observed_flock(fd, operation):
+        if operation == fcntl.LOCK_EX:
+            assert holder.poll() is None and not journal.exists()
+            with pytest.raises(BlockingIOError):
+                original_flock(fd, operation | fcntl.LOCK_NB)
+            holder.stdin.close()
+        return original_flock(fd, operation)
+
+    clock = SimpleNamespace(monotonic=lambda: sum(sleeps), sleep=sleeps.append)
+    monkeypatch.setattr(hostctl, "time", clock)
+    with flock_holder(lock) as holder, monkeypatch.context() as patch:
+        patch.setattr(fcntl, "flock", observed_flock)
         assert hostctl.journal("bounded", wait=0.1) is False
-        assert REAL_MONOTONIC() - started < 0.4
-        assert not (root / "journal.jsonl").exists()
+        assert sum(sleeps) == pytest.approx(0.1) and not journal.exists()
         assert hostctl.journal("default") is True
-        assert REAL_MONOTONIC() - started >= 0.5
-    finally:
-        holder.wait(timeout=3)
+        assert holder.stdin.closed, "journal did not attempt a blocking acquisition"
     rows = [json.loads(line) for line in (root / "journal.jsonl").read_text().splitlines()]
     assert [r["event"] for r in rows] == ["default"]
     assert hostctl.journal("bounded-free", wait=0) is True
