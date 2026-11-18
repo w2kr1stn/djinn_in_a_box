@@ -27,25 +27,27 @@ if ! [[ "$SOPS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 version_line="sops $SOPS_VERSION"
-if installed=$("$INSTALL_DIR/sops" --disable-version-check --version 2>/dev/null </dev/null) \
-        && [[ "$installed" == "$version_line" ]]; then
+if "$INSTALL_DIR/sops" --disable-version-check --version 2>/dev/null </dev/null |
+        cmp -s - <(printf '%s\n' "$version_line"); then
     echo "sops: Version $SOPS_VERSION already installed, skipping download" >&2
-    echo "$installed"
+    echo "$version_line"
     exit 0
 fi
 
 asset="sops-v${SOPS_VERSION}.linux.amd64"
 base="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}"
-if ! expected=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 "$base/sops-v${SOPS_VERSION}.checksums.txt" \
-        | awk -v f="$asset" '$2 == f || $2 == "*" f || $2 == "./" f {print $1}') \
+staging=$(mktemp -d "$INSTALL_DIR/.sops.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+checksums="$staging/sops-v${SOPS_VERSION}.checksums.txt"
+if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/sops-v${SOPS_VERSION}.checksums.txt" \
+        || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \
         || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
     echo "sops: Missing or invalid release checksum for $asset" >&2
     exit 1
 fi
 
-staged=$(mktemp "$INSTALL_DIR/.sops.XXXXXX")
-trap 'rm -f -- "$staged"' EXIT
-curl -fsSL "${CURL_GUARDS[@]}" "$base/$asset" > "$staged"
+staged="$staging/sops"
+curl -fsSL "${CURL_GUARDS[@]}" -o "$staged" "$base/$asset"
 actual=$(sha256sum < "$staged")
 if [[ "$expected" != "${actual%% *}" ]]; then
     echo "sops: checksum mismatch for $asset" >&2
@@ -53,10 +55,10 @@ if [[ "$expected" != "${actual%% *}" ]]; then
 fi
 
 chmod +x "$staged"
-if ! candidate=$("$staged" --disable-version-check --version </dev/null) || [[ "$candidate" != "$version_line" ]]; then
-    echo "sops: Invalid binary version (expected '$version_line', got '$candidate')" >&2
+if ! "$staged" --disable-version-check --version </dev/null | cmp -s - <(printf '%s\n' "$version_line"); then
+    echo "sops: Invalid binary version (expected '$version_line')" >&2
     exit 1
 fi
 
 mv -T "$staged" "$INSTALL_DIR/sops"
-echo "$candidate"
+echo "$version_line"

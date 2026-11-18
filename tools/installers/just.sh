@@ -24,39 +24,41 @@ if ! [[ "$JUST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 version_line="just $JUST_VERSION"
-if installed=$("$INSTALL_DIR/just" --version 2>/dev/null </dev/null) && [[ "$installed" == "$version_line" ]]; then
+if "$INSTALL_DIR/just" --version 2>/dev/null </dev/null |
+        cmp -s - <(printf '%s\n' "$version_line"); then
     echo "just: Version $JUST_VERSION already installed, skipping download" >&2
-    echo "$installed"
+    echo "$version_line"
     exit 0
 fi
 
 asset="just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 base="https://github.com/casey/just/releases/download/${JUST_VERSION}"
 
-if ! expected=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 "$base/SHA256SUMS" \
-        | awk -v f="$asset" '$2 == f || $2 == "*" f || $2 == "./" f {print $1}') \
+# Stage on the target filesystem so the final move replaces the binary atomically.
+staging=$(mktemp -d "$INSTALL_DIR/.just.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+checksums="$staging/SHA256SUMS"
+if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/SHA256SUMS" \
+        || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \
         || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
     echo "just: Missing or invalid release checksum for $asset" >&2
     exit 1
 fi
 
-# Stage on the target filesystem so the final move replaces the binary atomically.
-staging=$(mktemp -d "$INSTALL_DIR/.just.XXXXXX")
-trap 'rm -rf -- "$staging"' EXIT
 archive="$staging/$asset"
-curl -fsSL "${CURL_GUARDS[@]}" "$base/$asset" > "$archive"
+curl -fsSL "${CURL_GUARDS[@]}" -o "$archive" "$base/$asset"
 actual=$(sha256sum < "$archive")
 if [[ "$expected" != "${actual%% *}" ]]; then
     echo "just: checksum mismatch for $asset" >&2
     exit 1
 fi
 
-(cd -- "$staging" && tar -xzf "$asset" just)
+tar -xzOf "$archive" just > "$staging/just"
 chmod +x "$staging/just"
-if ! candidate=$("$staging/just" --version </dev/null) || [[ "$candidate" != "$version_line" ]]; then
-    echo "just: Invalid binary version (expected '$version_line', got '$candidate')" >&2
+if ! "$staging/just" --version </dev/null | cmp -s - <(printf '%s\n' "$version_line"); then
+    echo "just: Invalid binary version (expected '$version_line')" >&2
     exit 1
 fi
 
 mv -T "$staging/just" "$INSTALL_DIR/just"
-echo "$candidate"
+echo "$version_line"

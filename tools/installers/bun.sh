@@ -24,25 +24,27 @@ if ! [[ "$BUN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 version_line="$BUN_VERSION"
-if installed=$("$INSTALL_DIR/bun" --version 2>/dev/null </dev/null) && [[ "$installed" == "$version_line" ]]; then
+if "$INSTALL_DIR/bun" --version 2>/dev/null </dev/null |
+        cmp -s - <(printf '%s\n' "$version_line"); then
     echo "bun: Version $BUN_VERSION already installed, skipping download" >&2
-    echo "$installed"
+    echo "$version_line"
     exit 0
 fi
 
 asset="bun-linux-x64.zip"
 base="https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}"
-if ! expected=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 "$base/SHASUMS256.txt" \
-        | awk -v f="$asset" '$2 == f || $2 == "*" f || $2 == "./" f {print $1}') \
+staging=$(mktemp -d "$INSTALL_DIR/.bun.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+checksums="$staging/SHASUMS256.txt"
+if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/SHASUMS256.txt" \
+        || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \
         || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
     echo "bun: Missing or invalid release checksum for $asset" >&2
     exit 1
 fi
 
-staging=$(mktemp -d "$INSTALL_DIR/.bun.XXXXXX")
-trap 'rm -rf -- "$staging"' EXIT
 archive="$staging/$asset"
-curl -fsSL "${CURL_GUARDS[@]}" "$base/$asset" > "$archive"
+curl -fsSL "${CURL_GUARDS[@]}" -o "$archive" "$base/$asset"
 actual=$(sha256sum < "$archive")
 if [[ "$expected" != "${actual%% *}" ]]; then
     echo "bun: checksum mismatch for $asset" >&2
@@ -51,10 +53,10 @@ fi
 
 unzip -p "$archive" bun-linux-x64/bun > "$staging/bun"
 chmod +x "$staging/bun"
-if ! candidate=$("$staging/bun" --version </dev/null) || [[ "$candidate" != "$version_line" ]]; then
-    echo "bun: Invalid binary version (expected '$version_line', got '$candidate')" >&2
+if ! "$staging/bun" --version </dev/null | cmp -s - <(printf '%s\n' "$version_line"); then
+    echo "bun: Invalid binary version (expected '$version_line')" >&2
     exit 1
 fi
 
 mv -T "$staging/bun" "$INSTALL_DIR/bun"
-echo "$candidate"
+echo "$version_line"

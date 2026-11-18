@@ -13,7 +13,7 @@ import pytest
 from test_tools_herdr_installer import ROOT, run_command, write_executable
 
 VERSION = "1.2.3"
-ZERO_DIGEST = "0" * 64
+EXTRA_OUTPUT = [("x", 0), ("\n", 0), ("\nextra output", 0)]
 
 
 @dataclass
@@ -94,6 +94,11 @@ def release(request: pytest.FixtureRequest, tmp_path: Path) -> Release:
         tmp_path / "curl",
         """#!/bin/bash
 printf '%s\\n' "$*" >> "$HOME/calls"
+if [[ "${@: -3:1}" == -o ]]; then
+    exec > "${@: -2:1}"
+elif [[ "${!#}" == "${RETRY_URL:-}" ]]; then
+    printf partial
+fi
 case "${!#}" in
     "$API_URL") printf '{"tag_name":"%s"}\\n' "$RELEASE_TAG" ;;
     "$SUMS_URL") cat "$HOME/checksums" ;;
@@ -105,10 +110,13 @@ esac
     return Release(name, tmp_path, env, VERSION if name == "bun" else f"{name} {VERSION}")
 
 
-@pytest.mark.parametrize("pin", ["", VERSION], ids=["latest", "pinned-backslash"])
-def test_verified_install(release: Release, pin: str) -> None:
-    if pin:
+@pytest.mark.parametrize("mode", ["latest", "pinned-backslash", "retry-checksum", "retry-artifact"])
+def test_verified_install(release: Release, mode: str) -> None:
+    if mode == "pinned-backslash":
         release.env["TOOLS_BIN"] = str(release.root / "tools\\volume/bin")
+    if retry_url := {"retry-checksum": "SUMS_URL", "retry-artifact": "ASSET_URL"}.get(mode):
+        release.env["RETRY_URL"] = release.env[retry_url]
+    pin = "" if mode == "latest" else VERSION
     expected = release.package(release.version_line)
     result = release.run(pin=pin)
     assert (result.returncode, result.stdout) == (0, release.version_line + "\n"), result.stderr
@@ -129,29 +137,36 @@ def test_invalid_version_keeps_existing(release: Release, pin: str) -> None:
     assert release.binary.read_bytes() == original
 
 
-@pytest.mark.parametrize(
-    "digests",
-    [None, [], ["invalid"], [ZERO_DIGEST] * 2, [ZERO_DIGEST]],
-    ids=["missing-file", "missing-entry", "bad-hash", "duplicate", "mismatch"],
-)
-def test_checksum_failure_keeps_existing(release: Release, digests: list[str] | None) -> None:
+@pytest.mark.parametrize("case", ["absent", "empty", "invalid", "duplicate", "extra", "mismatch"])
+def test_checksum_failure_keeps_existing(release: Release, case: str) -> None:
     original = release.existing()
     release.package(release.version_line)
     checksums = release.root / "checksums"
-    filename = checksums.read_text().split()[1]
-    if digests is None:
+    mismatch = case == "mismatch"
+    if case == "absent":
         checksums.unlink()
+    elif mismatch:
+        marker_script = b'#!/bin/sh\ntouch "$HOME/executed"\n'
+        data = marker_script if release.name == "sops" else b"invalid archive"
+        (release.root / "artifact").write_bytes(data)
     else:
-        checksums.write_text("".join(f"{digest}  {filename}\n" for digest in digests))
+        row = checksums.read_text().rstrip()
+        rows = {
+            "empty": "",
+            "invalid": f"invalid  {row.split()[1]}",
+            "duplicate": f"{row}\n{row}",
+            "extra": f"{row} unexpected-field",
+        }
+        checksums.write_text(rows[case] + "\n")
     result = release.run()
-    mismatch = digests == [ZERO_DIGEST]
+    assert not (release.root / "executed").exists()
     assert result.returncode != 0
     assert ("checksum mismatch" if mismatch else "release checksum") in result.stderr
     assert len(release.calls()) == (2 if mismatch else 1)
     assert release.binary.read_bytes() == original
 
 
-@pytest.mark.parametrize(("suffix", "status"), [("", 7), ("x", 0), ("\nextra output", 0)])
+@pytest.mark.parametrize(("suffix", "status"), [("", 7), *EXTRA_OUTPUT])
 def test_staged_version_failure_keeps_existing(release: Release, suffix: str, status: int) -> None:
     original = release.existing()
     release.package(release.version_line + suffix, status)
@@ -160,7 +175,7 @@ def test_staged_version_failure_keeps_existing(release: Release, suffix: str, st
     assert release.binary.read_bytes() == original and os.access(release.binary, os.X_OK)
 
 
-@pytest.mark.parametrize(("suffix", "status"), [("", 0), ("x", 0), ("\nextra output", 0), ("", 7)])
+@pytest.mark.parametrize(("suffix", "status"), [("", 0), ("", 7), *EXTRA_OUTPUT])
 def test_installed_version_skip(release: Release, suffix: str, status: int) -> None:
     original = release.existing(release.version_line + suffix, status)
     expected = release.package(release.version_line)
@@ -176,6 +191,16 @@ def test_directory_at_target(release: Release) -> None:
     release.package(release.version_line)
     assert release.run().returncode != 0
     assert [path.name for path in release.binary.iterdir()] == ["keep"]
+
+
+@pytest.mark.parametrize("release", ["just"], indirect=True)
+def test_tar_member_is_extracted_as_data(release: Release) -> None:
+    original = release.existing()
+    decoy = release.root / "decoy"
+    decoy.touch(mode=0o755)
+    (release.root / "just").symlink_to(decoy)
+    release.package(release.version_line)
+    assert release.run().returncode != 0 and release.binary.read_bytes() == original
 
 
 def test_wrapper_cache(release: Release) -> None:
