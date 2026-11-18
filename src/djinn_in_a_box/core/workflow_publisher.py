@@ -394,9 +394,19 @@ def _release_directory_lock(descriptor: int, locked: bool) -> None:
 class _ViewEntryError(OSError):
     """A view entry that cannot be published; `relative` names it."""
 
-    def __init__(self, message: str, relative: PurePosixPath) -> None:
+    def __init__(
+        self,
+        message: str,
+        relative: PurePosixPath,
+        drift_class: DriftClass = DriftClass.INVALID_OR_SEMANTIC,
+    ) -> None:
         super().__init__(message)
         self.relative = relative
+        self.drift_class = drift_class
+
+    @classmethod
+    def missing(cls, relative: PurePosixPath) -> _ViewEntryError:
+        return cls("Listed view entry disappeared", relative, DriftClass.SOURCE_CHANGED)
 
 
 def snapshot_file_view(
@@ -413,13 +423,15 @@ def snapshot_file_view(
     """Read a view tree; with `item_origin`, a refused entry is named as an item."""
     try:
         files, fingerprint = _read_file_tree(view_root, ignored_paths, profile, residue_prefixes)
-    except OSError as error:
+    except _ViewEntryError as error:
         items = (
-            (DriftEntry(DriftClass.INVALID_OR_SEMANTIC, error.relative, origin=item_origin),)
-            if isinstance(error, _ViewEntryError) and item_origin is not None
+            (DriftEntry(error.drift_class, error.relative, origin=item_origin),)
+            if item_origin is not None
             else ()
         )
-        raise PublishError(DriftClass.INVALID_OR_SEMANTIC, items=items) from error
+        raise PublishError(error.drift_class, items=items) from error
+    except OSError as error:
+        raise PublishError(DriftClass.INVALID_OR_SEMANTIC) from error
     if not files:
         raise PublishError(DriftClass.INVALID_OR_SEMANTIC)
     return WorkflowView(
@@ -1983,6 +1995,8 @@ def _read_file_tree(
             parent, prefix = following
             try:
                 directory = os.open(prefix.name, _DIRECTORY_FLAGS, dir_fd=parent)
+            except FileNotFoundError as error:
+                raise _ViewEntryError.missing(prefix) from error
             except OSError as error:
                 raise _ViewEntryError(
                     "View root contains an unreadable or non-regular entry", prefix
@@ -2028,6 +2042,8 @@ def _read_directory(
             continue
         try:
             info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError as error:
+            raise _ViewEntryError.missing(relative) from error
         except OSError as error:
             raise _ViewEntryError(
                 "View root contains an unreadable or non-regular entry", relative
@@ -2050,7 +2066,7 @@ def _read_directory(
                 "View root contains an unreadable or non-regular file", relative
             ) from error
         if snapshot is None:
-            raise _ViewEntryError("View root contains a non-regular file", relative)
+            raise _ViewEntryError.missing(relative)
         content = snapshot.content
         if profile == "opencode" and relative in _NATIVE_ONLY_PATHS["opencode"]:
             try:
