@@ -845,14 +845,16 @@ normal cleanup retains it, explicit name deletion refuses, and only
 supervisor storage are host-local too.
 
 The owner enables Tailscale SSH on intended targets and edits the tailnet policy.
-This generic example grants account-source TCP 22 and checked SSH only to tagged
-targets as the explicitly declared OS user:
+Replace `100.x.y.z` with the helper's current tailnet IPv4 from the
+[Machines page](https://tailscale.com/docs/concepts/ip-and-dns-addresses#finding-your-tailscale-ip-address)
+and fill in the account and declared target OS user.
 
 ```json
 {
   "tagOwners": {"tag:djinn-target": ["owner@example.com"]},
+  "hosts": {"djinn-helper-example": "100.x.y.z"},
   "grants": [{
-    "src": ["owner@example.com"],
+    "src": ["djinn-helper-example"],
     "dst": ["tag:djinn-target"],
     "ip": ["tcp:22"]
   }],
@@ -865,9 +867,31 @@ targets as the explicitly declared OS user:
 }
 ```
 
-Tag only intended targets; leave the helper untagged. The account source also
-covers other nodes owned by that account. `autogroup:self` would broaden
-destinations to the owner's devices. Review other rules for broader grants.
+[Tailscale SSH requires both rules](https://tailscale.com/docs/features/tailscale-ssh#ensure-tailscale-ssh-is-permitted-in-access-control-policies)
+to allow a connection. The [network grant](https://tailscale.com/docs/reference/syntax/grants#source-selectors)
+selects the helper by its `hosts` alias. The [SSH rule](https://tailscale.com/docs/reference/syntax/policy-file#tailscale-ssh)
+keeps `check`, the account as source and the declared OS user as the login.
+SSH sources have no IP or host alias selector. Tag only intended targets and
+keep the helper untagged so it can use [`check`](https://tailscale.com/docs/features/tailscale-ssh#limitations).
+For targets with a tailnet IPv4, Djinn's relay prefers that address and connects
+from the helper's tailnet IPv4.
+
+If [fresh enrollment changes the helper's address](https://tailscale.com/docs/concepts/ip-and-dns-addresses#forcing-an-ip-address-to-change)
+after `djinn clean all` or removing the helper from the tailnet, update the alias.
+With a stale alias, relay admission can fail if a target no longer resolves to a
+unique peer. The `relay-refused` journal event can report `declared address must
+resolve to exactly one peer`. If the target remains visible, a failed relay
+connection can log `upstream-refused`.
+
+Review [overlapping grants and ACLs](https://tailscale.com/docs/features/access-control/grants/grants-explained)
+for broader access to the targets and exclude TCP 22 from those rules.
+Use [port ranges](https://tailscale.com/docs/reference/syntax/grants#network-layer-capabilities)
+such as `tcp:1-21` and `tcp:23-65535` in grants to keep other TCP ports available.
+Use [policy `tests`](https://tailscale.com/docs/reference/syntax/policy-file#tests) to verify
+that the helper can reach a target on TCP 22 and another owner device is denied
+there but can reach a legitimate TCP port. Tailscale rejects policy updates
+that fail these tests.
+
 The default SSH check period is 12 hours and available on all plans;
 `checkPeriod: "always"` is an optional, plan-dependent per-connection check,
 not a Djinn promise of fresh MFA. See [policy syntax](https://tailscale.com/docs/reference/syntax/policy-file),
