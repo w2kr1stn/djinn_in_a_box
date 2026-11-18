@@ -6,9 +6,10 @@ import os
 import posixpath
 import re
 import sys
+from typing import cast
 
 denied_variable = "DJINN_DENIED_PATHS"
-file_keys = dict.fromkeys(("Read", "Edit", "Write"), "file_path")
+file_keys: dict[str, str] = dict.fromkeys(("Read", "Edit", "Write"), "file_path")
 file_keys["NotebookEdit"] = "notebook_path"
 file_keys["view_image"] = "path"
 patch_headers = ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
@@ -61,6 +62,7 @@ def names_command(command: str) -> bool:
 def check(payload: object, entries: list[str], home: str) -> None:
     if not isinstance(payload, dict):
         raise GuardError("invalid payload")
+    payload = cast(dict[str, object], payload)
     tool, args, cwd = (payload.get(key) for key in ("tool_name", "tool_input", "cwd"))
     if (
         not isinstance(tool, str)
@@ -69,6 +71,7 @@ def check(payload: object, entries: list[str], home: str) -> None:
         or not os.path.isabs(cwd)
     ):
         raise GuardError("invalid payload")
+    args = cast(dict[str, object], args)
     search = tool in ("Grep", "Glob")
     if tool not in file_keys and not search and tool not in ("Bash", "apply_patch"):
         return
@@ -96,10 +99,10 @@ def check(payload: object, entries: list[str], home: str) -> None:
         pattern = args.get("pattern", "")
         if not isinstance(pattern, str):
             raise GuardError("invalid payload")
-    if tool == "Glob":
-        prefix = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
-        if "/" in prefix:
-            roots.append(resolve(prefix[: prefix.rfind("/") + 1], roots[0], home))
+        if tool == "Glob":
+            prefix = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
+            if "/" in prefix:
+                roots.append(resolve(prefix[: prefix.rfind("/") + 1], roots[0], home))
     for entry in entries:
         shell_hit = False
         if tool == "Bash":
@@ -130,7 +133,9 @@ def main() -> int:
             entries = json.loads(configured)
         except ValueError as exc:
             raise GuardError("invalid DJINN_DENIED_PATHS") from exc
-        if not isinstance(entries, list) or not all(valid_entry(entry) for entry in entries):
+        if not isinstance(entries, list) or not all(
+            valid_entry(entry) for entry in cast(list[object], entries)
+        ):
             raise GuardError("invalid DJINN_DENIED_PATHS")
         if not entries:
             return 0
@@ -141,7 +146,7 @@ def main() -> int:
             payload = json.loads(raw)
         except ValueError as exc:
             raise GuardError("invalid payload") from exc
-        check(payload, entries, home)
+        check(payload, cast(list[str], entries), home)
     except Exception as exc:
         # Fail closed: an unhandled hook exception would let the tool run.
         reason = str(exc) if isinstance(exc, GuardError) else type(exc).__name__
