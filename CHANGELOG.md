@@ -156,6 +156,8 @@ Versioning before and after the first stable release.
 
 ### Security
 
+- Verify release checksums and run staged just, sops, and bun binaries before
+  replacing installed tools. Keep the existing binary if verification fails (#131).
 - The image builds verify the Docker CLI, Compose and GitHub CLI downloads
   against pinned checksums before installing them, like Buildx already did.
   Every verified build download retries transient network failures and is

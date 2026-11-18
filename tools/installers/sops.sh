@@ -1,6 +1,6 @@
 #!/bin/bash
 # SOPS - Secrets OPerationS (encrypted secrets management)
-set -e
+set -eo pipefail
 
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
@@ -10,14 +10,15 @@ mkdir -p "$INSTALL_DIR"
 # timeout fires (~15 min, observed at exactly half of the 52 MB binary).
 # --speed-time aborts the stall so --retry can start over. No --max-time here:
 # the binary is large and a slow line must not be mistaken for a hang.
-CURL_GUARDS=(--connect-timeout 10 --retry 4 --retry-delay 3
+CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
+             --connect-timeout 10 --retry 4 --retry-delay 3
              --speed-limit 2048 --speed-time 30)
 
 # Resolve version: use SOPS_VERSION env var, or fetch latest from GitHub
 if [[ -z "${SOPS_VERSION:-}" ]]; then
     SOPS_VERSION=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 \
         "https://api.github.com/repos/getsops/sops/releases/latest" \
-        | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+        | jq -r '.tag_name | strings | select(startswith("v")) | ltrimstr("v")')
 fi
 
 if ! [[ "$SOPS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -25,16 +26,37 @@ if ! [[ "$SOPS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-# Stage in a temporary file in the same directory, then move into place: a
-# partial transfer must never be left behind as $INSTALL_DIR/sops.
+version_line="sops $SOPS_VERSION"
+if installed=$("$INSTALL_DIR/sops" --disable-version-check --version 2>/dev/null </dev/null) \
+        && [[ "$installed" == "$version_line" ]]; then
+    echo "sops: Version $SOPS_VERSION already installed, skipping download" >&2
+    echo "$installed"
+    exit 0
+fi
+
+asset="sops-v${SOPS_VERSION}.linux.amd64"
+base="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}"
+if ! expected=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 "$base/sops-v${SOPS_VERSION}.checksums.txt" \
+        | awk -v f="$asset" '$2 == f || $2 == "*" f || $2 == "./" f {print $1}') \
+        || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "sops: Missing or invalid release checksum for $asset" >&2
+    exit 1
+fi
+
 staged=$(mktemp "$INSTALL_DIR/.sops.XXXXXX")
-trap 'rm -f "$staged"' EXIT
+trap 'rm -f -- "$staged"' EXIT
+curl -fsSL "${CURL_GUARDS[@]}" "$base/$asset" > "$staged"
+actual=$(sha256sum < "$staged")
+if [[ "$expected" != "${actual%% *}" ]]; then
+    echo "sops: checksum mismatch for $asset" >&2
+    exit 1
+fi
 
-curl -fsSL "${CURL_GUARDS[@]}" \
-    "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" \
-    -o "$staged"
 chmod +x "$staged"
-mv "$staged" "$INSTALL_DIR/sops"
-trap - EXIT
+if ! candidate=$("$staged" --disable-version-check --version </dev/null) || [[ "$candidate" != "$version_line" ]]; then
+    echo "sops: Invalid binary version (expected '$version_line', got '$candidate')" >&2
+    exit 1
+fi
 
-"$INSTALL_DIR/sops" --version
+mv -T "$staged" "$INSTALL_DIR/sops"
+echo "$candidate"
