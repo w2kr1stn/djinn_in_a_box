@@ -156,7 +156,7 @@ Versioning before and after the first stable release.
   run through wrappers that add the tools library directory only for themselves;
   the image and `.zshrc` no longer set `LD_LIBRARY_PATH`.
 - The dev image switches Claude Code's automatic updater off (`DISABLE_AUTOUPDATER=1`),
-  so a running dev container keeps the pinned version until a pin bump and rebuild (#187).
+  so no automatic update moves a running dev container off the pinned version (#187).
 
 ### Security
 
