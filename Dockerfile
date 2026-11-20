@@ -263,5 +263,5 @@ RUN chmod +x ~/entrypoint.sh ~/mcp-register.sh
 
 LABEL djinn.workflow.publisher="2"
 
-ENV SHELL=/bin/zsh
+ENV SHELL=/bin/zsh DISABLE_AUTOUPDATER=1
 ENTRYPOINT ["/home/dev/entrypoint.sh"]

@@ -25,3 +25,8 @@ def test_image_path_and_shell_initialization() -> None:
     zshrc = re.search(r"^RUN cat > ~/\.zshrc << 'EOF'\n(.*?)^EOF$", dockerfile, re.M | re.S)
     assert zshrc is not None
     assert not re.search(r"\bexport\s+(?:PATH|LD_LIBRARY_PATH)=", zshrc[1])
+
+
+def test_image_disables_claude_auto_updater() -> None:
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+    assert re.search(r"^ENV\s+(?:.*[ \t])?DISABLE_AUTOUPDATER=1(?:\s|$)", dockerfile, re.M)

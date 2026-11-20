@@ -155,6 +155,8 @@ Versioning before and after the first stable release.
   profile no longer resets that `PATH`. psql, pg_dump, pg_restore and pg_dumpall
   run through wrappers that add the tools library directory only for themselves;
   the image and `.zshrc` no longer set `LD_LIBRARY_PATH`.
+- The dev image switches Claude Code's automatic updater off (`DISABLE_AUTOUPDATER=1`),
+  so no automatic update moves a running dev container off the pinned version (#187).
 
 ### Security
 
