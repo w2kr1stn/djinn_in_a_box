@@ -5,6 +5,8 @@ set -eo pipefail
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
 mkdir -p "$INSTALL_DIR"
+staging=$(mktemp -d "$INSTALL_DIR/.sops.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
 
 # A stalled transfer would otherwise hold startup until the kernel's retransmit
 # timeout fires (~15 min, observed at exactly half of the 52 MB binary).
@@ -16,9 +18,8 @@ CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
 
 # Resolve version: use SOPS_VERSION env var, or fetch latest from GitHub
 if [[ -z "${SOPS_VERSION:-}" ]]; then
-    SOPS_VERSION=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 \
-        "https://api.github.com/repos/getsops/sops/releases/latest" \
-        | jq -r '.tag_name | strings | select(startswith("v")) | ltrimstr("v")')
+    curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$staging/release.json" "https://api.github.com/repos/getsops/sops/releases/latest"
+    SOPS_VERSION=$(jq -r '.tag_name | strings | select(startswith("v")) | ltrimstr("v")' "$staging/release.json")
 fi
 
 if ! [[ "$SOPS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -36,8 +37,6 @@ fi
 
 asset="sops-v${SOPS_VERSION}.linux.amd64"
 base="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}"
-staging=$(mktemp -d "$INSTALL_DIR/.sops.XXXXXX")
-trap 'rm -rf -- "$staging"' EXIT
 checksums="$staging/sops-v${SOPS_VERSION}.checksums.txt"
 if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/sops-v${SOPS_VERSION}.checksums.txt" \
         || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \

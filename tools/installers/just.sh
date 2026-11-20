@@ -5,6 +5,9 @@ set -eo pipefail
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
 mkdir -p "$INSTALL_DIR"
+# Stage on the target filesystem so the final move replaces the binary atomically.
+staging=$(mktemp -d "$INSTALL_DIR/.just.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
 
 # Bound metadata requests, while allowing a slow artifact transfer to finish.
 CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
@@ -13,9 +16,8 @@ CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
 
 # Resolve version: use JUST_VERSION env var, or fetch latest from GitHub
 if [[ -z "${JUST_VERSION:-}" ]]; then
-    JUST_VERSION=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 \
-        "https://api.github.com/repos/casey/just/releases/latest" \
-        | jq -r '.tag_name // empty')
+    curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$staging/release.json" "https://api.github.com/repos/casey/just/releases/latest"
+    JUST_VERSION=$(jq -r '.tag_name // empty' "$staging/release.json")
 fi
 
 if ! [[ "$JUST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -34,9 +36,6 @@ fi
 asset="just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 base="https://github.com/casey/just/releases/download/${JUST_VERSION}"
 
-# Stage on the target filesystem so the final move replaces the binary atomically.
-staging=$(mktemp -d "$INSTALL_DIR/.just.XXXXXX")
-trap 'rm -rf -- "$staging"' EXIT
 checksums="$staging/SHA256SUMS"
 if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/SHA256SUMS" \
         || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \

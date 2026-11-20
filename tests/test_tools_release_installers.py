@@ -13,6 +13,7 @@ import pytest
 from test_tools_herdr_installer import ROOT, run_command, write_executable
 
 VERSION = "1.2.3"
+RETRIES = {"retry-latest": "API_URL", "retry-checksum": "SUMS_URL", "retry-artifact": "ASSET_URL"}
 EXTRA_OUTPUT = [("x", 0), ("\n", 0), ("\nextra output", 0)]
 
 
@@ -110,13 +111,13 @@ esac
     return Release(name, tmp_path, env, VERSION if name == "bun" else f"{name} {VERSION}")
 
 
-@pytest.mark.parametrize("mode", ["latest", "pinned-backslash", "retry-checksum", "retry-artifact"])
+@pytest.mark.parametrize("mode", ["latest", "pinned-backslash", *RETRIES])
 def test_verified_install(release: Release, mode: str) -> None:
     if mode == "pinned-backslash":
         release.env["TOOLS_BIN"] = str(release.root / "tools\\volume/bin")
-    if retry_url := {"retry-checksum": "SUMS_URL", "retry-artifact": "ASSET_URL"}.get(mode):
+    if retry_url := RETRIES.get(mode):
         release.env["RETRY_URL"] = release.env[retry_url]
-    pin = "" if mode == "latest" else VERSION
+    pin = "" if mode in {"latest", "retry-latest"} else VERSION
     expected = release.package(release.version_line)
     result = release.run(pin=pin)
     assert (result.returncode, result.stdout) == (0, release.version_line + "\n"), result.stderr

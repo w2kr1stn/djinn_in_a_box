@@ -5,6 +5,8 @@ set -eo pipefail
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
 mkdir -p "$INSTALL_DIR"
+staging=$(mktemp -d "$INSTALL_DIR/.bun.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
 
 # Bound metadata requests, while allowing a slow artifact transfer to finish.
 CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
@@ -13,9 +15,8 @@ CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
 
 # Resolve version: use BUN_VERSION env var, or fetch latest from GitHub
 if [[ -z "${BUN_VERSION:-}" ]]; then
-    BUN_VERSION=$(curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 \
-        "https://api.github.com/repos/oven-sh/bun/releases/latest" \
-        | jq -r '.tag_name | strings | select(startswith("bun-v")) | ltrimstr("bun-v")')
+    curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$staging/release.json" "https://api.github.com/repos/oven-sh/bun/releases/latest"
+    BUN_VERSION=$(jq -r '.tag_name | strings | select(startswith("bun-v")) | ltrimstr("bun-v")' "$staging/release.json")
 fi
 
 if ! [[ "$BUN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -33,8 +34,6 @@ fi
 
 asset="bun-linux-x64.zip"
 base="https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}"
-staging=$(mktemp -d "$INSTALL_DIR/.bun.XXXXXX")
-trap 'rm -rf -- "$staging"' EXIT
 checksums="$staging/SHASUMS256.txt"
 if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/SHASUMS256.txt" \
         || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \
