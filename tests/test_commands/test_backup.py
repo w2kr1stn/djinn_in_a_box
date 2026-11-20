@@ -30,6 +30,7 @@ from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import host_runtime, hostctl
 from djinn_in_a_box.core.docker import RunResult, SyncRestoreResult
 from djinn_in_a_box.core.exceptions import ZoneConfigurationError
+from djinn_in_a_box.core.host_runtime import inspect_object
 from djinn_in_a_box.core.ssh_delivery import GitSSHError
 
 runner = CliRunner()
@@ -792,6 +793,19 @@ class TestBackupCommand:
             backup_module.backup()
 
         assert exc_info.value.exit_code == 1
+
+    def test_unknown_volume_inspection_preserves_existing_backup(self, tmp_path, monkeypatch):
+        archive = tmp_path / "djinn-backup-2026-01-01.tar.gz"
+        archive.write_bytes(b"previous backup")
+        failure = subprocess.CompletedProcess([], 1, "", "open metadata: no such file or directory")
+        monkeypatch.setattr(_lifecycle, "get_running_containers", lambda **kw: [])
+        monkeypatch.setattr(backup_module, "load_config", lambda: AppConfig(code_dir=tmp_path))
+        monkeypatch.setattr(backup_module, "BACKUPS_DIR", tmp_path)
+        monkeypatch.setattr(host_runtime, "inspect_object", inspect_object)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: failure)
+        result = runner.invoke(app, ["backup", "--categories", "data"])
+        assert result.exit_code == 1 and "ownership is unknown" in result.output
+        assert archive.read_bytes() == b"previous backup"
 
     def test_aborts_when_containers_running(self) -> None:
         with patch.object(_lifecycle, "get_running_containers", return_value=["djinn"]):

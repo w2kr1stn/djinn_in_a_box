@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tarfile
 from contextlib import nullcontext
@@ -19,6 +20,7 @@ from djinn_in_a_box.config.defaults import VOLUME_CATEGORIES
 from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.core import docker
 from djinn_in_a_box.core.docker import ContainerMount, DockerMode, MountCollisionError, RunResult
+from djinn_in_a_box.core.host_runtime import inspect_object
 
 runner = CliRunner()
 PACKAGE_NAME = "djinn-packages"
@@ -57,7 +59,9 @@ def _inspect_package_volume(
 ) -> subprocess.CompletedProcess[str]:
     name = command[-1]
     if name == PACKAGE_NAME:
-        return subprocess.CompletedProcess(command, 0, stdout=f"{name}\n", stderr="")
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps([{"Name": name}]), stderr=""
+        )
     return subprocess.CompletedProcess(
         command,
         1,
@@ -182,6 +186,7 @@ def test_packages_clean_lifecycle(
 
     with (
         patch.object(container, "load_config", return_value=config),
+        patch.object(docker.host_runtime, "inspect_object", inspect_object),
         patch.object(docker.subprocess, "run", side_effect=_inspect_package_volume),
         patch.object(container, "delete_volumes", return_value={PACKAGE_NAME: True}) as delete,
     ):
@@ -226,6 +231,7 @@ def test_default_backup_includes_packages_volume(
     with (
         patch.object(backup_module, "load_config", return_value=config),
         patch.object(_lifecycle, "get_running_containers", return_value=[]),
+        patch.object(docker.host_runtime, "inspect_object", inspect_object),
         patch.object(docker.subprocess, "run", side_effect=_inspect_package_volume),
         patch.object(backup_module, "backup_volume", side_effect=write_volume) as backup_volume,
         patch.object(backup_module, "BACKUPS_DIR", backups_dir),

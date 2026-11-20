@@ -200,7 +200,7 @@ def _sops_age_key_check(config: AppConfig, config_root: Path) -> Check | None:
 
 
 # -----------------------------------------------------------------------------
-# Low-level probes (each degrades to a boolean; never raises)
+# Low-level probes
 # -----------------------------------------------------------------------------
 def _docker_installed() -> bool:
     return Path(DOCKER_EXECUTABLE).is_file() and os.access(DOCKER_EXECUTABLE, os.X_OK)
@@ -240,7 +240,9 @@ def buildx_ok() -> bool:
 
 
 def _image_built() -> bool:
-    return _command_ok([DOCKER_EXECUTABLE, "image", "inspect", _IMAGE])
+    from djinn_in_a_box.core.host_runtime import inspect_object
+
+    return inspect_object(_IMAGE, DOCKER_EXECUTABLE, missing="image") is not None
 
 
 def _seed_target_has_expected_type(path: Path, kind: str) -> bool:
@@ -885,7 +887,9 @@ def _hostctl_journal_check(*, daemon: bool) -> Check:
         if daemon:
             try:
                 helper = host_runtime.inspect_object(
-                    hostctl.HELPER_NAME, hostctl.DOCKER_EXECUTABLE, missing="No such container",
+                    hostctl.HELPER_NAME,
+                    hostctl.DOCKER_EXECUTABLE,
+                    missing="container",
                 )
                 if (
                     helper is None or hostctl.generation(helper) != latest
@@ -1181,7 +1185,7 @@ def agent_docker_checks(*, daemon: bool) -> list[Check]:
         ).split()
         stale = [item for item in resources if item != verified.companion_id]
         for name in endpoints:
-            volume = host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE, "volume")
+            volume = host_runtime.inspect_object(name, hostctl.DOCKER_EXECUTABLE, missing="volume")
             if volume is None:
                 raise ValueError("endpoint disappeared during inspection")
             if (
@@ -1425,25 +1429,26 @@ def run_checks(config: AppConfig | None, config_error: str | None = None) -> lis
     checks.extend(agent_docker_checks(daemon=daemon))
     checks.extend(hostctl_checks(config, daemon=daemon))
 
-    image = daemon and _image_built()
-    checks.append(
-        Check(
-            "Image built",
-            Status.PASS if image else Status.WARN,
-            f"{_IMAGE} present" if image else "not built",
-            "" if image else "Run `djinn build`.",
-        )
-    )
-
-    net = daemon and network_exists(DJINN_NETWORK)
-    checks.append(
-        Check(
+    for name, probe, present, absent, remedy in (
+        ("Image built", _image_built, f"{_IMAGE} present", "not built", "Run `djinn build`."),
+        (
             "Network",
-            Status.PASS if net else Status.WARN,
-            DJINN_NETWORK if net else "missing",
-            "" if net else "Created automatically by `djinn start`.",
-        )
-    )
+            lambda: network_exists(DJINN_NETWORK),
+            DJINN_NETWORK,
+            "missing",
+            "Created automatically by `djinn start`.",
+        ),
+    ):
+        try:
+            exists = probe() if daemon else None
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            exists = None
+        if exists is None:
+            checks.append(Check(name, Status.WARN, "check unavailable"))
+        elif exists:
+            checks.append(Check(name, Status.PASS, present))
+        else:
+            checks.append(Check(name, Status.WARN, absent, remedy))
 
     inspection = docker_core.inspect_running_desktop()
     for row in inspection.channels:

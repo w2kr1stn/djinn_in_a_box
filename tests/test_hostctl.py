@@ -20,6 +20,7 @@ from djinn_in_a_box.config.models import AppConfig
 from djinn_in_a_box.config.ssh import HostctlConfig, duration_minutes
 from djinn_in_a_box.config.volumes import HOSTCTL_STATE_VOLUME, PROTECTED_INTERNAL_VOLUMES
 from djinn_in_a_box.core import docker, host_runtime, hostctl
+from djinn_in_a_box.core.host_runtime import inspect_object
 
 
 @pytest.fixture
@@ -133,7 +134,7 @@ def fake_transitions(inputs, monkeypatch):
         return True
 
     monkeypatch.setattr(docker, "ensure_network", ensure)
-    monkeypatch.setattr(host_runtime, "inspect_object", lambda *args: state["network"])
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *args, **kw: state["network"])
 
     def command(*args, **kwargs):
         state["calls"].append(args)
@@ -363,9 +364,16 @@ def test_network_failure_prevents_helper(inputs, fake_transitions, monkeypatch, 
         fake_transitions["network"] = {"Name": hostctl.HELPER_NETWORK}
         monkeypatch.setattr(docker, "ensure_network", lambda name: False)
     else:
-        monkeypatch.setattr(host_runtime, "inspect_object", lambda *args: None)
+        message = f"Error response from daemon: network {hostctl.HELPER_NETWORK} not found"
+        monkeypatch.setattr(host_runtime, "inspect_object", inspect_object)
+        result = subprocess.CompletedProcess([], 1, "", message)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
     with pytest.raises(hostctl.HostctlError, match="network"):
         hostctl.open_window(inputs)
+    row = json.loads((hostctl.state_root() / "journal.jsonl").read_text().splitlines()[-1])
+    assert row["event"] == "on-refused"
+    reason = "network ensure failed" if failure == "create" else "network verification failed"
+    assert row["reason"] == reason
     assert not any(c[0] == "run" for c in fake_transitions["calls"])
 
 
@@ -651,30 +659,14 @@ def test_clean_all_delete_state_verifies_stop_and_deletion(inputs, fake_transiti
     fake_transitions["helper"] = helper()
     volume = {"Name": HOSTCTL_STATE_VOLUME}
     volumes = iter([volume, None])
-    monkeypatch.setattr(host_runtime, "inspect_object", lambda *args: next(volumes))
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *args, **kw: next(volumes))
     with hostctl.control_guard():
         hostctl.delete_state_locked()
     calls = fake_transitions["calls"]
     assert calls.index(("rm", "helper-a")) < calls.index(("volume", "rm", HOSTCTL_STATE_VOLUME))
-    monkeypatch.setattr(host_runtime, "inspect_object", lambda *args: volume)
+    monkeypatch.setattr(host_runtime, "inspect_object", lambda *args, **kw: volume)
     with pytest.raises(hostctl.HostctlError, match="deletion could not"):
         hostctl.delete_state_locked()
-
-
-@pytest.mark.parametrize(
-    "resource,message",
-    [
-        ("container", "Error response from daemon: No such container: generic"),
-        ("volume", "Error response from daemon: get generic: no such volume"),
-    ],
-)
-def test_missing_daemon_shapes_and_closed_inspect_stdin(monkeypatch, resource, message):
-    def run(argv, **kwargs):
-        assert kwargs["stdin"] == subprocess.DEVNULL
-        return subprocess.CompletedProcess(argv, 1, "[]", message)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert host_runtime.inspect_object("generic", "/usr/bin/docker", resource) is None
 
 
 def test_no_git_host_alias_collision(inputs):
@@ -733,7 +725,7 @@ def test_real_null_or_foreign_labels_refuse_ownership(monkeypatch, labels):
     monkeypatch.setattr(
         host_runtime,
         "inspect_object",
-        lambda *args: {
+        lambda *args, **kw: {
             "Id": "foreign-helper",
             "Config": {"Labels": labels},
             "State": {"Running": True},
@@ -753,7 +745,7 @@ def test_shared_host_runtime_captured_calls_close_stdin(monkeypatch, operation):
     monkeypatch.setattr(
         host_runtime,
         "inspect_object",
-        lambda *args: {
+        lambda *args, **kw: {
             "Name": "disposable",
             "Labels": {
                 host_runtime.GENERATION_LABEL: "generation-a",
@@ -1031,7 +1023,8 @@ if args[:2] == ['container', 'inspect']:
     else:
         print('Error response from daemon: No such container: '+args[2], file=sys.stderr)
         sys.exit(1)
-elif args[:2] == ['network', 'inspect']: print(json.dumps([{{'Name': 'djinn-network'}}]))
+elif args[:2] == ['network', 'inspect']:
+    print(json.dumps([{{'Name': args[2], 'Id': 'network-id'}}]))
 elif args[:2] == ['volume', 'inspect']:
     print('Error response from daemon: get '+args[2]+': no such volume', file=sys.stderr)
     sys.exit(1)
@@ -1313,3 +1306,63 @@ def test_compose_loader_only_accepts_merge_tags(compose_yaml_loader):
     assert yaml.load("value: !reset []", Loader=compose_yaml_loader) == {"value": []}
     with pytest.raises(yaml.constructor.ConstructorError):
         yaml.load("value: !unknown []", Loader=compose_yaml_loader)
+
+
+def test_off_refuses_unverified_helper(inputs, monkeypatch):
+    result = subprocess.CompletedProcess([], 1, "", "open metadata: no such file or directory")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
+    with pytest.raises(host_runtime.GitSSHError, match="ownership is unknown"):
+        hostctl.close_window()
+    assert not (hostctl.state_root() / "journal.jsonl").exists()
+
+
+def test_unverified_dev_refuses_admission_even_with_override(monkeypatch):
+    from djinn_in_a_box.core import host_sealing
+
+    failure = subprocess.CompletedProcess([], 1, "", "Error: get helper: no such volume")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: failure)
+    assessment = host_sealing.inspect_assessment()
+    with pytest.raises(hostctl.HostctlError, match="inspection uncertain"):
+        assessment.require(allow_unsealed=True)
+
+
+def test_clean_all_keeps_sync_after_unverified_dev(tmp_path, monkeypatch):
+    from djinn_in_a_box.commands import container
+
+    sentinel = tmp_path / "sync"
+    sentinel.write_text("preserve")
+    failure = subprocess.CompletedProcess([], 1, "", "open metadata: no such file or directory")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: failure)
+    monkeypatch.setattr(container, "_load_optional_config", lambda: None)
+    monkeypatch.setattr(container, "_validate_opencode_carrier", lambda config: None)
+    monkeypatch.setattr(container, "_refuse_running_audit_sessions", lambda: None)
+    monkeypatch.setattr(container, "compose_down", lambda: docker.RunResult(0))
+    monkeypatch.setattr(container, "_logout_opencode", lambda config: sentinel.unlink())
+    monkeypatch.setattr(hostctl, "delete_state_locked", lambda: pytest.fail("unexpected deletion"))
+    result = CliRunner().invoke(app, ["clean", "all", "--force"])
+    assert result.exit_code == 1 and "ownership is unknown" in result.output
+    assert sentinel.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("kind", ["network", "volume", "image"])
+def test_failed_inspection_refuses_create_inventory_or_pull(monkeypatch, kind):
+    from djinn_in_a_box.commands import container
+
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[1:3])
+        return subprocess.CompletedProcess(argv, 1, "", "open metadata: no such file or directory")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if kind == "network":
+        assert not docker.ensure_network("obj")
+    elif kind == "volume":
+        with pytest.raises(host_runtime.GitSSHError):
+            docker.get_existing_volumes_by_category("cache")
+    else:
+        import typer
+
+        with pytest.raises(typer.Exit):
+            container._pull_agent_docker_image_if_missing()
+    assert calls == [[kind, "inspect"]]

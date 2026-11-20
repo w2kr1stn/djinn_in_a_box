@@ -414,7 +414,8 @@ class TestRefreshOpenCodeWorkflow:
         self, session_mgr: SessionManager
     ) -> None:
         container = MagicMock(returncode=0, stdout="sha256:image\n", stderr="")
-        image = MagicMock(returncode=1, stdout="", stderr="")
+        missing = "Error response from daemon: No such image: sha256:image\n"
+        image = MagicMock(returncode=1, stdout="", stderr=missing)
         daemon = MagicMock(returncode=0, stdout="", stderr="")
 
         with patch(_SUBPROCESS_RUN, side_effect=(container, image, daemon)):

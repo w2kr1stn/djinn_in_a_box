@@ -612,14 +612,14 @@ def test_preparation_fails_closed_and_cleans_partial_resources(
         actual["Config"]["Labels"][host_runtime.GENERATION_LABEL] = "foreign"
         inventory[actual["Id"]] = actual
 
-    def inspect(name, binary, resource="container", **kwargs):
-        if resource == "network":
+    def inspect(name, binary, *, missing, **kwargs):
+        if missing == "network":
             return {"Id": manifest["network_id"]}
-        if resource == "image":
+        if missing == "image":
             return (
                 image if name == agent_docker.IMAGE else {**image, "Id": manifest["dev_image_id"]}
             )
-        if resource == "volume":
+        if missing == "volume":
             if name == "djinn-test-cache":
                 return {
                     **endpoint,
@@ -754,7 +754,7 @@ def test_firewall_initializer_provenance_and_partial_cleanup(tmp_path, monkeypat
     name = actual["Name"].lstrip("/")
     commands = []
 
-    def inspect(identity, binary, resource="container", **kwargs):
+    def inspect(identity, binary, *, missing, **kwargs):
         if identity == name:
             return inventory.get(actual["Id"])
         return inventory.get(identity)

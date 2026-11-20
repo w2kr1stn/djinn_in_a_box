@@ -7,6 +7,7 @@ import posixpath
 import re
 import shlex
 import sys
+from typing import cast
 
 denied_variable = "DJINN_DENIED_PATHS"
 
@@ -28,8 +29,11 @@ def main() -> int:
         if any(ord(char) < 32 or ord(char) == 127 for char in path):
             raise ValueError("PATH contains a control character")
         entries = json.loads(os.environ.get(denied_variable) or "[]")
-        if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+        if not isinstance(entries, list) or not all(
+            isinstance(entry, str) for entry in cast(list[object], entries)
+        ):
             raise ValueError("invalid DJINN_DENIED_PATHS")
+        entries = cast(list[str], entries)
         if not any(path == entry or path.startswith(entry + "/") for entry in entries):
             raise ValueError("PATH is not below a denied path")
         if depth not in ("0", "1", "2", "3", "4", "5"):

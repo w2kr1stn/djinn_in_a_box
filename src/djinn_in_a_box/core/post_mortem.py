@@ -206,7 +206,9 @@ def _timeout(deadline: float) -> float:
 
 def _stopped_same_run(docker_path: str, identity: str, started_at: str, deadline: float) -> bool:
     try:
-        data = host_runtime.inspect_object(identity, docker_path, timeout=_timeout(deadline))
+        data = host_runtime.inspect_object(
+            identity, docker_path, missing="container", timeout=_timeout(deadline)
+        )
     except Exception as exc:
         raise _RecorderError("inspect") from exc
     return (
@@ -441,6 +443,7 @@ def record(
                 actual = host_runtime.inspect_object(
                     candidate.identifier,
                     docker_path,
+                    missing="container",
                     timeout=_timeout(deadline),
                 )
             except Exception as exc:

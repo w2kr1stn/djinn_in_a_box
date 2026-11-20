@@ -9,7 +9,7 @@ import sys
 import threading
 
 
-def receive(connection, length):
+def receive(connection: socket.socket, length: int) -> bytes:
     data = bytearray()
     while len(data) < length:
         part = connection.recv(length - len(data))
@@ -19,7 +19,7 @@ def receive(connection, length):
     return bytes(data)
 
 
-def connect(host, port):
+def connect(host: str, port: int) -> socket.socket:
     if port != 22:
         raise ValueError("hostctl permits TCP port 22 only")
     try:
@@ -56,8 +56,8 @@ def connect(host, port):
         raise
 
 
-def stream(connection):
-    def upload():
+def stream(connection: socket.socket) -> None:
+    def upload() -> None:
         try:
             while data := os.read(0, 65536):
                 connection.sendall(data)
@@ -69,10 +69,10 @@ def stream(connection):
     while data := connection.recv(65536):
         view = memoryview(data)
         while view:
-            view = view[os.write(1, view):]
+            view = view[os.write(1, view) :]
 
 
-def main():
+def main() -> int:
     try:
         if len(sys.argv) != 3:
             raise ValueError("usage: djinn-hostctl-connect <host> <port>")

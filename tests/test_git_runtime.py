@@ -25,49 +25,53 @@ from djinn_in_a_box.core.ssh_delivery import GitSSHError, read_public_delivery
 
 
 @pytest.mark.parametrize(
-    "stderr",
+    "resource,name,diagnostic",
     [
-        "Error response from daemon: get X: no such volume",
-        "Error response from daemon: No such container: X",
-        "NO SUCH image: X",
+        ("container", "obj", "No such container: obj"),
+        ("volume", "obj", "get obj: no such volume"),
+        ("network", "obj", "network obj not found"),
+        ("image", "repo/obj", "No such image: repo/obj:latest"),
+        ("image", "registry:5000/obj:tag", "No such image: registry:5000/obj:tag"),
+        ("image", "obj@sha256:" + "a" * 64, "No such image: obj@sha256:" + "a" * 64),
     ],
 )
-def test_inspect_object_default_missing_match_is_unchanged(monkeypatch, stderr):
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", stderr)
-    )
-    assert inspect_object("X", "/fake/docker", "volume") is None
+def test_resource_absence_requires_matching_diagnostic(monkeypatch, resource, name, diagnostic):
+    def run(args, **kwargs):
+        assert args == ["/fake/docker", resource, "inspect", name]
+        assert kwargs["timeout"] == 1.25 and kwargs["stdin"] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(args, 1, "[]", stderr)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    for prefix in ("Error response from daemon: ", "Error: "):
+        stderr = prefix + diagnostic + "\n"
+        assert inspect_object(name, "/fake/docker", missing=resource, timeout=1.25) is None
+    for diagnostic_error in (
+        "open metadata: no such file or directory",
+        "permission denied",
+        diagnostic.swapcase(),
+        diagnostic.replace(name, name + "-other"),
+        "storage detail: " + diagnostic,
+        diagnostic + "\npermission denied",
+        "get obj: no such volume" if resource == "container" else "No such container: obj",
+    ):
+        stderr = diagnostic_error
+        with pytest.raises(GitSSHError, match="Docker inspection failed"):
+            inspect_object(name, "/fake/docker", missing=resource, timeout=1.25)
+
+
+def test_inspection_requires_explicit_absence_condition():
+    with pytest.raises(TypeError, match="missing"):
+        inspect_object("obj")
 
 
 @pytest.mark.parametrize(
-    "stderr, missing, absent",
-    [
-        ("Error response from daemon: No such container: X", "No such container", True),
-        ("Error: No such container: X", "No such container", True),
-        ("open /x: no such file or directory", "No such container", False),
-        ("Error response from daemon: get X: no such volume", "No such container", False),
-        ("permission denied", "No such container", False),
-        ("Error response from daemon: no such container: X", "No such container", False),
-        ("Error response from daemon: No such container: X", "no such", False),
-        ("Error response from daemon: get X: no such volume", "no such", True),
-        ("Error response from daemon: network X not found", "network X not found", True),
-    ],
+    "stdout", ["not json", "[]", "[null]", "[{}]", '[{"Id": null}]', "[{}, {}]"]
 )
-def test_inspect_object_explicit_missing_is_case_sensitive(monkeypatch, stderr, missing, absent):
-    calls = []
-
-    def inspect(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, 1, "", stderr)
-
-    monkeypatch.setattr(subprocess, "run", inspect)
-    if absent:
-        assert inspect_object("X", "/fake/docker", missing=missing, timeout=1.25) is None
-    else:
-        with pytest.raises(GitSSHError, match="Docker inspection failed"):
-            inspect_object("X", "/fake/docker", missing=missing, timeout=1.25)
-    assert calls[0][0] == ["/fake/docker", "container", "inspect", "X"]
-    assert calls[0][1]["timeout"] == 1.25
+def test_malformed_success_is_an_inspection_failure(monkeypatch, stdout):
+    result = subprocess.CompletedProcess([], 0, stdout, "")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
+    with pytest.raises(GitSSHError, match="invalid Docker inspection"):
+        inspect_object("obj", missing="container")
 
 
 @pytest.fixture(autouse=True)
@@ -609,3 +613,15 @@ def test_live_runtime_control_files_are_private(git_inputs, fake_docker, monkeyp
             if path.is_relative_to(root) and path.relative_to(root).parts[0] != "private"
         }
         assert controls == {path for path in files if path.parent == root}
+
+
+def test_discard_retains_unverified_volume(tmp_path, monkeypatch):
+    state = {"generation": "g", "volumes": ["data"]}
+    owner = host_runtime.GitRuntime(tmp_path, "g", None)
+    monkeypatch.setattr(host_runtime, "read_state", lambda root: state)
+    monkeypatch.setattr(host_runtime, "save_state", lambda *a: pytest.fail("unexpected write"))
+    failure = subprocess.CompletedProcess([], 1, "", "open metadata: no such file or directory")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: failure)
+    with pytest.raises(GitSSHError, match="ownership is unknown"):
+        owner.discard_volume("data")
+    assert state["volumes"] == ["data"]

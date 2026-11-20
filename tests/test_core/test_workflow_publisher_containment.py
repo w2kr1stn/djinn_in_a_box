@@ -28,6 +28,7 @@ from djinn_in_a_box.core.workflow_publisher import (
     RUNTIME_MANIFEST_NAME,
     CarrierFragment,
     DriftClass,
+    DriftEntry,
     PublishedFile,
     PublishError,
     PublishResult,
@@ -658,6 +659,59 @@ def test_source_fingerprint_matches_the_previous_reader(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("stage", "failure"),
+    (
+        pytest.param("stat", None, id="stat-absence"),
+        pytest.param("pin", None, id="pin-absence"),
+        pytest.param("directory", None, id="directory-absence"),
+        pytest.param("stat", errno.EACCES, id="stat-permission"),
+        pytest.param("pin", errno.EIO, id="pin-io"),
+        pytest.param("directory", errno.EACCES, id="directory-permission"),
+    ),
+)
+def test_listed_source_entry_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, failure: int | None
+) -> None:
+    name = "vanishing"
+    path = tmp_path / name
+    if stage == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(b"workflow\n")
+    real_stat, real_open = os.stat, os.open
+
+    def fail_or_remove(directory: int) -> None:
+        if failure is not None:
+            raise OSError(failure, os.strerror(failure), name)
+        remove = os.rmdir if stage == "directory" else os.unlink
+        remove(name, dir_fd=directory)
+
+    def stat_entry(path: Any, *, dir_fd: int | None = None, follow_symlinks: bool = True) -> Any:
+        if dir_fd is not None and path == name:
+            fail_or_remove(dir_fd)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    def open_entry(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        expected_flag = os.O_DIRECTORY if stage == "directory" else os.O_PATH
+        if dir_fd is not None and path == name and flags & expected_flag:
+            fail_or_remove(dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    if stage == "stat":
+        monkeypatch.setattr(os, "stat", stat_entry)
+    else:
+        monkeypatch.setattr(os, "open", open_entry)
+    before = _open_descriptors()
+    with pytest.raises(PublishError) as refused:
+        snapshot_file_view(tmp_path, source="claude", item_origin="seed")
+
+    expected = DriftClass.SOURCE_CHANGED if failure is None else DriftClass.INVALID_OR_SEMANTIC
+    assert refused.value.drift_class is expected
+    assert refused.value.items == (DriftEntry(expected, _p(name), origin="seed"),)
+    assert _open_descriptors() == before
+
+
 @pytest.mark.parametrize("kind", ("directory-link", "file-link", "fifo"))
 def test_source_tree_refuses_links_and_special_files(tmp_path: Path, kind: str) -> None:
     _canonical, _target, outside = _roots(tmp_path)
@@ -703,13 +757,16 @@ def test_links_at_or_inside_runtime_residue_stay_ignored(tmp_path: Path, residue
     assert [item.relative_path for item in view.files] == [_p("AGENTS.md")]
 
 
-def test_linked_source_root_is_refused(tmp_path: Path) -> None:
-    _canonical, _target, outside = _roots(tmp_path)
-    alias = tmp_path / "alias"
-    alias.symlink_to(outside, target_is_directory=True)
+@pytest.mark.parametrize("kind", ("linked", "missing", "empty"))
+def test_unusable_source_root_is_invalid(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "source"
+    if kind == "linked":
+        root.symlink_to(tmp_path, target_is_directory=True)
+    elif kind == "empty":
+        root.mkdir()
 
     with pytest.raises(PublishError) as refused:
-        snapshot_file_view(alias, source="claude")
+        snapshot_file_view(root, source="claude")
 
     assert refused.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
 
@@ -909,8 +966,11 @@ def test_missing_proc_fails_closed_instead_of_reading_absent(
     result = _publish(canonical, target, _view())
     with pytest.raises(PublishError) as read:
         read_regular_file(target, _p("AGENTS.md"))
+    with pytest.raises(PublishError) as source:
+        snapshot_file_view(target, source="claude")
 
     assert result.drift_class is DriftClass.INVALID_OR_SEMANTIC
+    assert source.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
     assert (target / "AGENTS.md").read_bytes() == b"unmanaged operator file\n"
     assert read.value.drift_class is DriftClass.INVALID_OR_SEMANTIC
 
