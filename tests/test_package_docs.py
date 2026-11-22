@@ -36,10 +36,10 @@ def _table_rows(section: str) -> list[list[str]]:
 
 
 def test_readme_package_volume_row_matches_compose_and_category_registry() -> None:
-    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    storage_docs = (_ROOT / "docs" / "storage-and-recovery.md").read_text(encoding="utf-8")
     compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     section = _bounded_block(
-        readme,
+        storage_docs,
         "Named volumes are Docker-managed and host-local:",
         "The backup command includes credentials",
     )
@@ -62,12 +62,12 @@ def test_readme_package_volume_row_matches_compose_and_category_registry() -> No
 
 
 def test_package_docs_describe_root_owned_list() -> None:
-    readme = (_ROOT / "README.md").read_text()
-    assert "sudo sed -i '/^NAME$/d' /var/lib/djinn-packages/packages.txt" in readme
-    assert "root:root 0644" in readme and "root:root 0755" in readme
-    assert "Agents cannot change it" in readme
+    storage_docs = (_ROOT / "docs" / "storage-and-recovery.md").read_text()
+    assert "sudo sed -i '/^NAME$/d' /var/lib/djinn-packages/packages.txt" in storage_docs
+    assert "root:root 0644" in storage_docs and "root:root 0755" in storage_docs
+    assert "Agents cannot change it" in storage_docs
     for name in (
-        "README.md",
+        "docs/storage-and-recovery.md",
         "SECURITY-MODEL.md",
         "IMPLEMENTATION.md",
         "CHANGELOG.md",

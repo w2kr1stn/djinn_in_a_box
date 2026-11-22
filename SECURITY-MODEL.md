@@ -12,7 +12,7 @@ and its limits, see [Runtime package installs](#runtime-package-installs).
 The window relies on a trusted host controller, a sealed deployment, no direct
 Docker-to-tailnet forwarding, and owner-controlled target permissions. It gates
 new SSH access and cuts relay connections; it cannot undo remote changes or stop
-detached jobs already launched on a target. See [usage](README.md#host-control-windows)
+detached jobs already launched on a target. See [usage](docs/access-and-boundaries.md#host-control-windows)
 and [implementation](IMPLEMENTATION.md#hostctl-helper).
 
 ## Denied paths inside the container
@@ -21,7 +21,7 @@ Optional `[general].denied_paths` adds a tool-hook guard against accidental acce
 Claude Code's file/search/shell tools and Codex's shell, patch and image tools refuse configured paths and their
 home-relative equivalents. Image-owned managed settings and Codex requirements keep the hooks enabled.
 This is slip protection, not an isolation boundary: OpenCode, MCP tools, broad shell searches such as
-`rg <pattern> ~` and deliberate evasion are outside its scope. See [configuration and limits](README.md#denied-paths)
+`rg <pattern> ~` and deliberate evasion are outside its scope. See [configuration and limits](docs/access-and-boundaries.md#denied-paths)
 and the [hook contract](IMPLEMENTATION.md#denied-path-tool-guard).
 `djinn-path-names` makes names and metadata below denied paths visible through hostctl; file contents stay blocked.
 
@@ -81,7 +81,7 @@ is reachable through its shared CDN addresses.
 | Raw host D-Bus | Access to host session services, potentially including desktop-shell execution and secret services. |
 | Raw host audio socket | Playback/capture and an upstream module-loading interface where the host server permits it. |
 
-Docker access is off by default. [Agent mode](README.md#docker-access-modes)
+Docker access is off by default. [Agent mode](docs/access-and-boundaries.md#docker-access-modes)
 uses the official pinned `docker:29-dind-rootless` image as UID/GID 1000, with
 `seccomp=unconfined`, `systempaths=unconfined` and `/dev/net/tun`. It adds no
 capabilities, privileged mode, host namespaces, host Docker socket or other devices.
@@ -141,7 +141,7 @@ what Docker binds: every bind in the resolved Compose configuration, including
 base/config-root/workspace/declaration binds, plus every command-line `-v` mount
 (including shell, SOPS and zone mounts). The only exception is the approved
 `/var/run/docker.sock` source and target in DIRECT mode. An incomplete check
-refuses the run. See [mount usage](README.md#storage-and-mounts) for the private-state
+refuses the run. See [mount usage](docs/storage-and-recovery.md#storage-and-mounts) for the private-state
 ancestor refusal and remedies.
 
 A run accepts only checked binds, named volumes whose definitions contain only
@@ -179,7 +179,7 @@ must cover the run bridge too.
 ## Remote agent server access
 
 `djinn serve` runs agent server modes inside the detached dev container. See
-[usage and prerequisites](README.md#remote-agent-servers) and the
+[usage and prerequisites](docs/remote-agent-servers.md#remote-agent-servers) and the
 [process implementation](IMPLEMENTATION.md#remote-server-lifecycle).
 
 OpenCode binds only `127.0.0.1:4097` inside the container. A helper-managed
@@ -785,7 +785,7 @@ an agent from authenticating or signing with a loaded key; there is no destinati
 restriction on that capability. Keep Git public keys out of target
 `authorized_keys` wherever access should depend on hostctl, or ordinary SSH can
 provide a route around the window. Public `IdentityFile` and `IdentityAgent`
-selection are documented in [Git setup](README.md#git-identities-and-ssh-signing).
+selection are documented in [Git setup](docs/storage-and-recovery.md#git-identities-and-ssh-signing).
 
 Use a separate, owner-controlled browser/profile for Tailscale enrollment and
 SSH check approval. An agent-controlled browser must not hold the owner's IdP
@@ -956,7 +956,7 @@ allowlisted addresses, which can also carry secrets. They resolve domains once
 at startup and do not cover IPv6. They permit the helper's private bridge address;
 a custom helper network outside RFC1918 refuses readiness. This firewall cannot
 replace the host no-forwarding prerequisite. See [the rules](scripts/init-firewall.sh)
-and [firewall usage](README.md#what---firewall-allows).
+and [firewall usage](docs/access-and-boundaries.md#what---firewall-allows).
 
 `djinn run --allow` is a stricter mode for one headless run. A root step applies
 an IPv4 and IPv6 rule set that allows only loopback, replies and the listed
@@ -988,7 +988,7 @@ untouched, and policy failures do not stop startup. This is an update policy,
 not a vendor-traffic block: plugin discovery can contact `chatgpt.com`,
 `github.com` and `api.github.com`; model traffic can use `api.openai.com` or
 `chatgpt.com` depending on authentication/provider. The optional firewall's
-[listed domains](README.md#what---firewall-allows) include `api.openai.com` and
+[listed domains](docs/access-and-boundaries.md#what---firewall-allows) include `api.openai.com` and
 `auth.openai.com`, but omit `chatgpt.com`.
 
 Backups are age-encrypted by default under `~/.djinn/backups/`. `age` prompts
