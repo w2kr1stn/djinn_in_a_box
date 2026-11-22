@@ -13,7 +13,7 @@ It persists exactly `opencode.json`, `cli.json` and `themes/<name>.json`, with
 non-empty UTF-8 theme names that do not start with `.` and no nested theme directories.
 Each file must be regular and at most 1 MiB. Logins live in OpenCode's database
 and are mirrored to `credentials.json` and `credentials.removed.json` in the same
-carrier (see [OpenCode logins](../README.md#opencode-logins)); plugins, commands
+carrier (see [OpenCode logins](getting-started.md#opencode-logins)); plugins, commands
 and agents belong to the workflow seed.
 
 At startup, before workflow publication and MCP registration, Djinn checks the
@@ -90,7 +90,7 @@ opencode run --standalone --print-logs -m local/primary#high "Reply with exactly
 ```
 
 For the web UI, API, remote clients and one-time pairing, see
-[`djinn serve` usage and prerequisites](../README.md#remote-agent-servers).
+[`djinn serve` usage and prerequisites](remote-agent-servers.md#remote-agent-servers).
 
 ## Optional native plugins
 

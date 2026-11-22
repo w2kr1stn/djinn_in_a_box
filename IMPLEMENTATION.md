@@ -588,7 +588,7 @@ does not synchronize workflow views.
 
 `core/config_sync.py` owns the shared remedy table used by config, preflight and
 session; entrypoint advice follows the publisher's class and item origins. See
-the [operator state/remedy table](README.md#global-agent-workflow-ownership).
+the [operator state/remedy table](docs/agent-workflow.md#global-agent-workflow-ownership).
 Host-fallback roots are excluded from discard and retain their confirmation
 gate. Their target-drift refusals precede confirmation and give per-item
 restore sources from the final view: `config/<source-or-tool>/<path>`, the
@@ -1328,7 +1328,7 @@ manifest through `DJINN_GIT_MANIFEST`. Git's config writer generates
 `user.signingkey` and copied `gpg.ssh.allowedSignersFile`. Global-ignore generation
 is independent of signing selection. Without a signing default it preserves the
 host/repository choice by omitting `user.signingkey`; `commit.gpgsign` stays user-owned.
-See [Git identities and SSH signing](README.md#git-identities-and-ssh-signing) for
+See [Git identities and SSH signing](docs/storage-and-recovery.md#git-identities-and-ssh-signing) for
 manual declarations, `includeIf` wiring and repository changes. Doctor inspects
 configuration with origins and bounded repository discovery, and parses SSH
 Includes without executing `Match exec`; it never loads keys or repairs Git/SSH config.
@@ -1617,8 +1617,8 @@ and returns a `RunResult` with `owner=None`. `DockerMode.AGENT` raises
 It never acquires the creator lock or enters `git_runtime()`, prepares companions
 or desktop helpers, or calls the hostctl start guard. A dev and other runs can
 coexist; a run does not block dev creation. The shared mount/declaration builders,
-workflow delivery and firewall remain available. See [the run contract](README.md#quickstart)
-for delivery limits and [exit/cleanup behavior](README.md#container-entry-points).
+workflow delivery and firewall remain available. See [the run contract](docs/running-djinn.md#guest-runs)
+for delivery limits and [exit/cleanup behavior](docs/running-djinn.md#container-entry-points).
 
 `get_compose_files(docker_mode, guest=True)` places `docker-compose.run.yml`
 after the base, desktop and Docker-direct files, before the generated override.
@@ -2606,7 +2606,7 @@ All built-in agents use `prompt_template='-- "$AGENT_PROMPT"'`; the `AgentConfig
 default for user-defined agents remains `'"$AGENT_PROMPT"'`.
 
 `run()` refuses `--docker` with exit 1 before loading config or preparing workflow;
-[the diagnostic](README.md#docker-access-modes) names the supported alternatives.
+[the diagnostic](docs/access-and-boundaries.md#docker-access-modes) names the supported alternatives.
 It then loads app config and calls `validate_managed_bind_sources()` immediately
 after `load_config()`, before `get_config_root()` or `prepare_config_workflow()`.
 It prints a `MountSpecificationError` through `error()` and exits 1; mount errors
@@ -2631,7 +2631,7 @@ so the bytes do not depend on the terminal width.
 `write_flags`. The headless builder, the container session's headless builder
 and its interactive builder therefore all carry them. Its `prompt_template` is
 `-- "$AGENT_PROMPT"`. `scripts/probe-claude-isolated.py` is the maintainer
-re-probe described in the README.
+re-probe described in [docs/agent-workflow.md](docs/agent-workflow.md#re-probing-the-isolation).
 
 ## Session Workspace Contract
 

@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_hostctl_approval_limits_documented():
     root = Path(__file__).resolve().parents[1]
-    for name in ("README.md", "SECURITY-MODEL.md"):
+    for name in ("docs/access-and-boundaries.md", "SECURITY-MODEL.md"):
         text = " ".join((root / name).read_text().split())
         assert "`checkPeriod` (default 12 hours)" in text
         assert (
@@ -22,5 +22,5 @@ def test_hostctl_approval_limits_documented():
 
 def test_hostctl_check_usage_documented():
     root = Path(__file__).resolve().parents[1]
-    for name in ("README.md", "IMPLEMENTATION.md"):
+    for name in ("docs/access-and-boundaries.md", "IMPLEMENTATION.md"):
         assert "djinn hostctl check" in (root / name).read_text()

@@ -7,7 +7,8 @@ reason to investigate, not to abandon the session.
 
 The working directory is the installed Djinn repository. Read its
 [IMPLEMENTATION.md](../IMPLEMENTATION.md) for mechanisms and command internals,
-[README.md](../README.md) for configuration, zones, mounts and lifecycle commands,
+[README.md](../README.md) and the `docs/` pages it links (configuration, storage-and-recovery, running-djinn)
+for configuration, zones, mounts and lifecycle commands,
 and [SECURITY-MODEL.md](../SECURITY-MODEL.md) before changing Docker delivery.
 These files are the detailed references; inspect live state before diagnosing.
 
@@ -58,6 +59,6 @@ djinn doctor
 ```
 
 Recreation, when needed: hand back `djinn clean` followed by `djinn start` with
-the user's confirmed original flags (inspect the README and live mounts first;
+the user's confirmed original flags (inspect docs/running-djinn.md and live mounts first and
 do not guess `--here`, Docker mode or mount flags). Never execute host-side Djinn
 commands inside the assistant or mount the host root to circumvent this rule.
