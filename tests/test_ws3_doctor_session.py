@@ -992,3 +992,15 @@ def test_session_unreadable_workspace_error_names_full_path(
         manager.preflight_check.assert_not_called()
     finally:
         workspace.chmod(0o700)
+
+
+def test_doctor_reports_unknown_image_and_network(quiet_doctor, monkeypatch):
+    def unavailable(*args):
+        raise RuntimeError("Docker inspection failed")
+
+    monkeypatch.setattr(doctor_mod, "_image_built", unavailable)
+    monkeypatch.setattr(doctor_mod, "network_exists", unavailable)
+    rows = doctor_mod.run_checks(None)
+    for name in ("Image built", "Network"):
+        row = _check_named(rows, name)
+        assert (row.status, row.detail) == (doctor_mod.Status.WARN, "check unavailable")

@@ -170,6 +170,58 @@ def test_source_edit_after_the_read_is_source_changed(
     assert changed.value.drift is DriftClass.SOURCE_CHANGED
 
 
+@pytest.mark.parametrize("consumer", ("audit", "sync", "recheck"))
+def test_vanished_source_entry_reaches_host_build_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, consumer: str
+) -> None:
+    project, config_path, _outside = _workspace(tmp_path)
+    config = project / "config"
+    before = _snapshot(config)
+    transient = config / "claude/.djinn-settings-transient"
+    transient.write_text("transient\n")
+    real_stat = os.stat
+    real_write_snapshot = sync_module._write_snapshot  # pyright: ignore[reportPrivateUsage]
+    armed = consumer != "recheck"
+
+    def arm_after_snapshot(*args: Any) -> None:
+        nonlocal armed
+        real_write_snapshot(*args)
+        armed = True
+
+    def stat_entry(path: Any, *, dir_fd: int | None = None, follow_symlinks: bool = True) -> Any:
+        if armed and dir_fd is not None and path == transient.name:
+            os.unlink(path, dir_fd=dir_fd)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", stat_entry)
+    if consumer == "recheck":
+        monkeypatch.setattr(sync_module, "_write_snapshot", arm_after_snapshot)
+    if consumer == "audit":
+        audit = audit_config_sync(project, config_path=config_path)
+    else:
+        result = sync_config(project, config_path=config_path)
+        assert (result.success, result.retryable) == (False, True)
+        audit = result.audit
+    assert audit.drift_classes == (DriftClass.SOURCE_CHANGED,)
+    assert _snapshot(config) == before
+    assert sync_config(project, config_path=config_path).success
+
+
+def test_separate_fingerprint_error_remains_nonretryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config_path, _outside = _workspace(tmp_path)
+
+    def fail_fingerprint(*_args: Any, **_kwargs: Any) -> str:
+        raise PublishError(DriftClass.SOURCE_CHANGED)
+
+    monkeypatch.setattr(sync_module, "fingerprint_source_inputs", fail_fingerprint)
+    result = sync_config(project, config_path=config_path)
+
+    assert (result.success, result.retryable) == (False, False)
+    assert result.audit.drift_classes == (DriftClass.INVALID_OR_SEMANTIC,)
+
+
 def test_audit_and_sync_never_follow_a_linked_output_directory(
     tmp_path: Path, forbid_outside_reads: list[Path]
 ) -> None:

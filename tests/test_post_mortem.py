@@ -674,11 +674,11 @@ def test_inspect_timeouts_and_partial_record(fake_docker, evidence, monkeypatch)
     timeouts = []
     original = host_runtime.inspect_object
 
-    def inspect(name, docker_path, *, timeout):
+    def inspect(name, docker_path, *, missing, timeout):
         timeouts.append(timeout)
         if name == "bad":
             raise ValueError("secret-token")
-        return original(name, docker_path, timeout=timeout)
+        return original(name, docker_path, missing=missing, timeout=timeout)
 
     monkeypatch.setattr(host_runtime, "inspect_object", inspect)
     data = document(capture(fake_docker, [pm.Candidate("bad", True), pm.Candidate("dev", True)]))
@@ -873,9 +873,9 @@ def test_marker_reinspect_budget(fake_docker, evidence, monkeypatch):
     timeouts = []
     original = host_runtime.inspect_object
 
-    def inspected(name, docker_path, *, timeout):
+    def inspected(name, docker_path, *, missing, timeout):
         timeouts.append(timeout)
-        return original(name, docker_path, timeout=timeout)
+        return original(name, docker_path, missing=missing, timeout=timeout)
 
     monkeypatch.setattr(host_runtime, "inspect_object", inspected)
     pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)

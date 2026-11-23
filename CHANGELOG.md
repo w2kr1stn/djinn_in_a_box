@@ -38,6 +38,8 @@ Versioning before and after the first stable release.
 
 ### Fixed
 
+- Docker inspection failures now preserve unknown resources during host control, startup and cleanup (#189).
+- A workflow source entry that disappears while being read now reports `source-changed` and can be retried (#148).
 - Synchronize lifecycle tests with explicit process and lock handshakes and isolate Serve test state (#210).
 - `djinn run codex --write` works again: Codex removed `--full-auto`, and its own sandbox cannot start inside the
   container, so the built-in codex `write_flags` value in `djinn agents --json` changes to
@@ -154,9 +156,13 @@ Versioning before and after the first stable release.
   profile no longer resets that `PATH`. psql, pg_dump, pg_restore and pg_dumpall
   run through wrappers that add the tools library directory only for themselves;
   the image and `.zshrc` no longer set `LD_LIBRARY_PATH`.
+- The dev image switches Claude Code's automatic updater off (`DISABLE_AUTOUPDATER=1`),
+  so no automatic update moves a running dev container off the pinned version (#187).
 
 ### Security
 
+- Verify release checksums and run staged just, sops, and bun binaries before
+  replacing installed tools. Keep the existing binary if verification fails (#131).
 - The image builds verify the Docker CLI, Compose and GitHub CLI downloads
   against pinned checksums before installing them, like Buildx already did.
   Every verified build download retries transient network failures and is
@@ -242,6 +248,10 @@ Versioning before and after the first stable release.
 
 ### Changed
 
+- The tailnet policy example limits TCP 22 on tagged targets to the hostctl
+  helper's tailnet IPv4 (#143).
+- Report each unclassified startup environment name with its file, line and how to fix it.
+  Include the Python helper scripts in CI's strict type check (#192).
 - The dev image pins uv with `UV_VERSION` (0.13.3) instead of copying `latest`;
   `scripts/update-agents.sh` bumps it with the other pins. Python 3.14 is installed
   into the image, so existing virtual environments keep working after the container

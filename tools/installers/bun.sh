@@ -1,15 +1,22 @@
 #!/bin/bash
 # Bun - JavaScript runtime & package manager
-set -e
+set -eo pipefail
 
 INSTALL_DIR="${TOOLS_BIN:-$HOME/.cache/djinn-tools/bin}"
 
 mkdir -p "$INSTALL_DIR"
+staging=$(mktemp -d "$INSTALL_DIR/.bun.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+
+# Bound metadata requests, while allowing a slow artifact transfer to finish.
+CURL_GUARDS=(--proto '=https' --proto-redir '=https' --tlsv1.2
+             --connect-timeout 10 --retry 4 --retry-delay 3
+             --speed-limit 2048 --speed-time 30)
 
 # Resolve version: use BUN_VERSION env var, or fetch latest from GitHub
 if [[ -z "${BUN_VERSION:-}" ]]; then
-    BUN_VERSION=$(curl -fsSL "https://api.github.com/repos/oven-sh/bun/releases/latest" \
-        | grep '"tag_name"' | sed -E 's/.*"bun-v([^"]+)".*/\1/')
+    curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$staging/release.json" "https://api.github.com/repos/oven-sh/bun/releases/latest"
+    BUN_VERSION=$(jq -r '.tag_name | strings | select(startswith("bun-v")) | ltrimstr("bun-v")' "$staging/release.json")
 fi
 
 if ! [[ "$BUN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -17,13 +24,38 @@ if ! [[ "$BUN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-# Download and extract Bun binary
-TMP_DIR=$(mktemp -d)
-curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
-    -o "$TMP_DIR/bun.zip"
-unzip -o "$TMP_DIR/bun.zip" -d "$TMP_DIR" >/dev/null
-mv "$TMP_DIR/bun-linux-x64/bun" "$INSTALL_DIR/bun"
-chmod +x "$INSTALL_DIR/bun"
-rm -rf "$TMP_DIR"
+version_line="$BUN_VERSION"
+if "$INSTALL_DIR/bun" --version 2>/dev/null </dev/null |
+        cmp -s - <(printf '%s\n' "$version_line"); then
+    echo "bun: Version $BUN_VERSION already installed, skipping download" >&2
+    echo "$version_line"
+    exit 0
+fi
 
-"$INSTALL_DIR/bun" --version
+asset="bun-linux-x64.zip"
+base="https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}"
+checksums="$staging/SHASUMS256.txt"
+if ! curl -fsSL "${CURL_GUARDS[@]}" --max-time 30 -o "$checksums" "$base/SHASUMS256.txt" \
+        || ! expected=$(awk -v f="$asset" 'NF == 2 && ($2 == f || $2 == "*" f || $2 == "./" f) {print $1}' "$checksums") \
+        || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "bun: Missing or invalid release checksum for $asset" >&2
+    exit 1
+fi
+
+archive="$staging/$asset"
+curl -fsSL "${CURL_GUARDS[@]}" -o "$archive" "$base/$asset"
+actual=$(sha256sum < "$archive")
+if [[ "$expected" != "${actual%% *}" ]]; then
+    echo "bun: checksum mismatch for $asset" >&2
+    exit 1
+fi
+
+unzip -p "$archive" bun-linux-x64/bun > "$staging/bun"
+chmod +x "$staging/bun"
+if ! "$staging/bun" --version </dev/null | cmp -s - <(printf '%s\n' "$version_line"); then
+    echo "bun: Invalid binary version (expected '$version_line')" >&2
+    exit 1
+fi
+
+mv -T "$staging/bun" "$INSTALL_DIR/bun"
+echo "$version_line"

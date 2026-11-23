@@ -124,7 +124,7 @@ sys.exit(1)
         "Config": {"Labels": {hostctl.GENERATION_LABEL: "generation-a"}},
     }
     hostctl.save_private("opening.json", {"generation": "generation-a", "dev_id": "expected-dev"})
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: helper)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda: helper)
     monkeypatch.setattr(hostctl, "node_status", lambda *a: {"BackendState": "NeedsLogin"})
     monkeypatch.setattr(hostctl, "reconcile", lambda *a: None)
     monkeypatch.setattr(host_runtime.signal, "signal", lambda *a: None)
@@ -234,7 +234,7 @@ def test_hostctl_other_closures_use_launcher_root(tmp_path, monkeypatch, closure
     }
     monkeypatch.setattr(hostctl, "HELPER_NAME", "helper-a")
     monkeypatch.setattr(hostctl, "DOCKER_EXECUTABLE", "/isolated/docker")
-    monkeypatch.setattr(hostctl, "inspect_helper", lambda **kw: value)
+    monkeypatch.setattr(hostctl, "inspect_helper", lambda: value)
     monkeypatch.setattr(hostctl, "reconcile", lambda *a: None)
     monkeypatch.setattr(host_runtime.signal, "signal", lambda *a: None)
     monkeypatch.setattr(host_runtime.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(

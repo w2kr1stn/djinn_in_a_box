@@ -170,6 +170,7 @@ DJINN_ENV_KEYS = frozenset(
         "SOCK_GID",
         "DJINN_SHELL_PID",
         "EXIT_CODE",
+        "DISABLE_AUTOUPDATER",
     ]
 )
 RESERVED_ENVIRONMENT = {

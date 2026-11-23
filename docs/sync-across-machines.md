@@ -169,6 +169,6 @@ host-private post-mortem records and runtime state. Use `djinn clean`,
 
 Exclude `djinn-hostctl-state` and the hostctl journal/supervisor directories
 from synchronization. Build and enroll separately on each Docker host using
-[host control setup](../README.md#host-control-windows). Identity persistence,
+[host control setup](access-and-boundaries.md#host-control-windows). Identity persistence,
 cleanup and the prohibition on node-state copies/backups are defined in
 [enrollment and tailnet policy](../SECURITY-MODEL.md#enrollment-and-tailnet-policy).

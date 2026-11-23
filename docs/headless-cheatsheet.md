@@ -9,7 +9,7 @@ the window. Once `status` reports open, session agents in the running dev can
 use `ssh host-a`. For runs, see [the guest boundary](../SECURITY-MODEL.md#guest-runs).
 Hostctl status groups sealing findings by bind; `djinn doctor` lists every cause
 and unknown item, plus address results. See
-[host control usage](../README.md#host-control-windows) and the
+[host control usage](access-and-boundaries.md#host-control-windows) and the
 [security model](../SECURITY-MODEL.md#sealed-deployments-and-trusted-controller)
 for dev-start close/pause behavior, `--allow-unsealed` and deployment requirements.
 
@@ -128,8 +128,8 @@ djinn agents
 `djinn run` starts an ephemeral guest container on its own Compose network,
 alongside a running dev or other runs. It sends the prompt through `AGENT_PROMPT`,
 prints agent output to stdout, and exits with the agent's return code. See
-[exit codes and cleanup](../README.md#container-entry-points) for timeout, signal
-and refusal handling, and [Git delivery limits](../README.md#git-identities-and-ssh-signing)
+[exit codes and cleanup](running-djinn.md#container-entry-points) for timeout, signal
+and refusal handling, and [Git delivery limits](storage-and-recovery.md#git-identities-and-ssh-signing)
 for SSH and signing restrictions.
 
 ---
@@ -152,7 +152,7 @@ for SSH and signing restrictions.
 | `--timeout <sec>`, `-t <sec>` | Timeout for the headless container run. |
 
 `--docker` is refused for runs. For rootless Docker, work in a dev started with
-`djinn start --docker`; see [Docker access modes](../README.md#docker-access-modes)
+`djinn start --docker`; see [Docker access modes](access-and-boundaries.md#docker-access-modes)
 for the refusal and host-authority implications of direct access.
 
 `djinn run` without `--mount` and without `--here` keeps its implicit `--here`
@@ -167,7 +167,7 @@ The configured `general.code_dir` is always mounted as one workspace root:
 the run's workdir. A user target cannot equal or contain the active workspace
 target; children and explicit mounts at the unused root remain valid.
 Targets at or below Djinn-managed roots are refused for both `:rw` and `:ro`,
-following the [same rule as declared mounts](../README.md#storage-and-mounts).
+following the [same rule as declared mounts](storage-and-recovery.md#storage-and-mounts).
 That guidance also covers protected-source refusals for runs, including read-only
 mounts and `--here` from `$HOME`.
 

@@ -113,8 +113,8 @@ def fake(git_inputs, monkeypatch):
         "    signal.pause()\n"
         "elif hit and mode == 'daemon':\n"
         "    arm.unlink()\n"
-        "    print('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. '\n"
-        "          'Is the docker daemon running?', file=sys.stderr)\n"
+        "    print('Cannot connect to the Docker daemon: '\n"
+        "          'connect: no such file or directory', file=sys.stderr)\n"
         "    sys.exit(1)\n"
         "if state.exists():\n"
         "    print(state.read_text())\n"
@@ -608,7 +608,7 @@ def inproc(git_inputs, monkeypatch):
     base = Path(os.environ["XDG_RUNTIME_DIR"])
     docker = base / "docker-absent"
     docker.write_text(
-        "#!/bin/sh\necho 'Error response from daemon: No such container: x' >&2\nexit 1\n"
+        "#!/bin/sh\necho 'Error response from daemon: No such container:' \"$3\" >&2\nexit 1\n"
     )
     docker.chmod(0o700)
     records = post_mortem.records_root(create=True)  # the recorder's default root, one store
@@ -1478,7 +1478,7 @@ def test_observer_exit_uses_no_docker_command(gitted):
     gitted.keys.results = [frozenset({b"unexpected"})]
     gitted.docker.write_text(
         f"#!/bin/sh\necho called >> {gitted.root}/docker-calls\n"
-        "echo 'Error response from daemon: No such container: x' >&2\nexit 1\n"
+        "echo 'Error response from daemon: No such container:' \"$3\" >&2\nexit 1\n"
     )
     gitted.stop_at = 40
     gitted.run()

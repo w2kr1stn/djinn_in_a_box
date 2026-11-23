@@ -200,6 +200,7 @@ def test_status_declared_volume_categories(
         )),
         patch("djinn_in_a_box.core.docker.volume_exists",
               side_effect=lambda name: name != "djinn-scratch"),
+        patch.object(container, "volume_exists", return_value=True),
         patch.object(container, "_print_resource_table",
                      wraps=container._print_resource_table) as table,
         patch.object(container, "get_existing_sync_paths_by_category", return_value=[]),
@@ -421,11 +422,11 @@ class TestBuildCommand:
                 raise container.hostctl.HostctlError("Docker cp failed (exit 1)")
             return Path("/state/bin/supervisor")
 
-        def inspect(name: str, docker_path: str, resource: str) -> dict[str, str] | None:
+        def inspect(name: str, docker_path: str, *, missing: str) -> dict[str, str] | None:
             steps.append("inspect-image")
             assert name == container.agent_docker.IMAGE
             assert docker_path == container.DOCKER_EXECUTABLE
-            assert resource == "image"
+            assert missing == "image"
             return {"Id": "sha256:pinned"} if failing == "present" else None
 
         def pull(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
