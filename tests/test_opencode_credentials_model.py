@@ -1420,14 +1420,16 @@ def test_a_waiting_process_gets_the_lock_when_the_holder_exits(
         holder.stdout.close()
 
 
-def test_the_lock_is_not_reentrant_in_one_process(carrier_with_alias: tuple[Path, Path]) -> None:
+def test_the_lock_is_not_reentrant_in_one_process(
+    carrier_with_alias: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     real, alias = carrier_with_alias
-    with oc.carrier_lock(real) as lease:
+
+    with oc.carrier_lock(real) as lease, monkeypatch.context() as patch:
+        patch.setattr(oc.fcntl, "flock", lambda *_: pytest.fail("reentry reached the kernel lock"))
         for again in (real, alias):
-            started = time.monotonic()
             with pytest.raises(oc.LockReentered), oc.carrier_lock(again, timeout=30):
                 pytest.fail("re-entrant acquisition succeeded")
-            assert time.monotonic() - started < 2
         assert lease.held
         with pytest.raises(oc.LockReentered), oc.carrier_lock(real):
             pytest.fail("a failed attempt must not release the first lock")

@@ -11,11 +11,11 @@ import subprocess
 import sys
 import time
 import tracemalloc
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_restore_lock_holders import flock_holder
 
 from djinn_in_a_box.core import host_runtime
 from djinn_in_a_box.core import post_mortem as pm
@@ -52,14 +52,15 @@ def fake_docker(tmp_path):
     objects.write_text("{}")
     behavior.write_text("{}")
     binary.write_text(f"""#!{sys.executable}
-import json, os, pathlib, signal, sys, time
+import json, os, pathlib, signal, sys
 objects = pathlib.Path({str(objects)!r})
 behavior = json.loads(pathlib.Path({str(behavior)!r}).read_text())
 args = sys.argv[1:]
 with pathlib.Path({str(calls)!r}).open('a') as stream:
     stream.write(json.dumps({{'args': args, 'pid': os.getpid()}}) + '\\n')
 if args[:2] == ['container', 'inspect']:
-    time.sleep(behavior.get('inspect_delay', 0))
+    if behavior.get('inspect_block'):
+        signal.pause()
     if behavior.get('inspect_error'):
         print('daemon secret [red]do-not-print', file=sys.stderr)
         sys.exit(2)
@@ -74,7 +75,9 @@ if args[:2] == ['container', 'inspect']:
 elif args[0] == 'logs':
     if behavior.get('ignore_term'):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    time.sleep(behavior.get('logs_delay', 0))
+    if behavior.get('logs_block'):
+        (objects.parent / 'logs-ready').touch()
+        signal.pause()
     if behavior.get('huge'):
         for _ in range(behavior['huge']):
             os.write(1, b'Q' * 8192)
@@ -273,63 +276,51 @@ def test_marker_cap_and_refresh_order(fake_docker, monkeypatch):
     assert list(pm._markers(pm.records_root(create=False))) == ["a", "c"]
 
 
-@contextmanager
-def held_lock(root, tmp_path):
-    ready, release = tmp_path / "ready", tmp_path / "release"
-    code = """import fcntl, os, pathlib, sys, time
-fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
-fcntl.flock(fd, fcntl.LOCK_EX)
-pathlib.Path(sys.argv[2]).touch()
-end = time.monotonic() + 8
-while not pathlib.Path(sys.argv[3]).exists() and time.monotonic() < end:
-    time.sleep(.01)
-os.close(fd)
-"""
-    child = subprocess.Popen(
-        [sys.executable, "-c", code, str(root / ".lock"), str(ready), str(release)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        end = time.monotonic() + 3
-        while not ready.exists() and time.monotonic() < end:
-            time.sleep(0.01)
-        assert ready.exists()
-        yield
-    finally:
-        release.touch()
-        _, stderr = child.communicate(timeout=3)
-        assert child.returncode == 0, stderr
+@pytest.fixture
+def records_lock():
+    lock = pm.records_root(create=True) / ".lock"
+    lock.touch(mode=0o600)
+    with flock_holder(lock) as holder:
+        yield holder
 
 
-def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, tmp_path):
-    monkeypatch.setattr(pm, "RECORD_SECONDS", 1.2)
-    inventory(fake_docker, dev=evidence)
-    root = pm.records_root(create=True)
+def observe_nonblocking_attempts(monkeypatch, on_busy=None):
     attempts = []
     original = pm.fcntl.flock
 
     def counted(fd, operation):
         attempts.append(operation)
-        return original(fd, operation)
+        if operation != pm.fcntl.LOCK_EX | pm.fcntl.LOCK_NB:
+            pytest.fail("the recorder attempted a blocking flock")
+        try:
+            return original(fd, operation)
+        except BlockingIOError:
+            if on_busy is not None:
+                on_busy()
+            raise
 
     monkeypatch.setattr(pm.fcntl, "flock", counted)
-    with held_lock(root, tmp_path):
-        started = time.monotonic()
-        pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED, blocking=False)
-        assert time.monotonic() - started < 0.35
-    assert attempts == [pm.fcntl.LOCK_EX | pm.fcntl.LOCK_NB]
-    assert not (root / "provenance.json").exists()
+    return attempts
 
 
-def test_lock_wait_bounded(fake_docker, evidence, monkeypatch, tmp_path, capsys):
+def test_nonblocking_marker_one_attempt(fake_docker, evidence, monkeypatch, records_lock):
     inventory(fake_docker, dev=evidence)
+    attempts = observe_nonblocking_attempts(monkeypatch)
+    pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED, blocking=False)
+    assert records_lock.poll() is None
+    assert attempts == [pm.fcntl.LOCK_EX | pm.fcntl.LOCK_NB]
+    assert not (pm.records_root(create=False) / "provenance.json").exists()
+
+
+def test_lock_wait_bounded(fake_docker, evidence, monkeypatch, records_lock, capsys):
+    inventory(fake_docker, dev=evidence)
+    observe_nonblocking_attempts(monkeypatch)
     monkeypatch.setattr(pm, "RECORD_SECONDS", 0.2)
-    with held_lock(pm.records_root(create=True), tmp_path):
-        started = time.monotonic()
-        assert capture(fake_docker) is None
-        assert time.monotonic() - started < 0.8
+    sleeps = []
+    clock = SimpleNamespace(monotonic=lambda: sum(sleeps), sleep=sleeps.append)
+    monkeypatch.setattr(pm, "time", clock)
+    assert capture(fake_docker) is None
+    assert records_lock.poll() is None and sum(sleeps) == pytest.approx(0.2)
     assert "Post-mortem record failed (lock)" in capsys.readouterr().err
     assert admitted() == []
 
@@ -490,27 +481,40 @@ def test_observer_exit_incidents_are_distinct_but_repeats_deduplicate(fake_docke
 def test_two_process_writers_recheck_dedup_under_lock(fake_docker, evidence, tmp_path):
     inventory(fake_docker, dev=evidence)
     root = pm.records_root(create=True)
-    code = """import contextlib, pathlib, sys, time
+    code = """import fcntl, pathlib, sys, time
 from djinn_in_a_box.core import post_mortem as pm
 root, binary, barrier, number = sys.argv[1:]
 barrier = pathlib.Path(barrier)
-original = pm._lock
-@contextlib.contextmanager
-def synchronized(*args, **kwargs):
-    (barrier / number).touch()
-    end = time.monotonic() + 4
-    while len(list(barrier.iterdir())) != 2:
-        if time.monotonic() > end:
-            raise RuntimeError('barrier timeout')
+writing = barrier / 'writing'
+contended = barrier / 'contended'
+pm.RECORD_SECONDS = 30
+
+def await_marker(marker):
+    end = time.monotonic() + 15
+    while not marker.exists():
+        assert time.monotonic() < end, f'missing {marker.name} acknowledgement'
         time.sleep(.01)
-    with original(*args, **kwargs):
-        yield
-pm._lock = synchronized
+
 original_write = pm._atomic_write
 def delayed_write(*args):
-    time.sleep(.05)
+    writing.touch()
+    await_marker(contended)
     return original_write(*args)
-pm._atomic_write = delayed_write
+
+flock = fcntl.flock
+def observed_flock(fd, operation):
+    assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+        return flock(fd, operation)
+    except BlockingIOError:
+        contended.touch()
+        raise
+
+if number == '0':
+    pm._atomic_write = delayed_write
+else:
+    await_marker(writing)
+    fcntl.flock = observed_flock
 result = pm.record('clean', docker_path=binary,
     candidates=[pm.Candidate('dev', True)], root=pathlib.Path(root))
 assert result is not None and result.path is not None
@@ -518,20 +522,28 @@ print(result.path)
 """
     barrier = tmp_path / "barrier"
     barrier.mkdir()
-    children = [
-        subprocess.Popen(
-            [sys.executable, "-c", code, str(root), fake_docker.binary, str(barrier), str(i)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        for i in range(2)
-    ]
+    argv = [sys.executable, "-c", code, str(root), fake_docker.binary, str(barrier)]
+    children = []
     outputs = []
-    for child in children:
-        stdout, stderr = child.communicate(timeout=8)
-        assert child.returncode == 0, stderr
-        outputs.append(stdout)
+    try:
+        for i in range(2):
+            child = subprocess.Popen(
+                [*argv, str(i)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            children.append(child)
+        for child in children:
+            stdout, stderr = child.communicate(timeout=25)
+            assert child.returncode == 0, stderr
+            outputs.append(stdout)
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+    assert (barrier / "contended").exists()
     assert outputs[0] == outputs[1]
     assert len(admitted()) == 1
 
@@ -622,12 +634,31 @@ def test_huge_line_binary_ring_is_bounded(fake_docker, evidence, monkeypatch):
     assert all(child.poll() is not None for child in children)
 
 
+@pytest.fixture
+def log_waits(fake_docker, monkeypatch):
+    waits = []
+    ready = fake_docker.objects.with_name("logs-ready")
+    select = pm.selectors.DefaultSelector.select
+
+    def expire_ready_child(selector, timeout):
+        end = time.monotonic() + 15
+        while not ready.exists():
+            assert time.monotonic() < end, "logs child never started waiting"
+            time.sleep(0.01)
+        waits.append(timeout)
+        return select(selector, 0)
+
+    monkeypatch.setattr(pm, "time", SimpleNamespace(monotonic=lambda: sum(waits)))
+    monkeypatch.setattr(pm.selectors.DefaultSelector, "select", expire_ready_child)
+    return waits
+
+
 @pytest.mark.parametrize("ignore_term", [False, True])
 def test_deadline_writes_incomplete_and_reaps_own_child(
-    fake_docker, evidence, monkeypatch, ignore_term
+    fake_docker, evidence, monkeypatch, ignore_term, log_waits
 ):
     inventory(fake_docker, dev=evidence)
-    behavior(fake_docker, logs_delay=2, ignore_term=ignore_term)
+    behavior(fake_docker, logs_block=True, ignore_term=ignore_term)
     monkeypatch.setattr(pm, "RECORD_SECONDS", 0.3)
     terminations = []
     original_terminate = subprocess.Popen.terminate
@@ -637,9 +668,8 @@ def test_deadline_writes_incomplete_and_reaps_own_child(
         return original_terminate(child)
 
     monkeypatch.setattr(subprocess.Popen, "terminate", terminated)
-    started = time.monotonic()
     data = document(capture(fake_docker))
-    assert time.monotonic() - started < 0.8
+    assert log_waits == [pytest.approx(0.2)]
     assert data["incomplete"] == "deadline"
     assert data["subjects"][0]["errors"]["log_tail"] == "deadline"
     pid = next(c["pid"] for c in daemon_calls(fake_docker) if c["args"][0] == "logs")
@@ -663,12 +693,12 @@ def test_inspect_timeouts_and_partial_record(fake_docker, evidence, monkeypatch)
     assert data["errors"] == {"candidate:0": "inspect"}
     assert all(0 < timeout <= 5 for timeout in timeouts)
     assert len(data["subjects"]) == 1
-    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.02)
-    behavior(fake_docker, inspect_delay=0.5)
+    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.5)
+    behavior(fake_docker, inspect_block=True)
     observed = {"state": "absent", "expected_id": "x", "actual_id": None}
     data = document(capture(fake_docker, observed=observed))
     assert data["incomplete"] == "deadline"
-    assert 0 < timeouts[-1] <= 0.02
+    assert 0 < timeouts[-1] <= 0.5
 
 
 @pytest.mark.parametrize("layout", ["systemd", "cgroupfs", "missing", "invalid", "unreadable"])
@@ -858,21 +888,18 @@ def test_marker_reinspect_budget(fake_docker, evidence, monkeypatch):
     monkeypatch.setattr(host_runtime, "inspect_object", inspected)
     pm.mark_terminated(fake_docker.binary, evidence["Id"], STARTED)
     assert timeouts == [5]
-    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.1)
-    behavior(fake_docker, inspect_delay=0.5)
-    started = time.monotonic()
+    monkeypatch.setattr(pm, "RECORD_SECONDS", 0.5)
+    behavior(fake_docker, inspect_block=True)
     pm.mark_terminated(fake_docker.binary, "a" * 64, STARTED)
-    assert time.monotonic() - started < 0.5
-    assert 0 < timeouts[-1] <= 0.1
+    assert 0 < timeouts[-1] <= 0.5
     assert "a" * 64 not in pm._markers(pm.records_root(create=False))
 
 
-def test_docker_logs_individual_five_second_budget(fake_docker, evidence):
+def test_docker_logs_individual_five_second_budget(fake_docker, evidence, log_waits):
     inventory(fake_docker, dev=evidence)
-    behavior(fake_docker, logs_delay=6)
-    started = time.monotonic()
+    behavior(fake_docker, logs_block=True)
     data = document(capture(fake_docker))
-    assert time.monotonic() - started < 5.6
+    assert log_waits == [pytest.approx(4.9)]
     assert data["subjects"][0]["errors"]["log_tail"] == "logs"
 
 
@@ -915,18 +942,17 @@ def test_atomic_failure_cleans_only_own_temporary(fake_docker, evidence, monkeyp
     assert capsys.readouterr().err == "Post-mortem record failed (write)\n"
 
 
-def test_lock_retries_until_release(fake_docker, evidence, tmp_path):
-    import threading
-
+def test_lock_retries_until_release(fake_docker, evidence, monkeypatch, records_lock):
     inventory(fake_docker, dev=evidence)
-    root = pm.records_root(create=True)
-    with held_lock(root, tmp_path):
-        release = threading.Timer(0.15, (tmp_path / "release").touch)
-        release.start()
-        try:
-            assert capture(fake_docker).path.exists()
-        finally:
-            release.join()
+
+    def release():
+        records_lock.stdin.close()
+        assert records_lock.wait(timeout=10) == 0
+
+    attempts = observe_nonblocking_attempts(monkeypatch, release)
+    result = capture(fake_docker)
+    assert records_lock.stdin.closed and len(attempts) == 2
+    assert result is not None and result.path is not None and result.path.exists()
 
 
 def test_lock_rejects_permissive_file(fake_docker, evidence, capsys):

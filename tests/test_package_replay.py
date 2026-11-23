@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
 from test_djinn_apt_root import HELPER, ROOT, FakeTools, executable
@@ -99,38 +98,45 @@ def test_wrapper_plain_fallback(tmp_path, library):
 
 def test_wrapper_streams_status_before_helper_finishes(tmp_path):
     replay = ReplayHarness(tmp_path)
-    sleep_ended = tmp_path / "sleep-ended"
     executable(
         tmp_path / "sudo",
-        "#!/usr/bin/python3\nimport time\nfrom pathlib import Path\n"
+        "#!/usr/bin/python3\nimport sys\n"
         'print("I\\tinstalling 2 of 2", flush=True)\n'
-        "time.sleep(2)\n"
-        f"Path({str(sleep_ended)!r}).write_text(str(time.monotonic()))\n"
+        'assert sys.stdin.readline() == "release\\n"\n'
         'print("I\\tfinished", flush=True)\n',
     )
     lines = []
+    first_status = Event()
+    installing = "[info] installing 2 of 2"
+    finished = "[info] finished"
     with subprocess.Popen(
         ["/bin/bash", str(replay.script)],
         env=replay.env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
     ) as process:
         def read_stderr():
             for line in process.stderr:
-                lines.append((time.monotonic(), line))
+                lines.append(line)
+                if installing in line:
+                    first_status.set()
 
         reader = Thread(target=read_stderr)
         reader.start()
-        assert process.wait(timeout=5) == 0
-        reader.join(timeout=1)
-        assert not reader.is_alive()
+        try:
+            assert first_status.wait(15), "wrapper buffered the producer's first status"
+            assert process.poll() is None and not any(finished in line for line in lines)
+            process.stdin.write("release\n")
+        finally:
+            process.stdin.close()
+            assert process.wait(timeout=15) == 0
+            reader.join(timeout=15)
+            assert not reader.is_alive()
         assert process.stdout.read() == ""
-    first_status = [timestamp for timestamp, line in lines if "[info] installing 2 of 2" in line]
-    assert len(first_status) == 1
-    assert first_status[0] < float(sleep_ended.read_text())
-    assert any("[info] finished" in line for _, line in lines)
+    assert sum(installing in line for line in lines) == 1
+    assert any(finished in line for line in lines)
 
 
 def test_wrapper_fixed_targets_and_no_list_access(tmp_path):

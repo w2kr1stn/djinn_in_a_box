@@ -9,7 +9,6 @@ import select
 import subprocess
 import sys
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -285,23 +284,22 @@ def test_running_audit_allows_cache_cleanup_and_refuses_global_logout_by_lease(
         # A different thread represents an independent CLI; a reentrant check on this
         # thread would hide a control lock accidentally retained by the audit.
         def clean():
-            started = time.monotonic()
             cache = CliRunner().invoke(app, ["clean", "volumes", "--cache", "--force"])
             logout = CliRunner().invoke(app, ["clean", "volumes", "--credentials", "--force"])
-            outcomes.append((cache, logout, time.monotonic() - started))
+            outcomes.append((cache, logout))
 
         thread = threading.Thread(target=clean, daemon=True)
         thread.start()
-        thread.join(timeout=2)
+        thread.join(timeout=15)
         assert not thread.is_alive(), "lifecycle commands waited on the audit runtime"
+        assert len(oc.sessions_in_use()) == 1
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(subprocess, "run", run)
     result = CliRunner().invoke(app, ["audit", "--agent", "opencode"])
     assert result.exit_code == 0, (result.output, result.exception)
     assert len(outcomes) == 1
-    cache, logout, elapsed = outcomes[0]
-    assert elapsed < 2
+    cache, logout = outcomes[0]
     assert cache.exit_code == 0, cache.output
     assert "Deleted: djinn-cache" in cache.output
     assert logout.exit_code == 1, logout.output

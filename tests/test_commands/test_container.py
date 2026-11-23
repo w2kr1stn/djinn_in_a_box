@@ -2013,11 +2013,13 @@ class TestUpdateCommand:
         from djinn_in_a_box.core import paths
 
         pidfile = update_project.parent / "grandchild-pid"
+        block = update_project.parent / "block-update"
+        os.mkfifo(block)
         script = update_project / "scripts/update-agents.sh"
         script.write_text(
             "#!/bin/bash\n"
             "echo 'npm error code EAI_AGAIN' >&2\n"
-            f"sleep 30 &\necho $! > '{pidfile}'\nwait\n"
+            f"(read -r line < '{block}') &\necho $! > '{pidfile}'\nwait\n"
         )
         script.chmod(0o755)
         record = paths.AGENT_VERSIONS_FILE
@@ -2033,6 +2035,10 @@ class TestUpdateCommand:
         def popen(*args, **kwargs):
             proc = original_popen(*args, **kwargs)
             processes.append(proc)
+            deadline = time.monotonic() + 15
+            while not pidfile.exists():
+                assert proc.poll() is None and time.monotonic() < deadline, "no update child"
+                time.sleep(0.01)
             return proc
 
         monkeypatch.setattr(container.subprocess, "Popen", popen)
@@ -2045,19 +2051,17 @@ class TestUpdateCommand:
                 outcomes.append(exc)
 
         thread = threading.Thread(target=invoke, daemon=True)
-        started = time.monotonic()
         thread.start()
         try:
-            thread.join(timeout=3)
-            assert not thread.is_alive(), "update did not finish within its outer deadline"
-            assert time.monotonic() - started < 3
+            thread.join(timeout=20)
+            assert not thread.is_alive(), "update did not return while its child was blocked"
             assert len(outcomes) == 1 and isinstance(outcomes[0], typer.Exit)
             assert outcomes[0].exit_code == 1
             assert any("npm error code EAI_AGAIN" in text for text in shown)
             assert processes[0].poll() is not None
             assert processes[0].stdout.closed and processes[0].stderr.closed
             pid = int(pidfile.read_text())
-            deadline = time.monotonic() + 1
+            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 stat = Path(f"/proc/{pid}/stat")
                 if not stat.exists() or stat.read_text().split(")", 1)[1].split()[0] == "Z":
@@ -2074,7 +2078,7 @@ class TestUpdateCommand:
                     if proc.poll() is None and os.getpgid(proc.pid) != proc.pid:
                         continue
                     os.killpg(proc.pid, signal.SIGKILL)
-            thread.join(timeout=3)
+            thread.join(timeout=15)
             assert not thread.is_alive(), "cleanup failed to release captured pipes"
 
 

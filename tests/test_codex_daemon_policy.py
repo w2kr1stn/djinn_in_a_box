@@ -11,11 +11,12 @@ import stat
 import subprocess
 import sys
 import time
-from contextlib import suppress
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+
+from djinn_in_a_box.core.host_runtime import process_token
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/codex-daemon-policy.py"
 PINNED = (
@@ -66,8 +67,10 @@ with open(os.environ["FAKE_LOG"], "a") as log:
         "null_stdin": os.path.samefile("/proc/self/fd/0", "/dev/null"),
         "pid": os.getpid(), "pgid": os.getpgrp(), "sid": os.getsid(0)}) + "\\n")
 if sys.argv[1:] == ["--version"]:
-    if os.environ.get("FAKE_VERSION_SLEEP"):
-        time.sleep(2)
+    if os.environ.get("FAKE_VERSION_BLOCK"):
+        (home / 'version.ready').touch()
+        while not (home / 'release-child').exists():
+            time.sleep(0.01)
     if os.environ.get("FAKE_VERSION_STDERR"):
         print(os.environ["FAKE_VERSION_STDERR"], file=sys.stderr, flush=True)
     print(os.environ.get("FAKE_VERSION", "codex-cli 0.163.0"))
@@ -81,8 +84,10 @@ if mode == "timeout":
 import os, pathlib, signal, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 home = pathlib.Path(os.environ['CODEX_HOME'])
-(home / 'native.pid').write_text(str(os.getpid()))
-time.sleep(1.0)
+(home / 'native.tmp').write_text(str(os.getpid()))
+(home / 'native.tmp').replace(home / 'native.pid')
+while not (home / 'release-child').exists():
+    time.sleep(0.01)
 (home / 'published').write_text('late publication')
 p = home / 'packages/app-server-daemon'
 (p / 'current').unlink()
@@ -92,7 +97,12 @@ p = home / 'packages/app-server-daemon'
     sys.exit(0)
 if mode == "detached-holder":
     holder = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(6)"], start_new_session=True
+        [sys.executable, "-c", """
+import os, pathlib, time
+release = pathlib.Path(os.environ['CODEX_HOME']) / 'release-child'
+while not release.exists():
+    time.sleep(0.01)
+"""], start_new_session=True
     )
     (home / "holder.pid").write_text(str(holder.pid))
     sys.exit(0)
@@ -130,13 +140,31 @@ def run(
     *,
     overrides: dict[str, str] | None = None,
     constants: str | None = None,
+    ready: tuple[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, str(SCRIPT)]
+    handshake = ""
+    if ready is not None:
+        argument, name = ready
+        handshake = f"""
+import subprocess, time
+from pathlib import Path
+communicate = subprocess.Popen.communicate
+marker = Path({str(home / name)!r})
+def after_ready(process, *args, **kwargs):
+    if process.args[1] == {argument!r}:
+        end = time.monotonic() + 15
+        while not marker.exists():
+            assert time.monotonic() < end, f"missing {{marker.name}} acknowledgement"
+            time.sleep(0.01)
+    return communicate(process, *args, **kwargs)
+subprocess.Popen.communicate = after_ready
+"""
     if constants:
         command = [
             sys.executable,
             "-c",
-            f"import runpy, sys; ns=runpy.run_path({str(SCRIPT)!r}); "
+            handshake + f"import runpy, sys; ns=runpy.run_path({str(SCRIPT)!r}); "
             f"ns['main'].__globals__.update({constants}); sys.exit(ns['main']())",
         ]
     return subprocess.run(
@@ -145,7 +173,7 @@ def run(
         input="not devnull\n",
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=25 if ready is not None else 10,
         check=False,
     )
 
@@ -153,6 +181,13 @@ def run(
 def calls(home: Path) -> list[dict]:
     log = home.parent / "calls.jsonl"
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def assert_process_exited(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while process_token(pid) is not None:
+        assert time.monotonic() < deadline, f"fake child {pid} survived timeout"
+        time.sleep(0.01)
 
 
 def updates(home: Path) -> list[dict]:
@@ -529,6 +564,7 @@ def test_cli_version_failure_warns_and_never_prunes(home, fake, cause):
     release(home, "stale")
     overrides = {}
     constants = None
+    ready = None
     if cause == "missing":
         fake = fake.parent / "missing-binary"
     elif cause == "unusable":
@@ -538,10 +574,21 @@ def test_cli_version_failure_warns_and_never_prunes(home, fake, cause):
     elif cause == "failed-version":
         overrides["FAKE_VERSION_EXIT"] = "1"
     else:
-        overrides["FAKE_VERSION_SLEEP"] = "1"
-        constants = "VERSION_TIMEOUT=0.1"
-    result = run(home, fake, overrides=overrides, constants=constants)
-    assert_warning(result, releases(home).parent / "current")
+        overrides["FAKE_VERSION_BLOCK"] = "1"
+        constants = "VERSION_TIMEOUT=3"
+        ready = ("--version", "version.ready")
+    try:
+        result = run(home, fake, overrides=overrides, constants=constants, ready=ready)
+        assert_warning(result, releases(home).parent / "current")
+        if ready is not None:
+            assert (home / "version.ready").exists()
+            assert "--version timed out" in result.stderr
+            assert_process_exited(calls(home)[0]["pid"])
+    finally:
+        if ready is not None:
+            (home / "release-child").touch()
+            if launched := calls(home):
+                assert_process_exited(launched[0]["pid"])
     assert updates(home) == []
     assert {p.name for p in releases(home).iterdir()} == {"keep", "stale"}
 
@@ -616,28 +663,27 @@ def test_fresh_selection_admission_after_update(home, fake):
 def test_update_timeout_kills_launcher_and_native_child_and_skips_prune(home, fake):
     select(home, release(home, "old", "0.160.0"))
     release(home, "stale")
-    result = run(home, fake, overrides={"FAKE_MODE": "timeout"}, constants="UPDATE_TIMEOUT=0.3")
-    (update,) = updates(home)
-    native = int((home / "native.pid").read_text())
     try:
+        result = run(
+            home,
+            fake,
+            overrides={"FAKE_MODE": "timeout"},
+            constants="UPDATE_TIMEOUT=3",
+            ready=("app-server", "native.pid"),
+        )
+        (update,) = updates(home)
+        native = int((home / "native.pid").read_text())
         assert_warning(result, releases(home).parent / "current")
         assert "timed out" in result.stderr
         for pid in (update["pid"], native):
-            status = Path(f"/proc/{pid}/stat")
-            assert not status.exists() or status.read_text().split()[2] == "Z"
-        time.sleep(1.1)
+            assert_process_exited(pid)
         assert not (home / "published").exists()
         assert {p.name for p in releases(home).iterdir()} == {"old", "stale"}
         assert os.readlink(releases(home).parent / "current").endswith("/old")
     finally:
-        # Own fake PIDs only; verify before cleaning up a surviving mutation.
-        for pid in (update["pid"], native):
-            probe = subprocess.run(
-                ["ps", "-o", "pid,pgid,args", "-p", str(pid)], capture_output=True
-            )
-            if probe.returncode == 0:
-                with suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
+        (home / "release-child").touch()
+        if (marker := home / "native.pid").exists():
+            assert_process_exited(int(marker.read_text()))
 
 
 def test_json_recursion_failure_warns_without_traceback(home, monkeypatch, capsys):
@@ -954,16 +1000,17 @@ def test_container_writable_names_are_escaped_in_helper_output(home, fake):
 
 def test_detached_descendant_holding_the_pipes_cannot_hang_startup(home, fake):
     # The group kill cannot reach a new session; reaping must not wait for its pipe EOF.
-    # The holder exits on its own after 6 s; returning well before proves no wait for pipe EOF.
     select(home, release(home, "old", "0.160.0"))
-    started = time.monotonic()
-    result = run(
-        home,
-        fake,
-        overrides={"FAKE_MODE": "detached-holder"},
-        constants="UPDATE_TIMEOUT=0.5, TERMINATE_GRACE=0.1",
-    )
-    assert time.monotonic() - started < 4.5
+    marker = home / "holder.pid"
+    try:
+        result = run(
+            home, fake, overrides={"FAKE_MODE": "detached-holder"}, constants="UPDATE_TIMEOUT=3"
+        )
+        assert process_token(int(marker.read_text())), "the holder closed its pipes before return"
+    finally:
+        (home / "release-child").touch()
+        if marker.exists():
+            assert_process_exited(int(marker.read_text()))
     assert_warning(result, releases(home).parent / "current")
     assert "timed out" in result.stderr
     assert (releases(home) / "old").is_dir()

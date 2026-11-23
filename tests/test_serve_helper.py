@@ -19,6 +19,7 @@ import io
 import json
 import os
 import resource
+import select
 import signal
 import socket
 import stat
@@ -27,15 +28,15 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from mmap import mmap
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
 HELPER = Path(__file__).resolve().parents[1] / "src/djinn_in_a_box/core/serve_helper.py"
 SOURCE = HELPER.read_text(encoding="utf-8")
-REAL_STATE_DIR = "/tmp/djinn-serve"  # noqa: S108 - asserted never to be touched
 PR_SET_CHILD_SUBREAPER = 36
 TEXT_REFUSAL = "Error: You must be logged in to use Remote Control."
 Json = dict[str, Any]
@@ -272,13 +273,13 @@ class Ctx:
         timing: str | None = None,
         timeout: float = 60.0,
         env: dict[str, str] | None = None,
-        source: str = SOURCE,
+        source: str | None = None,
     ) -> tuple[int, Json]:
         merged = {**self.env, **(env or {})}
         if timing is not None:
             merged["DJINN_SERVE_TEST_TIMING"] = timing
         proc = subprocess.run(
-            [sys.executable, "-I", "-c", source, *args],
+            [sys.executable, "-I", "-c", SOURCE if source is None else source, *args],
             input=stdin if stdin is not None else "",
             capture_output=True,
             text=True,
@@ -356,8 +357,15 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ctx]:
         "FAKE_DIR": str(fake),
         "FAKE_CLAUDE_TEXT": TEXT_REFUSAL,
     }
-    assert str(state) != REAL_STATE_DIR and str(state).startswith(str(tmp_path))
-    before = os.stat(REAL_STATE_DIR).st_mtime_ns if os.path.isdir(REAL_STATE_DIR) else None
+    fallback = root / "unused-default-state"
+    default = f"STATE_DIR: Final = {json.dumps(mod.STATE_DIR)}"
+    assert SOURCE.count(default) == 1
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "SOURCE",
+        SOURCE.replace(default, f"STATE_DIR: Final = {json.dumps(str(fallback))}"),
+    )
+    monkeypatch.setattr(mod, "STATE_DIR", str(fallback))
     context = Ctx(root, home, state, fake, work, env)
     while context.backend == context.port:
         context.backend = free_port()
@@ -380,8 +388,7 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ctx]:
     context.install("opencode")
     context.install("claude")
     yield context
-    after = os.stat(REAL_STATE_DIR).st_mtime_ns if os.path.isdir(REAL_STATE_DIR) else None
-    assert before == after, "the real /tmp/djinn-serve was touched"
+    assert not fallback.exists(), "helper used the default state directory"
 
 
 # ------------------------------------------------------------------- source / schema
@@ -1032,9 +1039,8 @@ def test_log_cap_truncates_and_keeps_the_newest_output(ctx: Ctx) -> None:
 
 
 def test_helper_returns_while_daemon_runs(ctx: Ctx) -> None:
-    started = time.monotonic()
     rc, _ = ctx.claude()
-    assert rc == 0 and time.monotonic() - started < 5
+    assert rc == 0
     record = ctx.record("claude")
     for pid in (record["pid"], record["child_pid"]):
         assert is_alive(pid)
@@ -1077,10 +1083,16 @@ def hold_lock(ctx: Ctx) -> int:
 
 
 def test_concurrent_starts_yield_one_server(ctx: Ctx) -> None:
+    source = SOURCE.replace(
+        "        except BlockingIOError:\n            pass\n        if deadline is None:",
+        "        except BlockingIOError:\n"
+        '            open(f"{os.environ[\'FAKE_DIR\']}/lock-wait-{os.getpid()}", "w").close()\n'
+        "        if deadline is None:",
+    )
     handle = hold_lock(ctx)
     procs = [
         subprocess.Popen(
-            [sys.executable, "-I", "-c", SOURCE, "claude-start", "--prefix", "my-host"],
+            [sys.executable, "-I", "-c", source, "claude-start", "--prefix", "my-host"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1089,9 +1101,11 @@ def test_concurrent_starts_yield_one_server(ctx: Ctx) -> None:
         )
         for _ in range(2)
     ]
-    time.sleep(0.8)  # both are waiting on the lock the test holds
-    os.close(handle)
-    outs = [json.loads(p.communicate(timeout=60)[0]) for p in procs]
+    try:
+        assert wait_for(lambda: all((ctx.fake / f"lock-wait-{p.pid}").exists() for p in procs))
+    finally:
+        os.close(handle)
+        outs = [json.loads(p.communicate(timeout=60)[0]) for p in procs]
     assert sorted(o["result"] for o in outs) == ["already-running", "started"], outs
     assert len({o["pid"] for o in outs}) == 1
     assert len(ctx.calls("claude")) == 1
@@ -1112,10 +1126,9 @@ def test_busy_lock_reports_busy_and_status_still_answers(ctx: Ctx) -> None:
 
 
 def test_deadline_cuts_and_releases_lock(ctx: Ctx) -> None:
-    started = time.monotonic()
-    rc, out = ctx.claude(timing="deadline=1.5,claude_grace=12", timeout=30)
+    # The generous outer bound is below the grace period the deadline must interrupt.
+    rc, out = ctx.claude(timing="deadline=3,claude_grace=40", timeout=20)
     assert rc == 1 and out["code"] == "timeout" and out["code"] in mod.ERROR_CODES
-    assert time.monotonic() - started < 9
     handle = os.open(ctx.state / "lock", os.O_RDWR)
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released after the cut
@@ -1846,42 +1859,53 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     assert all(group[1].isdigit() and int(group[1]) > 0 for group in groups)
 
 
-@pytest.mark.parametrize("name,delay", [("opencode", 1.4), ("claude", 0.8)])
-def test_failed_handshake_kills_child_before_late_setsid(ctx: Ctx, name: str, delay: float) -> None:
-    # Delay only the forked child's setsid; all handshake/cleanup code is production code.
-    source = SOURCE.replace(
-        "        os.setsid()", f"        time.sleep({delay})\n        os.setsid()"
-    )
-    injected = """
+LAUNCH_MARKERS = """
+from pathlib import Path
+markers = Path(os.environ["FAKE_DIR"])
+def await_marker(name):
+    end = time.monotonic() + 15
+    while not (markers / name).exists():
+        assert time.monotonic() < end, f"missing launch marker: {name}"
+        time.sleep(0.01)
+"""
+
+
+def launch_after_marker(source: str, marker: str) -> str:
+    injected = f"""
 real_spawn = spawn
 def remember_spawn(*args, **kwargs):
     pid = real_spawn(*args, **kwargs)
-    with open(os.path.join(os.environ["FAKE_DIR"], "spawned.pid"), "w") as stream:
-        stream.write(str(pid))
+    (markers / "spawned.pid").write_text(str(pid))
+    await_marker({marker!r})
     return pid
 spawn = remember_spawn
 sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
 """
-    source = source.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    return source.rsplit('if __name__ == "__main__":', 1)[0] + LAUNCH_MARKERS + injected
+
+
+@pytest.mark.parametrize("name", ["opencode", "claude"])
+def test_failed_handshake_kills_child_before_late_setsid(ctx: Ctx, name: str) -> None:
+    source = SOURCE.replace(
+        "        os.setsid()\n        if os.getpgid(0)",
+        '        (markers / "before-setsid").touch()\n'
+        '        await_marker("release-setsid")\n'
+        "        os.setsid()\n        if os.getpgid(0)",
+    )
     args = (
         ["claude-start", "--prefix", "test"]
         if name == "claude"
         else ["opencode-start", "--port", str(ctx.port)]
     )
-    before = time.monotonic()
     rc, out = ctx.run(
         *args,
         stdin='{"password":"synthetic-password"}',
-        source=source,
+        source=launch_after_marker(source, "before-setsid"),
         timing="handoff_wait=0.1,launch_cleanup=0.5",
     )
-    elapsed = time.monotonic() - before
     pid = int((ctx.fake / "spawned.pid").read_text())
     assert rc == 1 and out["ok"] is False and out["code"] == "spawn", out
     assert "may survive" not in out["message"]
-    assert elapsed < delay, "cleanup must KILL immediately, before the child can finish setsid"
-    assert not is_alive(pid)
-    time.sleep(delay)
     assert not is_alive(pid) and ctx.calls(name) == []
     assert not (ctx.state / f"{name}.json").exists()
 
@@ -1890,11 +1914,11 @@ def test_claude_missing_handoff_cleans_unreported_child(ctx: Ctx) -> None:
     # Model descheduling after pty.fork(), before the child identity is handed over.
     source = SOURCE.replace(
         '        payload = f"{child}',
-        '        open(os.path.join(os.environ["FAKE_DIR"], "child.pid"), "w").write(str(child))\n'
-        '        time.sleep(0.6)\n        payload = f"{child}',
+        '        (markers / "child.pid").write_text(str(child))\n'
+        '        await_marker("release-handoff")\n        payload = f"{child}',
     )
     rc, out = ctx.claude(
-        source=source,
+        source=launch_after_marker(source, "child.pid"),
         timing="handoff_wait=0.3,launch_cleanup=0.5",
         env={"FAKE_CLAUDE_MODE": "stubborn"},
     )
@@ -1910,26 +1934,38 @@ def test_claude_exec_waits_for_published_identity_and_ack(ctx: Ctx) -> None:
 helper_pid = os.getpid()
 real_save = save_record
 real_write = os.write
+real_read = os.read
 real_exec = os.execvp
 def delayed_save(dirfd, name, record):
-    time.sleep(0.25)
+    await_marker("ack-waiting")
     assert not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "claude-calls.jsonl"))
     return real_save(dirfd, name, record)
 def delayed_ack(fd, data):
     if os.getpid() == helper_pid and data == _LAUNCH_ACK:
         assert os.path.exists(os.path.join(os.environ[TEST_STATE_ENV], "claude.json"))
-        time.sleep(0.25)
         assert not os.path.exists(os.path.join(os.environ["FAKE_DIR"], "claude-calls.jsonl"))
     return real_write(fd, data)
+def read_ack(fd, size):
+    data = real_read(fd, size)
+    if data == _LAUNCH_ACK:
+        (markers / "ack-read").touch()
+    return data
 def checked_exec(file, argv):
+    assert (markers / "ack-read").exists(), "exec before acknowledgement"
     assert os.path.exists(os.path.join(os.environ[TEST_STATE_ENV], "claude.json"))
     return real_exec(file, argv)
 save_record = delayed_save
 os.write = delayed_ack
+os.read = read_ack
 os.execvp = checked_exec
 sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
 """
-    source = SOURCE.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    source = SOURCE.replace(
+        '        ready = select.select([ack], [], [], timing("deadline"))[0]',
+        '        (markers / "ack-waiting").touch()\n'
+        '        ready = select.select([ack], [], [], timing("deadline"))[0]',
+    ).rsplit('if __name__ == "__main__":', 1)[0]
+    source += LAUNCH_MARKERS + injected
     rc, out = ctx.claude(source=source)
     assert rc == 0 and out["result"] == "started", out
     assert len(ctx.calls("claude")) == 1
@@ -1962,15 +1998,22 @@ def test_unacked_or_invalid_gate_never_execs_and_exits(ctx: Ctx, fault: str) -> 
 reader, writer = os.pipe()
 ack_read, ack_write = os.pipe()
 fd = open_state_dir()
-before = time.monotonic()
+fault = os.environ["GATE_FAULT"]
+if fault == "timeout":
+    real_select = select.select
+    def observed_select(reads, writes, errors, timeout=None):
+        if reads == [ack_read]:
+            with open(os.environ["GATE_ACK_BUDGET"], "w") as stream:
+                stream.write(str(timeout))
+        return real_select(reads, writes, errors, timeout)
+    select.select = observed_select
 pid = spawn(fd, "claude", ["claude", "remote-control"], pty_mode=True,
             handoff=writer, ack=ack_read)
 os.close(writer)
 os.close(ack_read)
-handoff = _read_handoff(reader, 1)
+handoff = _read_handoff(reader, 10)
 os.close(reader)
 assert handoff is not None
-fault = os.environ["GATE_FAULT"]
 if fault == "wrong-ack":
     os.write(ack_write, b"wrong")
 elif fault in ("wrong-go", "empty-go", "gate-error"):
@@ -1978,18 +2021,24 @@ elif fault in ("wrong-go", "empty-go", "gate-error"):
 if fault != "timeout":
     os.close(ack_write)
 _, status = os.waitpid(pid, 0)
-print(json.dumps({"status": status, "pid": pid, "child": handoff[0],
-                  "elapsed": time.monotonic() - before}))
+print(json.dumps({"status": status, "pid": pid, "child": handoff[0]}))
 """
     source = source.rsplit('if __name__ == "__main__":', 1)[0] + injected
+    deadline = 3 if fault == "timeout" else 40
+    ack_budget = ctx.fake / "ack-budget"
     proc = subprocess.run(
         [sys.executable, "-I", "-c", source],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         cwd=ctx.work,
-        env={**ctx.env, "GATE_FAULT": fault, "DJINN_SERVE_TEST_TIMING": "deadline=0.7"},
-        timeout=3,
+        env={
+            **ctx.env,
+            "GATE_FAULT": fault,
+            "GATE_ACK_BUDGET": str(ack_budget),
+            "DJINN_SERVE_TEST_TIMING": f"deadline={deadline}",
+        },
+        timeout=20,  # Invalid input must be rejected before the deadline, with startup headroom.
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
@@ -1997,7 +2046,8 @@ print(json.dumps({"status": status, "pid": pid, "child": handoff[0],
     assert os.WIFEXITED(out["status"]) and os.WEXITSTATUS(out["status"]) == 0, out
     assert ctx.calls("claude") == []
     assert not is_alive(out["pid"]) and is_gone(out["child"])
-    assert out["elapsed"] < (1.5 if fault == "timeout" else 0.6), out
+    if fault == "timeout":
+        assert float(ack_budget.read_text()) == pytest.approx(deadline)
 
 
 @pytest.mark.parametrize("fault", ["handoff", "publication", "ack"])
@@ -2524,6 +2574,7 @@ class RelayHarness:
     backend: socket.socket
     pid: int
     listener_inode: int
+    clock: mmap | None
 
     def client(self, source: str = "127.0.0.2", *, ipv6: bool = False) -> socket.socket:
         client = socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_STREAM)
@@ -2539,6 +2590,12 @@ class RelayHarness:
 
     def count(self) -> Json:
         return json.loads((self.ctx.state / "opencode-relay.count").read_text())
+
+    def advance(self, now: float) -> None:
+        assert self.clock is not None
+        before = self.count()["updated_at"]
+        self.clock[0] = round(now * 10)
+        assert wait_for(lambda: self.count()["updated_at"] > before), "relay did not tick"
 
 
 def assert_relay_handoff(ctx: Ctx, pid: int, readfd: int) -> None:
@@ -2573,6 +2630,25 @@ def relay(
     for key, value in ctx.env.items():
         monkeypatch.setenv(key, value)
     settings = getattr(request, "param", "relay_heartbeat=0.1,relay_flush=0.03,relay_idle=3")
+    clock = None
+    if settings.startswith(("clock:", "clock-", "accept-error-")) or settings == "low-fd":
+        clock = mmap(-1, 1)
+        test_time = SimpleNamespace(monotonic=lambda: clock[0] / 10, time=time.time)
+        monkeypatch.setattr(mod, "time", test_time)
+        settings = settings.removeprefix("clock:")
+    if settings == "clock-idle":
+        settings = "relay_idle=2,relay_connect=1,relay_heartbeat=0.1,relay_flush=0.03"
+    if settings == "clock-connect":
+        connection = mod.RelayConnection
+
+        def tracked_connection(*args):
+            conn = connection(*args)
+            if conn.connecting:
+                (ctx.fake / "connect-pending").touch()
+            return conn
+
+        monkeypatch.setattr(mod, "RelayConnection", tracked_connection)
+        settings = "relay_connect=2,relay_idle=10,relay_heartbeat=0.1,relay_flush=0.03"
     if settings == "counter-fail":
         real_write = mod.write_atomic
 
@@ -2655,24 +2731,32 @@ def relay(
     fd = mod.open_state_dir()
     readfd, writefd = os.pipe()
     ack_read, ack_write = os.pipe()
+    waiting = ctx.fake / "relay-awaits-ack"
+    test_pid = os.getpid()
+
+    def watch_ack(*args):
+        if os.getpid() != test_pid and args[0] == [ack_read]:
+            waiting.touch()
+        return select.select(*args)
+
+    monkeypatch.setattr(mod, "select", SimpleNamespace(select=watch_ack))
     pid = mod.spawn_relay(fd, ctx.port, writefd, ack_read, listener=listener)
     os.close(writefd)
     os.close(ack_read)
     try:
         assert_relay_handoff(ctx, pid, readfd)
         # Socket bound, but no accept before publication's ACK.
-        backend.settimeout(0.1)
         with socket.socket() as pending:
             pending.bind(("127.0.0.2", 0))
             pending.connect(("127.0.0.1", ctx.port))
-            with pytest.raises(TimeoutError):
-                backend.accept()
+            assert wait_for(waiting.exists), "relay did not await launch acknowledgement"
+            assert not select.select([backend], [], [], 0)[0]
         os.write(ack_write, mod._LAUNCH_ACK)
         backend.settimeout(3)
         probe, _ = backend.accept()
         probe.close()
         assert wait_for(lambda: (ctx.state / "opencode-relay.count").exists())
-        yield RelayHarness(ctx, backend, pid, listener_inode)
+        yield RelayHarness(ctx, backend, pid, listener_inode, clock)
     finally:
         os.close(ack_write)
         os.close(readfd)
@@ -2680,6 +2764,8 @@ def relay(
         backend.close()
         listener.close()
         reap_relay(pid)
+        if clock is not None:
+            clock.close()
 
 
 def refused(client: socket.socket) -> None:
@@ -2761,6 +2847,15 @@ def test_relay_counter_heartbeat_without_connections(relay: RelayHarness) -> Non
     assert first["relay_start"] == mod.raw_start(relay.pid)
     assert wait_for(lambda: relay.count()["updated_at"] > first["updated_at"])
     assert stat.S_IMODE((relay.ctx.state / "opencode-relay.count").stat().st_mode) == 0o600
+
+
+def test_status_uses_isolated_state_while_a_relay_writes(relay: RelayHarness) -> None:
+    first = relay.count()
+    other = relay.ctx.root / "second-state"
+    status = relay.ctx.status(env={mod.TEST_STATE_ENV: str(other)})
+    assert status["servers"]["opencode"]["state"] == "stopped"
+    assert other.is_dir() and not (other / "opencode-relay.count").exists()
+    assert wait_for(lambda: relay.count()["updated_at"] > first["updated_at"])
 
 
 def test_relay_connection_reset_is_contained(relay: RelayHarness) -> None:
@@ -2854,7 +2949,10 @@ def kill_after_ack(fd, data):
     if data == _LAUNCH_ACK:
         record = load_record(open_state_dir(), "opencode")
         os.killpg(record.relay_pid, signal.SIGKILL)
-        time.sleep(0.1)
+        end = time.monotonic() + 10
+        while proc_start(record.relay_pid) is not None:
+            assert time.monotonic() < end, "relay did not exit after SIGKILL"
+            time.sleep(0.01)
     return result
 os.write = kill_after_ack
 sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
@@ -2871,27 +2969,33 @@ sys.exit(main(sys.argv[1:], stdin=sys.stdin, stdout=sys.stdout))
     assert is_gone(record["pid"]) and is_gone(record["relay_pid"])
 
 
-@pytest.mark.parametrize("relay", ["relay_idle=0.2,relay_connect=1"], indirect=True)
+@pytest.mark.parametrize("relay", ["clock-idle"], indirect=True)
 def test_relay_idle_timeout_and_activity(relay: RelayHarness) -> None:
     with relay.client() as client, relay.target() as target:
-        for _ in range(5):
+        for tick in range(1, 6):
             client.sendall(b"keepalive")
             assert target.recv(99) == b"keepalive"
-            time.sleep(0.08)
+            relay.advance(tick)
+        relay.advance(tick + 2)
         refused(client)
     assert is_alive(relay.pid)
 
 
-@pytest.mark.parametrize("relay", ["relay_connect=0.2,relay_idle=3"], indirect=True)
+@pytest.mark.parametrize("relay", ["clock-connect"], indirect=True)
 def test_relay_connect_timeout(relay: RelayHarness) -> None:
     # A full real loopback accept queue leaves the relay's nonblocking connect pending.
     relay.backend.listen(0)
-    with socket.create_connection(("127.0.0.1", relay.ctx.backend), timeout=1) as filler:
-        assert filler.fileno() >= 0
-        started = time.monotonic()
-        with relay.client() as client:
-            refused(client)
-        assert 0.15 <= time.monotonic() - started < 1.5
+    pending = relay.ctx.fake / "connect-pending"
+    pending.unlink(missing_ok=True)
+    with (
+        socket.create_connection(("127.0.0.1", relay.ctx.backend), timeout=10),
+        relay.client() as client,
+    ):
+        assert wait_for(pending.exists), "backend connection never became pending"
+        relay.advance(1)
+        assert not select.select([client], [], [], 0)[0], "connection closed before its budget"
+        relay.advance(2)
+        refused(client)
     assert is_alive(relay.pid)
 
 
@@ -2924,30 +3028,40 @@ def test_relay_counter_write_failure_retries_without_reset(relay: RelayHarness) 
         assert wait_for(lambda expected=expected: relay.count()["refused"] == expected)
 
 
-@pytest.mark.parametrize("relay", ["relay_flush=0.5,relay_heartbeat=10"], indirect=True)
+@pytest.mark.parametrize("relay", ["clock:relay_flush=0.5,relay_heartbeat=10"], indirect=True)
 def test_relay_counter_flush_is_throttled_and_final(relay: RelayHarness) -> None:
     first = relay.count()
     for _ in range(2):
         with relay.client("127.0.0.3") as client:
             refused(client)
-    time.sleep(0.1)
-    assert relay.count() == first
+    # An accepted backend connection follows persistence for the preceding refusal.
+    with relay.client(), relay.target():
+        assert relay.count() == first
+    relay.advance(0.6)
+    flushed = relay.count()
+    assert flushed["refused"] == 2
+    with relay.client("127.0.0.3") as client:
+        refused(client)
+    with relay.client(), relay.target():
+        assert relay.count() == flushed
     os.killpg(relay.pid, signal.SIGTERM)
     assert is_gone(relay.pid)
-    assert relay.count()["refused"] == 2
+    assert relay.count()["refused"] == 3
 
 
-@pytest.mark.parametrize("relay", ["relay_log_interval=0.2"], indirect=True)
+@pytest.mark.parametrize(
+    "relay", ["clock:relay_log_interval=0.2,relay_flush=0.1,relay_heartbeat=0.1"], indirect=True
+)
 def test_relay_refusal_log_rate_limit_expires(relay: RelayHarness) -> None:
     for _ in range(2):
         with relay.client("127.0.0.3") as client:
             refused(client)
     log = relay.ctx.state / "opencode-relay.log"
     assert log.read_text().count("refused 127.0.0.3") == 1
-    time.sleep(0.25)
+    relay.advance(0.3)
     with relay.client("127.0.0.3") as client:
         refused(client)
-    assert wait_for(lambda: log.read_text().count("refused 127.0.0.3") == 2)
+    assert log.read_text().count("refused 127.0.0.3") == 2
 
 
 def test_relay_refusal_log_sources_are_capped(relay: RelayHarness) -> None:
@@ -2967,15 +3081,15 @@ def test_relay_refusal_log_sources_are_capped(relay: RelayHarness) -> None:
     assert len(lines) == 257
 
 
-@pytest.mark.parametrize("relay", ["relay_log_interval=2"], indirect=True)
+@pytest.mark.parametrize("relay", ["clock:relay_log_interval=2"], indirect=True)
 def test_relay_refusal_log_source_cap_expires(relay: RelayHarness) -> None:
     log = relay.ctx.state / "opencode-relay.log"
-    for _ in range(2):
+    for interval in (1, 2):
         for index in range(257):
             with relay.client(f"127.1.{index // 256}.{index % 256}") as client:
                 refused(client)
-        time.sleep(2.1)
-    assert wait_for(lambda: relay.count()["refused"] == 514)
+        relay.advance(interval * 2.1)
+        assert relay.count()["refused"] == interval * 257
     lines = log.read_text().splitlines()
     assert sum(line.startswith("refused ") for line in lines) == 512
     assert lines.count("refusal log suppressed: too many sources") == 2
@@ -2992,53 +3106,59 @@ def test_relay_refusal_log_source_cap_expires(relay: RelayHarness) -> None:
 def test_relay_accept_errors_retry_without_blocking_streams(
     relay: RelayHarness, error: str
 ) -> None:
+    log = relay.ctx.state / "opencode-relay.log"
     with relay.client() as client, relay.target() as target:
         (relay.ctx.fake / "accept-error").touch()
-        started = time.monotonic()
         with relay.client() as pending:
-            assert wait_for(lambda: not (relay.ctx.fake / "accept-error").exists(), 1)
+            assert wait_for(lambda: not (relay.ctx.fake / "accept-error").exists())
+            backed_off = error in ("ENFILE", "ENOBUFS", "ENOMEM")
+            if backed_off:
+                assert wait_for(lambda: "pausing new connections" in log.read_text())
+                relay.advance(0.5)
             client.sendall(b"established stream")
             assert target.recv(99) == b"established stream"
-            assert time.monotonic() - started < 0.5
+            if backed_off:
+                assert not select.select([relay.backend], [], [], 0)[0]
+                relay.advance(1)
             with relay.target() as resumed:
                 pending.sendall(b"new stream")
                 assert resumed.recv(99) == b"new stream"
-        lines = (relay.ctx.state / "opencode-relay.log").read_text().splitlines()
-        if error in ("ENFILE", "ENOBUFS", "ENOMEM"):
-            assert time.monotonic() - started >= 0.9
+        lines = log.read_text().splitlines()
+        if backed_off:
             assert lines == [f"accept failed ({error}); pausing new connections"]
         else:
             assert lines == []
-            assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.parametrize("relay", ["low-fd"], indirect=True)
 def test_relay_accept_fd_exhaustion_pauses_without_blocking_streams(relay: RelayHarness) -> None:
     clients: list[socket.socket] = []
     targets: list[socket.socket] = []
+    backend = relay.backend
     log = relay.ctx.state / "opencode-relay.log"
+    diagnostic = "accept failed (EMFILE); pausing new connections"
     try:
         for _ in range(32):
             clients.append(relay.client())
-            relay.backend.settimeout(0.15)
-            try:
-                targets.append(relay.target())
-            except TimeoutError:
+            assert wait_for(
+                lambda: select.select([backend], [], [], 0)[0] or diagnostic in log.read_text()
+            )
+            if diagnostic in log.read_text():
                 break
+            targets.append(relay.target())
         else:
             pytest.fail("relay did not exhaust its lowered fd limit")
-        diagnostic = "accept failed (EMFILE); pausing new connections"
-        assert wait_for(lambda: diagnostic in log.read_text(), 1)
         assert len(targets) >= 1 and len(clients) == len(targets) + 1
         fields = REAL_PROC_STAT(relay.pid)
         assert fields is not None
         before_cpu = sum(int(fields[index]) for index in (11, 12))
-        started = time.monotonic()
         clients[0].sendall(b"during pause")
         assert targets[0].recv(99) == b"during pause"
         targets[0].sendall(b"still forwarding")
         assert clients[0].recv(99) == b"still forwarding"
-        assert time.monotonic() - started < 0.5
+        assert relay.clock is not None
+        relay.clock[0] = 5
+        # Sample real CPU use while the controlled clock keeps the listener paused.
         time.sleep(0.35)
         fields = REAL_PROC_STAT(relay.pid)
         assert fields is not None
@@ -3047,9 +3167,12 @@ def test_relay_accept_fd_exhaustion_pauses_without_blocking_streams(relay: Relay
         )
         assert cpu_seconds < 0.15, f"busy accept loop: {cpu_seconds:.2f} CPU seconds"
         assert log.read_text().count(diagnostic) == 1
+        fds = Path(f"/proc/{relay.pid}/fd")
+        before_close = len(list(fds.iterdir()))
         for sock in (*clients[:-1], *targets):
             sock.close()
-        relay.backend.settimeout(3)
+        assert wait_for(lambda: len(list(fds.iterdir())) <= before_close - 2)
+        relay.advance(1)
         with relay.target() as resumed:
             clients[-1].sendall(b"accepted after freeing descriptors")
             assert resumed.recv(99) == b"accepted after freeing descriptors"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1144,9 +1146,8 @@ def test_hostctl_marker_after_stop_and_journal(postmortem_helper, monkeypatch, s
     assert len(marker_calls) == 1
 
 
-def test_hostctl_records_lock_never_delays_relay_stop(postmortem_helper):
-    import sys
-    import time
+def test_hostctl_records_lock_never_delays_relay_stop(postmortem_helper, monkeypatch):
+    from test_restore_lock_holders import flock_holder
 
     from djinn_in_a_box.core import post_mortem
 
@@ -1155,24 +1156,25 @@ def test_hostctl_records_lock_never_delays_relay_stop(postmortem_helper):
     data["State"]["Running"] = True
     store.write_text(json.dumps(data))
     post_mortem.records_root(create=True)
-    holder = subprocess.Popen(
-        [sys.executable, "-c", "import fcntl,os,sys; "
-         "f=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); "
-         "fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.readline()",
-         str(root / ".lock")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-    )
-    try:
-        assert holder.stdout.readline().strip() == "ready"
-        before = time.monotonic()
+    lock = root / ".lock"
+    lock.touch(mode=0o600)
+    original_flock = fcntl.flock
+    attempts = []
+
+    def observed_flock(fd, operation):
+        if os.fstat(fd).st_ino == lock.stat().st_ino:
+            running = json.loads(store.read_text())["State"]["Running"]
+            attempts.append((operation, running))
+            assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
+        return original_flock(fd, operation)
+
+    with flock_holder(lock) as holder, monkeypatch.context() as patch:
+        patch.setattr(fcntl, "flock", observed_flock)
         hostctl.close_window()
-        finished = time.monotonic()
-        stop_time = next(row[0] for row in map(json.loads, calls.read_text().splitlines())
-                         if row[1][0] == "stop")
-        assert stop_time - before < 1
-        assert finished - before < 1
+        assert holder.poll() is None
+        assert any(row[1][0] == "stop" for row in map(json.loads, calls.read_text().splitlines()))
         assert not (root / "provenance.json").exists()
-    finally:
-        holder.communicate("release\n", timeout=5)
+    assert attempts == [(fcntl.LOCK_EX | fcntl.LOCK_NB, False)]
 
 
 @pytest.mark.parametrize("outcome", ["running", "stopped", "unclear", "different-run"])

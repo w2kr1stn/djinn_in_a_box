@@ -6,6 +6,8 @@ import csv
 import json
 import os
 import secrets
+import select
+import signal
 import socket
 import stat
 import subprocess
@@ -767,15 +769,59 @@ def test_export_removes_by_label_after_success(export_child):
     assert export_child.docker.exports == []
 
 
-def test_export_timeout_removes_by_label_and_fails(export_child):
-    export_child.script["body"] = "time.sleep(30)"
+def test_export_timeout_removes_by_label_and_fails(export_child, monkeypatch):
+    export_child.script["body"] = (
+        "import signal\nsignal.alarm(20)\nprint('ready', flush=True)\nsignal.pause()"
+    )
     export_child.docker.exports = ["e" * 64]
-    started = time.monotonic()
-    with pytest.raises(docker_module.CredentialExportError, match="timed out"):
-        docker_module.export_opencode_credentials(
-            image="img", source="v", kind="volume", timeout=0.5
-        )
-    assert time.monotonic() - started < 10
+    read_export = docker_module._read_export
+    children = []
+    waits = []
+    origin = None
+    selectors = docker_module.selectors
+
+    class ObservedSelector(selectors.DefaultSelector):
+        def select(self, timeout=None):
+            nonlocal origin
+            if origin is None:
+                waits.append(timeout)
+                origin = time.monotonic()
+            return super().select(timeout)
+
+    monkeypatch.setattr(
+        docker_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: 0 if origin is None else time.monotonic() - origin,
+            sleep=time.sleep,
+        ),
+    )
+    monkeypatch.setattr(
+        docker_module,
+        "selectors",
+        SimpleNamespace(DefaultSelector=ObservedSelector, EVENT_READ=selectors.EVENT_READ),
+    )
+
+    def after_ready(child, output, deadline):
+        children.append(child)
+        assert select.select([child.stdout], [], [], 15)[0], "no export child readiness"
+        assert child.stdout.readline() == b"ready\n"
+        return read_export(child, output, deadline)
+
+    monkeypatch.setattr(docker_module, "_read_export", after_ready)
+    try:
+        with pytest.raises(docker_module.CredentialExportError, match="timed out"):
+            docker_module.export_opencode_credentials(
+                image="img", source="v", kind="volume", timeout=0.5
+            )
+        (child,) = children
+        assert waits == [0.5]
+        assert child.returncode == -signal.SIGKILL and child.stdout.closed
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=15)
     assert export_child.docker.exports == []
     assert any(argv[1:3] == ["rm", "--force"] for argv, _ in export_child.docker.calls)
 

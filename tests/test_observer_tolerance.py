@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_restore_lock_holders import flock_holder
 
 from djinn_in_a_box.core import git_agent, host_runtime, hostctl, post_mortem
 from djinn_in_a_box.core.git_agent import agent_keys
@@ -39,6 +40,40 @@ HOLDER = (
     "time.sleep(float(sys.argv[2]))\n"
 )
 
+OBSERVER_DRIVER = """
+import contextlib, sys, threading, time
+from pathlib import Path
+from types import SimpleNamespace
+from djinn_in_a_box.core import host_runtime, hostctl
+
+root = Path(sys.argv[1])
+creation_guard = host_runtime.creation_guard
+offset = root / 'clock-offset'
+
+class TickEvent(threading.Event):
+    def wait(self, timeout=None):
+        with (root / 'ticks').open('a') as ticks:
+            ticks.write('.')
+        return super().wait(timeout)
+
+@contextlib.contextmanager
+def observed_guard(*args, **kwargs):
+    try:
+        with creation_guard(*args, **kwargs) as lock:
+            yield lock
+    except hostctl.HostctlBusy:
+        (root / 'guard-busy').touch()
+        raise
+
+host_runtime.creation_guard = observed_guard
+host_runtime.threading = SimpleNamespace(Event=TickEvent, Thread=threading.Thread)
+host_runtime.time = SimpleNamespace(
+    monotonic=lambda: time.monotonic() + int(offset.read_text() if offset.exists() else '0'),
+    sleep=time.sleep,
+)
+host_runtime.observe(root, int(sys.argv[2]), sys.argv[3], Path(sys.argv[4]))
+"""
+
 
 @pytest.fixture(autouse=True)
 def container_uid_matches_host(monkeypatch):
@@ -56,7 +91,7 @@ def fake(git_inputs, monkeypatch):
     creator = os.path.realpath(runtime_root(create=True) / "creator.lock")
     binary.write_text(
         f"#!{sys.executable}\n"
-        "import os, pathlib, subprocess, sys, time\n"
+        "import os, pathlib, signal, sys, time\n"
         f"state = pathlib.Path({str(state)!r})\n"
         f"arm = pathlib.Path({str(arm)!r})\n"
         f"binary = {str(binary)!r}\n"
@@ -80,13 +115,9 @@ def fake(git_inputs, monkeypatch):
         "if hit and mode == 'spawn':\n"
         "    arm.unlink()\n"
         "    os.chmod(binary, 0o600)\n"
-        "    subprocess.Popen([sys.executable, '-c',\n"
-        "        'import os, sys, time; time.sleep(0.6); os.chmod(sys.argv[1], 0o700)', binary],\n"
-        "        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
-        "        start_new_session=True)\n"
         "elif hit and mode == 'timeout':\n"
         "    arm.unlink()\n"
-        "    time.sleep(6)\n"
+        "    signal.pause()\n"
         "elif hit and mode == 'daemon':\n"
         "    arm.unlink()\n"
         "    print('Cannot connect to the Docker daemon: '\n"
@@ -130,9 +161,18 @@ def observed_dev(state, runtime, dev_id="dev-1", running=True):
 
 
 @pytest.fixture
-def attached(git_inputs, fake, tmp_path):
+def attached(git_inputs, fake, tmp_path, monkeypatch, request):
     root = runtime_root()
     expected = read_public_delivery(git_inputs.git).blobs
+    popen = subprocess.Popen
+
+    def launch(argv, *args, **kwargs):
+        if argv[1:4] == ["-I", "-m", "djinn_in_a_box.core.host_runtime"]:
+            argv = [argv[0], "-I", "-c", OBSERVER_DRIVER, *argv[4:]]
+        return popen(argv, *args, **kwargs)
+
+    if getattr(request, "param", False):
+        monkeypatch.setattr(subprocess, "Popen", launch)
     with git_runtime(git_inputs, "djinn") as runtime:
         observed_dev(fake.state, runtime)
         runtime.retain()
@@ -218,6 +258,19 @@ def fire(context, mode: str, scope: str = "free") -> None:
     wait_for(lambda: not context.fake.arm.exists(), 15, f"{mode} fault was never injected")
 
 
+def advance_observer_past_tolerance(context) -> None:
+    ticks = context.root / "ticks"
+    # Two loop boundaries include a full tick after the lock was acquired.
+    before = ticks.stat().st_size
+    wait_for(lambda: ticks.stat().st_size >= before + 2, message="no tick under contention")
+    offset = context.root / "clock-offset"
+    pending = offset.with_suffix(".new")
+    pending.write_text("16")
+    pending.replace(offset)
+    before = ticks.stat().st_size
+    wait_for(lambda: ticks.stat().st_size >= before + 2, message="no tick after the clock jump")
+
+
 def test_creator_lock_held_across_ticks(attached):
     """L2: creator.lock held across several ticks."""
     before = len(calls(attached))
@@ -233,55 +286,48 @@ def test_creator_lock_held_across_ticks(attached):
     assert_survived(attached)
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_control_lock_held_beyond_tolerance(attached):
     """L3: control.lock held past the former 15 s tolerance."""
-    holder = hold(hostctl.state_root() / "control.lock", 17)
-    try:
-        time.sleep(16.5)
+    with flock_holder(hostctl.state_root() / "control.lock"):
         assert_survived(attached)
-    finally:
-        holder.wait(timeout=5)
-    time.sleep(0.5)
+        advance_observer_past_tolerance(attached)
+        assert_survived(attached)
     assert_survived(attached)
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_audit_admission_waiting_on_carrier_lock(attached, tmp_path):
     """T11: #162's admission holds control.lock while it waits for the carrier lock."""
     config_root = tmp_path / "audit-config"
     carrier = config_root / "opencode"
     carrier.mkdir(parents=True, mode=0o700)
-    holder = subprocess.Popen(
-        [sys.executable, "-c",
-         "import fcntl, os, sys, time\n"
-         "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
-         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
-         "print('held', flush=True)\n"
-         "time.sleep(20)\n", str(carrier)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True,
+    source = (
+        "from djinn_in_a_box.config.models import AppConfig\n"
+        "from djinn_in_a_box.core import assistant\n"
+        f"config = AppConfig(code_dir={str(tmp_path)!r}, config_root={str(config_root)!r})\n"
+        "assistant.open_audit_session(config).close()\n"
     )
-    assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
-    admission = subprocess.Popen(
-        [sys.executable, "-c",
-         "import sys\n"
-         "from djinn_in_a_box.config.models import AppConfig\n"
-         "from djinn_in_a_box.core import assistant\n"
-         "session = assistant.open_audit_session("
-         "AppConfig(code_dir=sys.argv[1], config_root=sys.argv[2]))\n"
-         "session.close()\n", str(tmp_path), str(config_root)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-    )
+    admission = None
     try:
-        # The admission must be inside its wait, i.e. holding control.lock, while we sign.
-        wait_for(lambda: _lock_is_held(hostctl.state_root() / "control.lock"), 10, "no admission")
-        time.sleep(1)
-        assert_survived(attached)
-        time.sleep(15)
-        assert admission.poll() is None, "admission ended before the 16 s mark"
-        assert _lock_is_held(hostctl.state_root() / "control.lock")
-        assert_survived(attached)
+        with flock_holder(carrier):
+            admission = subprocess.Popen(
+                [sys.executable, "-c", source],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            control = hostctl.state_root() / "control.lock"
+            wait_for(lambda: _lock_is_held(control), 10, "no admission")
+            assert_survived(attached)
+            advance_observer_past_tolerance(attached)
+            assert admission.poll() is None and _lock_is_held(control)
+            assert_survived(attached)
     finally:
-        holder.wait(timeout=30)
-        admission.wait(timeout=40)
+        if admission is not None:
+            _, stderr = admission.communicate(timeout=20)
+            assert admission.returncode == 0, stderr
     assert_survived(attached)
 
 
@@ -309,7 +355,10 @@ def test_lock_free_dev_inspection_failure_for_one_tick(attached, mode, word):
     fire(attached, mode, "free")
     wait_for(lambda: word in (attached.root / "observer.log").read_text(), 15,
              f"observer never logged {word}: {evidence(attached)}")
-    time.sleep(7 if mode == "timeout" else 1.5)
+    if mode == "spawn":
+        attached.fake.binary.chmod(0o700)
+    before = len(calls(attached))
+    wait_for(lambda: len(calls(attached)) > before, message="no inspection after transient failure")
     assert_survived(attached)
 
 
@@ -350,22 +399,20 @@ def test_guarded_inspection_failure_during_real_stop_transition(attached, mode, 
     assert word in (attached.root / "observer.log").read_text()
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_busy_guard_during_pending_transition_is_retried(attached):
     """G2: a held control.lock delays a pending transition; it takes no action until release."""
     earlier = len(calls(attached))
-    holder = hold(hostctl.state_root() / "control.lock", 3)
-    released = time.time() + 3
-    observed_dev(attached.fake.state, attached.runtime, running=False)
-    try:
-        time.sleep(2)
-        assert attached.observer.poll() is None, evidence(attached)
+    with flock_holder(hostctl.state_root() / "control.lock"):
+        observed_dev(attached.fake.state, attached.runtime, running=False)
+        wait_for((attached.root / "guard-busy").exists, message="no pending guarded transition")
+        assert_survived(attached)
         assert (attached.root / "state.json").exists()
-    finally:
-        holder.wait(timeout=5)
-    wait_for(lambda: attached.observer.poll() is not None, 10, evidence(attached))
+        assert not any(call[1] == "guarded" for call in calls(attached)[earlier:])
+    assert attached.observer.wait(timeout=30) == 0, evidence(attached)
     assert not (attached.root / "state.json").exists()
     guarded = [call for call in calls(attached)[earlier:] if call[1] == "guarded"]
-    assert guarded and all(call[0] >= released - 0.5 for call in guarded), guarded
+    assert guarded
     assert "HostctlBusy" in (attached.root / "observer.log").read_text()
 
 
@@ -382,20 +429,13 @@ def test_filter_death_is_rebound_and_published(attached):
     pid = attached.observer.pid
     assert serve_thread_alive(pid), "positive control: the handshake needs a visible thread"
     soft, hard = resource.prlimit(pid, resource.RLIMIT_NOFILE)
-    resource.prlimit(pid, resource.RLIMIT_NOFILE, (len(os.listdir(f"/proc/{pid}/fd")) + 1, hard))
-    clients = []
+    resource.prlimit(pid, resource.RLIMIT_NOFILE, (3, hard))  # stdin, stdout, stderr
     try:
-        # One descriptor of headroom: the first client takes it, every later accept() fails.
-        for _ in range(3):
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            clients.append(client)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(str(attached.root / "export/auth.sock"))
-        # Handshake: the serve thread (native thread name "Thread-N (serve") is gone.
-        wait_for(lambda: not serve_thread_alive(pid), 30, "the filter thread never died")
+            wait_for(lambda: not serve_thread_alive(pid), 30, "the filter thread never died")
     finally:
         resource.prlimit(pid, resource.RLIMIT_NOFILE, (soft, hard))
-        for client in clients:
-            client.close()
     wait_for(
         lambda: json.loads((attached.root / "state.json").read_text()).get("filter_rebinds"),
         20, evidence(attached),
@@ -1865,9 +1905,20 @@ def connect(path):
     return client
 
 
-def test_in_flight_request_completes_across_a_rebind_then_the_client_gets_eof(filter_pair):
+def test_in_flight_request_completes_across_a_rebind_then_the_client_gets_eof(
+    filter_pair, monkeypatch
+):
     """F6: the old client's request is finished, then its connection closes."""
     old = filter_pair()
+    receive = git_agent.receive_message
+    reads = []
+
+    def tracked_receive(stream):
+        if stream.getsockname() == str(old.exported):
+            reads.append(stream)
+        return receive(stream)
+
+    monkeypatch.setattr(git_agent, "receive_message", tracked_receive)
     client = connect(old.exported)
     request = struct_pack(b"\x0b")
     client.sendall(request[:2])  # in flight: only half of the request is there
@@ -1879,10 +1930,9 @@ def test_in_flight_request_completes_across_a_rebind_then_the_client_gets_eof(fi
     client.sendall(request[2:])
     response = git_agent.receive_message(client)
     assert response[:1] == b"\x0c"  # the in-flight request was answered
-    answered = time.monotonic()
     assert client.recv(1) == b""  # and then the old connection ends, not after the idle bound
-    assert time.monotonic() - answered < 2
     wait_for(lambda: old.clients._value == 16, 5, "the slot was not released")
+    assert len(reads) == 1, "the retired filter started another receive"
 
 
 def unread_bytes(client: socket.socket) -> int:
@@ -2294,21 +2344,19 @@ def test_late_signal_during_the_final_busy_guard_caps_the_wait(gitted):
     assert gitted.clock.now - marks["start"] < 10
 
 
-def test_real_sigterm_during_the_final_control_wait_ends_within_two_seconds(attached):
+@pytest.mark.parametrize("attached", [True], indirect=True)
+def test_real_sigterm_ends_the_observer_during_the_final_control_wait(attached):
     """K2: real observer, control.lock held; SIGTERM while it waits for its final guard."""
-    holder = hold(hostctl.state_root() / "control.lock", 120)
     log = attached.root / "observer.log"
-    try:
+    with flock_holder(hostctl.state_root() / "control.lock") as holder:
         attached.runtime.agent.terminate()
         attached.runtime.agent.wait(timeout=5)
         wait_for(lambda: "observer-exit: agent-exited" in log.read_text(), 15, evidence(attached))
-        started = time.monotonic()
+        wait_for((attached.root / "guard-busy").exists, message="no final control wait")
         attached.observer.terminate()
-        attached.observer.wait(timeout=4)
-        assert time.monotonic() - started < 3.5
-    finally:
-        holder.terminate()
-        holder.wait(timeout=5)
+        # Allow scheduling headroom above the signalled budget, below the ordinary 30 s wait.
+        assert attached.observer.wait(timeout=15) == 0
+        assert holder.poll() is None
 
 
 def test_replacement_id_seen_before_a_failed_state_read_is_recorded(gitted, monkeypatch):

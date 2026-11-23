@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1780,14 +1781,47 @@ def test_the_runner_passes_the_inherited_environment_minus_config_variables(
     assert environment["DO_NOT_TRACK"] == "1"
 
 
+@pytest.fixture
+def stalled_opencode(tmp_path, monkeypatch):
+    ready = tmp_path / "opencode-stalled"
+    monkeypatch.setenv("FAKE_STALL_READY", str(ready))
+    deadline = time.monotonic() + 20
+    origin = None
+    children = []
+    popen = subprocess.Popen
+
+    def since_stall():
+        nonlocal origin
+        now = time.monotonic()
+        assert now < deadline, "the stalled command did not reach its timeout"
+        if origin is None and ready.exists():
+            origin = now
+        return now - origin if origin is not None else 0
+
+    def record_child(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(oc, "time", SimpleNamespace(monotonic=since_stall))
+    monkeypatch.setattr(subprocess, "Popen", record_child)
+    try:
+        yield children
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=15)
+
+
 def test_a_command_that_runs_too_long_is_killed_and_reported(
-    world: World, fake_env: Host, monkeypatch: pytest.MonkeyPatch
+    world: World, fake_env: Host, monkeypatch: pytest.MonkeyPatch, stalled_opencode
 ) -> None:
     monkeypatch.setenv("FAKE_SLEEP_AT", "1")
-    started = time.monotonic()
     with pytest.raises(oc.OpenCodeFailed, match="export timed out"):
         oc.OpenCode(timeout=0.5).export()
-    assert time.monotonic() - started < 10
+    (child,) = stalled_opencode
+    assert child.returncode == -signal.SIGKILL
     assert list(world.tmp.iterdir()) == []
 
 
@@ -2544,16 +2578,16 @@ def test_a_timed_out_command_is_killed(
 
 
 def test_a_command_that_never_reads_its_stdin_times_out(
-    world: World, fake_env: Host, monkeypatch: pytest.MonkeyPatch
+    world: World, fake_env: Host, monkeypatch: pytest.MonkeyPatch, stalled_opencode
 ) -> None:
     monkeypatch.setenv("FAKE_STDIN_STALL", "1")
     payload = raw_json(
         [entry("cred_big", "prov_p", key_value("big") | {"metadata": {"pad": "x" * 4000000}})]
     )
-    started = time.monotonic()
     with pytest.raises(oc.OpenCodeFailed, match="import timed out"):
         oc.OpenCode(timeout=0.5).run("import", ["auth", "import", "--standalone"], stdin=payload)
-    assert time.monotonic() - started < 10
+    (child,) = stalled_opencode
+    assert child.returncode == -signal.SIGKILL
 
 
 def test_an_unknown_mode_is_refused_before_anything_happens(world: World, fake_env: Host) -> None:

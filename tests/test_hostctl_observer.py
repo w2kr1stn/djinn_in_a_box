@@ -47,7 +47,9 @@ if args[:2] == ['container', 'inspect']:
         sys.exit(1)
     print(json.dumps([json.loads(state.read_text())]))
 elif args[0] == 'exec' and 'up' in args:
-    time.sleep(60)
+    (state.parent / 'enrollment-ready').touch()
+    while not (state.parent / 'release-enrollment').exists():
+        time.sleep(0.01)
 elif args[0] == 'exec' and 'status' in args:
     print(json.dumps({{'BackendState':'NeedsLogin','AuthURL':'https://example.invalid/login'}}))
 elif args[0] == 'stop':
@@ -70,17 +72,18 @@ else: sys.exit(2)
     try:
         yield state, calls, root, observation
     finally:
+        (tmp_path / "release-enrollment").touch()
         host_runtime.stop_owned_process(observation["observer_pid"], observation["observer_token"])
 
 
 def test_blocked_enrollment_does_not_hold_lock_or_delay_off(observed):
-    _, calls, root, observation = observed
-    wait_for(lambda: any("up" in json.loads(line) for line in calls.read_text().splitlines()))
+    state, calls, root, observation = observed
+    wait_for((state.parent / "enrollment-ready").exists)
     assert observation["node_state"] == "NeedsLogin"
     assert "AuthURL" not in (root / "observation.json").read_text()
-    before = time.monotonic()
     hostctl.close_window()
-    assert time.monotonic() - before < 2
+    assert not (state.parent / "release-enrollment").exists()
+    assert not json.loads(state.read_text())["State"]["Running"]
     wait_for(lambda: host_runtime.process_token(observation["observer_pid"]) is None)
     up = next(json.loads(line) for line in calls.read_text().splitlines() if '"up"' in line)
     assert "--reset" in up and "--ssh=false" in up and "--accept-routes=false" in up
