@@ -41,7 +41,7 @@ HOLDER = (
 )
 
 OBSERVER_DRIVER = """
-import contextlib, sys, time
+import contextlib, sys, threading, time
 from pathlib import Path
 from types import SimpleNamespace
 from djinn_in_a_box.core import host_runtime, hostctl
@@ -49,6 +49,12 @@ from djinn_in_a_box.core import host_runtime, hostctl
 root = Path(sys.argv[1])
 creation_guard = host_runtime.creation_guard
 offset = root / 'clock-offset'
+
+class TickEvent(threading.Event):
+    def wait(self, timeout=None):
+        with (root / 'ticks').open('a') as ticks:
+            ticks.write('.')
+        return super().wait(timeout)
 
 @contextlib.contextmanager
 def observed_guard(*args, **kwargs):
@@ -60,6 +66,7 @@ def observed_guard(*args, **kwargs):
         raise
 
 host_runtime.creation_guard = observed_guard
+host_runtime.threading = SimpleNamespace(Event=TickEvent, Thread=threading.Thread)
 host_runtime.time = SimpleNamespace(
     monotonic=lambda: time.monotonic() + int(offset.read_text() if offset.exists() else '0'),
     sleep=time.sleep,
@@ -154,7 +161,7 @@ def observed_dev(state, runtime, dev_id="dev-1", running=True):
 
 
 @pytest.fixture
-def attached(git_inputs, fake, tmp_path, monkeypatch):
+def attached(git_inputs, fake, tmp_path, monkeypatch, request):
     root = runtime_root()
     expected = read_public_delivery(git_inputs.git).blobs
     popen = subprocess.Popen
@@ -164,7 +171,8 @@ def attached(git_inputs, fake, tmp_path, monkeypatch):
             argv = [argv[0], "-I", "-c", OBSERVER_DRIVER, *argv[4:]]
         return popen(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "Popen", launch)
+    if getattr(request, "param", False):
+        monkeypatch.setattr(subprocess, "Popen", launch)
     with git_runtime(git_inputs, "djinn") as runtime:
         observed_dev(fake.state, runtime)
         runtime.retain()
@@ -251,12 +259,16 @@ def fire(context, mode: str, scope: str = "free") -> None:
 
 
 def advance_observer_past_tolerance(context) -> None:
+    ticks = context.root / "ticks"
+    # Two loop boundaries include a full tick after the lock was acquired.
+    before = ticks.stat().st_size
+    wait_for(lambda: ticks.stat().st_size >= before + 2, message="no tick under contention")
     offset = context.root / "clock-offset"
     pending = offset.with_suffix(".new")
     pending.write_text("16")
     pending.replace(offset)
-    before = len(calls(context))
-    wait_for(lambda: len(calls(context)) >= before + 2, message="observer stopped making progress")
+    before = ticks.stat().st_size
+    wait_for(lambda: ticks.stat().st_size >= before + 2, message="no tick after the clock jump")
 
 
 def test_creator_lock_held_across_ticks(attached):
@@ -274,6 +286,7 @@ def test_creator_lock_held_across_ticks(attached):
     assert_survived(attached)
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_control_lock_held_beyond_tolerance(attached):
     """L3: control.lock held past the former 15 s tolerance."""
     with flock_holder(hostctl.state_root() / "control.lock"):
@@ -283,6 +296,7 @@ def test_control_lock_held_beyond_tolerance(attached):
     assert_survived(attached)
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_audit_admission_waiting_on_carrier_lock(attached, tmp_path):
     """T11: #162's admission holds control.lock while it waits for the carrier lock."""
     config_root = tmp_path / "audit-config"
@@ -385,6 +399,7 @@ def test_guarded_inspection_failure_during_real_stop_transition(attached, mode, 
     assert word in (attached.root / "observer.log").read_text()
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_busy_guard_during_pending_transition_is_retried(attached):
     """G2: a held control.lock delays a pending transition; it takes no action until release."""
     earlier = len(calls(attached))
@@ -414,20 +429,13 @@ def test_filter_death_is_rebound_and_published(attached):
     pid = attached.observer.pid
     assert serve_thread_alive(pid), "positive control: the handshake needs a visible thread"
     soft, hard = resource.prlimit(pid, resource.RLIMIT_NOFILE)
-    resource.prlimit(pid, resource.RLIMIT_NOFILE, (len(os.listdir(f"/proc/{pid}/fd")) + 1, hard))
-    clients = []
+    resource.prlimit(pid, resource.RLIMIT_NOFILE, (3, hard))  # stdin, stdout, stderr
     try:
-        # One descriptor of headroom: the first client takes it, every later accept() fails.
-        for _ in range(3):
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            clients.append(client)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(str(attached.root / "export/auth.sock"))
-        # Handshake: the serve thread (native thread name "Thread-N (serve") is gone.
-        wait_for(lambda: not serve_thread_alive(pid), 30, "the filter thread never died")
+            wait_for(lambda: not serve_thread_alive(pid), 30, "the filter thread never died")
     finally:
         resource.prlimit(pid, resource.RLIMIT_NOFILE, (soft, hard))
-        for client in clients:
-            client.close()
     wait_for(
         lambda: json.loads((attached.root / "state.json").read_text()).get("filter_rebinds"),
         20, evidence(attached),
@@ -2336,6 +2344,7 @@ def test_late_signal_during_the_final_busy_guard_caps_the_wait(gitted):
     assert gitted.clock.now - marks["start"] < 10
 
 
+@pytest.mark.parametrize("attached", [True], indirect=True)
 def test_real_sigterm_ends_the_observer_during_the_final_control_wait(attached):
     """K2: real observer, control.lock held; SIGTERM while it waits for its final guard."""
     log = attached.root / "observer.log"

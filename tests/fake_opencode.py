@@ -31,7 +31,7 @@ Test hooks (environment, all ``FAKE_*``; counted per call, 1-based, in ``<state>
   FAKE_NO_AUTOSELECT=1     removing the active credential leaves its integration without active
   FAKE_STDIN_STALL=1       import reads 10000 bytes of stdin, then stalls for 60 seconds
   FAKE_SLEEP_AT=k          call k sleeps 60 seconds before its effect (timeout tests)
-  FAKE_STALL_READY        signal either stall at this file and wait for termination
+  FAKE_STALL_READY        signal either stall here, with a 20-second watchdog
   FAKE_UNLINK_DB=1         export prints [] and removes the database file (a vanished database)
   FAKE_HUGE_EXPORT=1       export prints more than 16 MiB (size bound tests)
   FAKE_STDERR_FILE         the text of this file is written to stderr, and to stdout on failures
@@ -182,6 +182,7 @@ def do_export(state: dict, path: str) -> None:
 
 def stall() -> None:
     if marker := os.environ.get("FAKE_STALL_READY"):
+        signal.alarm(20)
         Path(marker).touch()
         signal.pause()
     else:

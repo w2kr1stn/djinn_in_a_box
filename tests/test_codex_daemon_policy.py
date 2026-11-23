@@ -69,7 +69,8 @@ with open(os.environ["FAKE_LOG"], "a") as log:
 if sys.argv[1:] == ["--version"]:
     if os.environ.get("FAKE_VERSION_BLOCK"):
         (home / 'version.ready').touch()
-        signal.pause()
+        while not (home / 'release-child').exists():
+            time.sleep(0.01)
     if os.environ.get("FAKE_VERSION_STDERR"):
         print(os.environ["FAKE_VERSION_STDERR"], file=sys.stderr, flush=True)
     print(os.environ.get("FAKE_VERSION", "codex-cli 0.163.0"))
@@ -83,7 +84,8 @@ if mode == "timeout":
 import os, pathlib, signal, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 home = pathlib.Path(os.environ['CODEX_HOME'])
-(home / 'native.pid').write_text(str(os.getpid()))
+(home / 'native.tmp').write_text(str(os.getpid()))
+(home / 'native.tmp').replace(home / 'native.pid')
 while not (home / 'release-child').exists():
     time.sleep(0.01)
 (home / 'published').write_text('late publication')
@@ -138,13 +140,31 @@ def run(
     *,
     overrides: dict[str, str] | None = None,
     constants: str | None = None,
+    ready: tuple[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, str(SCRIPT)]
+    handshake = ""
+    if ready is not None:
+        argument, name = ready
+        handshake = f"""
+import subprocess, time
+from pathlib import Path
+communicate = subprocess.Popen.communicate
+marker = Path({str(home / name)!r})
+def after_ready(process, *args, **kwargs):
+    if process.args[1] == {argument!r}:
+        end = time.monotonic() + 15
+        while not marker.exists():
+            assert time.monotonic() < end, f"missing {{marker.name}} acknowledgement"
+            time.sleep(0.01)
+    return communicate(process, *args, **kwargs)
+subprocess.Popen.communicate = after_ready
+"""
     if constants:
         command = [
             sys.executable,
             "-c",
-            f"import runpy, sys; ns=runpy.run_path({str(SCRIPT)!r}); "
+            handshake + f"import runpy, sys; ns=runpy.run_path({str(SCRIPT)!r}); "
             f"ns['main'].__globals__.update({constants}); sys.exit(ns['main']())",
         ]
     return subprocess.run(
@@ -153,7 +173,7 @@ def run(
         input="not devnull\n",
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=25 if ready is not None else 10,
         check=False,
     )
 
@@ -544,6 +564,7 @@ def test_cli_version_failure_warns_and_never_prunes(home, fake, cause):
     release(home, "stale")
     overrides = {}
     constants = None
+    ready = None
     if cause == "missing":
         fake = fake.parent / "missing-binary"
     elif cause == "unusable":
@@ -554,13 +575,20 @@ def test_cli_version_failure_warns_and_never_prunes(home, fake, cause):
         overrides["FAKE_VERSION_EXIT"] = "1"
     else:
         overrides["FAKE_VERSION_BLOCK"] = "1"
-        constants = "VERSION_TIMEOUT=3"  # Exercise the real deadline with startup headroom.
-    result = run(home, fake, overrides=overrides, constants=constants)
-    assert_warning(result, releases(home).parent / "current")
-    if cause == "version-timeout":
-        assert (home / "version.ready").exists()
-        assert "--version timed out" in result.stderr
-        assert_process_exited(calls(home)[0]["pid"])
+        constants = "VERSION_TIMEOUT=3"
+        ready = ("--version", "version.ready")
+    try:
+        result = run(home, fake, overrides=overrides, constants=constants, ready=ready)
+        assert_warning(result, releases(home).parent / "current")
+        if ready is not None:
+            assert (home / "version.ready").exists()
+            assert "--version timed out" in result.stderr
+            assert_process_exited(calls(home)[0]["pid"])
+    finally:
+        if ready is not None:
+            (home / "release-child").touch()
+            if launched := calls(home):
+                assert_process_exited(launched[0]["pid"])
     assert updates(home) == []
     assert {p.name for p in releases(home).iterdir()} == {"keep", "stale"}
 
@@ -636,8 +664,13 @@ def test_update_timeout_kills_launcher_and_native_child_and_skips_prune(home, fa
     select(home, release(home, "old", "0.160.0"))
     release(home, "stale")
     try:
-        # Leave time for the native child to start. It stays blocked until release or kill.
-        result = run(home, fake, overrides={"FAKE_MODE": "timeout"}, constants="UPDATE_TIMEOUT=3")
+        result = run(
+            home,
+            fake,
+            overrides={"FAKE_MODE": "timeout"},
+            constants="UPDATE_TIMEOUT=3",
+            ready=("app-server", "native.pid"),
+        )
         (update,) = updates(home)
         native = int((home / "native.pid").read_text())
         assert_warning(result, releases(home).parent / "current")

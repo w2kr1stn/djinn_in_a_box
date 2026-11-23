@@ -1998,6 +1998,15 @@ def test_unacked_or_invalid_gate_never_execs_and_exits(ctx: Ctx, fault: str) -> 
 reader, writer = os.pipe()
 ack_read, ack_write = os.pipe()
 fd = open_state_dir()
+fault = os.environ["GATE_FAULT"]
+if fault == "timeout":
+    real_select = select.select
+    def observed_select(reads, writes, errors, timeout=None):
+        if reads == [ack_read]:
+            with open(os.environ["GATE_ACK_BUDGET"], "w") as stream:
+                stream.write(str(timeout))
+        return real_select(reads, writes, errors, timeout)
+    select.select = observed_select
 pid = spawn(fd, "claude", ["claude", "remote-control"], pty_mode=True,
             handoff=writer, ack=ack_read)
 os.close(writer)
@@ -2005,7 +2014,6 @@ os.close(ack_read)
 handoff = _read_handoff(reader, 10)
 os.close(reader)
 assert handoff is not None
-fault = os.environ["GATE_FAULT"]
 if fault == "wrong-ack":
     os.write(ack_write, b"wrong")
 elif fault in ("wrong-go", "empty-go", "gate-error"):
@@ -2017,13 +2025,19 @@ print(json.dumps({"status": status, "pid": pid, "child": handoff[0]}))
 """
     source = source.rsplit('if __name__ == "__main__":', 1)[0] + injected
     deadline = 3 if fault == "timeout" else 40
+    ack_budget = ctx.fake / "ack-budget"
     proc = subprocess.run(
         [sys.executable, "-I", "-c", source],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         cwd=ctx.work,
-        env={**ctx.env, "GATE_FAULT": fault, "DJINN_SERVE_TEST_TIMING": f"deadline={deadline}"},
+        env={
+            **ctx.env,
+            "GATE_FAULT": fault,
+            "GATE_ACK_BUDGET": str(ack_budget),
+            "DJINN_SERVE_TEST_TIMING": f"deadline={deadline}",
+        },
         timeout=20,  # Invalid input must be rejected before the deadline, with startup headroom.
         check=False,
     )
@@ -2032,6 +2046,8 @@ print(json.dumps({"status": status, "pid": pid, "child": handoff[0]}))
     assert os.WIFEXITED(out["status"]) and os.WEXITSTATUS(out["status"]) == 0, out
     assert ctx.calls("claude") == []
     assert not is_alive(out["pid"]) and is_gone(out["child"])
+    if fault == "timeout":
+        assert float(ack_budget.read_text()) == pytest.approx(deadline)
 
 
 @pytest.mark.parametrize("fault", ["handoff", "publication", "ack"])
@@ -2615,10 +2631,11 @@ def relay(
         monkeypatch.setenv(key, value)
     settings = getattr(request, "param", "relay_heartbeat=0.1,relay_flush=0.03,relay_idle=3")
     clock = None
-    if settings.startswith(("clock-", "accept-error-")) or settings == "low-fd":
+    if settings.startswith(("clock:", "clock-", "accept-error-")) or settings == "low-fd":
         clock = mmap(-1, 1)
         test_time = SimpleNamespace(monotonic=lambda: clock[0] / 10, time=time.time)
         monkeypatch.setattr(mod, "time", test_time)
+        settings = settings.removeprefix("clock:")
     if settings == "clock-idle":
         settings = "relay_idle=2,relay_connect=1,relay_heartbeat=0.1,relay_flush=0.03"
     if settings == "clock-connect":
@@ -3011,30 +3028,40 @@ def test_relay_counter_write_failure_retries_without_reset(relay: RelayHarness) 
         assert wait_for(lambda expected=expected: relay.count()["refused"] == expected)
 
 
-@pytest.mark.parametrize("relay", ["relay_flush=0.5,relay_heartbeat=10"], indirect=True)
+@pytest.mark.parametrize("relay", ["clock:relay_flush=0.5,relay_heartbeat=10"], indirect=True)
 def test_relay_counter_flush_is_throttled_and_final(relay: RelayHarness) -> None:
     first = relay.count()
     for _ in range(2):
         with relay.client("127.0.0.3") as client:
             refused(client)
-    time.sleep(0.1)
-    assert relay.count() == first
+    # An accepted backend connection follows persistence for the preceding refusal.
+    with relay.client(), relay.target():
+        assert relay.count() == first
+    relay.advance(0.6)
+    flushed = relay.count()
+    assert flushed["refused"] == 2
+    with relay.client("127.0.0.3") as client:
+        refused(client)
+    with relay.client(), relay.target():
+        assert relay.count() == flushed
     os.killpg(relay.pid, signal.SIGTERM)
     assert is_gone(relay.pid)
-    assert relay.count()["refused"] == 2
+    assert relay.count()["refused"] == 3
 
 
-@pytest.mark.parametrize("relay", ["relay_log_interval=0.2"], indirect=True)
+@pytest.mark.parametrize(
+    "relay", ["clock:relay_log_interval=0.2,relay_flush=0.1,relay_heartbeat=0.1"], indirect=True
+)
 def test_relay_refusal_log_rate_limit_expires(relay: RelayHarness) -> None:
     for _ in range(2):
         with relay.client("127.0.0.3") as client:
             refused(client)
     log = relay.ctx.state / "opencode-relay.log"
     assert log.read_text().count("refused 127.0.0.3") == 1
-    time.sleep(0.25)
+    relay.advance(0.3)
     with relay.client("127.0.0.3") as client:
         refused(client)
-    assert wait_for(lambda: log.read_text().count("refused 127.0.0.3") == 2)
+    assert log.read_text().count("refused 127.0.0.3") == 2
 
 
 def test_relay_refusal_log_sources_are_capped(relay: RelayHarness) -> None:
@@ -3054,15 +3081,15 @@ def test_relay_refusal_log_sources_are_capped(relay: RelayHarness) -> None:
     assert len(lines) == 257
 
 
-@pytest.mark.parametrize("relay", ["relay_log_interval=2"], indirect=True)
+@pytest.mark.parametrize("relay", ["clock:relay_log_interval=2"], indirect=True)
 def test_relay_refusal_log_source_cap_expires(relay: RelayHarness) -> None:
     log = relay.ctx.state / "opencode-relay.log"
-    for _ in range(2):
+    for interval in (1, 2):
         for index in range(257):
             with relay.client(f"127.1.{index // 256}.{index % 256}") as client:
                 refused(client)
-        time.sleep(2.1)
-    assert wait_for(lambda: relay.count()["refused"] == 514)
+        relay.advance(interval * 2.1)
+        assert relay.count()["refused"] == interval * 257
     lines = log.read_text().splitlines()
     assert sum(line.startswith("refused ") for line in lines) == 512
     assert lines.count("refusal log suppressed: too many sources") == 2

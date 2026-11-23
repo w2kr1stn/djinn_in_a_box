@@ -776,29 +776,47 @@ def test_doctor_clear_precedence(window, monkeypatch, outcome, daemon):
 
 
 def test_stop_retries_while_real_journal_lock_stays_held(window, monkeypatch):
-    holder = hold(window.root / "journal.lock", 3)
+    from test_restore_lock_holders import flock_holder
+
+    lock = window.root / "journal.lock"
+    lock.touch(mode=0o600)
+    journal = window.root / "journal.jsonl"
     attempts = []
-    monkeypatch.setattr(host_runtime.time, "monotonic", REAL_MONOTONIC)
-    monkeypatch.setattr(host_runtime.time, "sleep", REAL_SLEEP)
+    flock = fcntl.flock
+    deadline = REAL_MONOTONIC() + 25
+
+    def bounded_flock(fd, operation):
+        if os.fstat(fd).st_ino == lock.stat().st_ino:
+            assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
+            assert REAL_MONOTONIC() < deadline, "closure journal did not finish"
+        return flock(fd, operation)
 
     def command(*args, **kwargs):
         if args[0] == "logs":
             return window.command(*args, **kwargs)
-        if holder.poll() is not None:
-            pytest.fail("journal contention delayed a stop attempt until after lock release")
-        attempts.append(REAL_MONOTONIC())
+        assert holder.poll() is None and not journal.exists()
+        attempts.append(window.clock)
         if len(attempts) == 1:
             raise hostctl.HostctlError("Docker stop failed (exit 1)")
+        holder.stdin.close()
+        with monkeypatch.context() as patch:
+            patch.setattr(time, "sleep", REAL_SLEEP)
+            assert holder.wait(timeout=10) == 0
         return window.command(*args, **kwargs)
 
     monkeypatch.setattr(hostctl, "command", command)
-    try:
+    with contextlib.ExitStack() as stack:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", REAL_POPEN)
+            holder = stack.enter_context(flock_holder(lock))
+        stack.callback(monkeypatch.setattr, time, "sleep", REAL_SLEEP)
+        monkeypatch.setattr(fcntl, "flock", bounded_flock)
         window.run()
-    finally:
-        holder.wait(timeout=5)
     assert len(attempts) == 2
-    assert attempts[1] - attempts[0] < 2
-    assert [r["event"] for r in window.rows()] == ["relay-close-failed", "relay-closed"]
+    assert attempts[1] - attempts[0] == pytest.approx(1)  # 0.5 s journal wait + 0.5 s retry
+    failed, closed = window.rows()
+    assert (failed["event"], failed["attempt"]) == ("relay-close-failed", 1)
+    assert closed["event"] == "relay-closed"
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])

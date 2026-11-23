@@ -7,10 +7,12 @@ import json
 import os
 import secrets
 import select
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -768,10 +770,37 @@ def test_export_removes_by_label_after_success(export_child):
 
 
 def test_export_timeout_removes_by_label_and_fails(export_child, monkeypatch):
-    export_child.script["body"] = "import signal\nprint('ready', flush=True)\nsignal.pause()"
+    export_child.script["body"] = (
+        "import signal\nsignal.alarm(20)\nprint('ready', flush=True)\nsignal.pause()"
+    )
     export_child.docker.exports = ["e" * 64]
     read_export = docker_module._read_export
     children = []
+    waits = []
+    origin = None
+    selectors = docker_module.selectors
+
+    class ObservedSelector(selectors.DefaultSelector):
+        def select(self, timeout=None):
+            nonlocal origin
+            if origin is None:
+                waits.append(timeout)
+                origin = time.monotonic()
+            return super().select(timeout)
+
+    monkeypatch.setattr(
+        docker_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: 0 if origin is None else time.monotonic() - origin,
+            sleep=time.sleep,
+        ),
+    )
+    monkeypatch.setattr(
+        docker_module,
+        "selectors",
+        SimpleNamespace(DefaultSelector=ObservedSelector, EVENT_READ=selectors.EVENT_READ),
+    )
 
     def after_ready(child, output, deadline):
         children.append(child)
@@ -786,7 +815,8 @@ def test_export_timeout_removes_by_label_and_fails(export_child, monkeypatch):
                 image="img", source="v", kind="volume", timeout=0.5
             )
         (child,) = children
-        assert child.returncode is not None and child.stdout.closed
+        assert waits == [0.5]
+        assert child.returncode == -signal.SIGKILL and child.stdout.closed
     finally:
         for child in children:
             if child.poll() is None:
